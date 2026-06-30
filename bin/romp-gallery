@@ -1,0 +1,235 @@
+#!/usr/bin/env node
+// Gallery dev server — serves the acceptance gallery at http://127.0.0.1:5599/gallery.html
+// with esbuild watch + SSE live-reload.
+//
+// Usage: node bin/romp-gallery [--open]
+//   --open   launch a browser after starting
+
+const http = require("http");
+const path = require("path");
+const fs = require("fs");
+const esbuild = require(path.join(__dirname, "../chat-view/node_modules/esbuild"));
+
+const PORT = 5599;
+const CHAT_VIEW = path.join(__dirname, "../chat-view");
+const UI = path.join(__dirname, "../ui");
+const DIST = path.join(CHAT_VIEW, "dist");
+const GALLERY_DIST = path.join(CHAT_VIEW, "dist-gallery");
+
+// SSE clients waiting for reload
+const sseClients = new Set();
+
+function notifyReload() {
+  for (const res of sseClients) {
+    res.write("event: reload\ndata: {}\n\n");
+  }
+}
+
+// Build the gallery driver (fixtures + gallery.ts → one browser IIFE)
+async function buildGallery(watch) {
+  const opts = {
+    entryPoints: [path.join(CHAT_VIEW, "src/dev/gallery.ts")],
+    nodePaths: [path.join(CHAT_VIEW, "node_modules")],
+    bundle: true,
+    format: "iife",
+    platform: "browser",
+    target: "es2020",
+    outfile: path.join(GALLERY_DIST, "gallery.js"),
+    sourcemap: true,
+    logLevel: "info",
+  };
+  if (watch) {
+    const ctx = await esbuild.context(opts);
+    await ctx.watch();
+    return ctx;
+  }
+  await esbuild.build(opts);
+}
+
+// Build the real webview bundle (render.ts + styles.css) — same as `npm run build`
+async function buildWebview(watch) {
+  const opts = {
+    entryPoints: [
+      path.join(UI, "webview/render.ts"),
+      path.join(UI, "webview/styles.css"),
+    ],
+    nodePaths: [path.join(CHAT_VIEW, "node_modules")],
+    bundle: true,
+    format: "iife",
+    platform: "browser",
+    target: "es2020",
+    outdir: GALLERY_DIST,
+    external: ["*.png", "*.svg"],
+    sourcemap: true,
+    logLevel: "info",
+  };
+  if (watch) {
+    const ctx = await esbuild.context(opts);
+    await ctx.watch();
+    return ctx;
+  }
+  await esbuild.build(opts);
+}
+
+// Generate gallery.html — the chat skeleton + sidebar + both bundles
+function galleryHtml() {
+  // Load the skeleton from page-skeleton.ts (already compiled to dist by npm run build)
+  // We inline a minimal version here to avoid a build dependency.
+  const chatBody = `
+  <div id="winframe"></div>
+  <div id="tabbar"><span id="tabs"></span></div>
+  <div id="ledger" style="display:none"></div>
+  <div id="content"><div id="live-ask" style="display:none"></div></div>
+  <div id="footer">
+    <div id="statusline" class="statusline"></div>
+    <div id="composer"><textarea id="composer-input" rows="1" placeholder="Message…"></textarea></div>
+  </div>`;
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>romp gallery</title>
+<link rel="stylesheet" href="/styles.css">
+<style>
+  :root {
+    --fg: #d4d4d4; --dim: #888; --bg: #1e1e1e;
+    --box-bg: #252526; --box-border: #3c3c3c;
+    --green: #74c991; --err: #e56e6e;
+    --mono: 'Menlo', 'Consolas', 'Courier New', monospace;
+    --rail-bg: rgba(255,255,255,0.06);
+    --accent: #9cd2ff; --accent-fg: #0c1a2e;
+    --st-working-bg: #f9d849; --st-ready-bg: #74c991;
+    --st-awaiting-bg: #9cd2ff; --st-permission-bg: #f85b5a;
+    --check-bg: #9cd2ff;
+    --vscode-input-background: rgba(255,255,255,0.05);
+    --vscode-input-foreground: #d4d4d4;
+    --vscode-input-border: #3c3c3c;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 13px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  #gallery-layout { display: flex; height: 100%; }
+  #gallery-sidebar {
+    width: 220px; min-width: 180px; overflow-y: auto; padding: 12px 0;
+    border-right: 1px solid var(--box-border); background: #181818;
+    flex: 0 0 auto;
+  }
+  .gal-group {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--dim); padding: 14px 14px 4px;
+  }
+  .gal-item {
+    padding: 5px 14px; cursor: pointer; color: var(--fg); font-size: 12.5px;
+    border-left: 3px solid transparent;
+  }
+  .gal-item:hover { background: rgba(255,255,255,0.05); }
+  .gal-item.active { background: rgba(156,210,255,0.1); border-left-color: var(--accent); font-weight: 600; }
+  #gallery-main { flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="gallery-layout">
+  <div id="gallery-sidebar"></div>
+  <div id="gallery-main">
+    ${chatBody}
+  </div>
+</div>
+<script>
+  // Shim acquireVsCodeApi so render.ts's postMessage calls don't throw
+  window.acquireVsCodeApi = function() {
+    return { postMessage: function() {}, getState: function() { return {}; }, setState: function() {} };
+  };
+  // Stub fetch (render.ts fetches /palette at load)
+  if (!window.fetch) window.fetch = function() { return Promise.resolve({ json: function() { return Promise.resolve({}); } }); };
+</script>
+<script src="/render.js"></script>
+<script src="/gallery.js"></script>
+</body>
+</html>`;
+}
+
+// Static file server
+const MIME = { ".js": "text/javascript", ".css": "text/css", ".html": "text/html", ".map": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
+
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  if (url.pathname === "/sse") {
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
+    res.write(":\n\n");
+    sseClients.add(res);
+    req.on("close", () => sseClients.delete(res));
+    return;
+  }
+
+  if (url.pathname === "/" || url.pathname === "/gallery.html") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(galleryHtml());
+    return;
+  }
+
+  // Serve from dist-gallery first, then dist (for media), then chat-view/media
+  const basename = path.basename(url.pathname);
+  const candidates = [
+    path.join(GALLERY_DIST, basename),
+    path.join(DIST, basename),
+    path.join(CHAT_VIEW, "media", basename),
+  ];
+  for (const fp of candidates) {
+    if (fs.existsSync(fp)) {
+      const ext = path.extname(fp);
+      res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+      fs.createReadStream(fp).pipe(res);
+      return;
+    }
+  }
+  res.writeHead(404);
+  res.end("not found");
+});
+
+async function main() {
+  fs.mkdirSync(GALLERY_DIST, { recursive: true });
+
+  // Watch for source changes and notify SSE clients
+  const watchPlugin = {
+    name: "gallery-reload",
+    setup(build) {
+      build.onEnd(() => notifyReload());
+    },
+  };
+
+  const galOpts = {
+    entryPoints: [path.join(CHAT_VIEW, "src/dev/gallery.ts")],
+    nodePaths: [path.join(CHAT_VIEW, "node_modules")],
+    bundle: true, format: "iife", platform: "browser", target: "es2020",
+    outfile: path.join(GALLERY_DIST, "gallery.js"),
+    sourcemap: true, logLevel: "info", plugins: [watchPlugin],
+  };
+  const webOpts = {
+    entryPoints: [
+      path.join(UI, "webview/render.ts"),
+      path.join(UI, "webview/styles.css"),
+    ],
+    nodePaths: [path.join(CHAT_VIEW, "node_modules")],
+    bundle: true, format: "iife", platform: "browser", target: "es2020",
+    outdir: GALLERY_DIST, external: ["*.png", "*.svg"],
+    sourcemap: true, logLevel: "info", plugins: [watchPlugin],
+  };
+
+  const [galCtx, webCtx] = await Promise.all([
+    esbuild.context(galOpts),
+    esbuild.context(webOpts),
+  ]);
+  await Promise.all([galCtx.watch(), webCtx.watch()]);
+
+  server.listen(PORT, () => {
+    const url = `http://127.0.0.1:${PORT}/gallery.html`;
+    console.log(`romp gallery → ${url}`);
+    if (process.argv.includes("--open")) {
+      const cmd = process.platform === "darwin" ? "open" : "xdg-open";
+      require("child_process").exec(`${cmd} ${url}`);
+    }
+  });
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });

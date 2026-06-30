@@ -113,7 +113,8 @@
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
     "vscode:prepublish": "node esbuild.js --production",
-    "test": "node esbuild.js --tests && node --test 'out-tests/**/*.test.js'"
+    "test": "node esbuild.js --tests && node --test 'out-tests/**/*.test.js'",
+    "gallery": "node ../bin/romp-gallery"
   },
   "devDependencies": {
     "@types/jsdom": "^28.0.3",

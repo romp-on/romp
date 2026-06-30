@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-gallery/
 *.vsix
 .DS_Store
 out-tests/
