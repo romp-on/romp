@@ -24,6 +24,10 @@ export interface ParsedAsk {
   cursorFound: boolean; // false when no ❯ was detected — capture unreliable, don't send blind keys
   chosen?: string[];    // submit screen: the answers under review (all questions, flattened)
   pairs?: { q: string; a: string }[]; // submit screen: every ● question / → answer pair, in order
+  diff?: string;        // Edit/Write permission: the fenced diff, normalized to +/- /context lines
+  fileHead?: string;    // Edit/Write permission: the label/path/warning block shown above the diff
+  planBody?: string;    // ExitPlanMode: the plan markdown (rendered as markdown, not a diff)
+  body?: string;        // non-diff tool permission (WebFetch/Bash/MCP/…): the detail block (url+prompt, command, …)
   multiSelect: boolean; // back-compat: kind === "multi"
   preview?: string;     // the side-by-side preview box (verbatim monospace text, with its border) the
                         // focused option draws to the RIGHT of the option list — undefined when none.

@@ -3646,6 +3646,10 @@ function singleOptions(ask: ParsedAsk) {
 // its "Type something." slot is driven by the inline custom-answer field.
 function renderSingleCard(ask: ParsedAsk) {
   const card = askCard();
+  if (ask.fileHead) card.appendChild(fileHead(ask.fileHead));
+  if (ask.diff) card.appendChild(diffPre(ask.diff));
+  if (ask.planBody) { const plan = el("div", "ask-plan"); plan.innerHTML = DOMPurify.sanitize(marked.parse(ask.planBody) as string); card.appendChild(plan); }
+  if (ask.body) card.appendChild(askBody(ask.body));
   qline(card, ask.question || ask.header);
   const opts = singleOptions(ask);
   const key = (activeId || "") + "§" + opts.map((o) => `${o.n}:${o.label}`).join("|");
@@ -3674,6 +3678,18 @@ function renderSingleCard(ask: ParsedAsk) {
     wirePasteFallback(inp);
     row.appendChild(inp);
     card.appendChild(row);
+  }
+  if (ask.diff !== undefined || ask.body !== undefined || ask.planBody !== undefined) {
+    const redir = el("div", "ask-redirect");
+    const arrow = el("span", "ask-redirect-arrow"); arrow.textContent = "↩"; redir.appendChild(arrow);
+    const rinp = document.createElement("input");
+    rinp.type = "text"; rinp.className = "ask-redirect-input"; rinp.placeholder = "tell Claude what to do differently…";
+    rinp.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") { e.preventDefault(); const v = rinp.value.trim(); if (v && activeId) { if (vscodeApi) vscodeApi.postMessage({ type: "redirectAsk", id: activeId, text: v }); } }
+    });
+    redir.appendChild(rinp);
+    card.appendChild(redir);
   }
   card.tabIndex = 0;
   card.addEventListener("keydown", onSingleKey);

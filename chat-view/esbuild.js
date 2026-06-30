@@ -76,6 +76,7 @@ function testBuild() {
     platform: "node",
     target: "node18",
     packages: "external",
+    external: ["jsdom", "esbuild"],
     outdir: "out-tests",
     sourcemap: "inline",
     logLevel: "info",
