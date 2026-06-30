@@ -1854,7 +1854,7 @@ function copyToClipboard(text: string) {
 // reflects it before the next push (the kernel reconciles).
 function setSessionFlag(id: string, flag: "hideFromFeed" | "postalServiceOff", value: boolean) {
   const s = sessions.get(id);
-  if (s) (s as Record<string, unknown>)[flag] = value;
+  if (s) (s as unknown as Record<string, unknown>)[flag] = value;
   if (vscodeApi) vscodeApi.postMessage({ type: "setSessionFlag", id, flag, value });
 }
 // Override a session's identity color from the tab menu's swatches (the user 2026-06-29). Optimistically paint

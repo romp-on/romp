@@ -71,10 +71,9 @@ class LandingShell(unittest.TestCase):
         # the switcher runs in a separate <script> so a splitter throw can't disable the tab bar. Each shell
         # behaviour gets its own isolated <script>: boot-splash + connection-status banner + rail-usage +
         # splitter + focus-ring + fleet-toggle + settings-fullscreen + mobile switcher + per-pane collapse
-        # handles + the build-staleness banner = 10 (the user 2026-06-23; + boot-splash + rail-usage 2026-06-26;
-        # + connection-status banner 2026-06-27).
+        # handles + the build-staleness banner + keyboard-shortcuts = 11.
         html = km._landing()
-        self.assertEqual(html.count("<script>"), 10)
+        self.assertEqual(html.count("<script>"), 11)
 
     def test_bottom_bar_is_text_only_and_compact(self):
         html = km._landing()

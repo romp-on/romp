@@ -340,7 +340,7 @@ function makeCard(it: FeedItem): HTMLElement {
   clr.onclick = (ev) => {
     ev.stopPropagation();
     pendingCleared.add(it.itemId);   // suppress until the kernel confirms — no mid-dismiss pop-back
-    clearedStack.push([it]);         // cache for an instant optimistic Undo clear
+    clearedStack.push([it as unknown as AskItem]);
     card.classList.add("dismissing");
     vscodeApi?.postMessage({ type: "askClear", itemId: it.itemId });   // reply ids share cleared.jsonl
     setTimeout(() => { if (cardEls.get(it.itemId) === card && card.classList.contains("dismissing")) { card.remove(); cardEls.delete(it.itemId); } }, 180);
@@ -475,7 +475,7 @@ function makeAskCard(it: AskItem): HTMLElement {
   // "Nudge" on the card itself (the user 2026-06-18): a one-click status follow-up for a WORKING card,
   // beside Clear, so you don't have to open the modal. Sends the canned status question down the SAME
   // follow-up path (askFollowUp → the kernel quotes the goal as context). Shown only for working cards.
-  const nudge = el("button", "fdismiss ffollow fask-nudge"); nudge.textContent = "Nudge"; nudge.title = "nudge this session for a status update on this goal"; nudge.style.display = "none";
+  const nudge = el("button", "fdismiss ffollow fask-nudge") as HTMLButtonElement; nudge.textContent = "Nudge"; nudge.title = "nudge this session for a status update on this goal"; nudge.style.display = "none";
   // "Follow up" on a BLOCKED or COMPLETED card (the user 2026-06-22): one click opens THIS goal's modal and
   // jumps straight into its follow-up composer (via openFollowUpOnRender), saving the open-modal-then-click
   // step. The modal's own Follow up button stays. Working cards get Nudge instead — the two are mutually

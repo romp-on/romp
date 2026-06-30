@@ -27,7 +27,7 @@ class FeedCacheOnly(unittest.TestCase):
         # the parse-derived enrichments are all gated on `ps` (cached) so the cold first paint is just cards
         self.assertIn("if (ps and not who_working) else None", src)        # API-error floor
         self.assertIn("if ps else None", src)                              # awaiting badge
-        self.assertIn("if not had_working and ps:", src)                   # provisional card
+        self.assertIn("if not had_working and perm_top is None and ps:", src)   # provisional card
 
 
 class WarmerDoesNotCompeteWithChat(unittest.TestCase):
