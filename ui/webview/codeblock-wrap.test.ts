@@ -24,6 +24,7 @@ test("wrapped code carries a subtle (faint) line-number gutter", () => {
   assert.match(RENDER, /class="cl"><span class="ct"/);
 });
 
-test("diffs skip the line-number gutter (they already carry +/- markers)", () => {
-  assert.match(RENDER, /highlight\(pre, false\)/);
+test("diffs use diffPre() with per-line +/- gutter rows (not hljs)", () => {
+  assert.match(RENDER, /function diffPre/);
+  assert.match(RENDER, /diff-gutter/);
 });

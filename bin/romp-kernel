@@ -1223,6 +1223,7 @@ def _timeline_sessions(now, tmux, live_only=False):
 # closeTab / endSession; the Python rewrite dropped them, so the webview's + picker stayed blank and
 # "New session" spun on its 30s "Opening…" modal forever. Ported here (the user 2026-06-15).
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+PICKER_MAX_AGE_S = int(os.environ.get("ROMP_PICKER_DAYS", "14")) * 86400
 
 
 def _rel_ago(now, t):
@@ -1244,18 +1245,42 @@ def _live_names(tmux):
 
 def _session_list(now, tmux):
     """Picker payload: recent sessions, RUNNING ones first then by recency, each
-    {id,name,color,running,time,summary} — the shape render.ts's renderPicker expects."""
+    {id,name,color,running,time,summary} — the shape render.ts's renderPicker expects.
+    Dead sessions older than PICKER_MAX_AGE_S (default 14 days) are filtered out."""
     live = set(tmux or {})
+    cutoff = now - PICKER_MAX_AGE_S
     items = []
     for s in _sessions(now)[:150]:
         sid = s["sid"]
+        running = sid in live
+        if not running and s.get("mtime", 0) < cutoff:
+            continue
         arch = jd.load_archive(sid) or {}
         items.append({"id": sid, "name": s["name"], "color": _name_color(sid),
-                      "running": sid in live, "dir": _tilde(_cwd_of(sid)),   # recent-dirs source for the new-session field
-                      "time": "running" if sid in live else _rel_ago(now, s["mtime"]),
+                      "running": running, "dir": _tilde(_cwd_of(sid)),
+                      "time": "running" if running else _rel_ago(now, s["mtime"]),
                       "summary": arch.get("headline", "")})
     items.sort(key=lambda it: 0 if it["running"] else 1)   # stable: running first, recency within
     return items
+
+
+def _forget_name(name, live_names):
+    """Drop every names-record carrying `name` so a stale session leaves the picker.
+    Refuses to forget a name that's still live. Returns how many records were removed."""
+    if name in live_names:
+        return 0
+    removed = 0
+    names_dir = jd.STATE / "names"
+    if not names_dir.is_dir():
+        return 0
+    for p in names_dir.iterdir():
+        try:
+            stored_name = p.read_text().split("\t")[0]
+            if stored_name == name:
+                p.unlink(); removed += 1
+        except Exception:
+            pass
+    return removed
 
 
 _DEFAULT_DIR_FILE = Path(os.path.expanduser("~/.config/romp/default-dir"))
@@ -1454,7 +1479,7 @@ def _drive(msg, client):
         return False
     t = msg.get("type")
     ID_OPS = ("sendMessage", "interrupt", "compactSession", "answerAsk", "navAsk", "toggleAsk", "submitAsk",
-              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "apiRetry", "setModel", "setEffort", "setMode",
+              "addCustomAsk", "cancelAsk", "askText", "redirectAsk", "cancelQueued", "apiRetry", "setModel", "setEffort", "setMode",
               "endSession", "renameSession")
     if t in ID_OPS and msg.get("id"):
         sid = str(msg["id"])
@@ -1515,6 +1540,8 @@ def _drive(msg, client):
         be.on_ask(sid, "cancel")
     elif t == "askText" and msg.get("text"):
         be.on_ask(sid, "text", str(msg["text"]))
+    elif t == "redirectAsk" and msg.get("text"):
+        be.on_ask(sid, "redirect", str(msg["text"]))
     elif t == "cancelQueued" and msg.get("idx") is not None and hasattr(be, "unqueue"):
         be.unqueue(sid, int(msg["idx"]))                  # pull a queued (not-yet-started) message back out; the
         _push_all()                                       # webview already refilled the composer with its text
@@ -1805,12 +1832,13 @@ class TmuxBackend(sb.SessionBackend):
     def on_ask(self, sid, kind, payload=None):
         name = _name_of(sid) or str(sid)
         fn = {"answer": _ask_answer, "focus": _ask_focus, "toggle": _ask_toggle, "submit": _ask_submit,
-              "custom": _ask_add_custom, "cancel": _ask_cancel, "text": _ask_send_text}.get(kind)
+              "custom": _ask_add_custom, "cancel": _ask_cancel, "text": _ask_send_text,
+              "redirect": _ask_redirect}.get(kind)
         if not fn:
             return False
         if kind in ("submit", "cancel"):
             _ask_thread(fn, name)
-        elif kind in ("custom", "text"):
+        elif kind in ("custom", "text", "redirect"):
             _ask_thread(fn, name, str(payload))
         else:                                             # answer / focus / toggle carry a target index
             _ask_thread(fn, name, payload)
@@ -2528,6 +2556,29 @@ def _ask_send_text(name, text):
         return
     _send_literal(name, text)
     time.sleep(0.12); _send_keys(name, ["Enter"])
+
+
+def _ask_redirect(name, text):
+    """Decline-and-redirect: Escape declines the tool, then type guidance into the
+    composer and Enter. Poll for the composer (transition timing varies by prompt kind)
+    and fall back to delivering anyway if it never settles."""
+    if not (text or "").strip():
+        return
+    _send_keys(name, ["Escape"])
+
+    def deliver():
+        _send_literal(name, text)
+        time.sleep(0.14); _send_keys(name, ["Enter"])
+
+    def step(left):
+        if left <= 0:
+            deliver(); return
+        cap = _capture_pane(name) or ""
+        if ap.COMPOSER_RE.search(cap):
+            deliver(); return
+        time.sleep(0.09); step(left - 1)
+
+    time.sleep(0.12); step(10)
 
 
 def _ask_thread(fn, *a):
@@ -8238,6 +8289,16 @@ class Handler(BaseHTTPRequestHandler):
             _kept_open.discard(msg["id"])        # ×-closing a read-only dead tab forgets it (timeline-only again)
             _send_to_app("chat", {"type": "closed", "id": msg["id"]})   # prune it in the live view now
             _push_all()
+        elif msg and msg.get("type") == "forgetSession" and isinstance(msg.get("name"), str):
+            name = str(msg["name"])
+            live = set(_live_names(_tmux_sessions()))
+            removed = _forget_name(name, live)
+            if removed:
+                client["send"](json.dumps({"type": "sessionList",
+                                           "items": _session_list(int(time.time()), _tmux_sessions()),
+                                           "defaultDir": _tilde(_default_create_dir())}))
+            else:
+                client["send"](json.dumps({"type": "warn", "text": 'can\'t forget "%s" — it\'s still running.' % name}))
         elif msg and msg.get("type") == "openSession" and msg.get("id"):
             # live → reopen the hidden tab + focus; dead → the chat's confirmRevive modal
             _open_or_revive(msg["id"])

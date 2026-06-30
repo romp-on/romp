@@ -31,5 +31,23 @@ npm run build      # or: npm run watch
 ```
 
 Then open this folder in VS Code/Cursor and press **F5** (Run romp Chat View).
-In the dev host, run the command **“romp Chat: Open Session Viewer”** and pick a
+In the dev host, run the command **”romp Chat: Open Session Viewer”** and pick a
 session.
+
+### Acceptance gallery
+
+```sh
+npm run gallery    # → http://127.0.0.1:5599/gallery.html  (--open to launch a browser)
+```
+
+A standalone page that replays one synthetic **scene per content type** —
+messages/markdown, thinking, tool calls, Edit/Write diffs, todo, postal, queued,
+and every permission popup (edit red/green diff, Bash command, single/multi/submit
+asks) — through the exact `postMessage` protocol the host uses. Editing
+`src/webview/*.ts`, `styles.css`, or the fixtures live-reloads the page (esbuild
+watch + SSE).
+
+- Fixtures: `src/dev/fixtures.ts` (synthetic only — see the repo privacy rule).
+- Coverage is pinned by `src/dev/fixtures.test.ts`: every content kind is present,
+  and the permission scenes trip the real `pendingEditDiff` / `pendingCommand`
+  matchers, so a popup regression fails `npm test`, not just the eye.

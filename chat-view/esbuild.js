@@ -59,12 +59,14 @@ function testBuild() {
   // ../ui (timeline + quote) and ../ui/webview (feed/render/etc.). out-tests/
   // keeps each tree's structure (esbuild's outbase = the common ancestor), and
   // `node --test 'out-tests/**/*.test.js'` finds them recursively.
-  const entries = ["src", "../ui", "../ui/webview"].flatMap((dir) =>
-    fs
-      .readdirSync(path.join(__dirname, dir))
+  const dirs = ["src", "src/dev", "../ui", "../ui/webview"];
+  const entries = dirs.flatMap((dir) => {
+    const abs = path.join(__dirname, dir);
+    if (!fs.existsSync(abs)) return [];
+    return fs.readdirSync(abs)
       .filter((f) => f.endsWith(".test.ts"))
-      .map((f) => dir + "/" + f),
-  );
+      .map((f) => dir + "/" + f);
+  });
   /** @type {import('esbuild').BuildOptions} */
   return {
     entryPoints: entries,
@@ -73,6 +75,7 @@ function testBuild() {
     format: "cjs",
     platform: "node",
     target: "node18",
+    packages: "external",
     outdir: "out-tests",
     sourcemap: "inline",
     logLevel: "info",

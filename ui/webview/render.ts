@@ -318,6 +318,58 @@ function preEl(text: string): HTMLElement {
   return pre;
 }
 
+/** Red/green diff renderer — each line gets its own div.diff-row with a gutter marker and colored band. */
+function diffPre(diffText: string): HTMLElement {
+  const box = el("div", "fold-pre diff-fold");
+  for (const line of diffText.split("\n")) {
+    const m = line[0];
+    const kind = m === "+" ? "add" : m === "-" ? "del" : "ctx";
+    const row = el("div", "diff-row diff-" + kind);
+    const gutter = el("span", "diff-gutter"); gutter.textContent = m === "+" || m === "-" ? m : " ";
+    const text = el("span", "diff-text"); text.textContent = m === "+" || m === "-" ? line.slice(1) : line.replace(/^ {2}/, "");
+    row.appendChild(gutter); row.appendChild(text);
+    box.appendChild(row);
+  }
+  return box;
+}
+
+/** File header for Edit/Write diffs — paths get mono styling, notes get dimmed. */
+function fileHead(text: string): HTMLElement {
+  const wrap = el("div", "ask-filehead");
+  for (const line of text.split("\n")) {
+    const isPath = /^\S+$/.test(line) && /[/.]/.test(line);
+    const row = el("div", isPath ? "ask-file-path" : "ask-file-note");
+    row.textContent = line;
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+/** Tool-permission detail block (Bash command, WebFetch url, MCP call). */
+function askBody(body: string): HTMLElement {
+  const wrap = el("div", "ask-body");
+  const lines = body.split("\n");
+  let descStart = -1;
+  for (let i = lines.length - 1; i >= 1; i--) {
+    const t = lines[i].trim();
+    if (/[=|&$<>{}`\\]/.test(t)) break;
+    if (/^[A-Z]/.test(t) && /\s/.test(t)) descStart = i;
+  }
+  const target = descStart >= 1 ? lines.slice(0, descStart) : lines;
+  const desc = descStart >= 1 ? lines.slice(descStart).join(" ").trim() : undefined;
+
+  let detail = target.join("\n");
+  const cmd = el("div", "ask-cmd");
+  cmd.textContent = detail;
+  wrap.appendChild(cmd);
+  if (desc) {
+    const d = el("div", "ask-body-desc");
+    d.textContent = desc;
+    wrap.appendChild(d);
+  }
+  return wrap;
+}
+
 // Links in the chat (markdown [x](url) and GFM-autolinked bare URLs alike, all rendered as <a href>
 // by md()) must actually follow on click. Two hosts, two paths:
 //   • Web dashboard (http(s): origin): open it in the user's OWN browser, on the device they're viewing
@@ -1243,10 +1295,8 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
     // Edit/MultiEdit: "+add −del" on the head line; the red/green diff hangs below, hidden.
     let add = 0, del = 0;
     for (const l of ev.diff.split("\n")) { if (l[0] === "+") add++; else if (l[0] === "-") del++; }
-    const pre = el("pre", "io-pre fold-pre diff-fold");
-    const code = el("code", "language-diff"); code.textContent = ev.diff; pre.appendChild(code);
+    const pre = diffPre(ev.diff);
     inlineFold(head, turn, `+${add} −${del}`, pre, fkey);
-    highlight(pre, false);   // diffs carry +/− markers + already wrap (io-pre); no line-number gutter
   } else if (ev.name === "Read") {
     if (ev.output) inlineFold(head, turn, `${countLines(ev.output)} lines`, preEl(ev.output), fkey);
   } else if (!ack && (ev.input || ev.output)) {

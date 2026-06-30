@@ -7,6 +7,7 @@ synthetic fixtures, same expected outputs, same assertions. Synthetic only:
 invented prompt text, no real session data.
 """
 import os
+import re
 import unittest
 from importlib.machinery import SourceFileLoader
 
@@ -414,6 +415,235 @@ class TestAskParse(unittest.TestCase):
 # Queued-message detection moved OUT of this pane parser to an EVENT-BASED reader in bin/romp-kernel
 # (_pending_queued, folding the transcript's queue-operation records). Its tests live in test_kernel.py
 # (TestPendingQueued); the old pane-scrape parse_queued + its tests were removed (the user 2026-06-16).
+
+
+class TestDiffParsing(unittest.TestCase):
+    """Diff/body/planBody extraction from Edit/Write/NotebookEdit/ExitPlanMode permission panes."""
+
+    def test_edit_permission_diff_extracted_question_stays_clean(self):
+        fence = "╌" * 40
+        pane = "\n".join([
+            "─" * 40,
+            " Edit file",
+            " demo.txt",
+            fence,
+            " 1  context line stays",
+            " 2 -old line goes away",
+            " 2 +new line takes its place",
+            " 3  trailing context",
+            fence,
+            " Do you want to make this edit to demo.txt?",
+            " ❯ 1. Yes",
+            "   2. Yes, allow all edits during this session (shift+tab)",
+            "   3. No",
+            FOOTER,
+        ])
+        ask = parse(pane)
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["kind"], "single")
+        self.assertEqual(ask["question"], "Do you want to make this edit to demo.txt?",
+                         "diff must not bleed into the question")
+        self.assertEqual(ask["diff"],
+                         "  context line stays\n-old line goes away\n+new line takes its place\n  trailing context")
+        self.assertEqual(len(ask["options"]), 3)
+
+    def test_edit_file_header_captured_above_diff(self):
+        fence = "╌" * 40
+        pane = "\n".join([
+            "─" * 40,
+            " Edit file",
+            " ../../tmp/demo/notes.md",
+            " This will modify /tmp/demo/notes.md (outside working directory) via a symlink",
+            "",
+            fence,
+            " 1  context",
+            " 2 -old",
+            " 2 +new",
+            fence,
+            " Do you want to make this edit to notes.md?",
+            " ❯ 1. Yes",
+            "   2. No",
+            FOOTER,
+        ])
+        ask = parse(pane)
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["question"], "Do you want to make this edit to notes.md?")
+        self.assertEqual(
+            ask["fileHead"],
+            "Edit file\n../../tmp/demo/notes.md\n"
+            "This will modify /tmp/demo/notes.md (outside working directory) via a symlink",
+        )
+
+    def test_edit_blank_diff_lines_stay_own_rows(self):
+        fence = "╌" * 40
+        pad = " " * 30
+        pane = "\n".join([
+            fence,
+            " 3  intro paragraph." + pad,
+            " 4  ",                                  # blank line, number only
+            " 5 -## Section A" + pad,
+            " 5 +## Section A (revised)" + pad,
+            " 6  - item one",                        # leading-dash bullet = context
+            " 7 +- item three" + pad,
+            " 8  ",                                  # another blank
+            " 9  ## Section B",
+            fence,
+            " Do you want to make this edit to notes.md?",
+            " ❯ 1. Yes",
+            "   2. No",
+            FOOTER,
+        ])
+        ask = parse(pane)
+        self.assertIsNotNone(ask)
+        rows = ask["diff"].split("\n")
+        self.assertFalse(any(re.search(r"\b[0-9]\s*$", l) for l in rows),
+                         "a line number leaked into content:\n%s" % ask["diff"])
+        self.assertEqual(rows[0], "  intro paragraph.", "no trailing '4' folded in")
+        self.assertEqual(rows[1], "  ", "blank line is its own empty context row")
+        self.assertEqual(rows[2], "-## Section A")
+        self.assertEqual(rows[3], "+## Section A (revised)")
+        self.assertEqual(rows[4], "  - item one", "leading-dash bullet is context, not a deletion")
+        self.assertEqual(rows[5], "+- item three", "no trailing '8' folded in")
+
+    def test_write_new_file_no_marker_column(self):
+        fence = "╌" * 40
+        pane = "\n".join([
+            "─" * 40,
+            " Create file",
+            " notes.md",
+            fence,
+            " 1 ---",
+            " 2 title: Notes",
+            " 3 ---",
+            " 4 # Heading",
+            " 5 - first bullet",
+            " 6 - second bullet",
+            " 7 Some closing prose.",
+            fence,
+            " Do you want to create notes.md?",
+            " ❯ 1. Yes",
+            "   2. No",
+            FOOTER,
+        ])
+        ask = parse(pane)
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["question"], "Do you want to create notes.md?")
+        expected = "\n".join([
+            "+---", "+title: Notes", "+---", "+# Heading",
+            "+- first bullet", "+- second bullet", "+Some closing prose.",
+        ])
+        self.assertEqual(ask["diff"], expected,
+                         "every new-file line is an addition; leading '-' is content, not a deletion")
+        self.assertFalse(any(l.startswith("-") for l in ask["diff"].split("\n")),
+                         "no phantom deletions")
+
+    def test_notebook_edit_rounded_box_diff(self):
+        bx = lambda s: "│ " + s + "                    │"
+        pane = "\n".join([
+            "─" * 40,
+            " Edit notebook",
+            " This will modify /tmp/demo/demo.ipynb (outside working directory) via a symlink",
+            "",
+            "╭" + "─" * 40 + "╮",
+            bx("/tmp/demo/demo.ipynb"),
+            bx("Replace cell contents for cell cell-0"),
+            bx(""),
+            bx(' 1 -print("hello")'),
+            bx(" 1   No newline at end of file"),
+            bx(" 2 +import math"),
+            bx(" 3 +"),
+            bx(" 4 +for n in range(5):"),
+            "╰" + "─" * 40 + "╯",
+            " Do you want to make this edit to demo.ipynb?",
+            " ❯ 1. Yes",
+            "   2. No",
+            FOOTER,
+        ])
+        ask = parse(pane)
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["question"], "Do you want to make this edit to demo.ipynb?")
+        rows = ask["diff"].split("\n")
+        self.assertEqual(rows[0], '-print("hello")')
+        self.assertEqual(rows[2], "+import math")
+        self.assertIn("+for n in range(5):", rows)
+        # no box-drawing characters in parsed output
+        self.assertFalse(re.search(r"[│╭╮╰╯]", ask["diff"]),
+                         "box borders must be stripped from the diff")
+        self.assertFalse(re.search(r"[│╭╮╰╯]", ask["fileHead"]),
+                         "box borders must be stripped from the file header")
+        # file header carries the label, warning, in-box path and cell subtitle
+        self.assertIn("Edit notebook", ask["fileHead"])
+        self.assertIn("/tmp/demo/demo.ipynb", ask["fileHead"])
+        self.assertIn("Replace cell contents for cell cell-0", ask["fileHead"])
+
+    def test_exit_plan_mode_boxed_plan_is_markdown(self):
+        bx = lambda s: "│ " + s + "        │"
+        pane = "\n".join([
+            "─" * 40,
+            " Ready to code?",
+            " Here is Claude's plan:",
+            "╭" + "─" * 40 + "╮",
+            bx("## Plan"),
+            bx(""),
+            bx("1. First do a thing"),
+            bx("   - a nested detail"),
+            bx("2. Then the next thing"),
+            "╰" + "─" * 40 + "╯",
+            " Would you like to proceed?",
+            " ❯ 1. Yes, and auto-accept edits",
+            "   2. Yes, and manually approve edits",
+            "   3. No, keep planning",
+            FOOTER,
+        ])
+        ask = parse(pane)
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["question"], "Would you like to proceed?")
+        self.assertNotIn("diff", ask, "a plan is not a diff")
+        self.assertIn("planBody", ask)
+        self.assertIn("## Plan", ask["planBody"], "heading preserved")
+        self.assertIn("   - a nested detail", ask["planBody"], "nested-list indentation preserved")
+        self.assertFalse(re.search(r"[│╭╮╰╯]", ask["planBody"]),
+                         "box borders stripped from the plan")
+        self.assertEqual(len(ask["options"]), 3)
+        self.assertEqual(ask["options"][0]["label"], "Yes, and auto-accept edits")
+
+    def test_plain_permission_prompt_has_no_diff(self):
+        pane = "\n".join([
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. No",
+            FOOTER,
+        ])
+        ask = parse(pane)
+        self.assertIsNotNone(ask)
+        self.assertNotIn("diff", ask)
+        self.assertEqual(ask["question"], "Do you want to proceed?")
+
+    def test_webfetch_permission_body_extracted(self):
+        pane = "\n".join([
+            "─" * 40,
+            " Fetch",
+            "",
+            '   url: "https://example.com", prompt: "What is the heading?"',
+            "   Claude wants to fetch content from example.com",
+            "",
+            " Do you want to allow Claude to fetch this content?",
+            " ❯ 1. Yes",
+            "   2. Yes, and don't ask again for example.com",
+            "   3. No, and tell Claude what to do differently (esc)",
+        ])
+        ask = parse(pane)
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["question"],
+                         "Do you want to allow Claude to fetch this content?",
+                         "detail must not bleed into question")
+        self.assertEqual(
+            ask["body"],
+            'url: "https://example.com", prompt: "What is the heading?"\n'
+            "Claude wants to fetch content from example.com",
+        )
+        self.assertNotIn("diff", ask)
+        self.assertEqual(len(ask["options"]), 3)
 
 
 if __name__ == "__main__":

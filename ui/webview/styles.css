@@ -935,6 +935,37 @@ body { display: flex; flex-direction: column; }
 /* the "↳ You answered Claude's question" marker line atop the box */
 .ask-answered-tag { font-size: 0.72em; letter-spacing: 0.04em; font-weight: 700; color: #6da0ff; margin-bottom: 6px; }
 
+/* ask-card sub-components: file header, plan box, diff fold, body/cmd */
+.ask-card .ask-filehead { margin: 2px 0 7px; font-family: var(--mono); font-size: 0.86em; line-height: 1.45; }
+.ask-file-path { color: var(--fg); overflow-wrap: anywhere; }
+.ask-file-note { color: var(--dim); overflow-wrap: anywhere; }
+.ask-card .ask-plan {
+  margin: 2px 0 9px; padding: 9px 13px; max-height: 360px; overflow: auto;
+  border: 1px solid var(--box-border); border-radius: 6px; background: var(--box-bg);
+}
+.ask-card .ask-plan > :first-child { margin-top: 0; }
+.ask-card .ask-plan > :last-child { margin-bottom: 0; }
+.ask-card .diff-fold { margin: 2px 0 9px; max-height: 320px; }
+.ask-card .ask-body { margin: 2px 0 9px; }
+.ask-cmd {
+  font-family: var(--mono); font-size: 0.9em; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg);
+  border: 1px solid var(--box-border); border-radius: 6px; background: var(--box-bg);
+  padding: 8px 11px; max-height: 240px; overflow: auto;
+}
+.ask-body-desc { color: var(--dim); margin-top: 5px; font-size: 0.85em; font-style: italic; line-height: 1.45; overflow-wrap: anywhere; }
+
+/* ask-redirect: inline redirect input below a permission card */
+.ask-redirect { display: flex; gap: 8px; align-items: center; padding: 7px 9px 2px; margin-top: 5px; border-top: 1px solid var(--box-border); }
+.ask-redirect-arrow { flex: 0 0 auto; color: var(--dim); font-weight: 700; }
+.ask-redirect-input {
+  flex: 1 1 auto; box-sizing: border-box; min-width: 0;
+  background: var(--vscode-input-background, rgba(255, 255, 255, 0.05));
+  color: var(--vscode-input-foreground, var(--fg));
+  border: 1px solid var(--vscode-input-border, var(--box-border));
+  border-radius: 6px; padding: 5px 9px; font: inherit; outline: none;
+}
+
 /* ---------- live "awaiting your input" picker (pending, click-to-answer) ---------- */
 /* The picker is part of the scrolling transcript (the user 2026-06-27): it's the last child of #content and
    flows at the BOTTOM of the chat, scrolling WITH the history — no fixed region, no separate scrollbar, so a
@@ -946,10 +977,10 @@ body { display: flex; flex-direction: column; }
   box-shadow: inset 3px 0 0 var(--st-awaiting-bg);
   outline: none; /* the highlighted row is the cue, not a focus ring */
 }
-.ask-live .ask-qtext { margin-bottom: 7px; }
+.ask-live .ask-qtext { margin-bottom: 4px; }
 .ask-live-opt {
   display: flex; gap: 9px; align-items: baseline;
-  border-radius: 5px; padding: 5px 9px; color: var(--fg); cursor: pointer;
+  border-radius: 5px; padding: 2px 9px; color: var(--fg); cursor: pointer;
 }
 .ask-live-opt.focus { background: rgba(255, 255, 255, 0.10); box-shadow: inset 2px 0 0 var(--st-awaiting-bg); }
 .ask-live-opt .ask-optlabel { flex: 0 0 auto; font-weight: 600; }
@@ -1198,9 +1229,16 @@ body { display: flex; flex-direction: column; }
   border: 1px solid var(--box-border); border-radius: 6px; background: var(--box-bg);
 }
 
-/* diff (Edit/MultiEdit): collapsed by default; reuse the hljs add/del accents */
-.diff-fold .hljs-addition { color: var(--green); }
-.diff-fold .hljs-deletion { color: var(--err); }
+/* diff (Edit/MultiEdit): red/green row bands with gutter markers */
+.diff-fold { padding: 7px 0; font-family: var(--mono); font-size: 0.9em; line-height: 1.5; }
+.diff-row { display: flex; gap: 8px; padding: 0 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-gutter { flex: 0 0 auto; width: 1ch; text-align: center; opacity: 0.7; user-select: none; }
+.diff-text { flex: 1; min-width: 0; }
+.diff-ctx { color: var(--fg); }
+.diff-add { background: rgba(116, 201, 145, 0.14); }
+.diff-add .diff-text, .diff-add .diff-gutter { color: var(--green); }
+.diff-del { background: rgba(229, 110, 110, 0.14); }
+.diff-del .diff-text, .diff-del .diff-gutter { color: var(--err); }
 
 /* ---------- markdown ---------- */
 .md { overflow-wrap: anywhere; } /* wrap long unbreakable strings (tokens/base64/urls) */
@@ -1373,6 +1411,13 @@ pre.has-copy:hover .code-copy, .code-copy:focus-visible { opacity: 0.9; }
   font-family: var(--sans); font-size: 0.92em;
 }
 .picker-action:hover { background: rgba(255, 255, 255, 0.1); }
+.picker-forget {
+  flex: 0 0 auto; background: none; border: none; cursor: pointer;
+  color: var(--dim); font-size: 0.95em; line-height: 1; padding: 2px 4px;
+  border-radius: 4px; opacity: 0; transition: opacity 0.1s;
+}
+.picker-row:hover .picker-forget, .picker-row.active .picker-forget { opacity: 0.7; }
+.picker-forget:hover { opacity: 1; color: var(--st-permission-bg, #f85b5a); background: rgba(255, 255, 255, 0.10); }
 /* armed (auto-selected) when the typed name matches no session — Enter creates it;
    same focus-color accent as .picker-row.active so the highlight reads as "selected" */
 .picker-action.active {

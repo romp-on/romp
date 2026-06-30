@@ -45,6 +45,17 @@ FOOTER_RE = re.compile(r"to navigate|Enter to select|Esc to (cancel|exit)")
 # the message box, NOT a pending footer-less confirmation (PATH C below).
 COMPOSER_RE = re.compile(r"⏵⏵|shift\s*\+\s*tab to cycle|auto mode (on|off)|\bctx:\s*\d+%")
 
+# The diff frame in an Edit/Write/MultiEdit permission prompt is fenced by a row
+# of ╌ (U+254C) / ┄ (U+2504) dashes — distinct from the ─ box border above. The
+# diff body sits between two such fences; each line is `<lineno> <marker><text>`
+# (marker: '-' deleted, '+' added, ' ' context).
+DIFF_FENCE_RE = re.compile(r"^\s*[╌┄]{3,}\s*$")
+# A numbered diff line: "<lineno> <rest>". Group 1 is everything after the line
+# number + its single separator space, right-trimmed of the TUI's width padding.
+DIFF_NUM_RE = re.compile(r"^\s*\d+\s(.*?)\s*$")
+BOX_TOP_RE = re.compile(r"^\s*╭")
+BOX_BOT_RE = re.compile(r"^\s*╰")
+
 # Side-by-side preview: match VERTICAL and CORNER box glyphs ONLY — never
 # horizontals (─━═) or the em/en dashes that legitimately appear in a diagram.
 BOX_EDGE_RE = re.compile(r"[│┃┆┇┊┋╎╏║▏▕╭╮╯╰┌┐┘└┏┓┛┗╔╗╝╚├┤┣┫╠╣]")
@@ -74,6 +85,189 @@ def is_indented(line):
 # The `←  ☒ Header  ✔ Submit  →` tab bar (multi-select AND the wizard).
 def is_tab_bar(line):
     return _TABBAR_ARROW_RE.search(line) is not None and _TABBAR_KIND_RE.search(line) is not None
+
+
+def is_diff_fence(line):
+    return DIFF_FENCE_RE.match(line) is not None
+
+
+def is_box_edge(line):
+    return BOX_TOP_RE.match(line) is not None or BOX_BOT_RE.match(line) is not None or re.match(r"^\s*│", line) is not None
+
+
+def _strip_box(s):
+    """Remove │-border from a boxed line."""
+    return re.sub(r"\s*│\s*$", "", re.sub(r"^\s*│\s?", "", s))
+
+
+def _lead_ws(s):
+    m = re.match(r"^(\s*)", s)
+    return len(m.group(1)) if m else 0
+
+
+def find_diff_region(lines, end_idx):
+    """Find a ╌-fenced or ╭-boxed diff region before end_idx.
+
+    Returns (frame_top, start, end, strip_fn) or None. strip_fn maps a raw line
+    to its inner content (identity for ╌-fences, border-strip for boxes).
+    """
+    fences = [i for i in range(end_idx) if is_diff_fence(lines[i])]
+    if len(fences) >= 2:
+        return (fences[0], fences[0] + 1, fences[-1], lambda s: s)
+    top = -1
+    bot = -1
+    for i in range(end_idx):
+        if top < 0:
+            if BOX_TOP_RE.match(lines[i]):
+                top = i
+        elif BOX_BOT_RE.match(lines[i]):
+            bot = i
+            break
+    if top >= 0 and bot > top:
+        return (top, top + 1, bot, _strip_box)
+    return None
+
+
+def extract_diff_block(lines, end_idx):
+    """Pull the framed diff (and file header) out of a permission pane.
+
+    Returns a dict with optional keys: diff, fileHead, planBody.
+
+    Each diff line is `<lineno> <marker><text>` -> emit "-text" / "+text" / "  text"
+    (a unified diff the webview colors). A line with NO line number is a soft-wrap
+    continuation and folds into the previous.
+
+    New-file Writes have NO marker column -- line numbers sit directly before
+    content -- so `- item` (a markdown bullet) would be misread as a deletion.
+    The marker column exists ONLY when EVERY numbered line begins with "+", "-",
+    or space.
+
+    When a rounded box holds no numbered diff lines, its content is plan markdown
+    (ExitPlanMode) -- returned as planBody, not as a diff.
+    """
+    region = find_diff_region(lines, end_idx)
+    if not region:
+        return {}
+    frame_top, start, end, strip_fn = region
+    # header ABOVE the frame: from the nearest ─ rule down to the frame.
+    h_start = 0
+    for i in range(frame_top - 1, -1, -1):
+        if is_rule(lines[i]):
+            h_start = i + 1
+            break
+    above = []
+    for i in range(h_start, frame_top):
+        t = lines[i]
+        if not is_blank(t) and not is_rule(t) and not is_diff_fence(t):
+            above.append(t.strip())
+    # inner lines: numbered lines are the diff; non-numbered lines BEFORE the
+    # first diff row are the in-box header (NotebookEdit's path + subtitle).
+    rows = []         # list of rest strings (content after "<lineno> ")
+    in_box_head = []
+    inner_raw = []
+    for i in range(start, end):
+        t = strip_fn(lines[i])
+        inner_raw.append(t.rstrip())
+        if is_diff_fence(t):
+            continue
+        m = DIFF_NUM_RE.match(t)
+        if m:
+            rows.append(m.group(1))  # rest (marker column kept)
+        elif rows and t.strip():
+            rows[-1] += " " + t.strip()  # soft-wrap continuation
+        elif not rows and t.strip():
+            in_box_head.append(t.strip())  # in-box header line
+    above_head = "\n".join(above) if above else None
+    # No numbered lines -> the box is markdown (a plan), not a diff.
+    if not rows:
+        plan_body = "\n".join(inner_raw).strip()
+        result = {}
+        if above_head:
+            result["fileHead"] = above_head
+        if plan_body:
+            result["planBody"] = plan_body
+        return result
+    file_head_parts = above + in_box_head
+    file_head = "\n".join(file_head_parts) if file_head_parts else None
+    marked = [r for r in rows if r != ""]
+    has_marker_col = len(marked) > 0 and all(r[0] in ("+", "-", " ") for r in marked)
+    out = []
+    for r in rows:
+        if not has_marker_col:
+            out.append("+" + r)  # new file: whole line is an addition
+        elif r == "":
+            out.append("  ")     # blank context line
+        else:
+            mk = r[0]
+            if mk in ("+", "-"):
+                out.append(mk + r[1:])
+            else:
+                out.append("  " + r[1:])
+    result = {}
+    result["diff"] = "\n".join(out)
+    if file_head:
+        result["fileHead"] = file_head
+    return result
+
+
+def split_above(lines, first_opt_idx):
+    """Split the lines above the option block into header, question, body, and diff fields.
+
+    Blank lines break the region into blocks; the block nearest the options seeds
+    the QUESTION. A block above it that's indented DEEPER than the question is the
+    detail BODY (WebFetch url+prompt, Bash command, MCP call); a same-or-less-
+    indented block is more question text and folds in.
+    """
+    header = None
+    blocks = []  # bottom-up; lines bottom-up within a block
+    cur = None
+    floor = max(0, first_opt_idx - 40)
+    for k in range(first_opt_idx - 1, floor - 1, -1):
+        t = lines[k]
+        if is_rule(t) or is_diff_fence(t) or is_box_edge(t):
+            break
+        if is_blank(t):
+            if cur:
+                blocks.append(cur)
+                cur = None
+            continue
+        if is_tab_bar(t):
+            h = re.search(r"☐\s*([^☐☒✔✓→]+?)\s+[☐☒✔✓]", t) or \
+                re.search(r"[☐☒]\s*([^☐☒✔✓→]+?)\s+[☐☒✔✓]", t)
+            if h and not header:
+                header = h.group(1).strip()
+            continue
+        hm = HEADER_RE.match(t)
+        if hm and not header:
+            header = hm.group(1).strip()
+            continue
+        if not cur:
+            cur = {"lines": [t.strip()], "indent": _lead_ws(t)}
+        else:
+            cur["lines"].append(t.strip())
+            cur["indent"] = min(cur["indent"], _lead_ws(t))
+    if cur:
+        blocks.append(cur)
+
+    question_lines = []
+    body = None
+    if blocks:
+        q_indent = blocks[0]["indent"]
+        question_lines = list(reversed(blocks[0]["lines"]))  # top-down
+        for i in range(1, len(blocks)):
+            if blocks[i]["indent"] > q_indent:
+                body = "\n".join(reversed(blocks[i]["lines"]))
+                break
+            question_lines = list(reversed(blocks[i]["lines"])) + question_lines
+    diff_result = extract_diff_block(lines, first_opt_idx)
+    return {
+        "header": header,
+        "question": " ".join(question_lines) if question_lines else None,
+        "body": body,
+        "diff": diff_result.get("diff"),
+        "fileHead": diff_result.get("fileHead"),
+        "planBody": diff_result.get("planBody"),
+    }
 
 
 def preview_border_col(lines):
@@ -164,7 +358,8 @@ def parse_options(lines, block, end_idx):
     return {"options": options, "cursor": cursor, "cursorFound": cursor_found, "hasCheckbox": has_checkbox}
 
 
-def _mk(kind, header, question, opts, preview=None, chosen=None, pairs=None):
+def _mk(kind, header, question, opts, preview=None, chosen=None, pairs=None,
+         diff=None, body=None, file_head=None, plan_body=None):
     sig_opts = "|".join(
         "%s:%s:%s" % (o["n"], o["label"], "" if o.get("checked") is None else ("x" if o["checked"] else "o"))
         for o in opts["options"]
@@ -176,6 +371,10 @@ def _mk(kind, header, question, opts, preview=None, chosen=None, pairs=None):
         ",".join(chosen or []),
         ";".join("%s=%s" % (p["q"], p["a"]) for p in (pairs or [])),
         ("pv%d:%s" % (len(preview), preview)) if preview else "",
+        ("diff:%d" % len(diff)) if diff else "",
+        ("body:%d" % len(body)) if body else "",
+        ("fh:%d" % len(file_head)) if file_head else "",
+        ("plan:%d" % len(plan_body)) if plan_body else "",
     ])
     result = {
         "kind": kind,
@@ -190,6 +389,14 @@ def _mk(kind, header, question, opts, preview=None, chosen=None, pairs=None):
         "preview": preview,
         "sig": sig,
     }
+    if diff is not None:
+        result["diff"] = diff
+    if file_head is not None:
+        result["fileHead"] = file_head
+    if body is not None:
+        result["body"] = body
+    if plan_body is not None:
+        result["planBody"] = plan_body
     return result
 
 
@@ -228,40 +435,16 @@ def parse_ask_pane(pane, cols=None):
         block = option_block(lines, foot_idx)
         if block:
             first_opt_idx = block[0]
-            header = None
-            q_lines = []
-            k = first_opt_idx - 1
-            while k >= 0 and len(q_lines) + (1 if header else 0) < 8:
-                t = lines[k]
-                if is_rule(t):
-                    break
-                if is_blank(t):
-                    k -= 1
-                    continue
-                if is_tab_bar(t):
-                    # Best-effort tab name: the first unanswered ☐ tab (the active
-                    # one in forward flow), else the first tab.
-                    h = re.search(r"☐\s*([^☐☒✔✓→]+?)\s+[☐☒✔✓]", t) or \
-                        re.search(r"[☐☒]\s*([^☐☒✔✓→]+?)\s+[☐☒✔✓]", t)
-                    if h and not header:
-                        header = h.group(1).strip()
-                    k -= 1
-                    continue
-                hm = HEADER_RE.match(t)
-                if hm and not header:
-                    header = hm.group(1).strip()
-                    k -= 1
-                    continue
-                q_lines.append(t.strip())
-                k -= 1
-            question = " ".join(reversed(q_lines)) if q_lines else None
+            sa = split_above(lines, first_opt_idx)
             opts = parse_options(lines, block, foot_idx)
             if opts["options"]:
                 # ONLY checkbox rows mean multi-select — the ✔ Submit tab bar also
                 # tops the multi-question wizard, whose per-question screens are
                 # single-select.
                 kind = "multi" if opts["hasCheckbox"] else "single"
-                return _mk(kind, header, question, opts, preview)
+                return _mk(kind, sa["header"], sa["question"], opts, preview,
+                           diff=sa["diff"], body=sa["body"],
+                           file_head=sa["fileHead"], plan_body=sa["planBody"])
 
     # PATH B — the multi-select SUBMIT/review screen (no footer; "Submit answers").
     end = len(lines)
@@ -313,25 +496,10 @@ def parse_ask_pane(pane, cols=None):
             opts = parse_options(lines, block, end)
             if len(opts["options"]) >= 2 and opts["cursorFound"] and not opts["hasCheckbox"]:
                 first_opt_idx = block[0]
-                header = None
-                q_lines = []
-                k = first_opt_idx - 1
-                while k >= 0 and len(q_lines) < 8:
-                    t = lines[k]
-                    if is_rule(t):
-                        break
-                    if is_blank(t):
-                        k -= 1
-                        continue
-                    hm = HEADER_RE.match(t)
-                    if hm and not header:
-                        header = hm.group(1).strip()
-                        k -= 1
-                        continue
-                    q_lines.append(t.strip())
-                    k -= 1
-                return _mk("single", header,
-                           " ".join(reversed(q_lines)) if q_lines else None, opts, preview)
+                sa = split_above(lines, first_opt_idx)
+                return _mk("single", sa["header"], sa["question"], opts, preview,
+                           diff=sa["diff"], body=sa["body"],
+                           file_head=sa["fileHead"], plan_body=sa["planBody"])
 
     return None
 
