@@ -64,7 +64,7 @@ def _rebind_state(path):
 # INDEXING on Haiku, judgment-heavy TRIAGE on Sonnet.
 INDEX_MODEL  = "claude-haiku-4-5-20251001"   # captioner + archiver (index tier — high volume, low stakes)
 TRIAGE_MODEL = "claude-sonnet-4-6"           # planner + courier + closer (triage tier — judgment)
-WINDOW      = 48 * 3600                  # only caption transcripts touched in the last N hours (matches the parse horizon)
+WINDOW      = int(10.5 * 24 * 3600)      # only caption transcripts touched within this window (default 1.5 weeks)
 BUDGET      = 60                         # max captions written per pass
 FAIRNESS    = 10                         # max captions per session per pass (so one busy session can't starve the rest)
 ARCH_BUDGET = 30                         # max session archives (re)built per pass

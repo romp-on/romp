@@ -225,7 +225,8 @@ def _version_info():
     return {"kernel_sha": _kernel_sha(), "pid": os.getpid(), "started": int(_STARTED),
             "uptime_s": int(time.time() - _STARTED), "dist_ver": _dist_ver(), "bundles": bundles,
             "autoNudge": _auto_nudge_on(),   # server-side toggle state → the gear checkbox reflects the kernel
-            "defaultDir": _tilde(_default_create_dir())}   # the resolved default new-session dir → the gear "Default directory" field
+            "defaultDir": _tilde(_default_create_dir()),
+            "discoverWindow": _read_discover_window()}   # the resolved default new-session dir → the gear "Default directory" field
 
 
 def _dist_ver():
@@ -506,12 +507,30 @@ def _alive_sessions(now, tmux):
     So: tmux reachable (sessions present, or a tmux binary exists) → trust the empty result and show
     only living sessions; no tmux at all → fall back so a headless box isn't blank."""
     alive = [s for s in _sessions(now) if s["sid"] in tmux]
+    have = {s["sid"] for s in alive}
+    # Live tmux sessions whose transcript fell outside discover()'s 48h window are invisible —
+    # synthesize a session entry from the names registry so they stay on every surface. The
+    # transcript path mirrors discover()'s _proj_dir(cwd) / "<sid>.jsonl".
+    for sid in tmux:
+        if sid in have:
+            continue
+        name = _name_of(sid)
+        if not name:
+            continue
+        cwd = _cwd_of(sid)
+        proj = jd._proj_dir(cwd) if cwd else None
+        path = proj / (sid + ".jsonl") if proj else None
+        try:
+            mtime = os.stat(path).st_mtime if path and path.exists() else 0
+        except OSError:
+            mtime = 0
+        alive.append({"sid": sid, "name": name, "anchor": sid, "path": str(path or ""), "mtime": mtime})
+        have.add(sid)
     # SDK sessions that are alive (in the merged `tmux` map) but have no transcript on disk yet — a
     # just-created or never-run SDK session — aren't in discover()/_sessions, so add them here, else
     # their tab never opens (the user 2026-06-22). Once they run and write a transcript, discover takes over.
     be = _sdk()
     if be:
-        have = {s["sid"] for s in alive}
         for sid in tmux:
             if sid not in have and be.owns(sid):
                 alive.append(_sdk_sess(sid, now))
@@ -1284,6 +1303,27 @@ def _forget_name(name, live_names):
 
 
 _DEFAULT_DIR_FILE = Path(os.path.expanduser("~/.config/romp/default-dir"))
+_DISCOVER_WINDOW_FILE = Path(os.path.expanduser("~/.config/romp/discover-window"))
+_DISCOVER_WINDOW_DEFAULT = 10.5  # days
+
+
+def _read_discover_window():
+    """The user-set discover window in days, or the default (1.5 weeks). Persisted in a FILE so the
+    gear dialog can set it. The value drives jd.WINDOW (how far back dead sessions appear)."""
+    try:
+        v = float(_DISCOVER_WINDOW_FILE.read_text().strip())
+        return max(1, v)
+    except Exception:
+        return _DISCOVER_WINDOW_DEFAULT
+
+
+def _set_discover_window(days):
+    """Persist the discover window and update the live jd.WINDOW."""
+    days = max(1, float(days))
+    _DISCOVER_WINDOW_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _DISCOVER_WINDOW_FILE.write_text(str(days))
+    jd.WINDOW = int(days * 86400)
+    return days
 
 
 def _read_default_dir_file():
@@ -6925,6 +6965,13 @@ _GEAR_HTML = ("<button id=rgear hidden aria-hidden=true></button>"
               "<span><b>Auto Nudge</b>"
               "<span class=rs-sub>When a session goes idle but its goal still shows working (not blocked, not awaiting you), automatically nudge it once for a status update.</span>"
               "</span></label>"
+              "<div class='rs-row rs-sep' style='cursor:default'><span style='flex:1 1 auto'><b>Session history window</b>"
+              "<span class=rs-sub>How far back dead sessions appear in the picker and timeline. Live sessions always show regardless. Default: 10.5 days (1.5 weeks).</span>"
+              "<div style='display:flex;gap:6px;align-items:center;margin-top:5px'>"
+              "<input id=rs-discoverwin type=number min=1 max=90 step=0.5 style='width:70px;background:#1e1e1e;color:#ccc;"
+              "border:1px solid #3a3a3a;border-radius:5px;padding:3px 6px;text-align:right'>"
+              "<span style='color:#9aa0a6;font-size:0.85em'>days</span>"
+              "</div></span></div>"
               "<div class=rs-sec>Timeline</div>"
               "<label class=rs-row><input type=checkbox id=rs-collapsegaps checked>"
               "<span><b>Collapse idle gaps</b>"
@@ -6959,7 +7006,7 @@ _GEAR_HTML = ("<button id=rgear hidden aria-hidden=true></button>"
               "</div></div>")
 _GEAR_JS = r"""(function(){var g=document.getElementById('rgear'),p=document.getElementById('rsettings'),
 b=document.getElementById('rsver'),cc=document.getElementById('rs-compact'),
-db=document.getElementById('rs-debug'),an=document.getElementById('rs-autonudge'),bk=document.getElementById('rs-backend'),dd=document.getElementById('rs-defaultdir'),gb=document.getElementById('rs-branch'),cg=document.getElementById('rs-collapsegaps');
+db=document.getElementById('rs-debug'),an=document.getElementById('rs-autonudge'),bk=document.getElementById('rs-backend'),dd=document.getElementById('rs-defaultdir'),gb=document.getElementById('rs-branch'),cg=document.getElementById('rs-collapsegaps'),dw=document.getElementById('rs-discoverwin');
 function load(){try{return Object.assign({compact:false,colormap:'aurora',subgoals:true,debug:false,backend:'tmux',defaultDir:'',showBranch:true,collapseGaps:true},JSON.parse(localStorage.getItem('romp:settings')||'null'));}catch(e){return {compact:false,colormap:'aurora',subgoals:true,debug:false,backend:'tmux',defaultDir:'',showBranch:true,collapseGaps:true};}}
 function save(s){try{localStorage.setItem('romp:settings',JSON.stringify(s));}catch(e){}}
 function emit(){try{window.dispatchEvent(new Event('romp:settings'));}catch(e){}}   // same-doc signal → the feed re-gates its cards
@@ -7000,12 +7047,15 @@ if(cmList&&!cmList.hidden&&w&&!w.contains(e.target))cmList.hidden=true;});   // 
 if(bk)bk.addEventListener('change',function(){var s=load();s.backend=bk.value;save(s);emit();});   // webview-local pref read at createSession time (render.ts); no kernel round-trip
 if(dd)dd.addEventListener('change',function(){var v=dd.value.trim();var s=load();s.defaultDir=v;save(s);   // same-tab cache for the picker prefill
 try{window.acquireVsCodeApi&&window.acquireVsCodeApi().postMessage({type:'setDefaultDir',value:v});}catch(e){}});   // persist kernel-side: _default_create_dir reads this file FIRST
+if(dw)dw.addEventListener('change',function(){var v=parseFloat(dw.value)||10.5;if(v<1)v=1;dw.value=v;
+try{window.acquireVsCodeApi&&window.acquireVsCodeApi().postMessage({type:'setDiscoverWindow',days:v});}catch(e){}});
 var ddb=document.getElementById('rs-defaultdir-browse');
 if(ddb)ddb.addEventListener('click',function(){try{window.acquireVsCodeApi&&window.acquireVsCodeApi().postMessage({type:'browseDir',target:'gear'});}catch(e){}});   // native folder dialog → render.ts fills #rs-defaultdir + fires change
 function lv(){var t=document.querySelector('script[src*="feed.js"]');
 var m=t&&t.getAttribute('src').match(/[?&]v=(\d+)/);return m?+m[1]:0;}
 function fill(){fetch('/version',{cache:'no-store'}).then(function(r){return r.json();}).then(function(v){
 if(an)an.checked=!!v.autoNudge;
+if(dw&&typeof v.discoverWindow==='number')dw.value=v.discoverWindow;
 if(dd&&typeof v.defaultDir==='string')dd.value=v.defaultDir;   // the kernel's persisted default (file → env/install) is authoritative
 var x=lv();b.innerHTML='kernel '+(v.kernel_sha||'?')+'\nserving v'+
 v.dist_ver+'\nthis tab v'+(x||'?');
@@ -8397,6 +8447,12 @@ class Handler(BaseHTTPRequestHandler):
                 client["send"](json.dumps({"type": "warn", "text": err}))
             else:
                 client["send"](json.dumps({"type": "defaultDirSaved", "value": _tilde(_default_create_dir())}))
+        elif msg and msg.get("type") == "setDiscoverWindow" and msg.get("days") is not None:
+            try:
+                days = _set_discover_window(float(msg["days"]))
+                jd._discover_cache["fp"] = None   # bust the discover cache so the new window takes effect
+            except Exception:
+                client["send"](json.dumps({"type": "warn", "text": "invalid discover window value"}))
         elif msg and msg.get("type") == "setColormap" and msg.get("name"):
             _set_colormap(str(msg["name"]))    # recency colormap chooser → recolours the feed on next push
 
@@ -8498,6 +8554,7 @@ def _parent_watch():
 
 
 def main():
+    jd.WINDOW = int(_read_discover_window() * 86400)
     _ensure_bundles()
     threading.Thread(target=_producer, daemon=True).start()
     threading.Thread(target=_pusher, daemon=True).start()

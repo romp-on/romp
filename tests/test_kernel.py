@@ -2682,6 +2682,17 @@ class ViewBuilder(unittest.TestCase):
         alive = km._alive_sessions(NOW, {SID: {"state": "working"}})
         self.assertEqual([s["sid"] for s in alive], [SID])
 
+    def test_alive_stale_transcript_still_shown(self):
+        # a live tmux session whose transcript is outside discover()'s 48h window must still
+        # appear — _alive_sessions synthesizes an entry from the names registry
+        stale_sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        (km.NAMES / stale_sid).write_text("stale-sess\t/tmp\t#1EA1EB\twhite")
+        tmux = {SID: {"state": "idle"}, stale_sid: {"state": "idle"}}
+        alive = km._alive_sessions(NOW, tmux)
+        sids = [s["sid"] for s in alive]
+        self.assertIn(SID, sids, "in-window session present")
+        self.assertIn(stale_sid, sids, "stale-transcript live session present")
+
     def test_clear_all_clears_blocked_too(self):
         d0 = km.build_feed(NOW)
         self.assertTrue([a for a in d0["asks"] if a["column"] == "needs_input"], "fixture has a blocked ask")
