@@ -413,6 +413,28 @@ function gearIcon(cx, cy, color) {
   }
   return g;
 }
+// Vertical placement for the fixed-position drop-downs (_openLaneMenu / _openMetaMenu). The timeline
+// often renders as a SHORT bottom band — the web shell's f-timeline iframe — and position:fixed pins
+// to THAT band's viewport, so a menu hung unconditionally at anchor.bottom+4 from a gear near the
+// band's lower edge fell straight past the iframe's bottom and read as invisible / hidden behind the
+// shell (the user 2026-08-07). Prefer below the anchor; flip above when below can't hold the menu;
+// clamp to the viewport as the backstop when NEITHER side can (a band shorter than the menu keeps the
+// menu's top edge on-screen — a cropped last row beats no menu at all).
+function menuTop(anchor, menuH, viewH) {
+  const below = anchor.bottom + 4;
+  if (below + menuH <= viewH - 6) return below;
+  const above = anchor.top - 4 - menuH;
+  if (above >= 6) return above;
+  return Math.max(6, viewH - 6 - menuH);
+}
+// Translate a pane-local anchor rect into a host document's coordinates by summing the intervening
+// iframes' offsets (the moveTip pattern, extracted pure so the arithmetic is testable). `frames` is
+// the list of frameElement rects between the pane and the host, innermost first.
+function offsetRect(rect, frames) {
+  let { left, top, bottom } = rect;
+  for (const fr of frames || []) { left += fr.left; top += fr.top; bottom += fr.top; }
+  return { left, top, bottom };
+}
 // The gear menu's rows, one per per-session flag. `enabled` reads the toggle's MEANING off the session
 // (hideFromFeed/postalServiceOff are off-flags; notify is an on-flag), `value` maps a desired
 // enabled-state back to the flag value _setSessionFlag persists.
@@ -760,6 +782,18 @@ class TimelinePanel {
     this._onDocKey = (e) => { if (e.key === 'Escape') { this._closeMetaMenu(); this._closeLaneMenu(); } };
     document.addEventListener('click', this._onDocClick);
     document.addEventListener('keydown', this._onDocKey);
+    // The menus render in the tip's host document (see _menuHost), so a click or Escape landing on the
+    // HOST page — which now shows the menu — must close them too. Same teardown discipline as the tip:
+    // pagehide unhooks the host listeners and drops any open menu, so an iframe reload can't orphan either.
+    if (tipDoc !== document) {
+      tipDoc.addEventListener('click', this._onDocClick);
+      tipDoc.addEventListener('keydown', this._onDocKey);
+      window.addEventListener('pagehide', () => { try {
+        tipDoc.removeEventListener('click', this._onDocClick);
+        tipDoc.removeEventListener('keydown', this._onDocKey);
+        this._closeMetaMenu(); this._closeLaneMenu();
+      } catch (e) {} });
+    }
 
     this._onResize = () => this.draw();
     this._onWheel = (e) => this.onWheel(e);
@@ -869,6 +903,12 @@ class TimelinePanel {
     if (this._onDragUp) window.removeEventListener('mouseup', this._onDragUp, true);
     document.removeEventListener('click', this._onDocClick);
     document.removeEventListener('keydown', this._onDocKey);
+    try {   // the host-document twins of the two closers above (menus render in the tip's host doc)
+      if (this._tipWin && this._tipWin !== window) {
+        this._tipWin.document.removeEventListener('click', this._onDocClick);
+        this._tipWin.document.removeEventListener('keydown', this._onDocKey);
+      }
+    } catch (e) { /* host gone — its listeners went with it */ }
     this._closeMetaMenu();
     this._closeLaneMenu();
     if (this.tip) this.tip.remove();
@@ -2126,6 +2166,23 @@ class TimelinePanel {
 
   _closeMetaMenu() { if (this._metaMenu) { this._metaMenu.remove(); this._metaMenu = null; } }
 
+  // Where a drop-down should live and be measured: the tip's host document (the topmost same-origin
+  // window — in the web shell that's the whole page, so a menu taller than the timeline band gets the
+  // full window's height instead of the band's few rows; the user 2026-08-07, still cropped after the
+  // flip fix). The anchor rect is translated by the intervening iframes' offsets, moveTip-style. A
+  // cross-origin parent (the VS Code webview) throws on frameElement access → fall back to our own
+  // pane, which is exactly the pre-host behavior.
+  _menuHost(anchorRect) {
+    if (this._tipWin && this._tipWin !== window) {
+      try {
+        const frames = [];
+        for (let w = window; w !== this._tipWin && w.frameElement; w = w.parent) frames.push(w.frameElement.getBoundingClientRect());
+        return { win: this._tipWin, doc: this._tipWin.document, rect: offsetRect(anchorRect, frames) };
+      } catch (e) { /* host went cross-origin/away — position pane-locally */ }
+    }
+    return { win: window, doc: document, rect: anchorRect };
+  }
+
   // Open the model/effort drop-down anchored under the clicked label. Re-clicking the same word's
   // caret toggles it shut. Refused while the lane is AWAITING a prompt — the pane's keyboard belongs to
   // the picker, so a pasted "/model …" + Enter would answer it instead (the chat view guards the same way).
@@ -2155,11 +2212,12 @@ class TimelinePanel {
         this.draw();
       });
     }
-    const r = anchorEl.getBoundingClientRect();
-    // clamp to the viewport so a right-edge lane's menu stays on-screen
-    const left = Math.min(Math.round(r.left), (window.innerWidth || 9999) - 140);
+    const h = this._menuHost(anchorEl.getBoundingClientRect());
+    h.doc.body.appendChild(menu);   // a cross-document append ADOPTS the node; its listeners are kept
+    // clamp to the host viewport so a right-edge lane's menu stays on-screen
+    const left = Math.min(Math.round(h.rect.left), (h.win.innerWidth || 9999) - 140);
     menu.style.left = Math.max(6, left) + 'px';
-    menu.style.top = Math.round(r.bottom + 4) + 'px';
+    menu.style.top = Math.round(menuTop(h.rect, menu.offsetHeight || 0, h.win.innerHeight || 9999)) + 'px';
     this._metaMenu = menu;
   }
 
@@ -2213,10 +2271,11 @@ class TimelinePanel {
       }
     };
     build();
-    const r = anchorEl.getBoundingClientRect();
-    const left = Math.min(Math.round(r.left), (window.innerWidth || 9999) - 300);   // clamp on-screen
+    const h = this._menuHost(anchorEl.getBoundingClientRect());
+    h.doc.body.appendChild(menu);   // a cross-document append ADOPTS the node; its listeners are kept
+    const left = Math.min(Math.round(h.rect.left), (h.win.innerWidth || 9999) - 300);   // clamp on-screen
     menu.style.left = Math.max(6, left) + 'px';
-    menu.style.top = Math.round(r.bottom + 4) + 'px';
+    menu.style.top = Math.round(menuTop(h.rect, menu.offsetHeight || 0, h.win.innerHeight || 9999)) + 'px';
     this._laneMenu = menu;
   }
 
@@ -3317,4 +3376,4 @@ class TimelinePanel {
   body(s) { return s ? '<div class="b">' + s + '</div>' : ''; }
 }
 
-module.exports = { TimelinePanel, badgeFor, roundedPath, crossX, workAnchorOf, idleGaps, fmtSpan, dotLit, barLit, interpNow, shouldReanchorEdge, reanchorEdge, isFreshNowSample, barEndT, dragAxis, stripRompMarks, collapseRepeat, reqText };
+module.exports = { TimelinePanel, badgeFor, roundedPath, crossX, workAnchorOf, idleGaps, fmtSpan, dotLit, barLit, interpNow, shouldReanchorEdge, reanchorEdge, isFreshNowSample, barEndT, dragAxis, stripRompMarks, collapseRepeat, reqText, menuTop, offsetRect };
