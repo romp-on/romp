@@ -96,6 +96,9 @@ class FeedNotifications(unittest.TestCase):
         self.assertEqual(out[0][0], "romp: web")
         self.assertTrue(out[0][1].startswith("Needs you: "), out[0][1])
         self.assertIn("Fix the login flow", out[0][1])
+        # the sid rides every notification so a push tap can land ON the session that fired
+        # (the user 2026-08-08 — their first real push opened the app on a different session)
+        self.assertEqual(out[0][2], "TESTSID")
 
     def test_an_unarmed_transition_is_silent(self):
         km._feed_notifications(_feed(_card("TESTSID:g1", "TESTSID", "working")))
@@ -197,7 +200,8 @@ class NotifyWiring(unittest.TestCase):
 
     def test_fresh_feed_builds_drive_the_notifier(self):
         # the detector runs where the fresh build lands — the one choke point every push shares
-        self.assertIn("for _t, _b in _feed_notifications(feed):", self.src)
+        # (the sid joined the tuple 2026-08-08 so the push sink can aim its tap-to-open)
+        self.assertIn("for _t, _b, _sid in _feed_notifications(feed):", self.src)
         self.assertIn("_system_notify(_t, _b)", self.src)
 
 

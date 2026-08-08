@@ -36,6 +36,25 @@ PORT = int(os.environ.get("ROMP_KERNEL_PORT", "29855"))   # the manager/extensio
 BIND = os.environ.get("ROMP_SERVE_HOST", "127.0.0.1")   # loopback only; tailnet/phone reach = `tailscale serve` proxying to loopback (docs/guide.md#from-your-phone). Env override is a test seam, not a user knob.
 
 
+# ── the installable dashboard (plans/ios-app.md proposal 1; the user 2026-08-07) ──────────────────
+# The web app manifest + home-screen icons that turn iOS/Android "Add to Home Screen" into a real
+# standalone app (own icon, full screen, in the app switcher) instead of a browser-chrome bookmark.
+# Both are served auth-EXEMPT, of necessity, not oversight: browsers fetch <link rel=manifest> and
+# the manifest's icon list with credentials OMITTED (no cookie, no header), so a token-gated
+# manifest 403s at the exact moment the install sheet consults it. They carry brand strings and
+# brand art only — the same leak class as /healthz's "ok".
+_INSTALL_ICONS = ("romp-touch-180.png", "romp-app-192.png", "romp-app-512.png")   # regenerate: assets/make_touch_icons.py
+_APP_MANIFEST = json.dumps({
+    "name": "Romp", "short_name": "Romp", "start_url": "/", "display": "standalone",
+    # both colors match the shell's own background (#1e1e1e — NOT the login page's #101418, which
+    # plans/ios-app.md guessed) so the standalone window and its launch frame never flash a foreign
+    # color around the boot splash
+    "background_color": "#1e1e1e", "theme_color": "#1e1e1e",
+    "icons": [{"src": "/media/romp-app-192.png", "sizes": "192x192", "type": "image/png"},
+              {"src": "/media/romp-app-512.png", "sizes": "512x512", "type": "image/png"}],
+}, sort_keys=True)
+
+
 _STARTED = time.time()                       # this kernel process's start (for /version uptime)
 
 
@@ -16093,8 +16112,11 @@ def _cached_feed(now, tmux, sig, connect=False):
     feed = build_feed(now, tmux)         # instant may be invisible to the build below → must rebuild
     feed["buildId"] = bid
     _built_feed[:] = [sig, feed, time.time(), started]
-    for _t, _b in _feed_notifications(feed):              # armed bells: fresh builds are the transition event
+    _badge = _needs_you_count(feed)
+    for _t, _b, _sid in _feed_notifications(feed):        # armed bells: fresh builds are the transition event
         _system_notify(_t, _b)
+        _push_notify(_t, _b, _sid, _badge)                # same events to subscribed phones (plans/ios-app.md)
+    _badge_push(_badge)                                   # app-icon count for installed shells (proposal 3)
     return feed
 
 
@@ -16124,9 +16146,11 @@ def _system_notify(title, body):
 
 
 def _feed_notifications(feed):
-    """Diff this feed build against the last; return [(title, body)] for every ARMED card that newly
-    entered needs_input or completed (including a card appearing already there — work can surface
-    blocked). Also advances the prev map and prunes armed ids whose card left the feed."""
+    """Diff this feed build against the last; return [(title, body, sid)] for every ARMED card that
+    newly entered needs_input or completed (including a card appearing already there — work can
+    surface blocked). Also advances the prev map and prunes armed ids whose card left the feed.
+    sid rides along so a push notification's tap can land ON the session that fired (the user
+    2026-08-08, whose first real push opened the app on a different session)."""
     prev = _NOTIFY_PREV[0]
     cur = {}
     for a in feed.get("asks") or []:
@@ -16148,8 +16172,300 @@ def _feed_notifications(feed):
         what = "Needs you" if col == "needs_input" else "Completed"
         txt = str(a.get("text") or "").strip()
         out.append(("romp: %s" % (a.get("name") or "session"),
-                    "%s: %s" % (what, txt[:140] if txt else "a task changed state")))
+                    "%s: %s" % (what, txt[:140] if txt else "a task changed state"),
+                    str(a.get("sid") or "")))
     return out
+
+
+def _needs_you_count(feed):
+    """How many real (non-provisional) cards sit in needs_input — the number the app icon wears.
+    Counted from the same feed build the notifications diff, so badge and bell can never disagree."""
+    return sum(1 for a in (feed.get("asks") or [])
+               if not a.get("provisional") and a.get("column") == "needs_input")
+
+
+# The count the shell clients last heard (None = nothing sent since boot). The badge moves on feed
+# BUILDS — the exact event the columns move on — and only when the number actually changed.
+_BADGE_LAST = [None]
+
+
+def _badge_push(n):
+    """Tell every connected shell the current needs-you count when it CHANGES (proposal 3: the
+    app-icon badge, the glanceable "does anything need me"). The shell relays it to
+    navigator.setAppBadge, which only installed apps honor — everyone else ignores the message."""
+    if n == _BADGE_LAST[0]:
+        return
+    _BADGE_LAST[0] = n
+    _send_to_app("shell", {"type": "badge", "n": n})
+
+
+# ── Web Push: the same bell events, delivered to the phone (plans/ios-app.md proposal 2; the user
+# 2026-08-07, who wants "needs you" to reach them wherever they are, not just the kernel box's
+# desktop). A device opts in from the shell's bell (mobile tab bar → _LANDING_PUSH_JS): it
+# registers /sw.js, subscribes with our VAPID key, and POSTs the subscription to /push/subscribe.
+# _push_notify then mirrors every _system_notify to every subscribed device. iOS grants the Push
+# API only to INSTALLED home-screen apps (16.4+), which is why proposal 1 is the prerequisite.
+#
+# Crypto is RFC 8291 (aes128gcm content encryption — Apple's/Google's push relays carry ciphertext
+# they cannot read) + RFC 8292 (VAPID, an ES256 JWT proving the sender). Both need P-256/HKDF/
+# AES-GCM, i.e. the `cryptography` package — the kernel's only soft dependency beyond the SDK. It
+# is NOT silently optional (fail loudly, CLAUDE.md): /push/subscribe answers 500 with the missing
+# package named, and a send attempted with subscriptions on file but no crypto says so on stderr.
+_PUSH_CRYPTO = [None]   # None = untried; False = unavailable; else the namespace below
+
+
+def _push_crypto():
+    """The cryptography primitives Web Push needs, imported once, or None. Lazy, not top-of-module:
+    the package may live only in the SDK venv, whose site-packages _ensure_sdk_on_path injects
+    after import."""
+    if _PUSH_CRYPTO[0] is None:
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+            _PUSH_CRYPTO[0] = {"hashes": hashes, "ser": serialization, "ec": ec,
+                               "decode_dss": decode_dss_signature, "AESGCM": AESGCM, "HKDF": HKDF}
+        except ImportError:
+            _PUSH_CRYPTO[0] = False
+    return _PUSH_CRYPTO[0] or None
+
+
+def _b64u(b):
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def _b64u_dec(s):
+    return base64.urlsafe_b64decode(str(s) + "=" * (-len(s) % 4))
+
+
+def _push_subs():
+    """endpoint -> subscription ({endpoint, keys:{p256dh,auth}}). Fresh read, no mtime cache:
+    consulted only on bell events and subscribe/unsubscribe, never per feed build."""
+    try:
+        d = json.loads((jd.STATE / "push-subscriptions.json").read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_push_subs(subs):
+    # 0600: an endpoint is a capability URL — anyone holding it (plus our VAPID key) can push to
+    # the device — so the store gets the serve-token treatment, not world-readable JSON.
+    _atomic_write(jd.STATE / "push-subscriptions.json", json.dumps(subs, sort_keys=True), mode=0o600)
+
+
+def _set_push_sub(sub):
+    cur = dict(_push_subs())
+    cur[sub["endpoint"]] = sub
+    _save_push_subs(cur)
+
+
+def _del_push_sub(endpoint):
+    cur = dict(_push_subs())
+    if cur.pop(endpoint, None) is not None:
+        _save_push_subs(cur)
+
+
+def _vapid_keys():
+    """This kernel's VAPID P-256 keypair (RFC 8292), minted on first use and persisted at 0600 —
+    stable thereafter, because a subscription is bound to the key it was created with. Returns
+    (private_key, public_key_b64url); raises RuntimeError when cryptography is missing (the
+    subscribe route turns that into a plain-text 500 the shell surfaces)."""
+    cg = _push_crypto()
+    if not cg:
+        raise RuntimeError("Web Push needs the python 'cryptography' package on the kernel host")
+    f = jd.STATE / "push-vapid.json"
+    priv = None
+    try:
+        d = json.loads(f.read_text())
+        priv = cg["ec"].derive_private_key(int(d["d"], 16), cg["ec"].SECP256R1())
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    if priv is None:
+        priv = cg["ec"].generate_private_key(cg["ec"].SECP256R1())
+        _atomic_write(f, json.dumps({"d": "%064x" % priv.private_numbers().private_value}), mode=0o600)
+    pub = priv.public_key().public_bytes(cg["ser"].Encoding.X962, cg["ser"].PublicFormat.UncompressedPoint)
+    return priv, _b64u(pub)
+
+
+def _webpush_encrypt(payload, p256dh_b64u, auth_b64u, _salt=None, _eph=None):
+    """RFC 8291 aes128gcm: encrypt payload to one subscription's keys. One record (our payloads are
+    a title+body, nowhere near rs=4096), 0x02 delimiter, header = salt|rs|idlen|ephemeral-pubkey.
+    _salt/_eph are test seams so the round-trip test can pin the whole derivation."""
+    cg = _push_crypto()
+    ua_pub = cg["ec"].EllipticCurvePublicKey.from_encoded_point(cg["ec"].SECP256R1(), _b64u_dec(p256dh_b64u))
+    eph = _eph or cg["ec"].generate_private_key(cg["ec"].SECP256R1())
+    raw = lambda k: k.public_bytes(cg["ser"].Encoding.X962, cg["ser"].PublicFormat.UncompressedPoint)
+    hkdf = lambda salt, ikm, info, n: cg["HKDF"](algorithm=cg["hashes"].SHA256(), length=n,
+                                                 salt=salt, info=info).derive(ikm)
+    ikm = hkdf(_b64u_dec(auth_b64u), eph.exchange(cg["ec"].ECDH(), ua_pub),
+               b"WebPush: info\x00" + raw(ua_pub) + raw(eph.public_key()), 32)
+    salt = _salt or os.urandom(16)
+    cek = hkdf(salt, ikm, b"Content-Encoding: aes128gcm\x00", 16)
+    nonce = hkdf(salt, ikm, b"Content-Encoding: nonce\x00", 12)
+    ct = cg["AESGCM"](cek).encrypt(nonce, bytes(payload) + b"\x02", None)
+    return salt + (4096).to_bytes(4, "big") + bytes([len(raw(eph.public_key()))]) + raw(eph.public_key()) + ct
+
+
+def _vapid_auth(endpoint):
+    """The Authorization header for one push POST (RFC 8292): an ES256 JWT whose audience is the
+    push service's ORIGIN (Apple's/Google's server, not the device), signed with our VAPID key."""
+    cg = _push_crypto()
+    priv, pub = _vapid_keys()
+    u = urlparse(endpoint)
+    seg = lambda o: _b64u(json.dumps(o, separators=(",", ":"), sort_keys=True).encode())
+    signing = ("%s.%s" % (seg({"alg": "ES256", "typ": "JWT"}),
+                          # sub is a required contact slot; the reserved example.com keeps a real
+                          # address out of this repo and out of every JWT we mint (privacy rule)
+                          seg({"aud": "%s://%s" % (u.scheme, u.netloc),
+                               "exp": int(time.time()) + 12 * 3600,
+                               "sub": "mailto:romp@example.com"}))).encode()
+    r, s = cg["decode_dss"](priv.sign(signing, cg["ec"].ECDSA(cg["hashes"].SHA256())))
+    return "vapid t=%s.%s, k=%s" % (signing.decode(), _b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big")), pub)
+
+
+def _push_send_one(sub, payload):
+    """POST one encrypted notification to one subscription. Returns False only when the push
+    service says the subscription is DEAD (404/410 — the sole prune signal, per the plan); a
+    network blip keeps it."""
+    import urllib.request, urllib.error
+    req = urllib.request.Request(
+        sub["endpoint"], method="POST",
+        data=_webpush_encrypt(payload, sub["keys"]["p256dh"], sub["keys"]["auth"]),
+        headers={"Authorization": _vapid_auth(sub["endpoint"]),
+                 "Content-Encoding": "aes128gcm", "TTL": "86400", "Urgency": "high"})
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+        return True
+    except urllib.error.HTTPError as e:
+        return e.code not in (404, 410)
+    except Exception:
+        return True
+
+
+def _push_notify(title, body, sid="", badge=0):
+    """_system_notify's sibling sink: the same (title, body) — the card's gist and nothing more —
+    to every subscribed device, plus two pieces of ROUTING metadata, not content: sid, so tapping
+    the notification lands on the session that fired (the user 2026-08-08), and badge, the
+    needs-you count the service worker paints on the app icon while the app is closed. Runs on
+    the pusher thread, so all network work moves to a daemon thread (the _refresh_remote_prices
+    discipline) and this never blocks or raises."""
+    subs = _push_subs()
+    if not subs:
+        return
+    if not _push_crypto():
+        # subscriptions exist, so a phone is expecting these — say so where the kernel's operator
+        # looks, rather than dropping them silently (fail loudly, CLAUDE.md)
+        print("romp: web push: %d subscription(s) on file but the python 'cryptography' package "
+              "is missing — notification not delivered" % len(subs), file=sys.stderr)
+        return
+    payload = json.dumps({"title": str(title), "body": str(body),
+                          "sid": str(sid or ""), "badge": int(badge or 0)}).encode()
+
+    def run():
+        dead = []
+        for ep, sub in subs.items():
+            try:
+                if not _push_send_one(sub, payload):
+                    dead.append(ep)
+            except Exception:
+                pass                               # one bad subscription must not block the rest
+        for ep in dead:
+            _del_push_sub(ep)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+# The whole service worker. Push delivery ONLY — deliberately NO fetch handler: romp is useless
+# offline by nature, and a caching worker would fight the stale-bundle machinery (?v= cache-bust +
+# the rstale banner), which assumes the network serves every load (plans/ios-app.md proposal 2).
+# Served at top-level /sw.js, not under /dist/: a worker's scope is capped at its URL's directory,
+# and this one must control '/' to own the app's notifications.
+_SW_JS = """
+// Take over IMMEDIATELY on update. The default lifecycle parks an updated worker in 'waiting'
+// until every client closes — right for cache-owning workers with state to hand over, wrong for
+// this one, which owns nothing but event handlers: the tap-to-open worker sat waiting behind its
+// sid-blind predecessor, so notification taps kept running the OLD handler and opened the app on
+// whatever session was last shown (the user 2026-08-08, testing the very fix that was parked).
+self.addEventListener('install',function(e){self.skipWaiting();});
+self.addEventListener('activate',function(e){e.waitUntil(clients.claim());});
+self.addEventListener('push',function(e){
+var d={};try{d=e.data?e.data.json():{};}catch(err){}
+var work=[self.registration.showNotification(d.title||'romp',
+{body:d.body||'',icon:'/media/romp-app-192.png',badge:'/media/romp-app-192.png',data:{sid:d.sid||''}})];
+// the app-icon count, kept current while the app is CLOSED (the open shell re-paints it live over
+// its own WS). setAppBadge exists in the SW only where badging works at all (iOS installed apps).
+if('setAppBadge' in self.navigator)work.push(self.navigator.setAppBadge(d.badge||0)['catch'](function(){}));
+e.waitUntil(Promise.all(work));
+});
+// Land ON the thing that notified (the user 2026-08-08, whose first push opened a different
+// session): a live window gets focus + the sid over postMessage (the shell relays it into the
+// chat pane); no window -> open one with the sid in the URL, and the shell asks the kernel to
+// aim the focus at it once its chat pane connects (POST /reveal).
+self.addEventListener('notificationclick',function(e){
+e.notification.close();
+var sid=(e.notification.data&&e.notification.data.sid)||'';
+e.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(function(ws){
+if(ws.length)return ws[0].focus().then(function(w){try{(w||ws[0]).postMessage({romp:'pushReveal',sid:sid});}catch(err){}});
+return clients.openWindow(sid?'/?push-reveal='+encodeURIComponent(sid):'/');}));
+});
+"""
+
+
+# ── landing a push tap on the session that fired ─────────────────────────────────────────────────
+# The cold-start half of notificationclick: the app was closed, the SW opened '/?push-reveal=sid',
+# and the shell POSTs /reveal {sid, wid} at boot — necessarily BEFORE its chat pane's WS exists, so
+# the focus cannot be sent yet. It parks here and is delivered on the exact event it was waiting
+# for: that window's chat pane saying "ready" (matched by wid — the per-dashboard id the shell
+# mints and every same-window pane shares — so a second dashboard's reload cannot steal it). One
+# slot, latest wins: two taps before a boot completes should land on the newer notification.
+_PENDING_REVEAL = [None]                     # {"sid": ..., "wid": ...} or None
+
+
+def _reveal_msg(sid):
+    """What lands in the chat pane: a live session gets the focus (live=True → the live tail,
+    where the blocking prompt sits); a dead one gets the revive prompt, never a silent reveal —
+    the same split _reveal_or_confirm makes for feed/timeline taps."""
+    if sid and sid not in _tmux_sessions():
+        return {"type": "confirmRevive", "id": sid, "name": _name_of(sid) or sid}
+    return {"type": "focus", "id": sid, "live": True}
+
+
+def _reveal_request(sid, wid):
+    """POST /reveal: aim the focus at the dashboard whose wid asked. Its chat pane already
+    connected → deliver now; not yet (the cold-start norm — the shell's fetch beats the iframe's
+    WS) → park for _consume_pending_reveal. Returns whether it was delivered immediately."""
+    with _clients_lock:
+        targets = [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid]
+    delivered = False
+    for c in targets:
+        try:
+            c["send"](json.dumps(_reveal_msg(sid)))
+            delivered = True
+        except Exception:
+            pass
+    if not delivered:
+        _PENDING_REVEAL[0] = {"sid": str(sid), "wid": str(wid or "")}
+    return delivered
+
+
+def _consume_pending_reveal(client):
+    """Called from the WS 'ready' handler: if this is the chat pane the parked reveal was aimed
+    at, deliver and clear. Runs AFTER the ready push, so the session tabs this focus names are
+    already on the client (same socket, ordered delivery). An empty parked wid matches the first
+    chat pane to arrive — the no-sessionStorage fallback, better than dropping the tap."""
+    p = _PENDING_REVEAL[0]
+    if not p or client.get("app") != "chat":
+        return
+    if p["wid"] and (client.get("wid") or "") != p["wid"]:
+        return
+    _PENDING_REVEAL[0] = None
+    try:
+        client["send"](json.dumps(_reveal_msg(p["sid"])))
+    except Exception:
+        pass
 
 
 def _cached_timeline(now, tmux, sig, connect=False):
@@ -17851,11 +18167,82 @@ window.addEventListener('message',function(e){var m=e.data;if(!m)return;if(m.rom
 if(m.romp==='toggleFleet')show(m.to==='chat'?'chat':'fleet');});
 function shellWS(){try{var proto=location.protocol==='https:'?'wss://':'ws://';
 var ws=new WebSocket(proto+location.host+'/ws?app=shell');
+// ready → the kernel sends the current needs-you count, so a relaunched installed app trues up
+// its icon badge immediately instead of waiting for the next change (plans/ios-app.md proposal 3)
+ws.onopen=function(){try{ws.send(JSON.stringify({type:'ready'}));}catch(e){}};
 ws.onmessage=function(ev){var m;try{m=JSON.parse(ev.data);}catch(e){return;}
-if(m&&m.type==='reveal'&&m.pane)show(m.pane);};
+if(m&&m.type==='reveal'&&m.pane)show(m.pane);
+// the app-icon badge: setAppBadge only exists where badging works (installed apps) — everyone
+// else falls through silently, so this needs no capability gymnastics
+else if(m&&m.type==='badge'&&'setAppBadge' in navigator){
+try{(m.n?navigator.setAppBadge(m.n):navigator.clearAppBadge())['catch'](function(e){});}catch(e){}}};
 ws.onclose=function(){setTimeout(shellWS,2000);};}catch(e){}}
 shellWS();
 var last='chat';try{var s=localStorage.getItem(KT);if(s&&F[s])last=s;}catch(e){}show(last);
+})();
+"""
+
+
+# The bell in the mobile tab bar: this device opting in/out of the needs-you pushes
+# (plans/ios-app.md proposal 2). Progressive disclosure at the capability level: the button ships
+# hidden and only appears where push can actually work — which on iOS means the INSTALLED
+# home-screen app (Safari in-browser has no PushManager), exactly the surface the feature is for.
+# Notification.requestPermission runs synchronously in the tap (iOS voids the gesture across an
+# await), which is why the on/off branch keys on a state var painted at boot, not a fresh query.
+_LANDING_PUSH_JS = """
+(function(){var bells=[].slice.call(document.querySelectorAll('#mbell,#rail-bell'));if(!bells.length)return;
+if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))return;
+bells.forEach(function(b){b.hidden=false;});
+var isOn=false,busy=false;
+function paint(){bells.forEach(function(b){b.classList.toggle('on',isOn);
+var t=isOn?'Notifications on for this device — tap to turn off':'Notify this device when a session needs you';
+b.setAttribute('title',t);b.setAttribute('aria-label',t);});}
+function sub(){return navigator.serviceWorker.getRegistration('/').then(function(r){return r?r.pushManager.getSubscription():null;});}
+sub().then(function(s){isOn=!!s;paint();}).catch(function(e){});
+function fail(e){try{window.__rompNotify&&window.__rompNotify('error','Notifications: '+((e&&e.message)||e));}catch(err){}}
+function post(path,obj){return fetch(path,{method:'POST',body:JSON.stringify(obj)}).then(function(r){
+if(!r.ok)return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));});});}
+function b64u(s){var raw=atob((s+'==='.slice((s.length+3)%4)).replace(/-/g,'+').replace(/_/g,'/'));
+var a=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)a[i]=raw.charCodeAt(i);return a;}
+function done(){busy=false;bells.forEach(function(b){b.classList.remove('busy');});}
+bells.forEach(function(bl){bl.addEventListener('click',function(){
+if(busy)return;busy=true;bells.forEach(function(b){b.classList.add('busy');});   // acknowledge the tap before any round-trip
+if(isOn){
+sub().then(function(s){var ep=s?s.endpoint:'';
+return (s?s.unsubscribe():Promise.resolve()).then(function(){return post('/push/unsubscribe',{endpoint:ep});});})
+.then(function(){isOn=false;paint();done();},function(e){fail(e);done();});
+return;}
+Notification.requestPermission().then(function(perm){
+if(perm!=='granted')throw new Error('not allowed on this device');
+return navigator.serviceWorker.register('/sw.js');
+}).then(function(){return fetch('/push/vapid-key').then(function(r){
+if(!r.ok)return r.text().then(function(t){throw new Error(t||'no server key');});return r.json();});
+}).then(function(k){return navigator.serviceWorker.ready.then(function(reg){
+return reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64u(k.key)});});
+}).then(function(s){return post('/push/subscribe',s.toJSON());})
+.then(function(){isOn=true;paint();done();},function(e){fail(e);done();});
+});});
+})();
+// Landing a push tap on the session that fired (the user 2026-08-08). Two arrivals:
+//  - live window: the SW focused us and posted {romp:'pushReveal',sid} — relay a focus straight
+//    into the chat iframe. Its own handler does the rest (tab select, come forward on mobile via
+//    revealSelfPane), same as a kernel-sent focus — the shim delivers those over postMessage too.
+//  - cold start: the SW opened '/?push-reveal=sid' — the chat pane's WS does not exist yet, so
+//    ask the kernel to park the focus for OUR wid (POST /reveal, consumed on the pane's ready).
+//    The param is then stripped so a later manual reload does not replay the jump.
+// Separate IIFE from the bell on purpose: the bell bails where the Push API is missing, but a
+// pushReveal can only ever arrive where it exists, and this block must not ride that bail.
+(function(){
+function reveal(sid){if(!sid)return;var f=document.getElementById('f-chat');
+try{f&&f.contentWindow&&f.contentWindow.postMessage({type:'focus',id:sid,live:true},'*');}catch(e){}}
+if('serviceWorker' in navigator&&navigator.serviceWorker.addEventListener){
+navigator.serviceWorker.addEventListener('message',function(ev){
+var m=ev.data;if(m&&m.romp==='pushReveal'&&m.sid)reveal(m.sid);});}
+var u=new URL(location.href),pr=u.searchParams.get('push-reveal');
+if(pr){var wid='';try{wid=sessionStorage.getItem('romp:wid')||'';}catch(e){}
+fetch('/reveal',{method:'POST',body:JSON.stringify({sid:pr,wid:wid})})['catch'](function(e){});
+u.searchParams['delete']('push-reveal');
+try{history.replaceState(null,'',u.pathname+(u.searchParams.toString()?'?'+u.searchParams.toString():''));}catch(e){}}
 })();
 """
 
@@ -18081,12 +18468,31 @@ def _landing():
             # maximum-scale=1,user-scalable=no: the top document governs pinch-zoom for the whole visual
             # viewport (incl. iframes), so without this iOS page-zooms on a timeline pinch instead of letting
             # the timeline's own pinch handler run (the user 2026-06-16). Disables browser zoom on the mobile UI.
-            # NO viewport-fit=cover (the user 2026-06-17): with cover, Android Chrome reports a non-zero
+            # NO viewport-fit=cover in the STATIC meta (the user 2026-06-17): with cover, Android Chrome reports a non-zero
             # env(safe-area-inset-bottom) even though the viewport already sits ABOVE the nav bar, so #mtabs's
             # safe-area padding-bottom became a dead slab below the Chat/Feed/Timeline labels; cover also drew
             # the top edge under the status bar with no top inset (clipped chat tab bar). The default viewport
             # auto-insets clear of the status bar AND the nav bar and zeroes every env() inset.
             "<meta name=viewport content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'>"
+            # …EXCEPT installed on an iOS home screen (plans/ios-app.md; the user 2026-08-07): standalone
+            # mode has no browser chrome keeping #mtabs off the home indicator, and iOS only populates
+            # env(safe-area-inset-*) under cover. navigator.standalone is iOS-only and standalone-only,
+            # so this runtime flip can never reach Android Chrome/Firefox, whose cover bugs above stand.
+            # It also tags <html class=ios-standalone>, the key the #mtabs inset padding hangs on.
+            "<script>if(navigator.standalone){document.documentElement.className+=' ios-standalone';"
+            "var _vp=document.querySelector('meta[name=viewport]');"
+            "_vp.setAttribute('content',_vp.getAttribute('content')+',viewport-fit=cover');}</script>"
+            # the install surface (plans/ios-app.md proposal 1): manifest + touch icon + Apple metas on
+            # the SHELL only — the chat/feed/timeline pages are panes inside it, never install targets.
+            # status-bar-style black (opaque), not black-translucent: opaque keeps the webview BELOW the
+            # status bar, so the standalone app needs no top safe-area work.
+            "<link rel=manifest href=/manifest.webmanifest>"
+            "<link rel=apple-touch-icon href=/media/romp-touch-180.png>"
+            "<meta name=apple-mobile-web-app-capable content=yes>"
+            "<meta name=mobile-web-app-capable content=yes>"
+            "<meta name=apple-mobile-web-app-status-bar-style content=black>"
+            "<meta name=apple-mobile-web-app-title content=Romp>"
+            "<meta name=theme-color content='#1e1e1e'>"
             "<link rel=icon type=image/svg+xml href=/media/romp-swirl-glyph.svg><title>Romp</title><style>"
             ":root{--accent:#9cd2ff;--accent-fg:#0c1a2e}"
             # The chain, widest support last-wins: 100% (always right where the viewport is static), then
@@ -18461,13 +18867,19 @@ def _landing():
             "#f-timeline{flex:1 1 auto;min-height:0}#f-timeline.m-on{display:block}"
             "body[data-tab=timeline] .row{display:none}"    # timeline tab active → collapse the chat/feed row so the band fills
             # compact text-only switcher, FIXED to the visible viewport bottom so nothing can sit below it.
-            # NO safe-area padding-bottom: without viewport-fit=cover the viewport already sits ABOVE the
-            # system nav bar, so the inset is redundant — and Firefox Android (unlike Chrome) does NOT zero
-            # env(safe-area-inset-bottom) without cover, so it reported the PORTRAIT nav-bar height (the nav
+            # NO safe-area padding-bottom in the BROWSER: without viewport-fit=cover the viewport already sits
+            # ABOVE the system nav bar, so the inset is redundant — and Firefox Android (unlike Chrome) does NOT
+            # zero env(safe-area-inset-bottom) without cover, so it reported the PORTRAIT nav-bar height (the nav
             # is at the bottom in portrait, on the side in landscape → inset only non-zero in portrait) and
             # padded a dead slab below the labels in portrait only (the user 2026-06-19, Firefox/Android).
             "#mtabs{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:20;"
             "background:#181818;border-top:1px solid #303031}"
+            # …but INSTALLED on an iOS home screen the browser chrome that kept the bar off the home
+            # indicator is gone, so the bar reclaims the inset there — and ONLY there: html.ios-standalone
+            # is set solely under navigator.standalone (see the head script), which no Android browser
+            # exposes, so the two dead-slab regressions above cannot recur. barfit() reads offsetHeight,
+            # which includes this padding, so .col's reservation tracks it for free.
+            "html.ios-standalone #mtabs{padding-bottom:env(safe-area-inset-bottom,0px)}"
             "#mtabs button{flex:1;border:0;background:none;cursor:pointer;-webkit-tap-highlight-color:transparent;"
             "color:#9aa0a6;font:600 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
             "padding:6px 0;display:flex;align-items:center;justify-content:center}"
@@ -18476,6 +18888,15 @@ def _landing():
             "#mtabs .mtabs-div{flex:0 0 1px;background:#303031;margin:5px 0}"
             "#mtabs button.mact{flex:0 0 auto;padding:6px 10px;color:#7d848b;font-size:17px;line-height:1}"
             "#mtabs button.mact svg{display:block}"
+            # the push bell's states: on = the romp accent (a selected toggle, not a status); busy =
+            # dimmed, the immediate tap acknowledgement while the subscribe round-trip runs. The
+            # [hidden] rule matters: the #mtabs button display:flex above outspecifies the UA's
+            # [hidden]{display:none}, so without it the capability-gated bell would always show.
+            "#mtabs button[hidden]{display:none}"
+            "#mtabs #mbell.on{color:var(--accent)}"
+            "#mtabs #mbell.busy{opacity:.45}"
+            ".rail-acts #rail-bell.on{color:var(--accent)}"
+            ".rail-acts #rail-bell.busy{opacity:.45}"
             "}"
             # default Chat + Feed + Timeline shown, Fleet off (the user 2026-06-25); the rail toggles + ?panes=
             # reconcile in _LANDING_COLLAPSE_JS.
@@ -18620,6 +19041,15 @@ def _landing():
             "<rect class=rn-me x='6' y='1' width='4' height='4' rx='0.6' fill='currentColor'/>"
             "<rect class=rn-a x='1' y='11' width='4' height='4' rx='0.6' fill='currentColor'/>"
             "<rect class=rn-b x='11' y='11' width='4' height='4' rx='0.6' fill='currentColor'/></svg></div>"
+            # the push bell, the desktop twin of #mbell (the user 2026-08-08: a laptop Chrome tab can
+            # receive Web Push with no install, but the opt-in bell only rendered on the mobile layout).
+            # Ships hidden; _LANDING_PUSH_JS reveals it wherever the Push API exists and drives both
+            # bells as ONE control (same subscription, same flow). No data-act — it owns its own tap flow.
+            "<div class=rail-act id=rail-bell hidden title=Notifications aria-label=Notifications>"
+            "<svg viewBox='0 0 16 16' width='18' height='18'>"
+            "<path d='M8 2 C5.7 2 4.3 3.8 4.3 6.2 L4.3 9 L3 11.2 L13 11.2 L11.7 9 L11.7 6.2 C11.7 3.8 10.3 2 8 2 Z'"
+            " fill='none' stroke='currentColor' stroke-width='1.2' stroke-linejoin='round'/>"
+            "<path d='M6.5 13 A1.7 1.7 0 0 0 9.5 13' fill='none' stroke='currentColor' stroke-width='1.2'/></svg></div>"
             "<div class=rail-act id=rail-gear title=Settings aria-label=Settings>⛭</div>"   # ⛭ (gear-without-hub): the bigger, bolder gear the user prefers (restored 2026-06-29)
             "</div>"   # /.rail-acts
             "</div>"   # /.pane-rail (bottom bar)
@@ -18655,6 +19085,14 @@ def _landing():
             "<button class=mact id=merr data-act=errs aria-label=Log title='Log — click to open'>"
             + _ERRS_SVG +
             "</button>"
+            # the push bell (plans/ios-app.md proposal 2): opt this DEVICE into needs-you notifications.
+            # Ships hidden; _LANDING_PUSH_JS reveals it only where the Push API exists (on iOS: the
+            # installed home-screen app). No data-act — it owns its own tap flow, not the A-map's.
+            "<button class=mact id=mbell hidden aria-label=Notifications title=Notifications>"
+            "<svg viewBox='0 0 16 16' width='18' height='18'>"
+            "<path d='M8 2 C5.7 2 4.3 3.8 4.3 6.2 L4.3 9 L3 11.2 L13 11.2 L11.7 9 L11.7 6.2 C11.7 3.8 10.3 2 8 2 Z'"
+            " fill='none' stroke='currentColor' stroke-width='1.2' stroke-linejoin='round'/>"
+            "<path d='M6.5 13 A1.7 1.7 0 0 0 9.5 13' fill='none' stroke='currentColor' stroke-width='1.2'/></svg></button>"
             # settings wears the desktop rail's OWN gear glyph, ⛭ (U+26ED), not the outlined star it had.
             "<button class=mact data-act=settings aria-label=Settings title=Settings>⛭</button>"
             "</nav>"
@@ -18747,6 +19185,7 @@ def _landing():
                          .replace("__ROMP_LOADER__", json.dumps(_loader_inner())) + "</script>"
             "<script>" + _LANDING_REMOTES_JS + "</script>"
             "<script>" + _LANDING_MOBILE_JS + "</script>"
+            "<script>" + _LANDING_PUSH_JS + "</script>"
             "<script>" + _LANDING_COLLAPSE_JS + "</script>"
             + _stale_block(v) + _rdrift_block() +
             "</body></html>")
@@ -18942,6 +19381,20 @@ class Handler(BaseHTTPRequestHandler):
                 be = _sdk()
                 n = be.busy_count() if be and hasattr(be, "busy_count") else 0
                 return self._send(200, json.dumps({"busy": n}), "application/json", cache="no-cache")
+            if p == "/manifest.webmanifest":
+                # the install manifest — auth-exempt like /healthz, and for a hard reason: the
+                # browser's manifest fetch sends NO credentials, so behind the gate it 403s at the
+                # exact moment "Add to Home Screen" consults it (see _APP_MANIFEST). no-cache so a
+                # renamed icon or color lands on the next install, not a stale cached one.
+                return self._send(200, _APP_MANIFEST, "application/manifest+json", cache="no-cache")
+            if p.startswith("/media/") and p.split("/", 2)[-1] in _INSTALL_ICONS:
+                # the home-screen icons ride exempt with the manifest (Chrome fetches the manifest's
+                # icon list credential-less too). A fixed three-name allowlist, not a prefix — no
+                # request byte reaches the filesystem path, so there is nothing to traverse.
+                fp = MEDIA / p.split("/", 2)[-1]
+                if not fp.is_file():
+                    return self._send(404, "not found", "text/plain")
+                return self._send(200, fp.read_bytes(), "image/png", cache="no-cache")
             ok, self._set_cookie, why = self._authorize(q)
             self._cors_origin = self.headers.get("Origin") if ok else None   # echoed by _send (CORS delivery)
             if not ok:
@@ -19070,6 +19523,19 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/fleet":
                 _client_seen[0] = time.time()
                 return self._send(200, _fleet_page(), "text/html; charset=utf-8", cache="no-cache")
+            if p == "/sw.js":
+                # the push service worker (see _SW_JS). Behind the gate on purpose: the browser's
+                # register() fetch is same-origin and carries the cookie, and only an authed shell
+                # ever registers it. no-cache so a changed worker is picked up on the next launch.
+                return self._send(200, _SW_JS, "text/javascript; charset=utf-8", cache="no-cache")
+            if p == "/push/vapid-key":
+                # the public key the shell subscribes with (applicationServerKey). Gated like every
+                # page fetch; the 500 carries the missing-package message for the bell to surface.
+                try:
+                    _priv, pub = _vapid_keys()
+                    return self._send(200, json.dumps({"key": pub}), "application/json", cache="no-cache")
+                except RuntimeError as e:
+                    return self._send(500, str(e), "text/plain")
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA
                 fp = (base / p.split("/", 2)[2]).resolve()
@@ -19149,6 +19615,47 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, FLEET_REPORT.read_text(), "application/json")
                 except OSError:
                     return self._send(200, json.dumps({"rows": []}), "application/json")
+            if u.path == "/push/subscribe":
+                # A device opting into the bell pushes (plans/ios-app.md proposal 2): body is the
+                # browser's own PushSubscription JSON, stored keyed by endpoint — so re-subscribing
+                # the same device overwrites rather than duplicates, and opt-in is per device by
+                # construction (a subscription exists only if that device posted one).
+                try:
+                    sub = json.loads(raw_body or b"{}")
+                    ep = str(sub.get("endpoint") or "")
+                    keys = sub.get("keys") or {}
+                    if not (ep.startswith("https://") and keys.get("p256dh") and keys.get("auth")):
+                        return self._send(400, "not a push subscription", "text/plain")
+                except (ValueError, AttributeError):
+                    return self._send(400, "bad json", "text/plain")
+                try:
+                    _vapid_keys()                 # fail HERE, loudly, if the crypto dep is missing —
+                except RuntimeError as e:         # never store a subscription we can't deliver to
+                    return self._send(500, str(e), "text/plain")
+                _set_push_sub({"endpoint": ep, "keys": {"p256dh": str(keys["p256dh"]),
+                                                        "auth": str(keys["auth"])}})
+                return self._send(200, json.dumps({"ok": True}), "application/json")
+            if u.path == "/push/unsubscribe":
+                try:
+                    ep = str(json.loads(raw_body or b"{}").get("endpoint") or "")
+                except (ValueError, AttributeError):
+                    return self._send(400, "bad json", "text/plain")
+                _del_push_sub(ep)
+                return self._send(200, json.dumps({"ok": True}), "application/json")
+            if u.path == "/reveal":
+                # The cold-start half of a push tap (see _PENDING_REVEAL): the freshly opened
+                # shell asks for the focus its ?push-reveal= URL named, aimed by its own wid so
+                # no other open dashboard gets dragged along (the 2026-07-29 rule).
+                try:
+                    body = json.loads(raw_body or b"{}")
+                    sid = str(body.get("sid") or "")
+                    wid = str(body.get("wid") or "")
+                except (ValueError, AttributeError):
+                    return self._send(400, "bad json", "text/plain")
+                if not sid:
+                    return self._send(400, "missing sid", "text/plain")
+                now_ = _reveal_request(sid, wid)
+                return self._send(200, json.dumps({"ok": True, "delivered": now_}), "application/json")
             if u.path == "/tick":
                 # Event-driven wake: the Stop / UserPromptSubmit hooks (and the postal drain) poke this the
                 # instant a turn ends / a prompt lands / a message arrives, so the judges run NOW instead of
@@ -19605,6 +20112,16 @@ class Handler(BaseHTTPRequestHandler):
                 client["send"](json.dumps({"type": "tabOrder", "order": _o, "tabs": _tabs}))
             except Exception:
                 pass
+            # a push tap parked a reveal for this window's chat pane → deliver it now, AFTER the
+            # ready push, so the tab it names already exists on the client (ordered socket)
+            _consume_pending_reveal(client)
+            # a shell that just connected paints the app-icon badge from the latest count — an
+            # installed app relaunching is exactly when the icon's number needs truing up
+            if client.get("app") == "shell" and _BADGE_LAST[0] is not None:
+                try:
+                    client["send"](json.dumps({"type": "badge", "n": _BADGE_LAST[0]}))
+                except Exception:
+                    pass
         elif msg and msg.get("type") == "setSessionFlag" and msg.get("id") and msg.get("flag"):
             # timeline lane gear → toggle a per-session view flag (e.g. hideFromFeed). Persisted +
             # re-broadcast so the feed drops/restores that session's cards immediately.

@@ -164,9 +164,10 @@ class LandingShell(unittest.TestCase):
         # splitter + focus-ring + fleet-toggle + settings-fullscreen + mobile switcher + viewport-pin +
         # per-pane collapse handles + the build-staleness banner + the remote-drift push banner = 12
         # (the user 2026-06-23; + boot-splash + rail-usage 2026-06-26; + connection-status banner
-        # 2026-06-27; + the visible-viewport pin; + the remote-drift banner 2026-07-04).
+        # 2026-06-27; + the visible-viewport pin; + the remote-drift banner 2026-07-04; + the head's
+        # ios-standalone viewport flip and the push bell 2026-08-07, plans/ios-app.md).
         html = km._landing()
-        self.assertEqual(html.count("<script>"), 12)
+        self.assertEqual(html.count("<script>"), 14)
 
     def test_bottom_bar_is_text_only_and_compact(self):
         html = km._landing()
@@ -200,10 +201,19 @@ class LandingShell(unittest.TestCase):
         # env(safe-area-inset-bottom) even though the viewport already sits above the nav bar, so #mtabs's
         # safe-area padding-bottom rendered as a dead slab below the Chat/Feed/Timeline labels (and cover
         # clipped the top under the status bar). The default viewport auto-insets clear of system UI and
-        # zeroes env() on Chrome, so it must NOT request cover. (The bar's safe-area padding is now gone
-        # entirely too — see test_bottom_bar_has_no_safe_area_padding — since Firefox doesn't zero it.)
+        # zeroes env() on Chrome, so the STATIC meta must NOT request cover.
+        #
+        # Narrowed, not repealed, for the installable app (plans/ios-app.md; the user 2026-08-07): an iOS
+        # home-screen app has no browser chrome keeping #mtabs off the home indicator, and iOS only
+        # populates env() under cover — so the head script flips cover on AT RUNTIME, gated on
+        # navigator.standalone, which is iOS-only and standalone-only. No Android browser can ever take
+        # that branch, so the 2026-06-17 regression cannot recur through it.
         html = km._landing()
-        self.assertNotIn("viewport-fit=cover", html)
+        self.assertIn("<meta name=viewport content='width=device-width,initial-scale=1,"
+                      "maximum-scale=1,user-scalable=no'>", html)     # the static meta: no cover
+        self.assertEqual(html.count("viewport-fit=cover"), 1)         # exactly the runtime flip…
+        self.assertIn("if(navigator.standalone)", html)               # …behind the iOS-standalone gate
+        self.assertLess(html.index("if(navigator.standalone)"), html.index("viewport-fit=cover"))
         self.assertIn("100dvh", html)            # still address-bar-aware
         self.assertIn("user-scalable=no", html)  # pinch-zoom governance preserved alongside the change
 
@@ -213,9 +223,15 @@ class LandingShell(unittest.TestCase):
         # the SIDE in landscape (inset = 0), and Firefox — unlike Chrome — does NOT zero that inset without
         # viewport-fit=cover, so #mtabs's padding-bottom:env(safe-area-inset-bottom) rendered as a
         # portrait-only slab. Without cover the viewport already clears the nav bar, so the padding is
-        # redundant and removed; the fixed bar simply sits at the visible bottom. No env() inset on the bar.
+        # redundant on the BROWSER bar, which stays inset-free.
+        #
+        # The one sanctioned exception (plans/ios-app.md; the user 2026-08-07): installed on an iOS home
+        # screen the browser chrome is gone and the bar must clear the home indicator, so a single rule
+        # keyed on html.ios-standalone — a class set only under navigator.standalone, which no Android
+        # browser exposes — reclaims the inset there and nowhere else.
         html = km._landing()
-        self.assertNotIn("env(safe-area-inset", html)
+        self.assertEqual(html.count("env(safe-area-inset"), 1)        # exactly the standalone rule below
+        self.assertIn("html.ios-standalone #mtabs{padding-bottom:env(safe-area-inset-bottom,0px)}", html)
         self.assertIn("#mtabs{display:flex;position:fixed;left:0;right:0;bottom:0", html)
 
 

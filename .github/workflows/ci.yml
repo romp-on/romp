@@ -60,7 +60,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install pytest
-        run: python -m pip install --upgrade pip pytest
+        # cryptography: the kernel's Web Push soft dependency (plans/ios-app.md). Installed here
+        # so tests/test_kernel_webpush.py's crypto layers RUN in CI instead of skipping — the
+        # kernel itself still degrades loudly without it (that path has its own test).
+        run: python -m pip install --upgrade pip pytest cryptography
       - name: Run pytest
         run: python -m pytest -q
 
