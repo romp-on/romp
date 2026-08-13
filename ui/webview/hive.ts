@@ -35,6 +35,14 @@ const ST: Record<HiveState, number> = {
 const ACCENT = 0x9cd2ff;
 const PAD_H = 0.06;           // a hair of thickness so a lifted tile isn't paper; the board
                               // reads as ONE flat layer (HEX_SIZE/PAD_R: hive-layout.ts)
+// The nameplate is written flat ON the tile, map-label style, sized to FIT ITS CELL — so a
+// name can geometrically never leave its hex or pile onto a neighbour's (the user
+// 2026-08-13, after the floating billboards stacked into fog). Fit math against the cell:
+// across-flats width √3·HEX_SIZE ≈ 3.55 ≥ LABEL_W_MAX, and the plate's far edge
+// LABEL_FRONT + LABEL_H/2 = 1.12 stays inside the apothem (≈ 1.78).
+const LABEL_W_MAX = 2.7;
+const LABEL_H = 0.4;
+const LABEL_FRONT = 0.92;     // parked in the camera-side half of the cell, clear of the bean
 // Tron world (the user 2026-08-13): near-black glossy ground with a faint accent grid, the
 // pads dark slabs whose STATUS light is their glowing rim, bloom doing the neon work. The
 // beans stay cute (session-colored, softly self-lit) with dark visors and glowing eyes.
@@ -66,8 +74,8 @@ class Pad {
   private ringMat: THREE.LineBasicMaterial;
   private sonar: THREE.LineLoop;
   private sonarMat: THREE.LineBasicMaterial;
-  private label: THREE.Sprite;
-  private labelW = 1; private labelH = 1;   // base sprite size; update() re-scales by camera distance
+  private labelYaw = new THREE.Group();     // yaws to face the camera; the nameplate rides its +z
+  private labelMesh: THREE.Mesh;
   private bang: THREE.Sprite;              // the ❗ that bobs over a needs-you pad
   private guy: Dweller;
   private baseY = 0;
@@ -124,13 +132,14 @@ class Pad {
     this.sonar.position.y = this.ring.position.y;
     this.group.add(this.sonar);
 
-    this.label = makeTextSprite(sess.name, sess.color?.bg || "#cccccc");
-    this.labelW = this.label.scale.x; this.labelH = this.label.scale.y;
-    this.label.position.y = 2.7;
-    this.group.add(this.label);
+    this.labelMesh = makeNameDecal(sess.name, sess.sid, sess.color?.bg || "#cccccc");
+    this.labelMesh.position.z = LABEL_FRONT;
+    this.labelYaw.position.y = PAD_H + 0.02;
+    this.labelYaw.add(this.labelMesh);
+    this.group.add(this.labelYaw);
 
     this.bang = makeTextSprite("!", "#ffffff", "#c0392b");
-    this.bang.position.y = 2.05;             // between head and label, kissing neither
+    this.bang.position.y = 2.05;             // floats over the bean — the one deliberate float
     this.bang.visible = false;
     this.group.add(this.bang);
 
@@ -153,24 +162,24 @@ class Pad {
       this.guy.setState(sess.state, sess.faded);
     }
     if (sess.name !== prevName || sess.color?.bg !== prevColor) {
-      this.group.remove(this.label);
-      disposeSprite(this.label);
-      this.label = makeTextSprite(sess.name, sess.color?.bg || "#cccccc");
-      this.labelW = this.label.scale.x; this.labelH = this.label.scale.y;
-      this.label.position.y = 2.7;
-      this.group.add(this.label);
+      this.labelYaw.remove(this.labelMesh);
+      disposeDecal(this.labelMesh);
+      this.labelMesh = makeNameDecal(sess.name, sess.sid, sess.color?.bg || "#cccccc");
+      this.labelMesh.position.z = LABEL_FRONT;
+      this.labelYaw.add(this.labelMesh);
     }
   }
 
   hitMeshes(): THREE.Object3D[] { return [this.padMesh]; }
 
-  update(dt: number, camYaw: number, camDist: number): boolean {
+  update(dt: number, camYaw: number, camDist: number, focus: boolean): boolean {
     this.t += dt;
-    // RTS labels: scale with camera distance so the name reads the SAME size from orbit
-    // and from a fly-in — spatial UI, constant legibility
-    const ls = Math.min(2.4, Math.max(0.85, camDist / 13));
-    this.label.scale.set(this.labelW * ls, this.labelH * ls, 1);
-    this.label.position.y = 2.45 + 0.5 * ls;
+    // map-label behavior: the plate faces the camera in yaw and FADES with altitude —
+    // zoomed out, the board is shapes and colors; zoom in (or hover/select) to read names.
+    // Never scaled up: an inflated label is how the old billboards piled into fog.
+    this.labelYaw.rotation.y = camYaw;
+    const lmat = this.labelMesh.material as THREE.MeshBasicMaterial;
+    lmat.opacity = ease(lmat.opacity, focus ? 1 : Math.min(1, Math.max(0, (42 - camDist) / 12)), dt, 10);
     if (this.spawnT < 1) {
       this.spawnT = Math.min(1, this.spawnT + dt / 0.5);
       const s = this.spawnT;
@@ -498,6 +507,62 @@ function makeTextSprite(text: string, color: string, bubble?: string): THREE.Spr
   return sp;
 }
 function disposeSprite(s: THREE.Sprite) { s.material.map?.dispose(); s.material.dispose(); }
+
+// A cell's nameplate: written flat ON the tile, map-label style (how Civ-like grids and map
+// engines keep names from piling up — a label that belongs to its cell can never leave it).
+// Crisp and glow-free: two-tone like every other surface (quiet "host:" prefix + identity
+// color), the color dimmed to sit UNDER the bloom threshold so text never fuzzes. Long
+// names ellipsize to the cell's width. The caller yaws it to the camera and fades it by
+// zoom (Pad.update) — a map fades labels out at altitude, it never inflates them.
+function makeNameDecal(name: string, sid: string, color: string): THREE.Mesh {
+  const p = hostPrefix(name, sid);
+  const host = p ? p.host : "";
+  let rest = p ? p.rest : name;
+  const c = document.createElement("canvas");
+  const g = c.getContext("2d")!;
+  const F = 46;
+  const hostFont = `italic 400 ${Math.round(F * 0.88)}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  const nameFont = `600 ${F}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  const px = (s: string, f: string) => { g.font = f; return g.measureText(s).width; };
+  const budget = (LABEL_W_MAX / LABEL_H) * (F * 1.35) - 24;   // px that fit at the fixed world height
+  const hostPx = host ? px(host, hostFont) : 0;
+  let cut = false;
+  while (rest.length > 2 && hostPx + px(rest, nameFont) + (cut ? px("…", nameFont) : 0) > budget) {
+    rest = rest.slice(0, -1);
+    cut = true;
+  }
+  if (cut) rest += "…";
+  c.width = Math.ceil(hostPx + px(rest, nameFont)) + 24;
+  c.height = Math.round(F * 1.35);
+  const g2 = c.getContext("2d")!;                 // resizing reset the context state above
+  g2.textBaseline = "middle";
+  const dim = new THREE.Color(color || "#cccccc").multiplyScalar(0.82);
+  let x = 12;
+  if (host) {
+    g2.font = hostFont;
+    g2.fillStyle = "#8a8a8a";
+    g2.fillText(host, x, c.height / 2);
+    x += hostPx;
+  }
+  g2.font = nameFont;
+  g2.fillStyle = "#" + dim.getHexString();
+  g2.fillText(rest, x, c.height / 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;                             // flat text at a glancing pitch smears without it
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(LABEL_H * (c.width / c.height), LABEL_H),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0, depthWrite: false }),
+  );
+  mesh.rotation.x = -Math.PI / 2;                 // lie flat; text-top points away from the viewer
+  return mesh;
+}
+function disposeDecal(m: THREE.Mesh) {
+  m.geometry.dispose();
+  const mat = m.material as THREE.MeshBasicMaterial;
+  mat.map?.dispose();
+  mat.dispose();
+}
 
 // ── confetti / puffs: one pooled particle system for every burst ─────────────────────────
 class Particles {
@@ -1206,7 +1271,8 @@ class HiveWorld {
       }
     }
     const dead: string[] = [];
-    for (const [psid, pad] of this.pads) if (pad.update(dt, this.yawCur, this.distCur)) dead.push(psid);
+    for (const [psid, pad] of this.pads)
+      if (pad.update(dt, this.yawCur, this.distCur, psid === this.hovered || psid === this.selected)) dead.push(psid);
     for (const psid of dead) {
       const pad = this.pads.get(psid)!;
       this.scene.remove(pad.group);
