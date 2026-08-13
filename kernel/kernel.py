@@ -502,8 +502,17 @@ def _kernel_ver():
 def _version_info():
     """What this kernel is running — code sha + per-bundle build mtimes + pid/uptime. Lets the feed's
     settings gear / `romp version` / a curl tell at a glance whether the browser is on a stale bundle
-    (compare the served ?v= against bundles[].mtime here). Any path here is $HOME-collapsed for privacy
-    (like defaultDir/rompDir) — never a raw /Users/<name> path."""
+    (compare the served ?v= against bundles[].mtime here).
+
+    /version is AUTH-EXEMPT — any local process reads it with no token, and it rides the remote poll
+    between machines — so it must reveal nothing that grants leverage. `rompDir` used to ride here,
+    $HOME-collapsed: the VS Code extension read it and turned it into an `execFile("bash", …)` target,
+    so whatever answered this port chose the directory a shell ran in (the extension resolves its own
+    install path now — see vscode-extension/src/update-target.ts — and never asks). A $HOME-collapse
+    hid the username, never the checkout's location or name, so the path had no business on an
+    auth-exempt route at all. (`defaultDir`/`nativeDialogs` still ride here because the gear reads
+    them here; they also travel the authenticated sessionList, and moving the gear onto that is the
+    clean follow-up that lets `defaultDir` leave this payload too.)"""
     bundles = {}
     try:
         for p in sorted(DIST.glob("*.js")) + sorted(DIST.glob("*.css")):
@@ -521,11 +530,7 @@ def _version_info():
             "judgeModel": jd._triage_model(), "indexModel": jd._index_model(),      # current per-tier judge models → the gear dropdowns
             "judgeEffort": jd._triage_effort(), "indexEffort": jd._index_effort(),  # current per-tier judge efforts ("" = default/none)
             "defaultDir": _tilde(_default_create_dir()),   # the resolved default new-session dir → the gear "Default directory" field
-            "nativeDialogs": _native_dialogs(),   # whether Browse… can draw a dialog HERE → the gear drops the button when it can't
-            # The repo root ($HOME-collapsed), so the VS Code extension host can run vscode-extension/install.sh
-            # to self-update a drifted VSIX (a webview reload can't — the code is baked into the on-disk VSIX).
-            # ROMP_DIR is reliably exported by romp-serve/launchd; HERE.parent (kernel/ → repo root) backs it up.
-            "rompDir": _tilde(os.environ.get("ROMP_DIR") or str(HERE.parent))}
+            "nativeDialogs": _native_dialogs()}   # whether Browse… can draw a dialog HERE → the gear drops the button when it can't
 
 
 def _dist_ver():

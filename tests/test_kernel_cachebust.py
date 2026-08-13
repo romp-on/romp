@@ -42,19 +42,13 @@ def test_version_info_shape():
     assert isinstance(info["bundles"], dict)
 
 
-def test_version_info_reports_romp_dir():
-    # The VS Code extension host reads rompDir off /version to run vscode-extension/install.sh and
-    # self-update a drifted VSIX. It must (a) point at the repo root and (b) stay $HOME-collapsed for
-    # privacy — never a raw /Users/<name> path (like defaultDir).
+def test_version_info_carries_no_repo_path():
+    # /version is AUTH-EXEMPT, so it must reveal nothing that grants leverage. rompDir used to ride
+    # here and the VS Code extension turned it into an execFile("bash", …) target — whatever answered
+    # the port chose the directory a shell ran in. The extension resolves its own install path now
+    # (update-target.ts), so rompDir has no reader and must not be published.
     info = km._version_info()
-    assert "rompDir" in info and isinstance(info["rompDir"], str) and info["rompDir"]
-    home = os.path.expanduser("~")
-    real = os.path.expanduser(info["rompDir"])
-    if real.startswith(home + os.sep):
-        assert info["rompDir"] == "~" or info["rompDir"].startswith("~" + os.sep), \
-            "a repo under $HOME must be reported home-collapsed (privacy)"
-    # Round-trips to the real repo root — the host expands ~ then runs vscode-extension/install.sh there.
-    assert os.path.isdir(os.path.join(real, "vscode-extension")), real
+    assert "rompDir" not in info, "rompDir must not ride the auth-exempt /version (exec-target leak)"
 
 
 def test_send_emits_cache_control():

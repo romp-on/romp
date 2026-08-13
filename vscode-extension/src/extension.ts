@@ -29,6 +29,7 @@ import { deriveStatus, freshNeedsYou, renderStatusBar, statusTooltipLines, Fleet
 import { citeText, sessionsForWorkspace, SessionInfo } from "./workspace-sessions";
 import { parsePorcelain } from "./session-diff";
 import { buildMenu, usageSummary } from "./romp-menu";
+import { resolveInstallScript } from "./update-target";
 
 const HOST = "127.0.0.1";
 
@@ -75,23 +76,26 @@ function maybeBuildNotice(dv: unknown): void {
 // banner just reloads, but VS Code loads bundled code from the on-disk VSIX, so a reload changes
 // nothing; the fix is the SAME vscode-extension/install.sh a user would run by hand). We run it from the
 // extension HOST, not the kernel: the host carries VS Code's resolved shell environment (the reliable
-// PATH with node/npm/npx/code), whereas a launchd/manager-spawned kernel often does not. The kernel
-// only tells us WHERE the repo lives (rompDir on /version). Reload stays a user click, never automatic
-// (prefer-reload-banner-not-auto).
+// PATH with node/npm/npx/code), whereas a launchd/manager-spawned kernel often does not.
+//
+// WHERE it runs is decided LOCALLY — this VSIX's own path, else ROMP_DIR from our own environment
+// (update-target.ts). It used to be whatever the kernel reported as rompDir on /version, an
+// AUTH-EXEMPT route: anything answering on the kernel port could then choose the directory we ran a
+// shell command from, and drive the prompt that invites the click besides. When this copy isn't a
+// checkout it can't rebuild anything, so we say so and point at the terminal rather than running some
+// other install.sh. Reload stays a user click, never automatic (prefer-reload-banner-not-auto).
 let updating = false;
 async function updateExtension(): Promise<void> {
   if (updating) return;                                    // one run per host (double-click, or toast + palette)
-  const info = await fetchJson("/version");
-  const reported = info && typeof info.rompDir === "string" ? String(info.rompDir) : "";
-  // rompDir is $HOME-collapsed for privacy; expand it back (same machine as the local kernel, so ~ → our home).
-  const repo = reported.startsWith("~") ? path.join(os.homedir(), reported.slice(1)) : reported;
-  if (!repo) {
+  const target = resolveInstallScript(ctx?.extensionPath || "", process.env.ROMP_DIR, (p) => fs.existsSync(p));
+  if (!target) {
     void vscode.window.showErrorMessage(
-      "romp: couldn't locate the romp repo to update from (the kernel didn't report rompDir). Run vscode-extension/install.sh in a terminal.");
+      "romp: this copy of the extension can't rebuild itself — it runs from a packaged VSIX, not a romp checkout. " +
+      "Run vscode-extension/install.sh in your romp checkout from a terminal, then reload this window.");
     return;
   }
-  const extDir = path.join(repo, "vscode-extension");
-  const script = path.join(extDir, "install.sh");
+  const extDir = target.dir;
+  const script = target.script;
   updating = true;
   try {
     const out = await vscode.window.withProgress(
