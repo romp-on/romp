@@ -878,6 +878,8 @@ class HiveWorld {
   private pressedPad: { sid: string; x: number; y: number; bean: boolean } | null = null;
   private dragSession: { sid: string; over: boolean } | null = null;
   private trashEl: HTMLElement;
+  private tipEl: HTMLElement;
+  private tipText = "";
   private ghostRingMat = new THREE.LineBasicMaterial({
     color: ACCENT, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false,
   });
@@ -956,6 +958,14 @@ class HiveWorld {
       '<path fill="currentColor" d="M9 3v1H4v2h16V4h-5V3H9zM6 8v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v10H9V10zm4 0h2v10h-2V10z"/></svg>' +
       '<span class="ht-label">Drop to end</span>';
     document.body.appendChild(this.trashEl);
+
+    // the hover tip: the session's LIVE STATUS floating over the hovered bean — hover is
+    // the board's "one level deeper" (progressive disclosure); pointer-events none so it
+    // can never steal the hover it answers
+    this.tipEl = document.createElement("div");
+    this.tipEl.id = "hive-tip";
+    this.tipEl.innerHTML = '<span class="tip-dot"></span><span class="tip-state"></span>';
+    document.body.appendChild(this.tipEl);
 
     const fit = () => {
       const w = root.clientWidth || 1, h = root.clientHeight || 1;
@@ -1061,12 +1071,13 @@ class HiveWorld {
     if (sid) {
       const pad = this.pads.get(sid);
       if (pad) { pad.lift = -0.07; setTimeout(() => { if (this.pads.get(sid) === pad) pad.lift = this.hovered === sid ? 0.12 : 0; }, 130); }
-      // the BEAN switches chat ON THE DOWN — instant (the user 2026-08-13, everything
-      // responsive). The same press can still become a pick-up: the switch has already
-      // happened, and seeing their chat while you carry them is coherent. The TILE'S
-      // action (card + camera fly-in) stays on the clean UP — a fly-in mid-drag is chaos.
-      if (hit.bean && pad) {
-        pad.pokeBean();
+      // ANY press on an occupied cell switches chat ON THE DOWN — hexagon and bean alike,
+      // instant (the user 2026-08-13, twice); the bean adds its pop. The same press can
+      // still become a pick-up: the switch has already happened, and seeing their chat
+      // while you carry them is coherent. The TILE'S deeper level (card + camera fly-in)
+      // stays on the clean UP — a fly-in mid-drag is chaos.
+      if (pad) {
+        if (hit.bean) pad.pokeBean();
         this.openChat(sid);
       }
       this.pressedPad = { sid, x: e.clientX, y: e.clientY, bean: hit.bean };
@@ -1372,6 +1383,32 @@ class HiveWorld {
       if (nw) nw.lift = 0.12;
       this.ghostHover = sid === HiveWorld.GHOST;
       this.renderer.domElement.style.cursor = sid ? "pointer" : "default";
+    }
+    // the hover tip rides the hovered bean, saying exactly what the card's state line
+    // would — placed per frame (the bean bobs, the camera springs), text only on change
+    const tipPad = this.hovered && this.hovered !== HiveWorld.GHOST && !this.dragSession
+      ? this.pads.get(this.hovered) : null;
+    if (tipPad && tipPad.dyingT < 0) {
+      const p = tipPad.beanWorldPos();
+      p.y += 2.3;                            // above the bang's bob, clear of the head
+      p.project(this.camera);
+      if (p.z < 1) {
+        const rr = this.renderer.domElement.getBoundingClientRect();
+        this.tipEl.style.transform = "translate(-50%, -100%) translate(" +
+          ((p.x * 0.5 + 0.5) * rr.width + rr.left).toFixed(1) + "px, " +
+          ((0.5 - p.y * 0.5) * rr.height + rr.top).toFixed(1) + "px)";
+        this.tipEl.classList.add("show");
+        const line = stateLine(tipPad.sess, Math.floor(Date.now() / 1000));
+        if (line !== this.tipText) {
+          this.tipText = line;
+          (this.tipEl.querySelector(".tip-state") as HTMLElement).textContent = line;
+          (this.tipEl.querySelector(".tip-dot") as HTMLElement).style.background = tipPad.sess.color?.bg || "#8a8a8a";
+          this.tipEl.dataset.state = tipPad.sess.state;
+        }
+      } else this.tipEl.classList.remove("show");
+    } else {
+      this.tipEl.classList.remove("show");
+      this.tipText = "";
     }
     // the ghost glides to its aim (the hovered empty cell, or its park when the pointer
     // leaves the board) and breathes faintly, waking on hover

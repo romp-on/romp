@@ -68,6 +68,28 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #090b10; }
   padding: 5px 10px; }
 #hive-card .hc-open:hover { color: #ffffff; border-color: rgba(255, 255, 255, 0.3); }
 
+/* ── the hover tip: the hovered session's live status over its bean — the menus
+   vocabulary chrome, state colors matching the card's state line; pointer-events none
+   so it never steals the hover it answers. Placed per frame by the render loop. */
+#hive-tip {
+  position: fixed; left: 0; top: 0; z-index: 6; pointer-events: none;
+  display: flex; align-items: center; gap: 6px;
+  background: #252526;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #9aa0a6; padding: 5px 9px; white-space: nowrap;
+  opacity: 0; transition: opacity 0.1s ease;
+  will-change: transform;
+}
+#hive-tip.show { opacity: 1; }
+#hive-tip .tip-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #8a8a8a; }
+#hive-tip[data-state="working"] { color: #e0b020; }
+#hive-tip[data-state="awaiting"], #hive-tip[data-state="blocked"] { color: #ff8589; }
+#hive-tip[data-state="awaitingBg"] { color: #7fd24a; }
+#hive-tip[data-state="compacting"], #hive-tip[data-state="clearing"] { color: #2dd4bf; }
+
 /* ── the trash dock: slides in from the bottom only while a session is being carried;
    dropping the bean on it ends the session. pointer-events none — the canvas keeps the
    pointer and rect-tests the drop; .armed answers the hover so the drop never surprises. */

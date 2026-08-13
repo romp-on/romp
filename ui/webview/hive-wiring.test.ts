@@ -11,6 +11,7 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kern
 const ESBUILD = fs.readFileSync(path.resolve(process.cwd(), "esbuild.js"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 const HIVE = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "hive.ts"), "utf8");
+const CSS2 = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "hive-pane.css"), "utf8");
 
 test("kernel serves /hive from _hive_page with the hive shim + bundle", () => {
   assert.ok(KERNEL.includes('if p == "/hive":'), "the /hive route exists");
@@ -75,13 +76,25 @@ test("clicking the bean opens their chat; the tile keeps opening the card", () =
   // session and reveals the chat pane — one path shared with the card's Open and dblclick.
   assert.match(HIVE, /new THREE\.CapsuleGeometry\(0\.55/, "the bean has a whole-body hit capsule");
   assert.match(HIVE, /colorWrite: false/, "…that draws nothing but still raycasts");
-  assert.match(HIVE, /if \(hit\.bean && pad\) \{\s*\n\s*pad\.pokeBean\(\);\s*\n\s*this\.openChat\(sid\);/,
-    "bean press: chat switches ON THE DOWN — instant, even if the press then becomes a pick-up");
+  assert.match(HIVE, /if \(pad\) \{\s*\n\s*if \(hit\.bean\) pad\.pokeBean\(\);\s*\n\s*this\.openChat\(sid\);/,
+    "ANY press on an occupied cell switches chat ON THE DOWN — hexagon and bean alike");
   assert.match(HIVE, /if \(!pp\.bean && this\.pads\.has\(pp\.sid\)\) this\.select\(pp\.sid\);/,
     "the tile's card (camera fly-in) still resolves on the clean UP");
   assert.match(HIVE, /openChat\(sid: string\) \{/, "one shared open path");
   assert.match(HIVE, /this\.card\.onOpen = \(sid\) => this\.openChat\(sid\);/, "the card's Open uses it");
   assert.match(HIVE, /\{ romp: "reveal", pane: "chat" \}/, "…and it reveals the chat pane");
+});
+
+test("hovering a session floats its live status over the bean (the card's own stateLine)", () => {
+  assert.match(HIVE, /this\.tipEl\.id = "hive-tip";/, "the tip element exists");
+  assert.match(HIVE, /stateLine\(tipPad\.sess, Math\.floor\(Date\.now\(\) \/ 1000\)\)/,
+    "the text is the SAME line the card's state row shows — one vocabulary for status");
+  assert.match(HIVE, /this\.tipEl\.dataset\.state = tipPad\.sess\.state;/, "state drives the color");
+  assert.match(HIVE, /!this\.dragSession\s*\n\s*\? this\.pads\.get\(this\.hovered\) : null;/,
+    "no tip mid-carry — the dock speaks then");
+  for (const frag of ['#hive-tip {', "pointer-events: none;", '#hive-tip[data-state="working"] { color: #e0b020; }',
+    '#hive-tip[data-state="awaiting"], #hive-tip[data-state="blocked"] { color: #ff8589; }'])
+    assert.ok(CSS2.includes(frag), "hive-pane.css carries: " + frag);
 });
 
 test("hive's WebGL palette matches the styles.css status tokens (one meaning per color)", () => {
