@@ -184,6 +184,15 @@ class Pad {
   beanMeshes(): THREE.Object3D[] { return [this.guy.hit]; }
   pokeBean() { this.guy.poke(); }
 
+  // the nameplate as a click target (board rename): only when actually readable — an
+  // invisible plate must never be a secret button, and hover already fades it in
+  nameMeshes(): THREE.Object3D[] { return [this.labelMesh]; }
+  nameVisible(): boolean {
+    return this.labelMesh.visible && (this.labelMesh.material as THREE.MeshBasicMaterial).opacity > 0.5;
+  }
+  setNameHidden(h: boolean) { this.labelMesh.visible = !h; }
+  labelWorldPos(): THREE.Vector3 { return this.labelMesh.getWorldPosition(new THREE.Vector3()); }
+
   // world-space carry target while the user drags them; null → spring home (update() eases)
   carryTo(p: THREE.Vector3 | null) { this.carryTarget = p ? p.clone() : null; }
   // move the pad's HOME to another cell (drag-to-re-home, the user 2026-08-13); update() glides it
@@ -882,7 +891,8 @@ class HiveWorld {
   // picks the bean up; it rides the pointer, the trash dock slides in, and dropping on
   // the armed dock ends the session — the deliberate carry + highlighted dock IS the
   // confirmation (and an ended session still revives with its history from the picker).
-  private pressedPad: { sid: string; x: number; y: number; bean: boolean } | null = null;
+  private pressedPad: { sid: string; x: number; y: number; bean: boolean; name: boolean } | null = null;
+  private renameEl: HTMLElement | null = null;   // the in-place board rename editor, when open
   private dragSession: { sid: string; over: boolean } | null = null;
   private trashEl: HTMLElement;
   private tipEl: HTMLElement;
@@ -949,6 +959,7 @@ class HiveWorld {
       this.idleT = 0;
     }, { passive: false });
     cv.addEventListener("dblclick", () => {
+      if (this.renameEl) return;               // typing a name — a stray dblclick must not switch chat
       const sid = this.hovered;
       if (sid && sid !== HiveWorld.GHOST) this.openChat(sid);
     });
@@ -1092,11 +1103,15 @@ class HiveWorld {
       // while you carry them is coherent. That is ALL a click does: the chat on the left
       // is the answer — the fly-in card + camera zoom on every click read as noise (the
       // user 2026-08-13) and now serve only the deep-link jump (select()).
-      if (pad) {
+      // EXCEPTION: the NAMEPLATE is its own affordance — clicking it edits the name in
+      // place (the city-banner pattern; the user 2026-08-13, who wanted renaming to feel
+      // like a great videogame), so it never switches chat; the edit opens on the clean UP
+      // so a drag from the plate still picks the session up.
+      if (pad && !hit.name) {
         if (hit.bean) pad.pokeBean();
         this.openChat(sid);
       }
-      this.pressedPad = { sid, x: e.clientX, y: e.clientY, bean: hit.bean };
+      this.pressedPad = { sid, x: e.clientX, y: e.clientY, bean: hit.bean, name: hit.name };
     } else {
       this.dragging = { mode: "orbit", x: e.clientX, y: e.clientY };
     }
@@ -1109,7 +1124,12 @@ class HiveWorld {
     this.pressedPad = null;
     this.dragging = null;
     if (this.dragSession) { this.dropSessionDrag(this.dragSession.over); return; }
-    if (pp) return;   // the press already did everything (chat switch on the DOWN); a drag ended above
+    if (pp) {
+      // most presses already did everything on the DOWN; the nameplate's clean click is
+      // the one action that resolves here — it opens the in-place editor
+      if (pp.name && Math.hypot(e.clientX - pp.x, e.clientY - pp.y) <= 5) this.beginBoardRename(pp.sid);
+      return;
+    }
     if (!pr) return;
     // a real drag is a camera move, not a click — the gate is the gesture itself (px
     // travelled between down and up), never a timer
@@ -1215,6 +1235,63 @@ class HiveWorld {
     vscodeApi?.postMessage({ type: "createSession", name: this.autoName(model), backend: "sdk", model, effort });
   }
 
+  // In-place board rename (the user 2026-08-13, who wanted renaming to feel like a great
+  // videogame): the city-banner pattern — click the nameplate and it becomes an editor
+  // exactly where it sits, in the plate's own type and the session's color. The same
+  // contracts as every other rename surface: a remote's host: prefix is fixed chrome with
+  // only the bare name editable, Enter/blur commits the kernel's renameSession op, Esc
+  // cancels, and the plate only re-renders when the push lands with the truth.
+  beginBoardRename(sid: string) {
+    const pad = this.pads.get(sid);
+    if (!pad || pad.dyingT >= 0 || this.renameEl) return;
+    const p = pad.labelWorldPos().project(this.camera);
+    const rr = this.renderer.domElement.getBoundingClientRect();
+    const x = (p.x * 0.5 + 0.5) * rr.width + rr.left;
+    const y = (0.5 - p.y * 0.5) * rr.height + rr.top;
+    pad.setNameHidden(true);                   // the editor stands where the plate was
+    const wrap = document.createElement("div");
+    wrap.id = "hive-rename";
+    wrap.style.transform = "translate(" + x.toFixed(1) + "px," + y.toFixed(1) + "px) translate(-50%, -50%)";
+    const hp = hostPrefix(pad.sess.name, sid);
+    const base = hp ? hp.rest : pad.sess.name;
+    if (hp) {
+      const fixed = document.createElement("span");
+      fixed.className = "host-prefix";
+      fixed.textContent = hp.host;
+      wrap.appendChild(fixed);
+    }
+    const input = document.createElement("input");
+    input.value = base;
+    input.spellcheck = false;
+    input.size = Math.max(base.length, 3);
+    input.style.color = pad.sess.color?.bg || "#dddddd";
+    wrap.appendChild(input);
+    document.body.appendChild(wrap);
+    this.renameEl = wrap;
+    let finished = false;
+    const finish = (commit: boolean) => {
+      if (finished) return;
+      finished = true;
+      const v = input.value.trim();
+      wrap.remove();
+      this.renameEl = null;
+      this.pads.get(sid)?.setNameHidden(false);
+      // the bare name, never the display string; the plate updates when the push lands
+      if (commit && v && v !== base) vscodeApi?.postMessage({ type: "renameSession", id: sid, name: v });
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();                     // Esc cancels the EDIT, never a drag/selection
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+    input.addEventListener("input", () => { input.size = Math.max(input.value.length, 3); });
+    for (const ev of ["pointerdown", "click", "dblclick"])
+      wrap.addEventListener(ev, (e) => e.stopPropagation());
+    input.focus();
+    input.select();
+  }
+
   // a transient board-level notice for refusals with no card open (fail loudly, never vanish)
   note(text: string) {
     this.noteEl.textContent = text;
@@ -1225,28 +1302,33 @@ class HiveWorld {
 
   private static GHOST = "\0ghost";          // impossible sid — the ghost's pick token
 
-  private pick(): { sid: string | null; bean: boolean } {
+  private pick(): { sid: string | null; bean: boolean; name: boolean } {
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    let best: { sid: string; d: number; bean: boolean } | null = null;
+    let best: { sid: string; d: number; bean: boolean; name: boolean } | null = null;
     for (const [sid, pad] of this.pads) {
       if (pad.dyingT >= 0) continue;
       const hits = this.raycaster.intersectObjects(pad.hitMeshes(), false);
-      if (hits.length && (!best || hits[0].distance < best.d)) best = { sid, d: hits[0].distance, bean: false };
+      if (hits.length && (!best || hits[0].distance < best.d)) best = { sid, d: hits[0].distance, bean: false, name: false };
       // the bean stands proud of its tile, so when both are under the pointer the bean wins
       const bh = this.raycaster.intersectObjects(pad.beanMeshes(), false);
-      if (bh.length && (!best || bh[0].distance < best.d)) best = { sid, d: bh[0].distance, bean: true };
+      if (bh.length && (!best || bh[0].distance < best.d)) best = { sid, d: bh[0].distance, bean: true, name: false };
+      // …and the READABLE nameplate wins over its own tile (it sits a hair above it)
+      const nh = this.raycaster.intersectObjects(pad.nameMeshes(), false);
+      if (nh.length && pad.nameVisible() && (!best || nh[0].distance <= best.d)) {
+        best = { sid, d: nh[0].distance, bean: false, name: true };
+      }
     }
     const gh = this.raycaster.intersectObject(this.ghostFill, false);
-    if (gh.length && (!best || gh[0].distance < best.d)) best = { sid: HiveWorld.GHOST, d: gh[0].distance, bean: false };
-    if (best) return { sid: best.sid, bean: best.bean };
+    if (gh.length && (!best || gh[0].distance < best.d)) best = { sid: HiveWorld.GHOST, d: gh[0].distance, bean: false, name: false };
+    if (best) return { sid: best.sid, bean: best.bean, name: best.name };
     // nothing solid under the pointer: any EMPTY cell of the board is the invitation too —
     // the ghost glides to it and a clean click recruits there (the user 2026-08-13)
     const slot = this.freeCellAt();
     if (slot !== null) {
       if (slot !== this.ghostSlot) this.ghostTo(slot);
-      return { sid: HiveWorld.GHOST, bean: false };
+      return { sid: HiveWorld.GHOST, bean: false, name: false };
     }
-    return { sid: null, bean: false };
+    return { sid: null, bean: false, name: false };
   }
 
   // The FREE cell of the board under a point — the ONE ground-plane → cell mapping, shared

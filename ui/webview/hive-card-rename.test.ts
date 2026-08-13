@@ -65,6 +65,20 @@ test("a refused rename surfaces on the card (fail loudly), via the kernel's warn
   assert.match(HIVE, /else world\.note\(/, "…and with no card open, the board-level note shows it");
 });
 
+test("the BOARD rename: click the nameplate, edit in place (the city-banner pattern)", () => {
+  const board = HIVE.slice(HIVE.indexOf("beginBoardRename(sid: string)"));
+  assert.match(HIVE, /if \(pad && !hit\.name\) \{/,
+    "a nameplate press never switches chat — the plate is its own affordance");
+  assert.match(HIVE, /if \(pp\.name && Math\.hypot\(e\.clientX - pp\.x, e\.clientY - pp\.y\) <= 5\) this\.beginBoardRename\(pp\.sid\);/,
+    "the edit opens on the clean UP, so a drag from the plate still picks the session up");
+  assert.match(HIVE, /nh\.length && pad\.nameVisible\(\)/,
+    "only a READABLE plate is clickable — an invisible plate is never a secret button");
+  assert.match(board, /const hp = hostPrefix\(pad\.sess\.name, sid\);/, "a remote's host is fixed chrome here too");
+  assert.match(board, /pad\.setNameHidden\(true\);/, "the editor STANDS IN for the plate");
+  assert.match(board, /\{ type: "renameSession", id: sid, name: v \}/, "same kernel op as every rename surface");
+  assert.match(board, /else if \(e\.key === "Escape"\) \{ e\.preventDefault\(\); finish\(false\); \}/, "Esc cancels");
+});
+
 test("the editor's chrome lives in hive-pane.css (this page loads only its own stylesheet)", () => {
   for (const sel of ['.hc-name[data-act="rename"]', ".hc-rename", ".host-prefix"])
     assert.ok(CSS.includes(sel), "hive-pane.css styles " + sel);

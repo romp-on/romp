@@ -124,6 +124,21 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #090b10; }
 .ht-bean.carried { position: fixed; left: 0; top: 0; z-index: 9; pointer-events: none; margin: 0;
   background: none; }
 
+/* ── the in-place board rename: the nameplate becomes an editor exactly where it sits ── */
+#hive-rename {
+  position: fixed; left: 0; top: 0; z-index: 8;
+  display: flex; align-items: baseline; gap: 2px;
+  background: rgba(22, 25, 31, 0.94);
+  border: 1px solid var(--accent, #9cd2ff);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  padding: 3px 8px;
+  font: 700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+#hive-rename input { background: none; border: 0; outline: none; padding: 0;
+  font: inherit; min-width: 2ch; }
+#hive-rename .host-prefix { font-weight: 400; font-style: italic; font-size: 0.88em; color: #8a8a8a; }
+
 /* the board-level notice: refusals with no card open (a bad create, a refused default) */
 #hive-note {
   position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);

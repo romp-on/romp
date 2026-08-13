@@ -76,8 +76,8 @@ test("a click's whole answer is the chat on the left; the card stays out of the 
   // session and reveals the chat pane — one path shared with the card's Open and dblclick.
   assert.match(HIVE, /new THREE\.CapsuleGeometry\(0\.55/, "the bean has a whole-body hit capsule");
   assert.match(HIVE, /colorWrite: false/, "…that draws nothing but still raycasts");
-  assert.match(HIVE, /if \(pad\) \{\s*\n\s*if \(hit\.bean\) pad\.pokeBean\(\);\s*\n\s*this\.openChat\(sid\);/,
-    "ANY press on an occupied cell switches chat ON THE DOWN — hexagon and bean alike");
+  assert.match(HIVE, /if \(pad && !hit\.name\) \{\s*\n\s*if \(hit\.bean\) pad\.pokeBean\(\);\s*\n\s*this\.openChat\(sid\);/,
+    "ANY press on an occupied cell switches chat ON THE DOWN — except the nameplate, which edits");
   // the fly-in card + camera zoom on every click read as noise (the user 2026-08-13):
   // a click does NOTHING more on the up, and select() serves only the deep-link jump
   assert.match(HIVE, /if \(pp\) return;/, "a click is DONE on the down — no card, no fly-in on the up");
