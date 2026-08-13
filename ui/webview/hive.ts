@@ -78,6 +78,9 @@ class Pad {
   private labelMesh: THREE.Mesh;
   private bang: THREE.Sprite;              // the ❗ that bobs over a needs-you pad
   private guy: Dweller;
+  carrier = new THREE.Group();              // rides the pointer while the user carries them
+  private carryTarget: THREE.Vector3 | null = null;
+  private carryWant = new THREE.Vector3(); // scratch — no per-frame allocation
   private baseY = 0;
   lift = 0;                                 // hover/press target offset, eased in update()
   private liftCur = 0;
@@ -145,7 +148,10 @@ class Pad {
 
     this.guy = new Dweller(sess.color?.bg || "#9cd2ff");
     this.guy.group.position.y = PAD_H;
-    this.group.add(this.guy.group);
+    // the CARRIER wraps the dweller: the bean's own animation moves guy.group, a user
+    // drag moves the carrier — so picking them up never fights the idle animation
+    this.carrier.add(this.guy.group);
+    this.group.add(this.carrier);
     this.guy.setState(sess.state, sess.faded);
 
     this.group.scale.setScalar(0.001);      // arrival pop plays from ~zero
@@ -174,6 +180,15 @@ class Pad {
   beanMeshes(): THREE.Object3D[] { return [this.guy.hit]; }
   pokeBean() { this.guy.poke(); }
 
+  // world-space carry target while the user drags them; null → spring home (update() eases)
+  carryTo(p: THREE.Vector3 | null) { this.carryTarget = p ? p.clone() : null; }
+  beanWorldPos(): THREE.Vector3 { return this.carrier.getWorldPosition(new THREE.Vector3()); }
+  consumeBean() {
+    this.guy.group.visible = false;
+    this.carrier.position.set(0, 0, 0);
+    this.carryTarget = null;
+  }
+
   update(dt: number, camYaw: number, camDist: number, focus: boolean): boolean {
     this.t += dt;
     // map-label behavior: the plate faces the camera in yaw and FADES with altitude —
@@ -199,6 +214,15 @@ class Pad {
     }
     this.liftCur = ease(this.liftCur, this.lift, dt, 14);
     this.group.position.y = this.liftCur;
+
+    // carried: the bean rides the pointer (world target → pad-local); released, it
+    // springs home — the same everything-springs rule as the rest of the board
+    if (this.carryTarget) this.carryWant.copy(this.carryTarget).sub(this.group.position);
+    else this.carryWant.set(0, 0, 0);
+    this.carrier.position.lerp(this.carryWant, 1 - Math.exp(-16 * dt));
+    const cs = this.carryTarget ? 1.12 : 1;
+    this.carrier.scale.x = ease(this.carrier.scale.x, cs, dt, 12);
+    this.carrier.scale.y = this.carrier.scale.z = this.carrier.scale.x;
 
     this.ringColor.lerp(this.ringTarget, 1 - Math.exp(-8 * dt));
     // a 1px line carries less light than the old fat rim, so overdrive the color past 1 —
@@ -845,6 +869,13 @@ class HiveWorld {
   private ghostHome = 0;                       // first-free slot — where it parks at rest
   private reservedSlot: number | null = null;  // cell claimed by a click, honored in sync()
   private pendingRecruit: { x: number; y: number; slot: number } | null = null;
+  // drag-to-end (the user 2026-08-13, TFT-style): a held press on a session that MOVES
+  // picks the bean up; it rides the pointer, the trash dock slides in, and dropping on
+  // the armed dock ends the session — the deliberate carry + highlighted dock IS the
+  // confirmation (and an ended session still revives with its history from the picker).
+  private pressedPad: { sid: string; x: number; y: number; bean: boolean } | null = null;
+  private dragSession: { sid: string; depth: number; over: boolean } | null = null;
+  private trashEl: HTMLElement;
   private ghostRingMat = new THREE.LineBasicMaterial({
     color: ACCENT, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false,
   });
@@ -908,7 +939,21 @@ class HiveWorld {
       const sid = this.hovered;
       if (sid && sid !== HiveWorld.GHOST) this.openChat(sid);
     });
-    window.addEventListener("keydown", (e) => { if (e.key === "Escape") this.deselect(); });
+    window.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      if (this.dragSession) { this.dropSessionDrag(false); return; }   // Esc aborts a carry
+      this.deselect();
+    });
+
+    // the trash dock: hidden below the bottom edge, slides in only while a session is
+    // being carried; pointer-events none — the canvas keeps the pointer, we rect-test
+    this.trashEl = document.createElement("div");
+    this.trashEl.id = "hive-trash";
+    this.trashEl.innerHTML =
+      '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">' +
+      '<path fill="currentColor" d="M9 3v1H4v2h16V4h-5V3H9zM6 8v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v10H9V10zm4 0h2v10h-2V10z"/></svg>' +
+      '<span class="ht-label">Drop to end</span>';
+    document.body.appendChild(this.trashEl);
 
     const fit = () => {
       const w = root.clientWidth || 1, h = root.clientHeight || 1;
@@ -975,6 +1020,13 @@ class HiveWorld {
 
   private onPointerMove(e: PointerEvent) {
     this.canvasPoint(e);
+    // a held press on a session that moves becomes a PICK-UP; the gate is the gesture
+    // (px travelled), the same 6px the recruit click uses
+    if (this.pressedPad && !this.dragSession
+        && Math.hypot(e.clientX - this.pressedPad.x, e.clientY - this.pressedPad.y) > 6) {
+      this.beginSessionDrag(this.pressedPad.sid);
+    }
+    if (this.dragSession) { this.moveSessionDrag(e); return; }   // a carry never orbits
     if (this.dragging) {
       const dx = e.clientX - this.dragging.x, dy = e.clientY - this.dragging.y;
       this.dragging.x = e.clientX; this.dragging.y = e.clientY;
@@ -1005,18 +1057,11 @@ class HiveWorld {
       return;
     }
     if (sid) {
+      // acknowledge the press NOW (the pad dips); the ACTION fires on the clean UP —
+      // a press that MOVES becomes a pick-up instead (drag to the trash dock to end)
       const pad = this.pads.get(sid);
-      // clicking the BEAN is the direct line to their chat: they pop (immediate
-      // acknowledgement, on them), and the chat pane opens on that session — the hive
-      // stays put. Clicking the TILE keeps opening the fly-in card (the user 2026-08-13).
-      if (hit.bean && pad) {
-        pad.pokeBean();
-        this.openChat(sid);
-        return;
-      }
-      // acknowledge on the DOWN, before anything async: the pad dips under the press
       if (pad) { pad.lift = -0.07; setTimeout(() => { if (this.pads.get(sid) === pad) pad.lift = this.hovered === sid ? 0.12 : 0; }, 130); }
-      this.select(sid);
+      this.pressedPad = { sid, x: e.clientX, y: e.clientY, bean: hit.bean };
     } else {
       this.dragging = { mode: "orbit", x: e.clientX, y: e.clientY };
     }
@@ -1024,8 +1069,24 @@ class HiveWorld {
 
   private onPointerUp(e: PointerEvent) {
     const pr = this.pendingRecruit;
+    const pp = this.pressedPad;
     this.pendingRecruit = null;
+    this.pressedPad = null;
     this.dragging = null;
+    if (this.dragSession) { this.dropSessionDrag(this.dragSession.over); return; }
+    if (pp) {
+      if (Math.hypot(e.clientX - pp.x, e.clientY - pp.y) > 5) return;   // it was a nudge, not a click
+      const pad = this.pads.get(pp.sid);
+      // clicking the BEAN is the direct line to their chat: they pop (acknowledgement on
+      // THEM) and the chat pane opens; clicking the TILE opens the fly-in card
+      if (pp.bean && pad) {
+        pad.pokeBean();
+        this.openChat(pp.sid);
+      } else if (pad) {
+        this.select(pp.sid);
+      }
+      return;
+    }
     if (!pr) return;
     // a real drag is a camera move, not a click — the gate is the gesture itself (px
     // travelled between down and up), never a timer
@@ -1035,6 +1096,53 @@ class HiveWorld {
     // acknowledge NOW with a spark on the clicked cell, then ask the shell for the picker
     this.particles.burst(new THREE.Vector3(p.x, 0.6, p.z), [ACCENT, 0xd6ecff], 16, 1.8);
     try { if (window.parent !== window) window.parent.postMessage({ romp: "openPicker" }, "*"); } catch { /* standalone */ }
+  }
+
+  private beginSessionDrag(sid: string) {
+    const pad = this.pads.get(sid);
+    if (!pad || pad.dyingT >= 0) return;
+    // carry at the pad's own camera depth, so the bean stays screen-true under the cursor
+    this.dragSession = { sid, depth: this.camera.position.distanceTo(pad.group.position), over: false };
+    pad.lift = 0;
+    const label = this.trashEl.querySelector(".ht-label") as HTMLElement;
+    label.textContent = "Drop to end " + pad.sess.name;
+    this.trashEl.classList.add("show");
+    this.renderer.domElement.style.cursor = "grabbing";
+  }
+
+  private moveSessionDrag(e: PointerEvent) {
+    const d = this.dragSession!;
+    const pad = this.pads.get(d.sid);
+    if (!pad || pad.dyingT >= 0) { this.dropSessionDrag(false); return; }
+    const p = new THREE.Vector3(this.pointer.x, this.pointer.y, 0.5).unproject(this.camera)
+      .sub(this.camera.position).normalize().multiplyScalar(d.depth).add(this.camera.position);
+    if (p.y < 0.4) p.y = 0.4;                // never carried below the board
+    pad.carryTo(p);
+    const r = this.trashEl.getBoundingClientRect();
+    const over = e.clientX >= r.left - 14 && e.clientX <= r.right + 14 && e.clientY >= r.top - 14;
+    if (over !== d.over) { d.over = over; this.trashEl.classList.toggle("armed", over); }
+  }
+
+  private dropSessionDrag(over: boolean) {
+    const d = this.dragSession;
+    this.dragSession = null;
+    this.trashEl.classList.remove("show", "armed");
+    this.renderer.domElement.style.cursor = "default";
+    if (!d) return;
+    const pad = this.pads.get(d.sid);
+    if (!pad) return;
+    if (over && pad.dyingT < 0) {
+      // the drop is the decision: end the session (the kernel's own endSession op — the
+      // same one the chat tab's × posts). The bean bursts where it vanished, and the
+      // tile goes straight to the sink — the farewell hop is for natural exits.
+      vscodeApi?.postMessage({ type: "endSession", id: d.sid });
+      this.particles.burst(pad.beanWorldPos().setY(1.0), [0xe5484d, 0x8a8a8a, 0xffb3b6], 26, 2.6);
+      pad.consumeBean();
+      pad.dyingT = 0.26;
+      if (this.selected === d.sid) this.deselect();
+    } else {
+      pad.carryTo(null);                     // anywhere else: they spring home, no harm done
+    }
   }
 
   private static GHOST = "\0ghost";          // impossible sid — the ghost's pick token
@@ -1255,8 +1363,9 @@ class HiveWorld {
     this.clock += dt;
     this.idleT += dt;
 
-    // hover pick once per frame (not per pointermove — cheaper and steadier)
-    const sid = this.pick().sid;
+    // hover pick once per frame (not per pointermove — cheaper and steadier); a carried
+    // bean under the cursor must not churn hover or drag the ghost around
+    const sid = this.dragSession ? this.hovered : this.pick().sid;
     if (sid !== this.hovered) {
       const old = this.hovered && this.hovered !== HiveWorld.GHOST ? this.pads.get(this.hovered) : null;
       if (old) old.lift = 0;
