@@ -7,6 +7,15 @@
 
 export interface Axial { q: number; r: number }
 
+// Board scale. Neighbour centers sit √3·HEX_SIZE apart (axialToXZ); each pad's top is a hex
+// prism of circumradius PAD_R with an EDGE turned toward every neighbour (hive.ts thetaStart
+// π/6), so its apothem is PAD_R·√3/2. PAD_R = HEX_SIZE makes twice the apothem exactly the
+// neighbour gap: adjacent pads snap flush and share their edge, one connected honeycomb
+// rather than islands (the user 2026-08-13, who wanted the hexagons snapped together). The
+// pads' slight base flare (hive.ts ×1.04) tucks under the shared rim, hiding any seam.
+export const HEX_SIZE = 2.05;
+export const PAD_R = HEX_SIZE;
+
 // The six axial neighbour directions, in the ring-walk order the spiral uses.
 const DIRS: readonly Axial[] = [
   { q: 1, r: 0 }, { q: 1, r: -1 }, { q: 0, r: -1 },
@@ -28,7 +37,7 @@ export function spiralSlot(i: number): Axial {
 }
 
 // Pointy-top axial → world XZ. `size` is the hex circumradius (center to corner); adjacent
-// pad centers land size·√3 apart, so pads with outer radius < size·√3/2 never touch.
+// pad centers land size·√3 apart.
 export function axialToXZ(a: Axial, size: number): { x: number; z: number } {
   const s3 = Math.sqrt(3);
   return { x: size * (s3 * a.q + (s3 / 2) * a.r), z: size * 1.5 * a.r };

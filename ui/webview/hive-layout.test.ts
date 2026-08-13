@@ -3,7 +3,7 @@
 // spatial memory of the board keeps working across pushes and reloads.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { assignSlots, axialToXZ, frameDt, frameRadius, hexDistance, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexDistance, PAD_R, spiralSlot } from "./hive-layout";
 
 test("frameDt never goes negative or huge — a bad clock can't diverge the eases", () => {
   assert.equal(frameDt(1016, 1000), 0.016, "a normal frame passes through");
@@ -49,6 +49,18 @@ test("pointy-top spacing: all six neighbours of the origin sit √3·size away",
     const p = axialToXZ(spiralSlot(i), size);
     const d = Math.hypot(p.x - o.x, p.z - o.z);
     assert.ok(Math.abs(d - Math.sqrt(3) * size) < 1e-9, `neighbour ${i} at ${d}`);
+  }
+});
+
+test("pads snap flush: twice the pad apothem exactly spans the gap to every neighbour", () => {
+  // The prism turns an edge toward each neighbour, so flush = apothem·2 === center distance.
+  // Shrinking PAD_R below HEX_SIZE reopens the moat between cells; growing it overlaps them.
+  const o = axialToXZ({ q: 0, r: 0 }, HEX_SIZE);
+  const apothem = (PAD_R * Math.sqrt(3)) / 2;
+  for (let i = 1; i <= 6; i++) {
+    const p = axialToXZ(spiralSlot(i), HEX_SIZE);
+    const d = Math.hypot(p.x - o.x, p.z - o.z);
+    assert.ok(Math.abs(2 * apothem - d) < 1e-9, `neighbour ${i} leaves a ${d - 2 * apothem} gap`);
   }
 });
 

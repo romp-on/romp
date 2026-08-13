@@ -11,7 +11,7 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { delegate } from "./actions";
-import { assignSlots, axialToXZ, frameDt, frameRadius, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, PAD_R, spiralSlot } from "./hive-layout";
 import { buildSessions, diffSessions, HiveSession, HiveState, hiveAge, stateLine } from "./hive-model";
 
 const vscodeApi =
@@ -32,9 +32,7 @@ const ST: Record<HiveState, number> = {
   opening: 0x9aa0a6,     // pale — CLI still coming up
 };
 const ACCENT = 0x9cd2ff;
-const HEX_SIZE = 2.05;        // axial size: neighbour centers sit √3·size apart
-const PAD_R = 1.62;           // pad circumradius (< √3/2·size, so pads never touch)
-const PAD_H = 0.42;
+const PAD_H = 0.42;           // HEX_SIZE/PAD_R live in hive-layout.ts, snapped flush there
 // Tron world (the user 2026-08-13): near-black glossy ground with a faint accent grid, the
 // pads dark slabs whose STATUS light is their glowing rim, bloom doing the neon work. The
 // beans stay cute (session-colored, softly self-lit) with dark visors and glowing eyes.
