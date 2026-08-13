@@ -60,6 +60,32 @@ export function hexDistance(a: Axial, b: Axial): number {
   return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
 }
 
+// World XZ → the axial cell containing it: the inverse of axialToXZ, cube-rounded so a
+// point anywhere inside a hex maps to that hex (nearest-center in hex metric).
+export function xzToAxial(x: number, z: number, size: number): Axial {
+  const qf = ((Math.sqrt(3) / 3) * x - z / 3) / size;
+  const rf = (2 / 3) * z / size;
+  const sf = -qf - rf;
+  let q = Math.round(qf), r = Math.round(rf);
+  const s = Math.round(sf);
+  const dq = Math.abs(q - qf), dr = Math.abs(r - rf), ds = Math.abs(s - sf);
+  if (dq > dr && dq > ds) q = -r - s;
+  else if (dr > ds) r = -q - s;
+  return { q: q + 0 === 0 ? 0 : q, r: r + 0 === 0 ? 0 : r };   // Math.round(-0.2) is -0
+}
+
+// Spiral index of an axial cell — the inverse of spiralSlot. Walks the cell's own ring
+// (6k cells, k small on any real board), so no closed-form arithmetic to get subtly wrong.
+export function slotOfAxial(a: Axial): number {
+  const k = hexDistance(a, { q: 0, r: 0 });
+  if (k === 0) return 0;
+  for (let i = 3 * k * (k - 1) + 1; i <= 3 * k * (k + 1); i++) {
+    const s = spiralSlot(i);
+    if (s.q === a.q && s.r === a.r) return i;
+  }
+  return -1;                                   // unreachable for a well-formed axial
+}
+
 // Ring number of a spiral slot — the inverse of spiralSlot's ring arithmetic.
 export function ringOf(i: number): number {
   if (!Number.isFinite(i) || i <= 0) return 0;

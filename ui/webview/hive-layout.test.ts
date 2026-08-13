@@ -3,7 +3,7 @@
 // spatial memory of the board keeps working across pushes and reloads.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, hexDistance, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, hexDistance, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, slotOfAxial, spiralSlot, xzToAxial } from "./hive-layout";
 
 test("frameDt never goes negative or huge — a bad clock can't diverge the eases", () => {
   assert.equal(frameDt(1016, 1000), 0.016, "a normal frame passes through");
@@ -97,6 +97,21 @@ test("hexCorner IS the cylinder parametrization (the corners everything shares)"
 test("ringOf inverts the spiral: it agrees with hex distance from the origin", () => {
   const O = { q: 0, r: 0 };
   for (let i = 0; i < 169; i++) assert.equal(ringOf(i), hexDistance(spiralSlot(i), O), `slot ${i}`);
+});
+
+test("xzToAxial inverts axialToXZ — any point inside a cell maps back to that cell", () => {
+  for (let i = 0; i < 169; i++) {
+    const a = spiralSlot(i);
+    const p = axialToXZ(a, HEX_SIZE);
+    assert.deepEqual(xzToAxial(p.x, p.z, HEX_SIZE), a, `center of slot ${i}`);
+    // a point pushed 80% of the way toward a corner is still inside the hex
+    const c = hexCorner(p.x, p.z, HEX_SIZE * 0.8, i % 6);
+    assert.deepEqual(xzToAxial(c.x, c.z, HEX_SIZE), a, `off-center point in slot ${i}`);
+  }
+});
+
+test("slotOfAxial inverts spiralSlot (click a cell → its exact slot index)", () => {
+  for (let i = 0; i < 169; i++) assert.equal(slotOfAxial(spiralSlot(i)), i, `slot ${i}`);
 });
 
 test("lattice: shared edges are emitted once, so every line weighs the same", () => {

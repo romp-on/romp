@@ -12,7 +12,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { delegate } from "./actions";
 import { hostPrefix } from "./host-prefix";
-import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, hexDistance, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, slotOfAxial, spiralSlot, xzToAxial } from "./hive-layout";
 import { buildSessions, diffSessions, HiveSession, HiveState, hiveAge, stateLine } from "./hive-model";
 
 const vscodeApi =
@@ -752,9 +752,16 @@ class HiveWorld {
   private dragging: { mode: "orbit" | "pan"; x: number; y: number } | null = null;
   private clock = 0;
   card = new HiveCard();
-  // the ghost hex: a faint outline on the first FREE slot — hover it and a "+" wakes up;
-  // click recruits (opens the new-session picker via the shell relay)
+  // the ghost hex: the standing invitation. It parks on the first FREE slot, and GLIDES
+  // under the pointer whenever any empty cell is hovered — every empty hexagon is
+  // clickable to spawn a session there (the user 2026-08-13). A clean click (down+up,
+  // no drag) recruits: it reserves the cell and opens the new-session picker.
   private ghost = new THREE.Group();
+  private ghostTarget = new THREE.Vector3();   // eased toward in frame() — the ghost glides
+  private ghostSlot = 0;                       // the cell the ghost is offering right now
+  private ghostHome = 0;                       // first-free slot — where it parks at rest
+  private reservedSlot: number | null = null;  // cell claimed by a click, honored in sync()
+  private pendingRecruit: { x: number; y: number; slot: number } | null = null;
   private ghostRingMat = new THREE.LineBasicMaterial({
     color: ACCENT, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false,
   });
@@ -808,7 +815,7 @@ class HiveWorld {
     const cv = this.renderer.domElement;
     cv.addEventListener("pointermove", (e) => this.onPointerMove(e));
     cv.addEventListener("pointerdown", (e) => this.onPointerDown(e));
-    window.addEventListener("pointerup", () => { this.dragging = null; });
+    window.addEventListener("pointerup", (e) => this.onPointerUp(e));
     cv.addEventListener("wheel", (e) => {
       e.preventDefault();
       this.dist = Math.min(70, Math.max(7, this.dist * Math.exp(e.deltaY * 0.0012)));
@@ -910,9 +917,10 @@ class HiveWorld {
     const sid = this.pick();
     if (e.button === 2 || e.shiftKey) { this.dragging = { mode: "pan", x: e.clientX, y: e.clientY }; return; }
     if (sid === HiveWorld.GHOST) {
-      // recruit: acknowledge with a spark on the ghost, then ask the shell for the picker
-      this.particles.burst(this.ghost.position.clone().setY(0.6), [ACCENT, 0xd6ecff], 16, 1.8);
-      try { if (window.parent !== window) window.parent.postMessage({ romp: "openPicker" }, "*"); } catch { /* standalone */ }
+      // recruit is decided on the UP (a clean click, not a drag) so the whole empty board
+      // stays grabbable for orbiting — the down arms the recruit AND starts the orbit
+      this.pendingRecruit = { x: e.clientX, y: e.clientY, slot: this.ghostSlot };
+      this.dragging = { mode: "orbit", x: e.clientX, y: e.clientY };
       return;
     }
     if (sid) {
@@ -923,6 +931,21 @@ class HiveWorld {
     } else {
       this.dragging = { mode: "orbit", x: e.clientX, y: e.clientY };
     }
+  }
+
+  private onPointerUp(e: PointerEvent) {
+    const pr = this.pendingRecruit;
+    this.pendingRecruit = null;
+    this.dragging = null;
+    if (!pr) return;
+    // a real drag is a camera move, not a click — the gate is the gesture itself (px
+    // travelled between down and up), never a timer
+    if (Math.hypot(e.clientX - pr.x, e.clientY - pr.y) > 5) return;
+    this.reservedSlot = pr.slot;
+    const p = axialToXZ(spiralSlot(pr.slot), HEX_SIZE);
+    // acknowledge NOW with a spark on the clicked cell, then ask the shell for the picker
+    this.particles.burst(new THREE.Vector3(p.x, 0.6, p.z), [ACCENT, 0xd6ecff], 16, 1.8);
+    try { if (window.parent !== window) window.parent.postMessage({ romp: "openPicker" }, "*"); } catch { /* standalone */ }
   }
 
   private static GHOST = "\0ghost";          // impossible sid — the ghost's pick token
@@ -937,7 +960,31 @@ class HiveWorld {
     }
     const gh = this.raycaster.intersectObject(this.ghostFill, false);
     if (gh.length && (!best || gh[0].distance < best.d)) best = { sid: HiveWorld.GHOST, d: gh[0].distance };
-    return best ? best.sid : null;
+    if (best) return best.sid;
+    // nothing solid under the pointer: any EMPTY cell of the board is the invitation too —
+    // the ghost glides to it and a clean click recruits there (the user 2026-08-13)
+    const oy = this.raycaster.ray.origin.y, dy = this.raycaster.ray.direction.y;
+    const t = dy !== 0 ? -oy / dy : -1;
+    if (t > 0) {
+      const px = this.raycaster.ray.origin.x + this.raycaster.ray.direction.x * t;
+      const pz = this.raycaster.ray.origin.z + this.raycaster.ray.direction.z * t;
+      const cell = xzToAxial(px, pz, HEX_SIZE);
+      if (hexDistance(cell, { q: 0, r: 0 }) <= this.latticeRings) {
+        const slot = slotOfAxial(cell);
+        if (slot >= 0 && !new Set(this.slots.values()).has(slot)) {
+          if (slot !== this.ghostSlot) this.ghostTo(slot);
+          return HiveWorld.GHOST;
+        }
+      }
+    }
+    return null;
+  }
+
+  // aim the ghost at a cell; frame() glides it there (everything springs, nothing teleports)
+  private ghostTo(slot: number) {
+    this.ghostSlot = slot;
+    const p = axialToXZ(spiralSlot(slot), HEX_SIZE);
+    this.ghostTarget.set(p.x, 0, p.z);
   }
 
   select(sid: string) {
@@ -983,6 +1030,18 @@ class HiveWorld {
     const diff = diffSessions(first ? null : prevSessions, sessions);
     const stored = loadSlots(this.slots);
     this.slots = assignSlots(stored, sessions.map((s) => s.sid));
+    // a click on an empty cell reserved it for the next NEW arrival (onPointerUp) — honor
+    // it here, before pads are built. A REVIVED session outranks the click: it returns to
+    // its remembered hex (the standing invariant), so the reservation only takes a sid
+    // with no remembered home. Spent (or dropped) at the first arrival after the click.
+    if (this.reservedSlot !== null && diff.added.length) {
+      const want = this.reservedSlot;
+      this.reservedSlot = null;
+      const sid = diff.added.find((id) => !stored.has(id));
+      if (sid !== undefined && (this.slots.get(sid) === want || ![...this.slots.values()].includes(want))) {
+        this.slots.set(sid, want);
+      }
+    }
     // persist the present sessions PLUS absent sids' remembered homes (a revived session
     // returns to its old hex), dropping the memories only if the map outgrows 200 entries
     const keep = new Map(this.slots);
@@ -1029,12 +1088,13 @@ class HiveWorld {
         this.particles.burst(at, [tint, ACCENT, 0xffd700, tint], 48, 4.2);
       }
     }
-    // park the ghost hex on the first FREE slot — the natural "next" cell of the spiral
+    // the ghost's PARK is the first FREE slot — the natural "next" cell of the spiral; it
+    // only re-aims now if it isn't busy following the pointer (or its cell got taken)
     let free = 0;
     const taken = new Set(this.slots.values());
     while (taken.has(free)) free++;
-    const gp = axialToXZ(spiralSlot(free), HEX_SIZE);
-    this.ghost.position.set(gp.x, 0, gp.z);
+    this.ghostHome = free;
+    if (this.hovered !== HiveWorld.GHOST || taken.has(this.ghostSlot)) this.ghostTo(free);
     // …and keep the one-layer lattice one ring wider than anything on it
     this.ensureLattice(Math.max(3, ringOf(Math.max(free, ...this.slots.values())) + 1));
 
@@ -1106,7 +1166,10 @@ class HiveWorld {
       this.ghostHover = sid === HiveWorld.GHOST;
       this.renderer.domElement.style.cursor = sid ? "pointer" : "default";
     }
-    // the ghost breathes faintly; waking on hover
+    // the ghost glides to its aim (the hovered empty cell, or its park when the pointer
+    // leaves the board) and breathes faintly, waking on hover
+    if (this.hovered !== HiveWorld.GHOST && this.ghostSlot !== this.ghostHome) this.ghostTo(this.ghostHome);
+    this.ghost.position.lerp(this.ghostTarget, 1 - Math.exp(-14 * dt));
     const gTarget = this.ghostHover ? 0.5 : 0.06 + 0.03 * (0.5 + 0.5 * Math.sin(this.clock * 1.2));
     this.ghostRingMat.opacity = ease(this.ghostRingMat.opacity, gTarget, dt, 8);
     this.ghostPlus.material.opacity = ease(this.ghostPlus.material.opacity, this.ghostHover ? 0.95 : 0.22, dt, 8);
