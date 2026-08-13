@@ -1074,8 +1074,9 @@ class HiveWorld {
       // ANY press on an occupied cell switches chat ON THE DOWN — hexagon and bean alike,
       // instant (the user 2026-08-13, twice); the bean adds its pop. The same press can
       // still become a pick-up: the switch has already happened, and seeing their chat
-      // while you carry them is coherent. The TILE'S deeper level (card + camera fly-in)
-      // stays on the clean UP — a fly-in mid-drag is chaos.
+      // while you carry them is coherent. That is ALL a click does: the chat on the left
+      // is the answer — the fly-in card + camera zoom on every click read as noise (the
+      // user 2026-08-13) and now serve only the deep-link jump (select()).
       if (pad) {
         if (hit.bean) pad.pokeBean();
         this.openChat(sid);
@@ -1093,12 +1094,7 @@ class HiveWorld {
     this.pressedPad = null;
     this.dragging = null;
     if (this.dragSession) { this.dropSessionDrag(this.dragSession.over); return; }
-    if (pp) {
-      if (Math.hypot(e.clientX - pp.x, e.clientY - pp.y) > 5) return;   // it was a nudge, not a click
-      // the bean already switched chat on the DOWN; the tile's card resolves here
-      if (!pp.bean && this.pads.has(pp.sid)) this.select(pp.sid);
-      return;
-    }
+    if (pp) return;   // the press already did everything (chat switch on the DOWN); a drag ended above
     if (!pr) return;
     // a real drag is a camera move, not a click — the gate is the gesture itself (px
     // travelled between down and up), never a timer
@@ -1213,6 +1209,9 @@ class HiveWorld {
     this.ghostTarget.set(p.x, 0, p.z);
   }
 
+  // The SELECTED state (camera fly-in + the fly-in card) is the DEEP-LINK presentation
+  // only — a feed/outline "show me" jump lands here (#focus=<sid>). A plain click never
+  // opens it: the chat on the left is the click's whole answer (the user 2026-08-13).
   select(sid: string) {
     this.selected = sid;
     const pad = this.pads.get(sid);

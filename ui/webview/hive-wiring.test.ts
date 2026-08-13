@@ -70,7 +70,7 @@ test("cell lines trace the EXACT boundary, so used and empty cells are one conne
   assert.ok(!HIVE.includes("LINE_INSET"), "no inset constant survives");
 });
 
-test("clicking the bean opens their chat; the tile keeps opening the card", () => {
+test("a click's whole answer is the chat on the left; the card stays out of the way", () => {
   // The bean is the direct line (the user 2026-08-13): an invisible capsule makes the
   // whole character clickable, the pop acknowledges on THEM, and openChat both opens the
   // session and reveals the chat pane — one path shared with the card's Open and dblclick.
@@ -78,8 +78,10 @@ test("clicking the bean opens their chat; the tile keeps opening the card", () =
   assert.match(HIVE, /colorWrite: false/, "…that draws nothing but still raycasts");
   assert.match(HIVE, /if \(pad\) \{\s*\n\s*if \(hit\.bean\) pad\.pokeBean\(\);\s*\n\s*this\.openChat\(sid\);/,
     "ANY press on an occupied cell switches chat ON THE DOWN — hexagon and bean alike");
-  assert.match(HIVE, /if \(!pp\.bean && this\.pads\.has\(pp\.sid\)\) this\.select\(pp\.sid\);/,
-    "the tile's card (camera fly-in) still resolves on the clean UP");
+  // the fly-in card + camera zoom on every click read as noise (the user 2026-08-13):
+  // a click does NOTHING more on the up, and select() serves only the deep-link jump
+  assert.match(HIVE, /if \(pp\) return;/, "a click is DONE on the down — no card, no fly-in on the up");
+  assert.ok(!/this\.select\(pp\.sid\)/.test(HIVE), "no click path reaches select()");
   assert.match(HIVE, /openChat\(sid: string\) \{/, "one shared open path");
   assert.match(HIVE, /this\.card\.onOpen = \(sid\) => this\.openChat\(sid\);/, "the card's Open uses it");
   assert.match(HIVE, /\{ romp: "reveal", pane: "chat" \}/, "…and it reveals the chat pane");
