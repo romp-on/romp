@@ -13,6 +13,7 @@
     "baseUrl": ".",
     "paths": {
       "three": ["node_modules/@types/three"],
+      "three/examples/jsm/*": ["node_modules/@types/three/examples/jsm/*"],
       "*": ["node_modules/*"]
     }
   },

@@ -60,6 +60,19 @@ export function assignSlots(prev: ReadonlyMap<string, number>, sids: readonly st
   return out;
 }
 
+// Frame delta from two rAF-ish timestamps, in seconds — SAFE against every clock the
+// browser can throw: a negative step (rAF timeline vs performance.now skew, VM clock
+// adjustments, headless virtual time) falls back to one nominal frame instead of going
+// negative — a negative dt would flip every exponential ease into a runaway AWAY from its
+// target (the 2026-08-13 camera-divergence bug: distCur 10.5 → 426 in four seconds). A
+// huge step (tab restored after minutes) caps at 50ms so nothing teleports.
+export function frameDt(nowMs: number, lastMs: number): number {
+  if (!Number.isFinite(nowMs) || !Number.isFinite(lastMs) || lastMs < 0) return 1 / 60;
+  const dt = (nowMs - lastMs) / 1000;
+  if (dt <= 0) return 1 / 60;
+  return Math.min(0.05, dt);
+}
+
 // World-space radius of the occupied board (for camera framing): the farthest pad center
 // from the origin, plus one pad of margin so the frame never crops a rim.
 export function frameRadius(slots: readonly number[], size: number): number {

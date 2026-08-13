@@ -3,7 +3,15 @@
 A fifth dashboard pane: a 3D honeycomb diorama, one hex pad per session, a small
 friendly character on each pad acting out what that session is doing right now.
 Halo-Wars-style tactical camera; click a hex to fly in, read the gist, and talk
-to that session. The aim is the Philosophy's "spend attention, don't drain it"
+to that session.
+
+**Art direction (the user, 2026-08-13):** the world is TRON — near-black glossy
+ground with a faint accent grid, pads as dark slabs whose status color is their
+glowing rim, bloom doing the neon work — and the characters are CUTE AND BLOBBY
+(Fall Guys / PEAK): session-colored bean bodies with squash-and-stretch, dark
+glossy visors, glowing eyes, stubby arms. Not angular low-poly fantasy (a KayKit
+adventurers direction was tried and rejected). Free CC0 assets are allowed if
+one genuinely matches this look; the procedural bean is the current build. The aim is the Philosophy's "spend attention, don't drain it"
 rendered literally: the whole board is glanceable posture + color, and every
 mechanic is one click deeper.
 

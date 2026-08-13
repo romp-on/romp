@@ -3,7 +3,16 @@
 // spatial memory of the board keeps working across pushes and reloads.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { assignSlots, axialToXZ, frameRadius, hexDistance, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, hexDistance, spiralSlot } from "./hive-layout";
+
+test("frameDt never goes negative or huge — a bad clock can't diverge the eases", () => {
+  assert.equal(frameDt(1016, 1000), 0.016, "a normal frame passes through");
+  assert.equal(frameDt(1000, 5000), 1 / 60, "a BACKWARD step falls back to one frame, never negative");
+  assert.equal(frameDt(1000, 1000), 1 / 60, "a zero step too (exp ease with dt=0 is a no-op otherwise)");
+  assert.equal(frameDt(99999, 1000), 0.05, "a long stall caps — nothing teleports after a tab restore");
+  assert.equal(frameDt(1016, -1), 1 / 60, "the loop-start sentinel takes the nominal frame");
+  assert.equal(frameDt(NaN, 1000), 1 / 60, "non-finite clocks fall back safely");
+});
 
 test("slot 0 is the origin; ring k holds 6k slots at hex distance k", () => {
   assert.deepEqual(spiralSlot(0), { q: 0, r: 0 });
