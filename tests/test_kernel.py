@@ -6287,7 +6287,7 @@ class ServeSecurity(unittest.TestCase):
         self.assertNotIn("nav-typing", html)                           # the typing/dimming logic is gone
         # the wiring: maps each iframe id → its pane, toggles pane-focused exclusively, defaults to chat.
         # Fleet is its OWN pane now (the user 2026-06-24), so f-fleet maps to fleet-pane, not the chat pane.
-        self.assertIn("var PANE={'f-chat':'chat-pane','f-fleet':'fleet-pane','f-feed':'feed-pane','f-timeline':'tl-pane'}", html)
+        self.assertIn("var PANE={'f-chat':'chat-pane','f-fleet':'fleet-pane','f-feed':'feed-pane','f-hive':'hive-pane','f-timeline':'tl-pane'}", html)
         self.assertIn("classList.toggle('pane-focused'", html)
         self.assertIn("d.addEventListener('pointerdown',emit,true)", html)
         self.assertIn("d.addEventListener('focusin',emit,true)", html)
@@ -7474,3 +7474,34 @@ class ChatDivergenceTripwire(unittest.TestCase):
         jd._debug_mode = lambda: False
         km._note_chat_divergence(SID, "web", "working", "waiting", NOW)       # debug off: silent
         self.assertEqual(self._rows(), [])
+
+
+class OpenSessionFocusFirst(unittest.TestCase):
+    """openSession's focus frame must OUTRUN the slow work (the user 2026-08-13: the chat
+    switch took one to two seconds). The chat's tab is always shown for a live session, so
+    the frame that flips it goes out first; the SDK eager-connect and the full push follow."""
+
+    def _run(self, live_sids):
+        calls = []
+        orig = (km._tmux_sessions, km._sdk, km._push_all, km._reveal_or_confirm)
+        try:
+            km._tmux_sessions = lambda: live_sids
+            km._sdk = lambda: types.SimpleNamespace(connect=lambda sid: calls.append("connect"))
+            km._push_all = lambda *a, **k: calls.append("push")
+            km._reveal_or_confirm = lambda sid, focus, client=None: calls.append(("focus", focus))
+            km._open_or_revive(SID)
+        finally:
+            km._tmux_sessions, km._sdk, km._push_all, km._reveal_or_confirm = orig
+        return calls
+
+    def test_live_session_focus_beats_connect_and_push(self):
+        calls = self._run({SID: {}})
+        self.assertEqual([c if isinstance(c, str) else c[0] for c in calls],
+                         ["focus", "connect", "push"],
+                         "the tab-flipping frame must never queue behind connect/_push_all")
+        self.assertEqual(calls[0][1], {"type": "focus", "id": SID})
+
+    def test_dead_session_routes_to_reveal_only(self):
+        calls = self._run({})
+        self.assertEqual([c if isinstance(c, str) else c[0] for c in calls], ["focus"],
+                         "a dead sid gets the confirmRevive path, never a connect or a push")

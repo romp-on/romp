@@ -5405,8 +5405,20 @@ def _open_or_revive(sid, live=False):
     """openSession routing: a LIVE session → focus the chat (its tab is always shown); a DEAD one → the
     confirmRevive modal (no silent reopen, no auto read-only tab — the user 2026-06-17). `live` (the user
     2026-07-08): land the chat on its LIVE TAIL, not the last scroll — a blocked card's picker/permission
-    prompt is the live bottom, so its feed chip drops you right on it."""
-    if sid in _tmux_sessions():
+    prompt is the live bottom, so its feed chip drops you right on it.
+
+    ORDER (the user 2026-08-13, who clocked the switch at one to two seconds): the focus frame goes
+    out FIRST — the chat flips its always-shown tab instantly on what it already holds — and the
+    slow work follows: the SDK eager-connect (which dials a session this chat hasn't touched yet;
+    kept for the reasons below) and the full push that freshens every client. Before this, connect
+    + _push_all ran ahead of the focus, so the one frame that actually switches the tab queued
+    behind seconds of build."""
+    live_now = sid in _tmux_sessions()
+    focus = {"type": "focus", "id": sid}
+    if live:
+        focus["live"] = True
+    _reveal_or_confirm(sid, focus)
+    if live_now:
         be = _sdk()
         if be:
             be.connect(sid)   # SDK: eager-connect on OPEN (idempotent; no-op for tmux/unknown sids) so the
@@ -5414,10 +5426,6 @@ def _open_or_revive(sid, live=False):
                               # is changeable BEFORE the first message — not only after one (the user 2026-06-24:
                               # opening an SDK session showed no model/effort until a message was sent).
         _push_all()
-    focus = {"type": "focus", "id": sid}
-    if live:
-        focus["live"] = True
-    _reveal_or_confirm(sid, focus)
 
 
 def _revive_session(sid):
