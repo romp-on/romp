@@ -90,6 +90,54 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #090b10; }
 #hive-tip[data-state="awaitingBg"] { color: #7fd24a; }
 #hive-tip[data-state="compacting"], #hive-tip[data-state="clearing"] { color: #2dd4bf; }
 
+/* ── the tray: one draggable model bean per /models entry (bottom-left). Drag a bean onto
+   a free hexagon to spawn that model there; the badge cycles its effort; a clean click
+   makes that bean the default seed. The default wears the accent ring. */
+#hive-tray {
+  position: fixed; left: 14px; bottom: 14px; z-index: 6;
+  display: flex; gap: 10px; align-items: flex-end;
+  background: rgba(22, 25, 31, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
+  padding: 9px 12px;
+  font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.ht-bean { display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: grab;
+  color: #c9c9c9; user-select: none; -webkit-user-select: none; padding: 2px 4px; border-radius: 6px; }
+.ht-bean.lifted { opacity: 0.35; }
+.ht-bean .hb-body { width: 26px; height: 30px; position: relative;
+  border-radius: 46% 46% 44% 44% / 58% 58% 40% 40%;
+  background: radial-gradient(circle at 35% 28%, #dfe9f5, #9fb3c8 78%);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4); }
+.ht-bean.default .hb-body { box-shadow: 0 0 0 2px var(--accent, #9cd2ff), 0 2px 6px rgba(0, 0, 0, 0.4); }
+.ht-bean .hb-body i { position: absolute; top: 38%; width: 4px; height: 5px; border-radius: 50%;
+  background: #10151c; }
+.ht-bean .hb-body i:first-child { left: 30%; }
+.ht-bean .hb-body i:last-child { right: 30%; }
+.ht-bean .hb-name { font-size: 12px; }
+.ht-bean .hb-eff { border: 1px solid rgba(255, 255, 255, 0.16); background: none; color: #9aa0a6;
+  border-radius: 6px; font-size: 0.82em; opacity: 0.85; padding: 0 6px; cursor: pointer;
+  font-family: inherit; }
+.ht-bean .hb-eff:hover { color: #ffffff; border-color: rgba(255, 255, 255, 0.3); }
+.ht-bean.carried { position: fixed; left: 0; top: 0; z-index: 9; pointer-events: none; margin: 0;
+  background: none; }
+
+/* the board-level notice: refusals with no card open (a bad create, a refused default) */
+#hive-note {
+  position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);
+  z-index: 7; pointer-events: none;
+  background: #252526;
+  border: 1px solid rgba(229, 72, 77, 0.45);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  color: #ffb3b6; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 6px 12px; white-space: nowrap;
+  opacity: 0; transition: opacity 0.15s ease;
+}
+#hive-note.show { opacity: 1; }
+
 /* ── the trash dock: slides in from the bottom only while a session is being carried;
    dropping the bean on it ends the session. pointer-events none — the canvas keeps the
    pointer and rect-tests the drop; .armed answers the hover so the drop never surprises. */

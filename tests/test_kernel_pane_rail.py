@@ -48,10 +48,9 @@ class PaneRailTest(unittest.TestCase):
     def test_three_top_panes_in_fixed_order_then_the_timeline_band(self):
         # the TOP row is chat | gv-a | fleet | gv-b | feed; the timeline is the bottom band (gh + #tl-pane) AFTER
         # the row closes — so the DOM order is row panes first, then the gh gutter, then #tl-pane.
-        order = ["id=chat-pane", "id=gv-a", "id=fleet-pane", "id=gv-b", "id=feed-pane", "id=gh", "id=tl-pane"]
+        order = ["id=chat-pane", "id=gv-a", "id=fleet-pane", "id=gv-b", "id=feed-pane", "id=gv-c", "id=hive-pane", "id=gh", "id=tl-pane"]
         idxs = [self.html.index(tok) for tok in order]
         self.assertEqual(idxs, sorted(idxs), "row panes, then the gh gutter, then the timeline band")
-        self.assertNotIn("id=gv-c", self.html)                   # no 4th-pane gutter
         # the pane rail is the BOTTOM BAR (the user 2026-07-05): LAST child of .col, AFTER the timeline band —
         # no longer the first child of .row. So its markup falls after #tl-pane.
         self.assertGreater(self.html.index("class=pane-rail"), self.html.index("id=tl-pane"),
@@ -81,7 +80,7 @@ class PaneRailTest(unittest.TestCase):
     def test_rail_drives_a_persisted_pane_controller_exposed_for_the_legacy_toggle(self):
         # the controller toggles po-* from the rail, persists the set, and exposes __rompPaneToggle so the
         # legacy {romp:'toggleFleet'} postMessage routes through the same path
-        self.assertIn("var PK='romp-panes',po={chat:true,fleet:false,feed:true,timeline:true}", self.html)
+        self.assertIn("var PK='romp-panes',po={chat:true,fleet:false,feed:true,hive:false,timeline:true}", self.html)
         self.assertIn("window.__rompPaneToggle=togglePane", self.html)
         self.assertIn("togglePane(b.getAttribute('data-pane'))", self.html)
         self.assertIn("document.body.classList.toggle('po-chat',!!po.chat)", self.html)
@@ -190,7 +189,7 @@ class PaneRailTest(unittest.TestCase):
         # mobile shows one pane at a time via the bottom tab bar, not the rail; the desktop po-* pane-hiding
         # must NOT leak in (the tab bar governs), so chat/feed/timeline panes are forced back to display:contents
         self.assertIn(".gv,.gh,.pane-rail{display:none}", self.html)
-        self.assertIn("#chat-pane,#fleet-pane,#feed-pane,#tl-pane{display:contents!important}", self.html)
+        self.assertIn("#chat-pane,#fleet-pane,#feed-pane,#hive-pane,#tl-pane{display:contents!important}", self.html)
         # the Outline (fleet) is a mobile TAB now, no longer desktop-only (the user 2026-07-11)
         self.assertNotIn("#fleet-pane{display:none!important}", self.html)
         self.assertIn("body[data-tab=timeline] .row{display:none}", self.html)   # timeline tab → band fills

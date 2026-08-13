@@ -31,12 +31,15 @@ test("dropping on the armed dock ends the session via the kernel's own op", () =
   assert.match(drop, /particles\.burst/, "the drop is acknowledged where it happened");
 });
 
-test("dropping anywhere else springs them home — no kill outside the dock", () => {
-  const misses = drop.slice(drop.indexOf("} else {"));
-  assert.match(misses, /pad\.carryTo\(null\);/, "release → spring home");
-  assert.ok(!misses.includes("endSession"), "no end op on a missed drop");
-  assert.match(HIVE, /if \(this\.dragSession\) \{ this\.dropSessionDrag\(false\); return; \}/,
-    "Esc aborts the carry the same way");
+test("dropping outside the dock never kills: a free cell re-homes, anywhere else springs home", () => {
+  const misses = drop.slice(drop.indexOf("// a FREE cell under the drop"));
+  assert.ok(!misses.includes("endSession"), "no end op anywhere off the dock");
+  assert.match(misses, /const slot = cancel \|\| pad\.dyingT >= 0 \? null : this\.freeCellAt\(\);/,
+    "Esc and a dying pad NEVER re-home — only a real drop does");
+  assert.match(misses, /if \(slot !== null\) this\.rehome\(d\.sid, slot, pad\);/, "free cell → new home");
+  assert.match(misses, /else pad\.carryTo\(null\);/, "occupied/off-board → spring home");
+  assert.match(HIVE, /if \(this\.dragSession\) \{ this\.dropSessionDrag\(false, true\); return; \}/,
+    "Esc aborts the carry as a CANCEL, not a drop");
 });
 
 test("the dock arms only under the pointer, and shows WHO the drop would end", () => {

@@ -14,16 +14,16 @@ SRC = open(os.path.join(os.path.dirname(HERE), "bin", "romp-kernel")).read()
 
 class FleetLedgers(unittest.TestCase):
     def test_fleet_is_its_own_app_in_the_push(self):
-        self.assertIn('want_fleet = any(c["app"] == "fleet" for c in targets)', SRC)
+        self.assertIn('want_fleet = any(c["app"] in ("fleet", "hive") for c in targets)', SRC)
         # the fleet rides the feed payload, so want_feed must include it
-        self.assertIn('want_feed = any(c["app"] in ("feed", "fleet", "chat") for c in targets)', SRC)
+        self.assertIn('want_feed = any(c["app"] in ("feed", "fleet", "hive", "chat") for c in targets)', SRC)
 
     def test_chat_sessions_are_built_for_a_fleet_only_push(self):
         # the ledger slices come from chat_sessions; build them for want_chat OR want_fleet (not chat-only)
         self.assertIn("if want_chat or want_fleet:", SRC)
 
     def test_the_feed_payload_routes_to_both_feed_and_fleet_clients(self):
-        self.assertIn('if c["app"] in ("feed", "fleet"):', SRC)
+        self.assertIn('if c["app"] in ("feed", "fleet", "hive"):', SRC)
 
     def test_ledgers_are_attached_from_chat_sessions(self):
         self.assertIn('feed["ledgers"] = [{"sid": m["id"]', SRC)

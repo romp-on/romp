@@ -4303,7 +4303,7 @@ def _pick_identity_color(now=None):
     return bgs[i], fgs[i]
 
 
-def _create_sdk_session(nm, cwd, auth=""):
+def _create_sdk_session(nm, cwd, auth="", model="", effort=""):
     """Create + open a new SDK-backed session, ACK-FAST (the user 2026-07-14, who asked why it took so long
     to open a new SDK session). spawn() is file writes and connect() is threaded (~0.4s to a booting
     CLI) — the 7-10s the user waited was the handler's inline _push_all(): a new session invalidates the
@@ -4316,7 +4316,7 @@ def _create_sdk_session(nm, cwd, auth=""):
     the next full cycle, ~5-6s on a busy fleet, all of it spent staring at the provisional dots
     (measured live, the user 2026-08-10)."""
     bg, fg = _pick_identity_color()   # fleet-aware: only the kernel sees BOTH backends' live sessions
-    sid = _sdk().spawn(nm, cwd, bg, fg, auth=auth)
+    sid = _sdk().spawn(nm, cwd, bg, fg, auth=auth, model=model, effort=effort)
     _sdk().connect(sid)    # eager-connect so the model lists immediately, not only after the 1st message
     _reveal_chat({"type": "focus", "id": sid})
     _mark_views_dirty()
@@ -21905,7 +21905,16 @@ class Handler(BaseHTTPRequestHandler):
                     "palettes": [{"name": k, "label": v["label"], "colors": v["bg"]}
                                  for k, v in pal.PALETTES.items()]}), "application/json", cache="no-cache")
             if p == "/models":                                # the ONE model + effort choice list — chat statusline, timeline lanes, AND judge settings all read it (the user 2026-07-02: no hardcoding in multiple places)
-                return self._send(200, json.dumps({"models": MODEL_CHOICES, "efforts": EFFORT_CHOICES}), "application/json", cache="no-cache")
+                # `defaults` (the user 2026-08-13): the remembered new-session seed, so the hive tray can
+                # mark the default bean. Read from the same store spawn() seeds from — never a cached copy.
+                try:
+                    _sd = json.loads((jd.STATE / "sdk-defaults.json").read_text())
+                except (OSError, ValueError):
+                    _sd = {}
+                _sd = _sd if isinstance(_sd, dict) else {}
+                return self._send(200, json.dumps({"models": MODEL_CHOICES, "efforts": EFFORT_CHOICES,
+                                                   "defaults": {k: _sd[k] for k in ("model", "effort") if _sd.get(k)}}),
+                                  "application/json", cache="no-cache")
             if p == "/usage":                                 # the /usage rate-limit bars, re-read on demand: the rail's
                 # usage widget is click-to-refresh (the user 2026-06-30). Returns the freshest on-disk snapshot
                 # NOW, and (2026-07-02) also pokes one live SDK session for an exact get_usage snapshot — the
@@ -22916,6 +22925,24 @@ class Handler(BaseHTTPRequestHandler):
             # changed — so the reordered cards lagged up to ~2s (the user 2026-07-15). The dirty mark bypasses
             # the throttle AND wakes the pusher, so the rebuilt payload (fresh order) ships right away.
             _mark_views_dirty()
+        elif msg and msg.get("type") == "setSpawnDefaults" and (msg.get("model") or msg.get("effort")):
+            # The hive tray's 'make this my default' (the user 2026-08-13): the model/effort seed every
+            # NEW session starts from — the same sdk-defaults store the statusline picks feed implicitly
+            # (write_sdk_default). Not a per-session drive op: it has no sid, so it lives here with the
+            # other backend-global ops. Values must come from the /models lists; refused loudly otherwise.
+            mdl = msg.get("model") if msg.get("model") in _MODEL_VALUES else None
+            eff = msg.get("effort") if msg.get("effort") in _EFFORT_VALUES else None
+            if eff == "ultracode":
+                eff = None    # per-session by design (set_effort: "never a seed") — skipping it silently would lie
+            if (msg.get("model") and mdl is None) or (msg.get("effort") and eff is None):
+                client["send"](json.dumps({"type": "warn",
+                                           "text": "that model/effort isn't one of the offered choices (ultracode is per-session only)."}))
+            else:
+                be = _sdk()
+                if be:
+                    be.set_spawn_defaults(model=mdl, effort=eff)
+                    client["send"](json.dumps({"type": "spawnDefaults",
+                                               "model": mdl or "", "effort": eff or ""}))
         elif msg and msg.get("type") == "createSession" and msg.get("name"):
             nm = str(msg["name"]).strip()
             if not NAME_RE.match(nm):
@@ -22948,7 +22975,13 @@ class Handler(BaseHTTPRequestHandler):
                         # auth ('login'|'key') is the picker's per-session billing pick; anything else
                         # (older clients, no pick) means the remembered/ambient default (spawn's seed).
                         a = msg.get("auth")
-                        _create_sdk_session(nm, cwd, auth=(a if a in ("login", "key") else ""))
+                        # model/effort: the hive tray's per-spawn choice (the user 2026-08-13) — an
+                        # explicit alias/level from the /models lists outranks the remembered seed for
+                        # this one session; anything else means the seed, exactly as before.
+                        mdl = msg.get("model") if msg.get("model") in _MODEL_VALUES else ""
+                        eff = msg.get("effort") if msg.get("effort") in _EFFORT_VALUES else ""
+                        _create_sdk_session(nm, cwd, auth=(a if a in ("login", "key") else ""),
+                                            model=mdl, effort=eff)
                     else:
                         # NEVER silently fall back to tmux (the user asked for SDK and got a mystery tmux
                         # session on a remote host without the venv, 2026-07-02). Say what's missing.

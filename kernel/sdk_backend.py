@@ -3393,7 +3393,7 @@ class SdkBackend:
 
     # ---- lifecycle (kernel-thread API) ----
     def spawn(self, name: str, cwd: str, bg: str = "", fg: str = "", sid: str | None = None,
-              auth: str = "") -> str:
+              auth: str = "", model: str = "", effort: str = "") -> str:
         sid = sid or str(uuid.uuid4())
         cwd = os.path.realpath(cwd) if os.path.exists(cwd) else cwd
         if not bg:                                   # give the session a stable identity colour like tmux sessions get
@@ -3406,12 +3406,17 @@ class SdkBackend:
         # fills in on connect from get_context_usage(). The seed lands in THIS session's reg — exactly what
         # _options launches with and what the badge reads — so the display can never desync from what's used.
         d = read_sdk_defaults(self.state_dir)
-        eff = d.get("effort") if d.get("effort") in EFFORT_LEVELS else DEFAULT_EFFORT
+        # An EXPLICIT per-spawn choice (the hive tray's model bean, the user 2026-08-13) outranks the
+        # remembered seed for THIS session only — the seed itself is untouched, so a one-off Haiku
+        # spawn never silently becomes everyone's default.
+        eff = (effort if effort in EFFORT_LEVELS
+               else d.get("effort") if d.get("effort") in EFFORT_LEVELS else DEFAULT_EFFORT)
         mode = d.get("mode") or "acceptEdits"   # seed the permission mode from the remembered default too (the user 2026-06-27)
         reg = {"sid": sid, "name": name, "cwd": cwd, "mode": mode,
                "effort": eff, "lastSid": "", "alive": True}
-        if d.get("model") and d["model"] != "default":
-            reg["model"] = d["model"]
+        m = model or d.get("model")
+        if m and m != "default":
+            reg["model"] = m
         # Auth: the picker's explicit pick wins; else the remembered default (a gear /auth pick on any
         # session); unset stays unset — effective_auth's fallback IS the pre-selector behavior.
         a = auth if auth in ("login", "key") else (d.get("auth") if d.get("auth") in ("login", "key") else "")
@@ -3981,6 +3986,12 @@ class SdkBackend:
     def rewind_files(self, sid: str, uuid: str) -> bool:
         s = self.sessions.get(sid)
         return bool(s and s.request_rewind_files(uuid))
+
+    def set_spawn_defaults(self, model: str | None = None, effort: str | None = None) -> None:
+        """An explicit 'make this my default' (the hive tray's bean click, the user 2026-08-13) — the
+        same store the statusline picks feed implicitly (write_sdk_default), set deliberately. The
+        caller validates values against the choice lists; None leaves that field alone."""
+        write_sdk_default(self.state_dir, model=model, effort=effort)
 
     def set_effort(self, sid: str, value: str) -> bool:
         """Change the reasoning effort. effort is a connect-time CLI flag (--effort) with no SDK runtime

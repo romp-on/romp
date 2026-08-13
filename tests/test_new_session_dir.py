@@ -198,7 +198,7 @@ class CreateSessionDirFork(_Wire):
         self.spawned = []
         self._real_sdk = km._create_sdk_session
         self._real_ready = km._sdk_ready
-        km._create_sdk_session = lambda nm, cwd, auth="": self.spawned.append((nm, cwd)) or "TESTSID"
+        km._create_sdk_session = lambda nm, cwd, auth="", model="", effort="": self.spawned.append((nm, cwd)) or "TESTSID"
         km._sdk_ready = lambda: True
         self.addCleanup(setattr, km, "_create_sdk_session", self._real_sdk)
         self.addCleanup(setattr, km, "_sdk_ready", self._real_ready)

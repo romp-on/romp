@@ -83,6 +83,7 @@ class Pad {
   carrier = new THREE.Group();              // rides the pointer while the user carries them
   private carryTarget: THREE.Vector3 | null = null;
   private carryWant = new THREE.Vector3(); // scratch — no per-frame allocation
+  private homeX = 0; private homeZ = 0;    // the pad's cell — eased toward, so a re-home GLIDES
   private baseY = 0;
   lift = 0;                                 // hover/press target offset, eased in update()
   private liftCur = 0;
@@ -97,6 +98,7 @@ class Pad {
     this.sess = sess;
     const { x, z } = axialToXZ(spiralSlot(slot), HEX_SIZE);
     this.group.position.set(x, 0, z);
+    this.homeX = x; this.homeZ = z;
 
     const tint = new THREE.Color(sess.color?.bg || "#8a8a8a");
     // Tron slab: near-black glossy top with only a whisper of the identity color; the
@@ -184,6 +186,8 @@ class Pad {
 
   // world-space carry target while the user drags them; null → spring home (update() eases)
   carryTo(p: THREE.Vector3 | null) { this.carryTarget = p ? p.clone() : null; }
+  // move the pad's HOME to another cell (drag-to-re-home, the user 2026-08-13); update() glides it
+  homeTo(x: number, z: number) { this.homeX = x; this.homeZ = z; }
   beanWorldPos(): THREE.Vector3 { return this.carrier.getWorldPosition(new THREE.Vector3()); }
   consumeBean() {
     this.guy.group.visible = false;
@@ -216,6 +220,9 @@ class Pad {
     }
     this.liftCur = ease(this.liftCur, this.lift, dt, 14);
     this.group.position.y = this.liftCur;
+    // the tile glides to its home cell (a re-home moves it; at rest this is a no-op)
+    this.group.position.x = ease(this.group.position.x, this.homeX, dt, 10);
+    this.group.position.z = ease(this.group.position.z, this.homeZ, dt, 10);
 
     // carried: the bean rides the pointer (world target → pad-local); released, it
     // springs home — the same everything-springs rule as the rest of the board
@@ -880,6 +887,8 @@ class HiveWorld {
   private trashEl: HTMLElement;
   private tipEl: HTMLElement;
   private tipText = "";
+  private noteEl: HTMLElement;
+  private noteT = 0;
   private ghostRingMat = new THREE.LineBasicMaterial({
     color: ACCENT, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false,
   });
@@ -945,7 +954,7 @@ class HiveWorld {
     });
     window.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
-      if (this.dragSession) { this.dropSessionDrag(false); return; }   // Esc aborts a carry
+      if (this.dragSession) { this.dropSessionDrag(false, true); return; }   // Esc aborts a carry
       this.deselect();
     });
 
@@ -966,6 +975,12 @@ class HiveWorld {
     this.tipEl.id = "hive-tip";
     this.tipEl.innerHTML = '<span class="tip-dot"></span><span class="tip-state"></span>';
     document.body.appendChild(this.tipEl);
+
+    // the board-level notice: kernel refusals that arrive with NO card open land here
+    // instead of vanishing (fail loudly) — a transient line, never a modal
+    this.noteEl = document.createElement("div");
+    this.noteEl.id = "hive-note";
+    document.body.appendChild(this.noteEl);
 
     const fit = () => {
       const w = root.clientWidth || 1, h = root.clientHeight || 1;
@@ -1122,13 +1137,13 @@ class HiveWorld {
   private moveSessionDrag(e: PointerEvent) {
     const d = this.dragSession!;
     const pad = this.pads.get(d.sid);
-    if (!pad || pad.dyingT >= 0) { this.dropSessionDrag(false); return; }
+    if (!pad || pad.dyingT >= 0) { this.dropSessionDrag(false, true); return; }
     const r = this.trashEl.getBoundingClientRect();
     const over = e.clientX >= r.left - 14 && e.clientX <= r.right + 14 && e.clientY >= r.top - 14;
     if (over !== d.over) { d.over = over; this.trashEl.classList.toggle("armed", over); }
   }
 
-  private dropSessionDrag(over: boolean) {
+  private dropSessionDrag(over: boolean, cancel = false) {
     const d = this.dragSession;
     this.dragSession = null;
     this.trashEl.classList.remove("show", "armed");
@@ -1145,9 +1160,67 @@ class HiveWorld {
       pad.consumeBean();
       pad.dyingT = 0.26;
       if (this.selected === d.sid) this.deselect();
-    } else {
-      pad.carryTo(null);                     // anywhere else: they spring home, no harm done
+      return;
     }
+    // a FREE cell under the drop re-homes them there (the user 2026-08-13, who wanted to
+    // choose where each session lives): the user's own gesture is the one sanctioned move
+    // event for a session's hex, and the slot map + localStorage move with it so the new
+    // home survives reloads. Esc / a dying pad / anywhere else springs them home unharmed.
+    const slot = cancel || pad.dyingT >= 0 ? null : this.freeCellAt();
+    if (slot !== null) this.rehome(d.sid, slot, pad);
+    else pad.carryTo(null);
+  }
+
+  private rehome(sid: string, slot: number, pad: Pad) {
+    this.slots.set(sid, slot);
+    saveSlots(loadSlots(this.slots));        // merge-persist, same shape sync() keeps
+    const p = axialToXZ(spiralSlot(slot), HEX_SIZE);
+    pad.homeTo(p.x, p.z);                    // the tile glides; the bean springs down onto it
+    pad.carryTo(null);
+    // the ghost's park may be stale now (the move may have taken or freed its cell)
+    let free = 0;
+    const taken = new Set(this.slots.values());
+    while (taken.has(free)) free++;
+    this.ghostHome = free;
+    if (this.hovered !== HiveWorld.GHOST) this.ghostTo(free);
+  }
+
+  // ── the tray (model beans): spawn-drag support ─────────────────────────────────────────
+  // The tray lives in the page DOM (buildTray below); these are the board-side halves.
+  trayHover(clientX: number, clientY: number): number | null {
+    const slot = this.freeCellAt(clientX, clientY);
+    if (slot !== null && slot !== this.ghostSlot) this.ghostTo(slot);
+    return slot;
+  }
+
+  autoName(alias: string): string {
+    // smallest free "<alias>-<n>" among the names on the board (bare names — a remote's
+    // host: prefix is viewer metadata, and collisions only matter on the owning kernel)
+    const used = new Set([...this.pads.values()].map((p) => {
+      const h = hostPrefix(p.sess.name, p.sess.sid);
+      return h ? h.rest : p.sess.name;
+    }));
+    let n = 1;
+    while (used.has(alias + "-" + n)) n++;
+    return alias + "-" + n;
+  }
+
+  spawnAt(slot: number, model: string, effort: string) {
+    // the dropped bean claims the cell (the same reservation a recruit click makes), the
+    // spark acknowledges, and the kernel's own createSession does the real work — an SDK
+    // session with THIS model+effort outranking the remembered seed for this one session
+    this.reservedSlot = slot;
+    const p = axialToXZ(spiralSlot(slot), HEX_SIZE);
+    this.particles.burst(new THREE.Vector3(p.x, 0.6, p.z), [ACCENT, 0xd6ecff], 16, 1.8);
+    vscodeApi?.postMessage({ type: "createSession", name: this.autoName(model), backend: "sdk", model, effort });
+  }
+
+  // a transient board-level notice for refusals with no card open (fail loudly, never vanish)
+  note(text: string) {
+    this.noteEl.textContent = text;
+    this.noteEl.classList.add("show");
+    clearTimeout(this.noteT);
+    this.noteT = window.setTimeout(() => this.noteEl.classList.remove("show"), 4000);
   }
 
   private static GHOST = "\0ghost";          // impossible sid — the ghost's pick token
@@ -1168,21 +1241,32 @@ class HiveWorld {
     if (best) return { sid: best.sid, bean: best.bean };
     // nothing solid under the pointer: any EMPTY cell of the board is the invitation too —
     // the ghost glides to it and a clean click recruits there (the user 2026-08-13)
-    const oy = this.raycaster.ray.origin.y, dy = this.raycaster.ray.direction.y;
-    const t = dy !== 0 ? -oy / dy : -1;
-    if (t > 0) {
-      const px = this.raycaster.ray.origin.x + this.raycaster.ray.direction.x * t;
-      const pz = this.raycaster.ray.origin.z + this.raycaster.ray.direction.z * t;
-      const cell = xzToAxial(px, pz, HEX_SIZE);
-      if (hexDistance(cell, { q: 0, r: 0 }) <= this.latticeRings) {
-        const slot = slotOfAxial(cell);
-        if (slot >= 0 && !new Set(this.slots.values()).has(slot)) {
-          if (slot !== this.ghostSlot) this.ghostTo(slot);
-          return { sid: HiveWorld.GHOST, bean: false };
-        }
-      }
+    const slot = this.freeCellAt();
+    if (slot !== null) {
+      if (slot !== this.ghostSlot) this.ghostTo(slot);
+      return { sid: HiveWorld.GHOST, bean: false };
     }
     return { sid: null, bean: false };
+  }
+
+  // The FREE cell of the board under a point — the ONE ground-plane → cell mapping, shared
+  // by hover (pick), drop-to-re-home, and the tray's spawn-drag. With client coords given,
+  // the pointer NDC is refreshed first (tray drags arrive as window events, not canvas ones).
+  freeCellAt(clientX?: number, clientY?: number): number | null {
+    if (clientX !== undefined && clientY !== undefined) {
+      const r = this.renderer.domElement.getBoundingClientRect();
+      this.pointer.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    }
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const oy = this.raycaster.ray.origin.y, dy = this.raycaster.ray.direction.y;
+    const t = dy !== 0 ? -oy / dy : -1;
+    if (t <= 0) return null;
+    const px = this.raycaster.ray.origin.x + this.raycaster.ray.direction.x * t;
+    const pz = this.raycaster.ray.origin.z + this.raycaster.ray.direction.z * t;
+    const cell = xzToAxial(px, pz, HEX_SIZE);
+    if (!(hexDistance(cell, { q: 0, r: 0 }) <= this.latticeRings)) return null;   // the visible board only
+    const slot = slotOfAxial(cell);
+    return slot >= 0 && !new Set(this.slots.values()).has(slot) ? slot : null;
   }
 
   // the direct line to a session: its chat opens in the chat pane (left of the board),
@@ -1523,11 +1607,19 @@ window.addEventListener("message", (e: MessageEvent) => {
     world.card.error(String(m.title || "That message was not delivered"), String(m.text || ""));
     return;
   }
-  // a refused op that answers as a warn (renameSession's bad-name reply) — same fail-loudly
-  // rule: this socket only carries replies to ops THIS page sent, so an open card is the
-  // one that asked
-  if (m.type === "warn" && world && world.card.sid) {
-    world.card.error(String(m.text || "That didn't take"), "");
+  // a refused op that answers as a warn (a bad rename, a refused default, a create the
+  // kernel won't take) — same fail-loudly rule: this socket only carries replies to ops
+  // THIS page sent. An open card owns it; otherwise the board-level note shows it.
+  if (m.type === "warn" && world) {
+    if (world.card.sid) world.card.error(String(m.text || "That didn't take"), "");
+    else world.note(String(m.text || "That didn't take"));
+    return;
+  }
+  // the kernel confirmed a default change (ours or another dashboard's tray) — re-mark
+  if (m.type === "spawnDefaults") {
+    if (m.model) SPAWN_DEFAULTS.model = String(m.model);
+    if (m.effort) SPAWN_DEFAULTS.effort = String(m.effort);
+    markTrayDefaults();
     return;
   }
   if (m.type !== "feed") return;
@@ -1535,10 +1627,104 @@ window.addEventListener("message", (e: MessageEvent) => {
   if (sessions === null) return;             // ledgers not built yet → loader stays up
   const root = document.getElementById("hive-root");
   if (!root) return;
-  if (!world) world = new HiveWorld(root);   // first real data: mount → _pane_spin fades
+  if (!world) { world = new HiveWorld(root); maybeBuildTray(); }   // first real data: mount → _pane_spin fades
   world.sync(sessions, firstPayload);
   firstPayload = false;
 });
+
+// ── the tray: one draggable bean per MODEL (the user 2026-08-13) ─────────────────────────
+// Config embedded in the board's own drag language: drag a bean onto a free hexagon and a
+// session with that model spawns there (SDK-backed, the dashboard-native kind); the badge
+// on each bean cycles its EFFORT; a clean CLICK makes that bean (model + effort) the
+// default every new session seeds from. Choices come from the kernel's /models — the ONE
+// list every picker shares — never a hardcoded copy here.
+interface SpawnChoice { value: string; label: string }
+let SPAWN_MODELS: SpawnChoice[] = [];
+let SPAWN_EFFORTS: string[] = [];
+const SPAWN_DEFAULTS: { model?: string; effort?: string } = {};
+let trayBuilt = false;
+
+fetch("/models", { cache: "no-store" }).then((r) => r.json()).then((d) => {
+  if (Array.isArray(d.models)) SPAWN_MODELS = d.models;
+  if (Array.isArray(d.efforts)) SPAWN_EFFORTS = d.efforts.map((e: SpawnChoice) => e.value);
+  Object.assign(SPAWN_DEFAULTS, d.defaults || {});
+  maybeBuildTray();
+}).catch(() => { /* standalone/VS Code host without a reachable kernel HTTP — no tray, board still works */ });
+
+function markTrayDefaults() {
+  document.querySelectorAll<HTMLElement>("#hive-tray .ht-bean").forEach((b) => {
+    b.classList.toggle("default", b.dataset.model === (SPAWN_DEFAULTS.model || ""));
+  });
+}
+
+function maybeBuildTray() {
+  if (trayBuilt || !world || !SPAWN_MODELS.length) return;
+  trayBuilt = true;
+  const tray = document.createElement("div");
+  tray.id = "hive-tray";
+  const effKey = "romp:hive-tray-efforts";
+  let effSel: Record<string, string> = {};
+  try { effSel = JSON.parse(localStorage.getItem(effKey) || "{}") || {}; } catch { /* fresh */ }
+  for (const mc of SPAWN_MODELS) {
+    const bean = document.createElement("div");
+    bean.className = "ht-bean";
+    bean.dataset.model = mc.value;
+    bean.title = "Drag onto a hexagon to spawn a " + mc.label +
+      " session there. Click to make it the default for new sessions.";
+    bean.innerHTML = '<div class="hb-body"><i></i><i></i></div><span class="hb-name">' + mc.label +
+      '</span><button class="hb-eff" title="Reasoning effort for sessions spawned from this bean"></button>';
+    const effBtn = bean.querySelector(".hb-eff") as HTMLButtonElement;
+    effBtn.textContent = effSel[mc.value] || SPAWN_DEFAULTS.effort || "high";
+    effBtn.addEventListener("click", (e) => {
+      e.stopPropagation();                   // the badge cycles effort; it never sets the default
+      const cur = SPAWN_EFFORTS.indexOf(effBtn.textContent || "");
+      effBtn.textContent = SPAWN_EFFORTS[(cur + 1) % Math.max(1, SPAWN_EFFORTS.length)] || "high";
+      effSel[mc.value] = effBtn.textContent!;
+      try { localStorage.setItem(effKey, JSON.stringify(effSel)); } catch { /* private mode */ }
+    });
+    bean.addEventListener("pointerdown", (e) => {
+      if ((e.target as HTMLElement).closest(".hb-eff")) return;
+      e.preventDefault();
+      const sx = e.clientX, sy = e.clientY;
+      let chip: HTMLElement | null = null;   // the carried copy; created once the press MOVES
+      const move = (ev: PointerEvent) => {
+        if (!chip && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 6) {
+          chip = bean.cloneNode(true) as HTMLElement;
+          chip.classList.add("carried");
+          document.body.appendChild(chip);
+          bean.classList.add("lifted");
+        }
+        if (chip) {
+          chip.style.transform = "translate(" + ev.clientX + "px," + ev.clientY + "px) translate(-50%, -60%)";
+          world?.trayHover(ev.clientX, ev.clientY);   // the board's ghost glides to the target cell
+        }
+      };
+      const up = (ev: PointerEvent) => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        bean.classList.remove("lifted");
+        const effort = effBtn.textContent || "";
+        if (chip) {
+          chip.remove();
+          const slot = world ? world.trayHover(ev.clientX, ev.clientY) : null;
+          if (slot !== null && world) world.spawnAt(slot, mc.value, effort);
+        } else {
+          // clean click: this bean (model + its effort) becomes the seed for new sessions.
+          // Optimistic mark now; the kernel's spawnDefaults confirmation (or warn) corrects.
+          SPAWN_DEFAULTS.model = mc.value;
+          SPAWN_DEFAULTS.effort = effort;
+          markTrayDefaults();
+          vscodeApi?.postMessage({ type: "setSpawnDefaults", model: mc.value, effort });
+        }
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+    tray.appendChild(bean);
+  }
+  document.body.appendChild(tray);
+  markTrayDefaults();
+}
 
 vscodeApi?.postMessage({ type: "ready" });   // ask the kernel for the connect-time push
 

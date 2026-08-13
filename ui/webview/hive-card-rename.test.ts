@@ -61,7 +61,8 @@ test("an ended session stops offering rename; refresh() restores it for a live o
 test("a refused rename surfaces on the card (fail loudly), via the kernel's warn reply", () => {
   assert.ok(KERNEL.includes('"type": "warn", "text": "session names use letters'),
     "the kernel answers a bad name with a warn");
-  assert.match(HIVE, /m\.type === "warn" && world && world\.card\.sid/, "the hive routes warns to the card");
+  assert.match(HIVE, /if \(world\.card\.sid\) world\.card\.error/, "an open card owns the warn");
+  assert.match(HIVE, /else world\.note\(/, "…and with no card open, the board-level note shows it");
 });
 
 test("the editor's chrome lives in hive-pane.css (this page loads only its own stylesheet)", () => {
