@@ -80,7 +80,8 @@ test("a click's whole answer is the chat on the left; the card stays out of the 
     "ANY press on an occupied cell switches chat ON THE DOWN — except the nameplate, which edits");
   // the fly-in card + camera zoom on every click read as noise (the user 2026-08-13):
   // a click does NOTHING more on the up, and select() serves only the deep-link jump
-  assert.match(HIVE, /if \(pp\) return;/, "a click is DONE on the down — no card, no fly-in on the up");
+  assert.match(HIVE, /if \(pp\.name && Math\.hypot[^\n]+this\.beginBoardRename\(pp\.sid\);\s*\n\s*return;/,
+    "the up resolves ONLY the nameplate's edit — no card, no fly-in");
   assert.ok(!/this\.select\(pp\.sid\)/.test(HIVE), "no click path reaches select()");
   assert.match(HIVE, /openChat\(sid: string\) \{/, "one shared open path");
   assert.match(HIVE, /this\.card\.onOpen = \(sid\) => this\.openChat\(sid\);/, "the card's Open uses it");
