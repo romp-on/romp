@@ -75,8 +75,10 @@ test("clicking the bean opens their chat; the tile keeps opening the card", () =
   // session and reveals the chat pane — one path shared with the card's Open and dblclick.
   assert.match(HIVE, /new THREE\.CapsuleGeometry\(0\.55/, "the bean has a whole-body hit capsule");
   assert.match(HIVE, /colorWrite: false/, "…that draws nothing but still raycasts");
-  assert.match(HIVE, /if \(pp\.bean && pad\) \{\s*\n\s*pad\.pokeBean\(\);\s*\n\s*this\.openChat\(pp\.sid\);/,
-    "bean click: acknowledge on them, then straight to the chat (on the clean UP — a moved press is a pick-up)");
+  assert.match(HIVE, /if \(hit\.bean && pad\) \{\s*\n\s*pad\.pokeBean\(\);\s*\n\s*this\.openChat\(sid\);/,
+    "bean press: chat switches ON THE DOWN — instant, even if the press then becomes a pick-up");
+  assert.match(HIVE, /if \(!pp\.bean && this\.pads\.has\(pp\.sid\)\) this\.select\(pp\.sid\);/,
+    "the tile's card (camera fly-in) still resolves on the clean UP");
   assert.match(HIVE, /openChat\(sid: string\) \{/, "one shared open path");
   assert.match(HIVE, /this\.card\.onOpen = \(sid\) => this\.openChat\(sid\);/, "the card's Open uses it");
   assert.match(HIVE, /\{ romp: "reveal", pane: "chat" \}/, "…and it reveals the chat pane");

@@ -1059,10 +1059,16 @@ class HiveWorld {
       return;
     }
     if (sid) {
-      // acknowledge the press NOW (the pad dips); the ACTION fires on the clean UP —
-      // a press that MOVES becomes a pick-up instead (drag to the trash dock to end)
       const pad = this.pads.get(sid);
       if (pad) { pad.lift = -0.07; setTimeout(() => { if (this.pads.get(sid) === pad) pad.lift = this.hovered === sid ? 0.12 : 0; }, 130); }
+      // the BEAN switches chat ON THE DOWN — instant (the user 2026-08-13, everything
+      // responsive). The same press can still become a pick-up: the switch has already
+      // happened, and seeing their chat while you carry them is coherent. The TILE'S
+      // action (card + camera fly-in) stays on the clean UP — a fly-in mid-drag is chaos.
+      if (hit.bean && pad) {
+        pad.pokeBean();
+        this.openChat(sid);
+      }
       this.pressedPad = { sid, x: e.clientX, y: e.clientY, bean: hit.bean };
     } else {
       this.dragging = { mode: "orbit", x: e.clientX, y: e.clientY };
@@ -1078,15 +1084,8 @@ class HiveWorld {
     if (this.dragSession) { this.dropSessionDrag(this.dragSession.over); return; }
     if (pp) {
       if (Math.hypot(e.clientX - pp.x, e.clientY - pp.y) > 5) return;   // it was a nudge, not a click
-      const pad = this.pads.get(pp.sid);
-      // clicking the BEAN is the direct line to their chat: they pop (acknowledgement on
-      // THEM) and the chat pane opens; clicking the TILE opens the fly-in card
-      if (pp.bean && pad) {
-        pad.pokeBean();
-        this.openChat(pp.sid);
-      } else if (pad) {
-        this.select(pp.sid);
-      }
+      // the bean already switched chat on the DOWN; the tile's card resolves here
+      if (!pp.bean && this.pads.has(pp.sid)) this.select(pp.sid);
       return;
     }
     if (!pr) return;

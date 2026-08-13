@@ -20,7 +20,7 @@ test("a pick-up is gated on the GESTURE: a held press must move before it become
   assert.match(HIVE, /if \(this\.dragSession\) \{ this\.moveSessionDrag\(e\); return; \}/,
     "a carry never orbits the camera");
   assert.match(HIVE, /this\.pressedPad = \{ sid, x: e\.clientX, y: e\.clientY, bean: hit\.bean \};/,
-    "the press arms; the click actions fire on the clean UP");
+    "the press arms the pick-up; the tile's click resolves on the clean UP (the bean's is instant on the down)");
 });
 
 test("dropping on the armed dock ends the session via the kernel's own op", () => {
