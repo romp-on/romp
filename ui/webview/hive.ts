@@ -171,6 +171,8 @@ class Pad {
   }
 
   hitMeshes(): THREE.Object3D[] { return [this.padMesh]; }
+  beanMeshes(): THREE.Object3D[] { return [this.guy.hit]; }
+  pokeBean() { this.guy.poke(); }
 
   update(dt: number, camYaw: number, camDist: number, focus: boolean): boolean {
     this.t += dt;
@@ -246,6 +248,7 @@ class Dweller {
   private face: THREE.Mesh;
   private eyeL: THREE.Mesh; private eyeR: THREE.Mesh;
   private armL: THREE.Mesh; private armR: THREE.Mesh;
+  hit!: THREE.Mesh;                         // invisible click body — see the ctor
   private aura: THREE.Mesh;                 // compacting swirl / awaitingBg marker, recolored per state
   private auraMat: THREE.MeshBasicMaterial;
   private orb!: THREE.Mesh;                 // awaitingBg: spinning gem overhead
@@ -306,6 +309,16 @@ class Dweller {
     this.torso.add(this.armL, this.armR);
     this.group.add(this.torso);
 
+    // the bean's HIT BODY: an invisible capsule over the whole character (arms, face, all
+    // of them), so clicking THEM is easy — colorWrite:false draws nothing but still
+    // raycasts. Clicking the bean is the direct line to their chat (the user 2026-08-13).
+    this.hit = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.55, 0.55, 4, 8),
+      new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false }),
+    );
+    this.hit.position.y = 0.62;
+    this.group.add(this.hit);
+
     this.auraMat = new THREE.MeshBasicMaterial({ color: ST.compacting, transparent: true, opacity: 0 });
     this.aura = new THREE.Mesh(new THREE.TorusGeometry(0.58, 0.035, 6, 24), this.auraMat);
     this.aura.position.y = 0.66;
@@ -360,6 +373,11 @@ class Dweller {
     }
     if (s !== this.state) this.squash = 1.18;   // every real transition lands with a squash beat
     this.state = s; this.faded = faded;
+  }
+
+  // a click landed on them — the hatch pop doubles as the immediate acknowledgement
+  poke() {
+    this.pop = Math.max(this.pop, 0.45);
   }
 
   update(dt: number, t: number, camYaw: number) {
@@ -888,7 +906,7 @@ class HiveWorld {
     }, { passive: false });
     cv.addEventListener("dblclick", () => {
       const sid = this.hovered;
-      if (sid) { vscodeApi?.postMessage({ type: "openSession", id: sid }); }
+      if (sid && sid !== HiveWorld.GHOST) this.openChat(sid);
     });
     window.addEventListener("keydown", (e) => { if (e.key === "Escape") this.deselect(); });
 
@@ -932,10 +950,7 @@ class HiveWorld {
     this.scene.add(this.ghost);
 
     this.card.onClose = () => this.deselect();
-    this.card.onOpen = (sid) => {
-      vscodeApi?.postMessage({ type: "openSession", id: sid });
-      try { if (window.parent !== window) window.parent.postMessage({ romp: "reveal", pane: "chat" }, "*"); } catch { /* standalone */ }
-    };
+    this.card.onOpen = (sid) => this.openChat(sid);
     this.card.onRename = (sid, name) => {
       // the SAME renameSession op the chat tab strip posts — the kernel renames the tmux
       // session (or the names file for a dead one) and the new name rides the next push
@@ -979,7 +994,8 @@ class HiveWorld {
 
   private onPointerDown(e: PointerEvent) {
     this.canvasPoint(e);
-    const sid = this.pick();
+    const hit = this.pick();
+    const sid = hit.sid;
     if (e.button === 2 || e.shiftKey) { this.dragging = { mode: "pan", x: e.clientX, y: e.clientY }; return; }
     if (sid === HiveWorld.GHOST) {
       // recruit is decided on the UP (a clean click, not a drag) so the whole empty board
@@ -989,8 +1005,16 @@ class HiveWorld {
       return;
     }
     if (sid) {
-      // acknowledge on the DOWN, before anything async: the pad dips under the press
       const pad = this.pads.get(sid);
+      // clicking the BEAN is the direct line to their chat: they pop (immediate
+      // acknowledgement, on them), and the chat pane opens on that session — the hive
+      // stays put. Clicking the TILE keeps opening the fly-in card (the user 2026-08-13).
+      if (hit.bean && pad) {
+        pad.pokeBean();
+        this.openChat(sid);
+        return;
+      }
+      // acknowledge on the DOWN, before anything async: the pad dips under the press
       if (pad) { pad.lift = -0.07; setTimeout(() => { if (this.pads.get(sid) === pad) pad.lift = this.hovered === sid ? 0.12 : 0; }, 130); }
       this.select(sid);
     } else {
@@ -1015,17 +1039,20 @@ class HiveWorld {
 
   private static GHOST = "\0ghost";          // impossible sid — the ghost's pick token
 
-  private pick(): string | null {
+  private pick(): { sid: string | null; bean: boolean } {
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    let best: { sid: string; d: number } | null = null;
+    let best: { sid: string; d: number; bean: boolean } | null = null;
     for (const [sid, pad] of this.pads) {
       if (pad.dyingT >= 0) continue;
       const hits = this.raycaster.intersectObjects(pad.hitMeshes(), false);
-      if (hits.length && (!best || hits[0].distance < best.d)) best = { sid, d: hits[0].distance };
+      if (hits.length && (!best || hits[0].distance < best.d)) best = { sid, d: hits[0].distance, bean: false };
+      // the bean stands proud of its tile, so when both are under the pointer the bean wins
+      const bh = this.raycaster.intersectObjects(pad.beanMeshes(), false);
+      if (bh.length && (!best || bh[0].distance < best.d)) best = { sid, d: bh[0].distance, bean: true };
     }
     const gh = this.raycaster.intersectObject(this.ghostFill, false);
-    if (gh.length && (!best || gh[0].distance < best.d)) best = { sid: HiveWorld.GHOST, d: gh[0].distance };
-    if (best) return best.sid;
+    if (gh.length && (!best || gh[0].distance < best.d)) best = { sid: HiveWorld.GHOST, d: gh[0].distance, bean: false };
+    if (best) return { sid: best.sid, bean: best.bean };
     // nothing solid under the pointer: any EMPTY cell of the board is the invitation too —
     // the ghost glides to it and a clean click recruits there (the user 2026-08-13)
     const oy = this.raycaster.ray.origin.y, dy = this.raycaster.ray.direction.y;
@@ -1038,11 +1065,19 @@ class HiveWorld {
         const slot = slotOfAxial(cell);
         if (slot >= 0 && !new Set(this.slots.values()).has(slot)) {
           if (slot !== this.ghostSlot) this.ghostTo(slot);
-          return HiveWorld.GHOST;
+          return { sid: HiveWorld.GHOST, bean: false };
         }
       }
     }
-    return null;
+    return { sid: null, bean: false };
+  }
+
+  // the direct line to a session: its chat opens in the chat pane (left of the board),
+  // the hive stays put on the right — one message pair, used by the bean click, the
+  // card's Open, and dblclick alike
+  openChat(sid: string) {
+    vscodeApi?.postMessage({ type: "openSession", id: sid });
+    try { if (window.parent !== window) window.parent.postMessage({ romp: "reveal", pane: "chat" }, "*"); } catch { /* standalone */ }
   }
 
   // aim the ghost at a cell; frame() glides it there (everything springs, nothing teleports)
@@ -1221,7 +1256,7 @@ class HiveWorld {
     this.idleT += dt;
 
     // hover pick once per frame (not per pointermove — cheaper and steadier)
-    const sid = this.pick();
+    const sid = this.pick().sid;
     if (sid !== this.hovered) {
       const old = this.hovered && this.hovered !== HiveWorld.GHOST ? this.pads.get(this.hovered) : null;
       if (old) old.lift = 0;

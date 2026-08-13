@@ -69,6 +69,19 @@ test("cell lines trace the EXACT boundary, so used and empty cells are one conne
   assert.ok(!HIVE.includes("LINE_INSET"), "no inset constant survives");
 });
 
+test("clicking the bean opens their chat; the tile keeps opening the card", () => {
+  // The bean is the direct line (the user 2026-08-13): an invisible capsule makes the
+  // whole character clickable, the pop acknowledges on THEM, and openChat both opens the
+  // session and reveals the chat pane — one path shared with the card's Open and dblclick.
+  assert.match(HIVE, /new THREE\.CapsuleGeometry\(0\.55/, "the bean has a whole-body hit capsule");
+  assert.match(HIVE, /colorWrite: false/, "…that draws nothing but still raycasts");
+  assert.match(HIVE, /if \(hit\.bean && pad\) \{\s*\n\s*pad\.pokeBean\(\);\s*\n\s*this\.openChat\(sid\);/,
+    "bean click: acknowledge on them, then straight to the chat");
+  assert.match(HIVE, /openChat\(sid: string\) \{/, "one shared open path");
+  assert.match(HIVE, /this\.card\.onOpen = \(sid\) => this\.openChat\(sid\);/, "the card's Open uses it");
+  assert.match(HIVE, /\{ romp: "reveal", pane: "chat" \}/, "…and it reveals the chat pane");
+});
+
 test("hive's WebGL palette matches the styles.css status tokens (one meaning per color)", () => {
   // hive draws in WebGL where CSS vars can't reach, so it carries the values — this pin is
   // what keeps them the SAME values. Each pair: [styles.css token, hive.ts literal].
