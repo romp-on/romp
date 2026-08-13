@@ -127,7 +127,7 @@ class Pad {
     this.group.add(this.label);
 
     this.bang = makeTextSprite("!", "#ffffff", "#c0392b");
-    this.bang.position.y = 2.35;
+    this.bang.position.y = 2.05;             // between head and label, kissing neither
     this.bang.visible = false;
     this.group.add(this.bang);
 
@@ -203,7 +203,7 @@ class Pad {
       this.sonarMat.opacity = (1 - p) * 0.5;
       this.sonar.scale.setScalar(1 + p * 0.85);
       this.bang.visible = true;
-      this.bang.position.y = 2.35 + 0.14 * Math.abs(Math.sin(this.t * 5));
+      this.bang.position.y = 2.05 + 0.14 * Math.abs(Math.sin(this.t * 5));
     } else {
       this.sonarMat.opacity = 0;
       this.bang.visible = false;
@@ -236,6 +236,8 @@ class Dweller {
   private armL: THREE.Mesh; private armR: THREE.Mesh;
   private aura: THREE.Mesh;                 // compacting swirl / awaitingBg marker, recolored per state
   private auraMat: THREE.MeshBasicMaterial;
+  private orb!: THREE.Mesh;                 // awaitingBg: spinning gem overhead
+  private orbMat!: THREE.MeshBasicMaterial;
   private desk: THREE.Group;                // tiny desk + glowing laptop — the "working" silhouette
   private screenMat: THREE.MeshStandardMaterial;
   private state: HiveState = "ready";
@@ -297,6 +299,12 @@ class Dweller {
     this.aura.position.y = 0.66;
     this.aura.rotation.x = Math.PI / 2.4;
     this.group.add(this.aura);
+    // the awaitingBg marker: a little hourglass-ish gem spinning overhead — "my work is
+    // out there running" — green like its status
+    this.orbMat = new THREE.MeshBasicMaterial({ color: ST.awaitingBg, transparent: true, opacity: 0 });
+    this.orb = new THREE.Mesh(new THREE.OctahedronGeometry(0.1), this.orbMat);
+    this.orb.position.y = 1.55;
+    this.group.add(this.orb);
 
     // the desk: tabletop + laptop with an emissive screen, parked in front of the bean;
     // shown only while working (the strongest one-glance "busy" silhouette there is)
@@ -378,7 +386,9 @@ class Dweller {
         break;
       }
       case "blocked":
-        rotX = 0.55; y = -0.05;              // folded forward over the wreck, arms hanging dead
+        desk = true;                          // the wreck stays on the desk, screen dead, smoking
+        this.screenMat.emissiveIntensity = 0.04;
+        rotX = 0.55; y = -0.05;              // folded forward over it, arms hanging dead
         armLZ = 0.05; armRZ = -0.05; armLX = -0.4; armRX = -0.4;
         break;
       case "retrying":
@@ -390,8 +400,9 @@ class Dweller {
       case "awaitingBg":
         rotX = -0.14;                        // leaning back, watching its dispatched work spin
         armLZ = 0.9; armRZ = -0.9;
-        aura = 0.4; this.auraMat.color.setHex(ST.awaitingBg);
-        this.aura.rotation.z = t * 0.9;
+        this.orbMat.opacity = 0.9;
+        this.orb.rotation.y = t * 2.2; this.orb.rotation.x = 0.5;
+        this.orb.position.y = 1.55 + 0.08 * Math.sin(t * 2.6);
         break;
       case "compacting": case "clearing":
         y = 0.18 + 0.05 * Math.sin(t * 2.4); // levitating meditation, teal swirl orbiting
@@ -420,6 +431,7 @@ class Dweller {
     }
     if (s !== "opening") { this.face.visible = true; this.armL.visible = true; this.armR.visible = true; }
     if (s !== "working") this.bodyMat.emissiveIntensity = 0.22;
+    if (s !== "awaitingBg") this.orbMat.opacity = ease(this.orbMat.opacity, 0, dt, 8);
     this.desk.visible = desk;
 
     // squash & stretch: landings compress the bean, air time stretches it — scale about the
@@ -516,6 +528,7 @@ class Particles {
   private col = new Float32Array(this.max * 3);
   private vel: Float32Array = new Float32Array(this.max * 3);
   private life = new Float32Array(this.max);
+  private grav = new Float32Array(this.max);   // per-particle: confetti falls, smoke rises
   private n = 0;
 
   constructor() {
@@ -529,7 +542,7 @@ class Particles {
     this.geo.setDrawRange(0, 0);
   }
 
-  burst(at: THREE.Vector3, colors: number[], count: number, speed: number) {
+  burst(at: THREE.Vector3, colors: number[], count: number, speed: number, gravity = -7.5, life = 1.1) {
     for (let i = 0; i < count && this.n < this.max; i++, this.n++) {
       const j = this.n * 3;
       // born spread over a small shell, not one point — a point of 50 additive sprites
@@ -544,7 +557,8 @@ class Particles {
       this.vel[j + 2] = Math.sin(th) * speed * (0.4 + Math.random() * 0.6);
       const c = new THREE.Color(colors[i % colors.length]);
       this.col[j] = c.r; this.col[j + 1] = c.g; this.col[j + 2] = c.b;
-      this.life[this.n] = 1.1 + Math.random() * 0.5;
+      this.life[this.n] = life + Math.random() * 0.5;
+      this.grav[this.n] = gravity;
     }
   }
 
@@ -554,14 +568,14 @@ class Particles {
       this.life[i] -= dt;
       if (this.life[i] <= 0) continue;
       const j = i * 3, k = w * 3;
-      this.vel[j + 1] -= 7.5 * dt;
+      this.vel[j + 1] += this.grav[i] * dt;
       this.pos[k] = this.pos[j] + this.vel[j] * dt;
       this.pos[k + 1] = this.pos[j + 1] + this.vel[j + 1] * dt;
       this.pos[k + 2] = this.pos[j + 2] + this.vel[j + 2] * dt;
       if (w !== i) {
         this.vel[k] = this.vel[j]; this.vel[k + 1] = this.vel[j + 1]; this.vel[k + 2] = this.vel[j + 2];
         this.col[k] = this.col[j]; this.col[k + 1] = this.col[j + 1]; this.col[k + 2] = this.col[j + 2];
-        this.life[w] = this.life[i];
+        this.life[w] = this.life[i]; this.grav[w] = this.grav[i];
       }
       w++;
     }
@@ -699,6 +713,15 @@ class HiveWorld {
   private dragging: { mode: "orbit" | "pan"; x: number; y: number } | null = null;
   private clock = 0;
   card = new HiveCard();
+  // the ghost hex: a faint outline on the first FREE slot — hover it and a "+" wakes up;
+  // click recruits (opens the new-session picker via the shell relay)
+  private ghost = new THREE.Group();
+  private ghostRingMat = new THREE.MeshBasicMaterial({
+    color: ACCENT, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  private ghostFill: THREE.Mesh;
+  private ghostPlus: THREE.Sprite;
+  private ghostHover = false;
 
   constructor(private root: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -783,6 +806,24 @@ class HiveWorld {
     document.addEventListener("visibilitychange", () => this.ensureLoop());
     this.ensureLoop();
 
+    // deliberately QUIETER than any real pad: smaller, hairline ring, near-invisible fill —
+    // an invitation at the spiral's frontier, not a resident
+    const ghostRing = new THREE.Mesh(
+      new THREE.RingGeometry(PAD_R * 0.72, PAD_R * 0.76, 6, 1, -Math.PI / 3), this.ghostRingMat);
+    ghostRing.rotation.x = -Math.PI / 2;
+    ghostRing.position.y = 0.03;
+    this.ghostFill = new THREE.Mesh(
+      new THREE.CircleGeometry(PAD_R * 0.76, 6, -Math.PI / 3),
+      new THREE.MeshBasicMaterial({ color: ACCENT, transparent: true, opacity: 0.012, depthWrite: false }));
+    this.ghostFill.rotation.x = -Math.PI / 2;
+    this.ghostFill.position.y = 0.02;
+    this.ghostPlus = makeTextSprite("+", "#9cd2ff");
+    this.ghostPlus.position.y = 0.6;
+    this.ghostPlus.scale.multiplyScalar(0.7);
+    this.ghostPlus.material.opacity = 0.25;
+    this.ghost.add(ghostRing, this.ghostFill, this.ghostPlus);
+    this.scene.add(this.ghost);
+
     this.card.onClose = () => this.deselect();
     this.card.onOpen = (sid) => {
       vscodeApi?.postMessage({ type: "openSession", id: sid });
@@ -828,6 +869,12 @@ class HiveWorld {
     this.canvasPoint(e);
     const sid = this.pick();
     if (e.button === 2 || e.shiftKey) { this.dragging = { mode: "pan", x: e.clientX, y: e.clientY }; return; }
+    if (sid === HiveWorld.GHOST) {
+      // recruit: acknowledge with a spark on the ghost, then ask the shell for the picker
+      this.particles.burst(this.ghost.position.clone().setY(0.6), [ACCENT, 0xd6ecff], 16, 1.8);
+      try { if (window.parent !== window) window.parent.postMessage({ romp: "openPicker" }, "*"); } catch { /* standalone */ }
+      return;
+    }
     if (sid) {
       // acknowledge on the DOWN, before anything async: the pad dips under the press
       const pad = this.pads.get(sid);
@@ -838,6 +885,8 @@ class HiveWorld {
     }
   }
 
+  private static GHOST = "\0ghost";          // impossible sid — the ghost's pick token
+
   private pick(): string | null {
     this.raycaster.setFromCamera(this.pointer, this.camera);
     let best: { sid: string; d: number } | null = null;
@@ -846,6 +895,8 @@ class HiveWorld {
       const hits = this.raycaster.intersectObjects(pad.hitMeshes(), false);
       if (hits.length && (!best || hits[0].distance < best.d)) best = { sid, d: hits[0].distance };
     }
+    const gh = this.raycaster.intersectObject(this.ghostFill, false);
+    if (gh.length && (!best || gh[0].distance < best.d)) best = { sid: HiveWorld.GHOST, d: gh[0].distance };
     return best ? best.sid : null;
   }
 
@@ -938,6 +989,13 @@ class HiveWorld {
         this.particles.burst(at, [tint, ACCENT, 0xffd700, tint], 48, 4.2);
       }
     }
+    // park the ghost hex on the first FREE slot — the natural "next" cell of the spiral
+    let free = 0;
+    const taken = new Set(this.slots.values());
+    while (taken.has(free)) free++;
+    const gp = axialToXZ(spiralSlot(free), HEX_SIZE);
+    this.ghost.position.set(gp.x, 0, gp.z);
+
     if (first || diff.added.length || diff.removed.length) {
       if (this.selected === null) this.frameAll();
     }
@@ -972,13 +1030,19 @@ class HiveWorld {
     // hover pick once per frame (not per pointermove — cheaper and steadier)
     const sid = this.pick();
     if (sid !== this.hovered) {
-      const old = this.hovered ? this.pads.get(this.hovered) : null;
+      const old = this.hovered && this.hovered !== HiveWorld.GHOST ? this.pads.get(this.hovered) : null;
       if (old) old.lift = 0;
       this.hovered = sid;
-      const nw = sid ? this.pads.get(sid) : null;
+      const nw = sid && sid !== HiveWorld.GHOST ? this.pads.get(sid) : null;
       if (nw) nw.lift = 0.12;
+      this.ghostHover = sid === HiveWorld.GHOST;
       this.renderer.domElement.style.cursor = sid ? "pointer" : "default";
     }
+    // the ghost breathes faintly; waking on hover
+    const gTarget = this.ghostHover ? 0.5 : 0.06 + 0.03 * (0.5 + 0.5 * Math.sin(this.clock * 1.2));
+    this.ghostRingMat.opacity = ease(this.ghostRingMat.opacity, gTarget, dt, 8);
+    this.ghostPlus.material.opacity = ease(this.ghostPlus.material.opacity, this.ghostHover ? 0.95 : 0.22, dt, 8);
+    this.ghostPlus.position.y = 0.6 + (this.ghostHover ? 0.1 * Math.abs(Math.sin(this.clock * 4)) : 0);
 
     // idle drift: after 6s hands-off the whole board breathes on a slow orbital sway
     const driftYaw = this.idleT > 6 ? Math.sin(this.clock * 0.1) * 0.05 : 0;
@@ -993,6 +1057,23 @@ class HiveWorld {
     );
     this.camera.lookAt(this.targetCur);
 
+    // ambient emitters, event-free by design: smoke while blocked, zzz while dozing — a
+    // steady drizzle tied to the CURRENT state, not a transition (they stop the moment the
+    // state moves on, no latch to forget)
+    for (const pad of this.pads.values()) {
+      if (pad.dyingT >= 0) continue;
+      const st = pad.sess.state;
+      if (st === "blocked" && Math.random() < dt * 1.6) {
+        const at = pad.group.position.clone(); at.y += PAD_H + 0.75;
+        at.x += 0.25; at.z += 0.45;           // off the dead laptop, not the bean's head
+        this.particles.burst(at, [0x555b63, 0x3c4148, 0x6a7076], 2, 0.22, 0.55, 1.4);
+      }
+      if (st === "ready" && pad.sess.faded && Math.random() < dt * 0.8) {
+        const at = pad.group.position.clone(); at.y += PAD_H + 1.25;
+        at.x += 0.3;
+        this.particles.burst(at, [0x9cd2ff, 0x6fa8d8], 1, 0.14, 0.3, 1.8);
+      }
+    }
     const dead: string[] = [];
     for (const [psid, pad] of this.pads) if (pad.update(dt, this.yawCur, this.distCur)) dead.push(psid);
     for (const psid of dead) {

@@ -108,9 +108,10 @@ accent `#9cd2ff` is reserved for selection/hover/focus chrome, never status.
 - Click: immediate press-dip on the pad (acknowledge FIRST, per CLAUDE.md
   click-safety rule), then the ~0.8s fly-to; ESC / ✕ flies back.
 - Reward moments are honest: confetti only on a real goalDone event.
-- Empty ghost hex at the spiral frontier: hovering shows a soft "+" — click
-  opens the session picker (`window.parent.postMessage` picker reveal). Later
-  iteration if the wiring fights back.
+- Empty ghost hex at the spiral frontier (SHIPPED): a hairline outline on the
+  first free slot, deliberately quieter than any real pad; hover wakes its "+",
+  click asks the shell (`{romp:"openPicker"}`) to reveal chat + open the same
+  new-session picker the + tab uses.
 - Perf: DPR ≤ 2; ≤ 32 fully-animated characters, LOD bob beyond; rAF gated by
   IntersectionObserver (pane hidden = display:none iframe → not intersecting)
   AND document.hidden; pause = zero GPU work. The romp loader (`_pane_spin`)

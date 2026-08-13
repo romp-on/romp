@@ -8461,6 +8461,8 @@ window.addEventListener("message", (e: MessageEvent) => {
     if (activeId && !isProvisionalId(activeId) && sessions.get(activeId)) showForkPrompt(activeId, "");
     return;
   }
+  // the hive's ghost hex (relayed by the shell): open the same new-session picker the + tab does
+  if (m.romp === "openPicker") { openPicker(); return; }
   if (m.type === "pipeState") { pipeBanner(!!m.up, Number(m.queued) || 0); return; }
   if (m.type === "session") upsert(m);
   else if (m.type === "globalRetryPaused") {

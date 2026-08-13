@@ -19310,6 +19310,12 @@ if(!window.__rompPaneToggle)return;
 if(m.to==='chat')window.__rompPaneToggle('chat',true);
 else if(m.to==='fleet')window.__rompPaneToggle('fleet',true);
 else window.__rompPaneToggle('fleet');});})();
+(function(){window.addEventListener('message',function(e){var m=e.data;if(!m||m.romp!=='openPicker')return;
+// the hive's ghost hex: reveal the chat pane, then hand the ask into its iframe — the
+// picker lives there (render.ts openPicker), and the shell lifts it full-screen as usual
+if(window.__rompPaneToggle)window.__rompPaneToggle('chat',true);
+var f=document.getElementById('f-chat');
+if(f&&f.contentWindow)try{f.contentWindow.postMessage({romp:'openPicker'},'*');}catch(err){}});})();
 """
 
 
