@@ -1,6 +1,65 @@
 /* Hive page frame (plans/hive.md). The world is one WebGL canvas filling the pane; every
-   readable surface (the fly-in card, composers) is DOM layered over it — those styles join
-   this file as they land. Kernel _hive_page reads this live; esbuild bundles it for the VSIX. */
-html, body { height: 100%; margin: 0; overflow: hidden; background: #1e1e1e; }
+   readable surface (the fly-in card, composer) is DOM layered over it. Kernel _hive_page
+   reads this live; esbuild bundles it for the VSIX. */
+html, body { height: 100%; margin: 0; overflow: hidden; background: #090b10; }
 #hive-root { position: fixed; inset: 0; }
 #hive-root canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+/* ── the fly-in card (pane-local dialog, CLAUDE.md ## Design) ──────────────────────────
+   Dark glass over the Tron world; the menu vocabulary's hairline + radius family. Slides
+   in from the right when a hex is selected; all text updates in place, never rebuilt. */
+#hive-card {
+  position: fixed; top: 14px; right: 14px; width: 296px; z-index: 5;
+  background: rgba(22, 25, 31, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
+  font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #d6d6d6;
+  padding: 10px 12px 12px;
+  opacity: 0; transform: translateX(14px); pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+#hive-card.open { opacity: 1; transform: none; pointer-events: auto; }
+#hive-card .hc-head { display: flex; align-items: center; gap: 8px; }
+#hive-card .hc-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #8a8a8a; }
+#hive-card .hc-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 700; font-size: 13px; }
+#hive-card .hc-x { flex: 0 0 auto; background: none; border: 0; color: #8a8a8a; font-size: 17px;
+  line-height: 1; cursor: pointer; padding: 2px 4px; border-radius: 4px; }
+#hive-card .hc-x:hover { color: #ffffff; background: rgba(255, 255, 255, 0.08); }
+#hive-card .hc-state { margin-top: 4px; font-size: 12px; color: #9aa0a6; }
+#hive-card .hc-state[data-state="working"] { color: #e0b020; }
+#hive-card .hc-state[data-state="awaiting"], #hive-card .hc-state[data-state="blocked"] { color: #ff8589; }
+#hive-card .hc-state[data-state="awaitingBg"] { color: #7fd24a; }
+#hive-card .hc-state[data-state="compacting"], #hive-card .hc-state[data-state="clearing"] { color: #2dd4bf; }
+#hive-card .hc-goal { margin-top: 8px; font-size: 12px; line-height: 1.45; color: #d6d6d6; }
+#hive-card .hc-brief { margin-top: 8px; font-size: 12px; line-height: 1.45; color: #ffd7d9;
+  background: rgba(229, 72, 77, 0.12); border: 1px solid rgba(229, 72, 77, 0.35);
+  border-radius: 6px; padding: 7px 9px; }
+#hive-card .hc-err { margin-top: 8px; font-size: 12px; line-height: 1.4; color: #ffb3b6; }
+#hive-card .hc-talk { display: flex; gap: 6px; margin-top: 10px; align-items: flex-end; }
+#hive-card .hc-input { flex: 1 1 auto; min-width: 0; resize: none; border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #e8e8e8; font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 6px 8px; }
+#hive-card .hc-input:focus { outline: none; border-color: var(--accent, #9cd2ff); }
+#hive-card .hc-send { flex: 0 0 auto; cursor: pointer; border: 0; border-radius: 6px;
+  background: var(--accent, #9cd2ff); color: var(--accent-fg, #0c1a2e); font: 600 12px -apple-system,
+  BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 7px 11px; }
+#hive-card .hc-send:disabled { opacity: 0.75; cursor: default; }
+#hive-card .hc-foot { margin-top: 9px; display: flex; justify-content: flex-end; }
+#hive-card .hc-open { cursor: pointer; background: none; border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px; color: #c9c9c9; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 5px 10px; }
+#hive-card .hc-open:hover { color: #ffffff; border-color: rgba(255, 255, 255, 0.3); }
+
+/* press-pulse for delegated actions (./actions flash) — feed.css keeps its own copy too,
+   since each pane page loads only its own stylesheet */
+.romp-acted { animation: romp-acted-pulse 0.26s ease; }
+@keyframes romp-acted-pulse {
+  0% { transform: scale(1); filter: brightness(1); }
+  35% { transform: scale(0.96); filter: brightness(1.35); }
+  100% { transform: scale(1); filter: brightness(1); }
+}

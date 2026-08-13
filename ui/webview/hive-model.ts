@@ -116,6 +116,36 @@ export function buildSessions(msg: any): HiveSession[] | null {
   return out;
 }
 
+// Compact age for the card's state line ("2m", "1h") — mirrors the outline's agehms.
+export function hiveAge(secs: number): string {
+  secs = Math.max(0, Math.floor(secs));
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+  return `${Math.floor(secs / 86400)}d`;
+}
+
+// The card's one-line state, in the user's terms (never romp nouns): what the session is
+// doing and, when it matters, for how long. Pure so every phrasing is tested.
+export function stateLine(s: HiveSession, now: number): string {
+  switch (s.state) {
+    case "working": {
+      const n = s.narration;
+      return n ? `working — ${n.toolUses} tool${n.toolUses === 1 ? "" : "s"} in, ${hiveAge(now - n.since)}`
+               : "working";
+    }
+    case "awaiting": return "needs you — stopped on a question";
+    case "blocked": return "stopped on an API error";
+    case "retrying": return "hitting API errors, retrying";
+    case "awaitingBg": return "idle, waiting on background work";
+    case "compacting": return "compacting its context";
+    case "clearing": return "clearing its context";
+    case "interrupting": return "stopping…";
+    case "opening": return "starting up";
+    default: return s.faded ? "idle for a while" : "ready";
+  }
+}
+
 // The event stream between two snapshots. `prev` null means "first payload": everything is
 // `added`, and no state/goal events fire (there is no earlier world to compare against).
 export function diffSessions(prev: HiveSession[] | null, next: HiveSession[]): HiveDiff {

@@ -49,6 +49,15 @@ test("esbuild bundles hive.ts and hive-pane.css like the other panes", () => {
   assert.ok(ESBUILD.includes('"../ui/webview/hive-pane.css"'), "hive-pane.css entry");
 });
 
+test("the talk path speaks the kernel's drive-op protocol", () => {
+  // the card's Send posts the SAME sendMessage op the chat composer uses — _drive routes it
+  // by sid to the owning backend from ANY app socket, and a foreign sid is refused loudly
+  assert.ok(HIVE.includes('{ type: "sendMessage", id: sid, text }'), "hive posts sendMessage");
+  assert.ok(KERNEL.includes('if t == "sendMessage" and msg.get("text"):'), "kernel still handles it");
+  assert.ok(HIVE.includes('m.type === "err"'), "kernel refusals surface on the card, never vanish");
+  assert.ok(HIVE.includes('{ type: "openSession", id: sid }'), "the card can jump to the full session");
+});
+
 test("hive's WebGL palette matches the styles.css status tokens (one meaning per color)", () => {
   // hive draws in WebGL where CSS vars can't reach, so it carries the values — this pin is
   // what keeps them the SAME values. Each pair: [styles.css token, hive.ts literal].

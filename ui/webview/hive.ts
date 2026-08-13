@@ -10,8 +10,9 @@ import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { delegate } from "./actions";
 import { assignSlots, axialToXZ, frameDt, frameRadius, spiralSlot } from "./hive-layout";
-import { buildSessions, diffSessions, HiveSession, HiveState } from "./hive-model";
+import { buildSessions, diffSessions, HiveSession, HiveState, hiveAge, stateLine } from "./hive-model";
 
 const vscodeApi =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
@@ -571,6 +572,106 @@ class Particles {
   }
 }
 
+// ── the fly-in card: the session's gist + a talk composer (plans/hive.md) ────────────────
+// DOM, not WebGL — readable text belongs to the page. Created ONCE and updated in place
+// (never rebuilt per push), actions delegated to the stable card root (./actions), so
+// clicks are click-safe by construction and every press flashes.
+class HiveCard {
+  el: HTMLElement;
+  private dot: HTMLElement; private name: HTMLElement; private state: HTMLElement;
+  private goal: HTMLElement; private brief: HTMLElement; private err: HTMLElement;
+  private input: HTMLTextAreaElement; private sendBtn: HTMLButtonElement;
+  sid: string | null = null;
+  onSend: (sid: string, text: string) => void = () => {};
+  onOpen: (sid: string) => void = () => {};
+  onClose: () => void = () => {};
+
+  constructor() {
+    const el = document.createElement("div");
+    el.id = "hive-card";
+    el.innerHTML =
+      '<div class="hc-head"><span class="hc-dot"></span><span class="hc-name"></span>' +
+      '<button class="hc-x" data-act="close" title="Back to the board (Esc)" aria-label="Close">×</button></div>' +
+      '<div class="hc-state"></div>' +
+      '<div class="hc-goal" hidden></div>' +
+      '<div class="hc-brief" hidden></div>' +
+      '<div class="hc-err" hidden></div>' +
+      '<div class="hc-talk"><textarea class="hc-input" rows="2"></textarea>' +
+      '<button class="hc-send" data-act="send">Send</button></div>' +
+      '<div class="hc-foot"><button class="hc-open" data-act="open">Open session ↗</button></div>';
+    document.body.appendChild(el);
+    this.el = el;
+    this.dot = el.querySelector(".hc-dot") as HTMLElement;
+    this.name = el.querySelector(".hc-name") as HTMLElement;
+    this.state = el.querySelector(".hc-state") as HTMLElement;
+    this.goal = el.querySelector(".hc-goal") as HTMLElement;
+    this.brief = el.querySelector(".hc-brief") as HTMLElement;
+    this.err = el.querySelector(".hc-err") as HTMLElement;
+    this.input = el.querySelector(".hc-input") as HTMLTextAreaElement;
+    this.sendBtn = el.querySelector(".hc-send") as HTMLButtonElement;
+    delegate(el, {
+      close: () => this.onClose(),
+      open: () => { if (this.sid) this.onOpen(this.sid); },
+      send: () => this.send(),
+    });
+    this.input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.send(); }
+      e.stopPropagation();                   // typing must never orbit the camera / close the card
+    });
+  }
+
+  private send() {
+    const sid = this.sid, text = this.input.value.trim();
+    if (!sid || !text) return;
+    this.onSend(sid, text);
+    // acknowledge NOW, before any kernel round-trip: the composer clears, the button says
+    // so, and the world fires the send-puff at the hex (the delivery itself is the kernel's
+    // normal park/forward — a refusal comes back as an err and lands in hc-err below)
+    this.input.value = "";
+    this.err.hidden = true;
+    const b = this.sendBtn;
+    b.disabled = true; b.textContent = "Sent ✓";
+    setTimeout(() => { b.disabled = false; b.textContent = "Send"; }, 1100);
+  }
+
+  show(s: HiveSession, now: number) {
+    const fresh = this.sid !== s.sid;
+    this.sid = s.sid;
+    this.refresh(s, now);
+    if (fresh) { this.err.hidden = true; this.input.value = ""; }
+    this.el.classList.add("open");
+    this.input.placeholder = "Say something to " + s.name + "…";
+    if (fresh) this.input.focus();
+  }
+
+  refresh(s: HiveSession, now: number) {
+    if (this.sid !== s.sid) return;
+    this.dot.style.background = s.color?.bg || "#8a8a8a";
+    this.name.textContent = s.name;
+    this.name.style.color = s.color?.bg || "#dddddd";
+    this.state.textContent = stateLine(s, now);
+    this.state.dataset.state = s.state;
+    this.goal.hidden = !s.goal;
+    if (s.goal) this.goal.textContent = s.goal;
+    const needsYou = s.state === "awaiting" || s.state === "blocked";
+    this.brief.hidden = !(s.brief && needsYou);
+    if (s.brief && needsYou) this.brief.textContent = s.brief;
+  }
+
+  gone() {
+    // the selected session left the board — say so rather than silently going stale
+    this.state.textContent = "this session has ended";
+    this.state.dataset.state = "";
+  }
+
+  error(title: string, text: string) {
+    this.err.hidden = false;
+    this.err.textContent = title + (text ? " — " + text : "");
+  }
+
+  hide() { this.sid = null; this.el.classList.remove("open"); }
+}
+
 // ── the world ────────────────────────────────────────────────────────────────────────────
 class HiveWorld {
   private renderer: THREE.WebGLRenderer;
@@ -597,6 +698,7 @@ class HiveWorld {
   private lastFrame = 0;
   private dragging: { mode: "orbit" | "pan"; x: number; y: number } | null = null;
   private clock = 0;
+  card = new HiveCard();
 
   constructor(private root: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -680,6 +782,21 @@ class HiveWorld {
     io.observe(root);
     document.addEventListener("visibilitychange", () => this.ensureLoop());
     this.ensureLoop();
+
+    this.card.onClose = () => this.deselect();
+    this.card.onOpen = (sid) => {
+      vscodeApi?.postMessage({ type: "openSession", id: sid });
+      try { if (window.parent !== window) window.parent.postMessage({ romp: "reveal", pane: "chat" }, "*"); } catch { /* standalone */ }
+    };
+    this.card.onSend = (sid, text) => {
+      vscodeApi?.postMessage({ type: "sendMessage", id: sid, text });
+      const pad = this.pads.get(sid);
+      if (pad) {
+        // the visible delivery: a little accent spark shower over their hex
+        const at = pad.group.position.clone().setY(PAD_H + 1.6);
+        this.particles.burst(at, [ACCENT, 0xd6ecff, 0x6fb7ff], 14, 1.6);
+      }
+    };
     (window as any).__hive = this;           // debug handle (harness + console poking)
   }
 
@@ -740,11 +857,13 @@ class HiveWorld {
       this.dist = 10.5;
       this.pitch = 0.62;
       this.idleT = 0;
+      this.card.show(pad.sess, Math.floor(Date.now() / 1000));
     }
   }
   deselect() {
     if (this.selected === null) return;
     this.selected = null;
+    this.card.hide();
     this.frameAll();
   }
 
@@ -794,7 +913,7 @@ class HiveWorld {
     for (const sid of diff.removed) {
       const pad = this.pads.get(sid);
       if (pad && pad.dyingT < 0) pad.dyingT = 0;   // departure plays; disposal in the loop
-      if (this.selected === sid) this.deselect();
+      if (this.selected === sid) { this.card.gone(); this.selected = null; this.frameAll(); }
       if (this.hovered === sid) this.hovered = null;
     }
     for (const sid of diff.added) {
@@ -804,9 +923,11 @@ class HiveWorld {
       this.scene.add(pad.group);
     }
     const changed = new Set(diff.stateChanged.map((c) => c.sid));
+    const nowS = Math.floor(Date.now() / 1000);
     for (const s of sessions) {
       const pad = this.pads.get(s.sid);
       if (pad && !diff.added.includes(s.sid)) pad.apply(s, changed.has(s.sid));
+      if (this.selected === s.sid) this.card.refresh(s, nowS);
     }
     for (const sid of diff.goalDone) {
       const pad = this.pads.get(sid);
@@ -914,7 +1035,14 @@ let firstPayload = true;
 
 window.addEventListener("message", (e: MessageEvent) => {
   const m = e.data;
-  if (!m || m.type !== "feed") return;
+  if (!m) return;
+  // a refused drive op (foreign sid, dead kernel) comes back as an err — surface it on the
+  // card instead of letting the send silently vanish (the fail-loudly rule)
+  if (m.type === "err" && world && world.card.sid && (!m.sid || m.sid === world.card.sid)) {
+    world.card.error(String(m.title || "That message was not delivered"), String(m.text || ""));
+    return;
+  }
+  if (m.type !== "feed") return;
   const sessions = buildSessions(m);
   if (sessions === null) return;             // ledgers not built yet → loader stays up
   const root = document.getElementById("hive-root");

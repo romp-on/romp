@@ -4,7 +4,7 @@
 // done-transition. All fixture data is synthetic (notes-api demo world, placeholder sids).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { buildSessions, diffSessions, HiveSession } from "./hive-model";
+import { buildSessions, diffSessions, HiveSession, hiveAge, stateLine } from "./hive-model";
 
 const SID_WEB = "11111111-2222-3333-4444-555555555555";
 const SID_API = "66666666-7777-8888-9999-aaaaaaaaaaaa";
@@ -112,6 +112,37 @@ test("goalDone fires once per observed done-transition, never for history", () =
   assert.deepEqual(diffSessions(after, after).goalDone, [], "…exactly once");
   // a session ARRIVING with done goals is history, not an event
   assert.deepEqual(diffSessions(null, after).goalDone, []);
+});
+
+test("the card's state line speaks the user's terms for every chip", () => {
+  const base = buildSessions(payload())![0];
+  const at = (state: string, extra?: Partial<HiveSession>) =>
+    stateLine({ ...base, state: state as HiveSession["state"], narration: null, ...extra }, 1000);
+  assert.equal(at("working"), "working");
+  assert.equal(
+    stateLine({ ...base, state: "working", narration: { since: 860, toolUses: 7 } }, 1000),
+    "working — 7 tools in, 2m");
+  assert.equal(
+    stateLine({ ...base, state: "working", narration: { since: 990, toolUses: 1 } }, 1000),
+    "working — 1 tool in, 10s");
+  assert.equal(at("awaiting"), "needs you — stopped on a question");
+  assert.equal(at("blocked"), "stopped on an API error");
+  assert.equal(at("retrying"), "hitting API errors, retrying");
+  assert.equal(at("awaitingBg"), "idle, waiting on background work");
+  assert.equal(at("compacting"), "compacting its context");
+  assert.equal(at("clearing"), "clearing its context");
+  assert.equal(at("interrupting"), "stopping…");
+  assert.equal(at("opening"), "starting up");
+  assert.equal(at("ready"), "ready");
+  assert.equal(at("ready", { faded: true }), "idle for a while");
+});
+
+test("hiveAge compacts like the outline's ages", () => {
+  assert.equal(hiveAge(42), "42s");
+  assert.equal(hiveAge(180), "3m");
+  assert.equal(hiveAge(7200), "2h");
+  assert.equal(hiveAge(200000), "2d");
+  assert.equal(hiveAge(-5), "0s");
 });
 
 test("a top completing straight into the archive still fires (known id, newly done)", () => {
