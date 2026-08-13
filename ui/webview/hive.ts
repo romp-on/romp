@@ -1190,11 +1190,20 @@ class HiveWorld {
   }
 
   // the direct line to a session: its chat opens in the chat pane (left of the board),
-  // the hive stays put on the right — one message pair, used by the bean click, the
-  // card's Open, and dblclick alike
+  // the hive stays put on the right — one path, used by the bean click, the card's Open,
+  // and dblclick alike. TWO legs: the shell relay flips the chat's tab INSTANTLY (pure
+  // client-side, no kernel round trip — the user 2026-08-13, truly reactive), then the
+  // kernel op follows for everything else it does (eager-connect, other dashboards, the
+  // dead-session revive prompt). Board sessions are live, so the local flip is never
+  // showing something the kernel would have refused.
   openChat(sid: string) {
+    try {
+      if (window.parent !== window) {
+        window.parent.postMessage({ romp: "focusChat", id: sid }, "*");
+        window.parent.postMessage({ romp: "reveal", pane: "chat" }, "*");
+      }
+    } catch { /* standalone */ }
     vscodeApi?.postMessage({ type: "openSession", id: sid });
-    try { if (window.parent !== window) window.parent.postMessage({ romp: "reveal", pane: "chat" }, "*"); } catch { /* standalone */ }
   }
 
   // aim the ghost at a cell; frame() glides it there (everything springs, nothing teleports)

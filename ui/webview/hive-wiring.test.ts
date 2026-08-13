@@ -83,6 +83,13 @@ test("clicking the bean opens their chat; the tile keeps opening the card", () =
   assert.match(HIVE, /openChat\(sid: string\) \{/, "one shared open path");
   assert.match(HIVE, /this\.card\.onOpen = \(sid\) => this\.openChat\(sid\);/, "the card's Open uses it");
   assert.match(HIVE, /\{ romp: "reveal", pane: "chat" \}/, "…and it reveals the chat pane");
+  // the INSTANT leg: the shell hands the chat its focus directly — the tab flips with no
+  // kernel round trip in the way; the kernel op follows for its side effects
+  assert.ok(HIVE.indexOf('{ romp: "focusChat", id: sid }') < HIVE.indexOf('{ type: "openSession", id: sid }'),
+    "the client-side flip is posted BEFORE the kernel op");
+  assert.ok(KERNEL.includes("m.romp!=='focusChat'"), "the shell carries the focusChat relay");
+  assert.ok(KERNEL.includes("f.contentWindow.postMessage({type:'focus',id:m.id},'*')"),
+    "…which injects the same focus frame the kernel would send");
 });
 
 test("hovering a session floats its live status over the bean (the card's own stateLine)", () => {

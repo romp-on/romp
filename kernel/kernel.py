@@ -19324,6 +19324,14 @@ else window.__rompPaneToggle('fleet');});})();
 if(window.__rompPaneToggle)window.__rompPaneToggle('chat',true);
 var f=document.getElementById('f-chat');
 if(f&&f.contentWindow)try{f.contentWindow.postMessage({romp:'openPicker'},'*');}catch(err){}});})();
+// The INSTANT tab switch (the user 2026-08-13: a hive click must be truly reactive): a pane posts
+// {romp:'focusChat',id} and the shell hands the chat iframe a focus frame DIRECTLY — one client-side
+// hop, indistinguishable from a kernel focus (the shim delivers kernel frames as window messages
+// too), no kernel round trip in the critical path. The sender still posts its kernel op for
+// everything else that op does (eager-connect, other dashboards, the dead-session revive prompt).
+(function(){window.addEventListener('message',function(e){var m=e.data;if(!m||m.romp!=='focusChat'||!m.id)return;
+var f=document.getElementById('f-chat');
+if(f&&f.contentWindow)try{f.contentWindow.postMessage({type:'focus',id:m.id},'*');}catch(err){}});})();
 """
 
 
