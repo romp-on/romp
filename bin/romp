@@ -709,6 +709,37 @@ _romp_token() {
     cat "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/serve-token" 2>/dev/null || true
 }
 
+# Is a kernel listening on the port? ANY HTTP status (even a 401 without the token) proves
+# life; curl's 000 means nothing is there. ROMP_ALIVE_PROBE is the test seam (hermetic
+# tests can't bind the real port), same pattern as ROMP_OPENER / ROMP_MANAGER_BIN.
+_romp_kernel_alive() {
+    if [[ -n "${ROMP_ALIVE_PROBE:-}" ]]; then
+        # shellcheck disable=SC2206
+        local _probe=(${ROMP_ALIVE_PROBE})
+        "${_probe[@]}" "$1" >/dev/null 2>&1
+        return $?
+    fi
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:$1/" 2>/dev/null)" != "000" ]]
+}
+
+# Start the stack the way the login service would — the manager, detached, spawning and
+# owning the kernel — then wait (bounded) for a live kernel and its minted token. With the
+# login service installed (install.sh) this path never runs in daily life; it exists so
+# ONE command works from ANY state — fresh clone, stopped service, a box that never ran
+# install.sh (the user 2026-08-13, who wanted the whole thing behind one command).
+_romp_start_stack() {
+    local _port="$1" _state="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}" _i
+    mkdir -p "$_state"
+    nohup "${ROMP_MANAGER_BIN:-romp-manager}" up >> "$_state/manager.log" 2>&1 &
+    disown 2>/dev/null || true
+    for _i in $(seq 1 "${ROMP_START_TRIES:-60}"); do
+        if _romp_kernel_alive "$_port" && [[ -n "$(_romp_token)" ]]; then return 0; fi
+        sleep 0.25
+    done
+    echo "romp: started the manager, but no kernel answered on :$_port — see $_state/manager.log" >&2
+    return 1
+}
+
 # `romp url` — print the tokened dashboard URL, nothing else (scripting/piping; bare `romp` is the
 # human entry point). The first open seeds a year-long cookie; after that the bare URL works.
 # `--url` stays as a silent alias (agent-facing text names it).
@@ -784,12 +815,21 @@ fi
 if [[ $# -eq 0 ]]; then
     _tok="$(_romp_token)"
     _kport="${ROMP_KERNEL_PORT:-29855}"
-    # The floor nudge comes BEFORE the token bail: a fresh install whose service
-    # hasn't minted a token yet is exactly the run that should hear about an old
-    # Claude Code, not be cut off by the earlier exit.
+    # The floor nudge comes BEFORE any bail: a fresh install is exactly the run that
+    # should hear about an old Claude Code, not be cut off by an earlier exit.
     _romp_claude_floor_nudge
+    # ONE command from any state (the user 2026-08-13): nothing listening → start the
+    # stack right here instead of pointing at a second command. Everything you already
+    # have then attaches by DISCOVERY, no flags: tmux sessions by their @romp tag, SDK
+    # sessions from kernel state, attached remote hosts from their persisted rows (they
+    # survive restarts). Scripts that must never start anything keep `romp url`.
+    if ! _romp_kernel_alive "$_kport"; then
+        echo "    romp isn't running — starting it..."
+        _romp_start_stack "$_kport" || exit 1
+        _tok="$(_romp_token)"
+    fi
     if [[ -z "$_tok" ]]; then
-        echo "romp: no serve token yet; the kernel mints it. Is romp running? (the login service starts it; \`romp up\` runs it by hand)" >&2
+        echo "romp: the kernel is up on :$_kport but there's no serve token — check \`romp status\`." >&2
         exit 1
     fi
     _url="http://127.0.0.1:$_kport/?token=$_tok"

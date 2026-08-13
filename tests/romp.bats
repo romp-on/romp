@@ -112,13 +112,47 @@ STUB
 
 # ─── Launch tests ────────────────────────────────────────────────────
 
-@test "bare romp is the dashboard front door: no kernel, loud error, never a session" {
-    # Round 3 (2026-07-25): the shortest command does the most common thing. In this
-    # hermetic env there is no serve token, so it must fail loudly and launch nothing.
-    touch "$MOCK_LOG"    # this path makes no tmux calls at all
+@test "bare romp with nothing running STARTS the stack — one command from any state" {
+    # 2026-08-13: the front door heals instead of pointing at a second command. The
+    # manager stub stands in for the real supervisor: it "boots a kernel" by minting
+    # the serve token; the probe stub answers alive once that has happened.
+    touch "$MOCK_LOG"
+    cat > "$MOCK_DIR/mgr" << STUB
+#!/usr/bin/env bash
+echo "manager \$1" >> "\$MOCK_LOG"
+mkdir -p "$XDG_STATE_HOME/romp"
+echo tok123 > "$XDG_STATE_HOME/romp/serve-token"
+STUB
+    chmod +x "$MOCK_DIR/mgr"
+    cat > "$MOCK_DIR/probe" << STUB
+#!/usr/bin/env bash
+[[ -f "$XDG_STATE_HOME/romp/serve-token" ]]
+STUB
+    chmod +x "$MOCK_DIR/probe"
+    export ROMP_MANAGER_BIN="$MOCK_DIR/mgr"
+    export ROMP_ALIVE_PROBE="$MOCK_DIR/probe"
+    export ROMP_OPENER=""      # set-but-empty: print the URL, open nothing (the standing seam)
+    run run_romp
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"starting it"* ]]
+    grep -q 'manager up' "$MOCK_LOG"
+    [[ "$output" == *"?token=tok123"* ]]
+    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]   # the front door never launches a session
+}
+
+@test "bare romp: a manager that yields no kernel fails loudly, never a session" {
+    touch "$MOCK_LOG"
+    cat > "$MOCK_DIR/mgr" << STUB
+#!/usr/bin/env bash
+echo "manager \$1" >> "\$MOCK_LOG"
+STUB
+    chmod +x "$MOCK_DIR/mgr"
+    export ROMP_MANAGER_BIN="$MOCK_DIR/mgr"
+    export ROMP_ALIVE_PROBE=false     # never alive
+    export ROMP_START_TRIES=2         # keep the bounded wait short in tests
     run run_romp
     [ "$status" -eq 1 ]
-    [[ "$output" == *"no serve token"* ]]
+    [[ "$output" == *"no kernel answered"* ]]
     [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
 
