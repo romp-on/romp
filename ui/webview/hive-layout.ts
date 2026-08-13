@@ -8,13 +8,25 @@
 export interface Axial { q: number; r: number }
 
 // Board scale. Neighbour centers sit √3·HEX_SIZE apart (axialToXZ); each pad's top is a hex
-// prism of circumradius PAD_R with an EDGE turned toward every neighbour (hive.ts thetaStart
-// π/6), so its apothem is PAD_R·√3/2. PAD_R = HEX_SIZE makes twice the apothem exactly the
+// prism of circumradius PAD_R with an EDGE turned toward every neighbour (PAD_THETA below),
+// so its apothem is PAD_R·√3/2. PAD_R = HEX_SIZE makes twice the apothem exactly the
 // neighbour gap: adjacent pads snap flush and share their edge, one connected honeycomb
 // rather than islands (the user 2026-08-13, who wanted the hexagons snapped together). The
 // pads' slight base flare (hive.ts ×1.04) tucks under the shared rim, hiding any seam.
 export const HEX_SIZE = 2.05;
 export const PAD_R = HEX_SIZE;
+
+// Prism orientation — the turn that makes flush pads FIT instead of overlap (the user
+// 2026-08-13: full-size pads first went in corner-first and interpenetrated). Three's
+// CylinderGeometry walks θ as x = r·sinθ, z = r·cosθ, so a vertex lands at XZ angle 90°−θ:
+// thetaStart 0 puts corners at 30°+k·60°, which puts the EDGES' midpoints at k·60° — the
+// exact angles axialToXZ hands the six neighbours. (The old π/6 landed corners at k·60°,
+// aiming a PAD_R-long corner straight at each neighbour, past the √3/2 apothem line.)
+// Flat hexes (RingGeometry/CircleGeometry) walk θ as x = r·cosθ, y = r·sinθ and lie down
+// via rotation.x = −π/2, landing a vertex at XZ angle −θ: −π/6 lines their corners up with
+// the prism's. Both constants are pinned together by hive-layout.test.ts.
+export const PAD_THETA = 0;
+export const RIM_THETA = -Math.PI / 6;
 
 // The six axial neighbour directions, in the ring-walk order the spiral uses.
 const DIRS: readonly Axial[] = [

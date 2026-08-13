@@ -11,7 +11,7 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { delegate } from "./actions";
-import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, PAD_R, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, PAD_R, PAD_THETA, RIM_THETA, spiralSlot } from "./hive-layout";
 import { buildSessions, diffSessions, HiveSession, HiveState, hiveAge, stateLine } from "./hive-model";
 
 const vscodeApi =
@@ -75,10 +75,11 @@ class Pad {
     const tint = new THREE.Color(sess.color?.bg || "#8a8a8a");
     // Tron slab: near-black glossy top with only a whisper of the identity color; the
     // pad's LIGHT is its rim. CylinderGeometry with 6 radial segments IS the hex prism;
-    // thetaStart π/6 turns an edge (not a corner) toward each axial neighbour.
+    // PAD_THETA turns an edge (not a corner) toward each axial neighbour, so flush
+    // neighbours meet edge-to-edge (the derivation lives with the constant).
     const top = new THREE.Color(0x0e1116).lerp(tint, 0.06);
     const side = new THREE.Color(0x080a0d).lerp(tint, 0.03);
-    const geo = new THREE.CylinderGeometry(PAD_R, PAD_R * 1.04, PAD_H, 6, 1, false, Math.PI / 6);
+    const geo = new THREE.CylinderGeometry(PAD_R, PAD_R * 1.04, PAD_H, 6, 1, false, PAD_THETA);
     this.padMesh = new THREE.Mesh(geo, [
       new THREE.MeshStandardMaterial({ color: side, roughness: 0.55, metalness: 0.35 }),
       new THREE.MeshStandardMaterial({ color: top, roughness: 0.3, metalness: 0.45 }),
@@ -88,13 +89,13 @@ class Pad {
     this.group.add(this.padMesh);
 
     // the status LIGHT: a glowing hex rim hugging the top edge (additive, bloom-fed).
-    // RingGeometry thetaStart -π/3 lines its corners up with the cylinder's π/6 once its
-    // XY maps into XZ below — the two parametrise their angles from different axes.
+    // RIM_THETA lines its corners up with the cylinder's PAD_THETA once its XY maps into
+    // XZ below — the two parametrise their angles from different axes.
     this.ringMat = new THREE.MeshBasicMaterial({
       color: ST[sess.state], transparent: true, opacity: 0.95,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    const ringGeo = new THREE.RingGeometry(PAD_R * 0.9, PAD_R * 0.985, 6, 1, -Math.PI / 3);
+    const ringGeo = new THREE.RingGeometry(PAD_R * 0.9, PAD_R * 0.985, 6, 1, RIM_THETA);
     this.ring = new THREE.Mesh(ringGeo, this.ringMat);
     this.ring.rotation.x = -Math.PI / 2;
     this.ring.position.y = PAD_H + 0.012;
@@ -104,7 +105,7 @@ class Pad {
       color: ST[sess.state], transparent: true, opacity: 0.22,
       blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
     });
-    this.halo = new THREE.Mesh(new THREE.RingGeometry(PAD_R * 0.86, PAD_R * 1.12, 6, 1, -Math.PI / 3), this.haloMat);
+    this.halo = new THREE.Mesh(new THREE.RingGeometry(PAD_R * 0.86, PAD_R * 1.12, 6, 1, RIM_THETA), this.haloMat);
     this.halo.rotation.x = -Math.PI / 2;
     this.halo.position.y = PAD_H + 0.006;
     this.group.add(this.halo);
@@ -114,7 +115,7 @@ class Pad {
       color: ST.awaiting, transparent: true, opacity: 0,
       blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
     });
-    this.sonar = new THREE.Mesh(new THREE.RingGeometry(PAD_R * 0.93, 0.05 + PAD_R * 0.93, 6, 1, -Math.PI / 3), this.sonarMat);
+    this.sonar = new THREE.Mesh(new THREE.RingGeometry(PAD_R * 0.93, 0.05 + PAD_R * 0.93, 6, 1, RIM_THETA), this.sonarMat);
     this.sonar.rotation.copy(this.ring.rotation);
     this.sonar.position.y = this.ring.position.y;
     this.group.add(this.sonar);
@@ -807,11 +808,11 @@ class HiveWorld {
     // deliberately QUIETER than any real pad: smaller, hairline ring, near-invisible fill —
     // an invitation at the spiral's frontier, not a resident
     const ghostRing = new THREE.Mesh(
-      new THREE.RingGeometry(PAD_R * 0.72, PAD_R * 0.76, 6, 1, -Math.PI / 3), this.ghostRingMat);
+      new THREE.RingGeometry(PAD_R * 0.72, PAD_R * 0.76, 6, 1, RIM_THETA), this.ghostRingMat);
     ghostRing.rotation.x = -Math.PI / 2;
     ghostRing.position.y = 0.03;
     this.ghostFill = new THREE.Mesh(
-      new THREE.CircleGeometry(PAD_R * 0.76, 6, -Math.PI / 3),
+      new THREE.CircleGeometry(PAD_R * 0.76, 6, RIM_THETA),
       new THREE.MeshBasicMaterial({ color: ACCENT, transparent: true, opacity: 0.012, depthWrite: false }));
     this.ghostFill.rotation.x = -Math.PI / 2;
     this.ghostFill.position.y = 0.02;

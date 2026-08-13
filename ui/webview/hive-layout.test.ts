@@ -3,7 +3,7 @@
 // spatial memory of the board keeps working across pushes and reloads.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexDistance, PAD_R, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexDistance, PAD_R, PAD_THETA, RIM_THETA, spiralSlot } from "./hive-layout";
 
 test("frameDt never goes negative or huge — a bad clock can't diverge the eases", () => {
   assert.equal(frameDt(1016, 1000), 0.016, "a normal frame passes through");
@@ -61,6 +61,38 @@ test("pads snap flush: twice the pad apothem exactly spans the gap to every neig
     const p = axialToXZ(spiralSlot(i), HEX_SIZE);
     const d = Math.hypot(p.x - o.x, p.z - o.z);
     assert.ok(Math.abs(2 * apothem - d) < 1e-9, `neighbour ${i} leaves a ${d - 2 * apothem} gap`);
+  }
+});
+
+// The prism's corners, as CylinderGeometry actually places them: x = r·sinθ, z = r·cosθ.
+function padCorners(c: { x: number; z: number }): { x: number; z: number }[] {
+  return Array.from({ length: 6 }, (_, k) => {
+    const th = PAD_THETA + (k * Math.PI) / 3;
+    return { x: c.x + PAD_R * Math.sin(th), z: c.z + PAD_R * Math.cos(th) };
+  });
+}
+
+test("pads FIT, not overlap: adjacent hexes share exactly two corners (a whole edge)", () => {
+  // Two equal regular hexagons sharing two adjacent corners share that edge and cannot
+  // interpenetrate. thetaStart π/6 (the 2026-08-13 overlap) shares ZERO corners here —
+  // it aims a corner at each neighbour, past the apothem line into the neighbouring cell.
+  const o = padCorners(axialToXZ({ q: 0, r: 0 }, HEX_SIZE));
+  for (let i = 1; i <= 6; i++) {
+    const n = padCorners(axialToXZ(spiralSlot(i), HEX_SIZE));
+    let shared = 0;
+    for (const a of o) for (const b of n) if (Math.hypot(a.x - b.x, a.z - b.z) < 1e-9) shared++;
+    assert.equal(shared, 2, `neighbour ${i} shares ${shared} corners`);
+  }
+});
+
+test("rim corners land on prism corners (Ring and Cylinder walk θ from different axes)", () => {
+  // RingGeometry places x = r·cosθ, y = r·sinθ; rotation.x = −π/2 maps (x, y) → (x, −z).
+  const prism = padCorners({ x: 0, z: 0 });
+  for (let k = 0; k < 6; k++) {
+    const th = RIM_THETA + (k * Math.PI) / 3;
+    const rim = { x: PAD_R * Math.cos(th), z: -PAD_R * Math.sin(th) };
+    const hit = prism.some((c) => Math.hypot(c.x - rim.x, c.z - rim.z) < 1e-9);
+    assert.ok(hit, `rim corner ${k} sits off the prism's corner grid`);
   }
 });
 
