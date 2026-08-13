@@ -11,7 +11,10 @@
     "moduleResolution": "node",
     "sourceMap": true,
     "baseUrl": ".",
-    "paths": { "*": ["node_modules/*"] }
+    "paths": {
+      "three": ["node_modules/@types/three"],
+      "*": ["node_modules/*"]
+    }
   },
   "include": ["src", "../ui"]
 }

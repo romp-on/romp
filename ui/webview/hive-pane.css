@@ -1,0 +1,6 @@
+/* Hive page frame (plans/hive.md). The world is one WebGL canvas filling the pane; every
+   readable surface (the fly-in card, composers) is DOM layered over it — those styles join
+   this file as they land. Kernel _hive_page reads this live; esbuild bundles it for the VSIX. */
+html, body { height: 100%; margin: 0; overflow: hidden; background: #1e1e1e; }
+#hive-root { position: fixed; inset: 0; }
+#hive-root canvas { display: block; width: 100%; height: 100%; touch-action: none; }

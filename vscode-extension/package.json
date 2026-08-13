@@ -176,11 +176,13 @@
     "typescript": "^5.4.5"
   },
   "dependencies": {
+    "@types/three": "^0.185.4",
     "@types/ws": "^8.18.1",
     "dompurify": "^3.4.10",
     "highlight.js": "^11.9.0",
     "katex": "^0.18.1",
     "marked": "^12.0.2",
+    "three": "^0.185.1",
     "ws": "^8.21.0"
   }
 }
