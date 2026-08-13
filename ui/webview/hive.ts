@@ -12,7 +12,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { delegate } from "./actions";
 import { hostPrefix } from "./host-prefix";
-import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, PAD_R, PAD_THETA, RIM_THETA, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, spiralSlot } from "./hive-layout";
 import { buildSessions, diffSessions, HiveSession, HiveState, hiveAge, stateLine } from "./hive-model";
 
 const vscodeApi =
@@ -33,7 +33,10 @@ const ST: Record<HiveState, number> = {
   opening: 0x9aa0a6,     // pale — CLI still coming up
 };
 const ACCENT = 0x9cd2ff;
-const PAD_H = 0.42;           // HEX_SIZE/PAD_R live in hive-layout.ts, snapped flush there
+const PAD_H = 0.06;           // a hair of thickness so a lifted tile isn't paper; the board
+                              // reads as ONE flat layer (HEX_SIZE/PAD_R: hive-layout.ts)
+const LINE_INSET = 0.94;      // a cell's own neon line sits just inside its boundary, so two
+                              // adjacent sessions' colors never fight over the shared edge
 // Tron world (the user 2026-08-13): near-black glossy ground with a faint accent grid, the
 // pads dark slabs whose STATUS light is their glowing rim, bloom doing the neon work. The
 // beans stay cute (session-colored, softly self-lit) with dark visors and glowing eyes.
@@ -44,16 +47,27 @@ function ease(cur: number, target: number, dt: number, rate: number): number {
   return cur + (target - cur) * (1 - Math.exp(-rate * dt));
 }
 
+// one thin hex outline in the XZ plane (hexCorner — the corners the prism uses), for a
+// LineLoop: THE line treatment of the board. Per-instance so Pad.dispose() can dispose it.
+function hexLineGeo(r: number): THREE.BufferGeometry {
+  const pos = new Float32Array(18);
+  for (let k = 0; k < 6; k++) {
+    const c = hexCorner(0, 0, r, k);
+    pos[k * 3] = c.x; pos[k * 3 + 1] = 0; pos[k * 3 + 2] = c.z;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  return g;
+}
+
 // ── one session's pad: hex prism + status ring + label + its dweller ─────────────────────
 class Pad {
   group = new THREE.Group();
   private padMesh: THREE.Mesh;
-  private ring: THREE.Mesh;
-  private ringMat: THREE.MeshBasicMaterial;
-  private halo!: THREE.Mesh;
-  private haloMat!: THREE.MeshBasicMaterial;
-  private sonar: THREE.Mesh;
-  private sonarMat: THREE.MeshBasicMaterial;
+  private ring: THREE.LineLoop;
+  private ringMat: THREE.LineBasicMaterial;
+  private sonar: THREE.LineLoop;
+  private sonarMat: THREE.LineBasicMaterial;
   private label: THREE.Sprite;
   private labelW = 1; private labelH = 1;   // base sprite size; update() re-scales by camera distance
   private bang: THREE.Sprite;              // the ❗ that bobs over a needs-you pad
@@ -89,35 +103,23 @@ class Pad {
     this.padMesh.position.y = PAD_H / 2;
     this.group.add(this.padMesh);
 
-    // the status LIGHT: a glowing hex rim hugging the top edge (additive, bloom-fed).
-    // RIM_THETA lines its corners up with the cylinder's PAD_THETA once its XY maps into
-    // XZ below — the two parametrise their angles from different axes.
-    this.ringMat = new THREE.MeshBasicMaterial({
+    // the status LIGHT: ONE thin neon line tracing the cell, a hair inside its boundary
+    // (LINE_INSET) — additive + bloom does the glow; no halo, no thickness, the
+    // mathematically even look (the user 2026-08-13)
+    this.ringMat = new THREE.LineBasicMaterial({
       color: ST[sess.state], transparent: true, opacity: 0.95,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    const ringGeo = new THREE.RingGeometry(PAD_R * 0.9, PAD_R * 0.985, 6, 1, RIM_THETA);
-    this.ring = new THREE.Mesh(ringGeo, this.ringMat);
-    this.ring.rotation.x = -Math.PI / 2;
+    this.ring = new THREE.LineLoop(hexLineGeo(PAD_R * LINE_INSET), this.ringMat);
     this.ring.position.y = PAD_H + 0.012;
     this.group.add(this.ring);
-    // …and its soft halo: a wider, fainter copy that sells the glow even before bloom
-    this.haloMat = new THREE.MeshBasicMaterial({
-      color: ST[sess.state], transparent: true, opacity: 0.22,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-    });
-    this.halo = new THREE.Mesh(new THREE.RingGeometry(PAD_R * 0.86, PAD_R * 1.12, 6, 1, RIM_THETA), this.haloMat);
-    this.halo.rotation.x = -Math.PI / 2;
-    this.halo.position.y = PAD_H + 0.006;
-    this.group.add(this.halo);
 
-    // sonar ping: an expanding, fading copy — the needs-you beacon (awaiting only)
-    this.sonarMat = new THREE.MeshBasicMaterial({
+    // sonar ping: an expanding, fading copy of the line — the needs-you beacon (awaiting only)
+    this.sonarMat = new THREE.LineBasicMaterial({
       color: ST.awaiting, transparent: true, opacity: 0,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    this.sonar = new THREE.Mesh(new THREE.RingGeometry(PAD_R * 0.93, 0.05 + PAD_R * 0.93, 6, 1, RIM_THETA), this.sonarMat);
-    this.sonar.rotation.copy(this.ring.rotation);
+    this.sonar = new THREE.LineLoop(hexLineGeo(PAD_R * LINE_INSET), this.sonarMat);
     this.sonar.position.y = this.ring.position.y;
     this.group.add(this.sonar);
 
@@ -187,15 +189,15 @@ class Pad {
     this.group.position.y = this.liftCur;
 
     this.ringColor.lerp(this.ringTarget, 1 - Math.exp(-8 * dt));
-    this.ringMat.color.copy(this.ringColor);
-    this.haloMat.color.copy(this.ringColor);
+    // a 1px line carries less light than the old fat rim, so overdrive the color past 1 —
+    // that's what pushes it over the bloom threshold into neon
+    this.ringMat.color.copy(this.ringColor).multiplyScalar(1.6);
     const st = this.sess.state;
     // pulse only the states that are genuinely in motion; steady states hold steady
     if (st === "working") this.ringMat.opacity = 0.62 + 0.3 * (0.5 + 0.5 * Math.sin(this.t * 3.6));
     else if (st === "awaiting") this.ringMat.opacity = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(this.t * 7));
     else if (st === "retrying") this.ringMat.opacity = 0.5 + 0.5 * (Math.sin(this.t * 11) > 0.2 ? 1 : 0.35);
     else this.ringMat.opacity = 0.95;
-    this.haloMat.opacity = this.ringMat.opacity * 0.24;
 
     if (st === "awaiting") {
       // sonar ping: 1.4s loop, ring swells to ~1.8× and fades — visible from any zoom
@@ -496,29 +498,6 @@ function makeTextSprite(text: string, color: string, bubble?: string): THREE.Spr
 }
 function disposeSprite(s: THREE.Sprite) { s.material.map?.dispose(); s.material.dispose(); }
 
-// the floor grid tile: one accent line pair per edge, a brighter major every 4th repeat is
-// faked by drawing the major into the same tile at quarter opacity steps — cheap, seamless
-function makeGridTexture(): THREE.CanvasTexture {
-  const c = document.createElement("canvas");
-  c.width = 256; c.height = 256;
-  const g = c.getContext("2d")!;
-  g.clearRect(0, 0, 256, 256);
-  g.strokeStyle = "rgba(156,210,255,0.30)";
-  g.lineWidth = 2;
-  g.strokeRect(0.5, 0.5, 256, 256);
-  g.strokeStyle = "rgba(156,210,255,0.10)";
-  g.lineWidth = 1;
-  for (const q of [64, 128, 192]) {
-    g.beginPath(); g.moveTo(q, 0); g.lineTo(q, 256); g.stroke();
-    g.beginPath(); g.moveTo(0, q); g.lineTo(256, q); g.stroke();
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(42, 42);                    // 300-unit plane → ~7.1-unit majors, pad-scaled
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
 // ── confetti / puffs: one pooled particle system for every burst ─────────────────────────
 class Particles {
   points: THREE.Points;
@@ -775,12 +754,17 @@ class HiveWorld {
   // the ghost hex: a faint outline on the first FREE slot — hover it and a "+" wakes up;
   // click recruits (opens the new-session picker via the shell relay)
   private ghost = new THREE.Group();
-  private ghostRingMat = new THREE.MeshBasicMaterial({
+  private ghostRingMat = new THREE.LineBasicMaterial({
     color: ACCENT, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false,
   });
   private ghostFill: THREE.Mesh;
   private ghostPlus: THREE.Sprite;
   private ghostHover = false;
+  // the one-layer board: every cell of the honeycomb as thin faint lines — EMPTY cells are
+  // this lattice, USED cells are the pads docked flush into it. Rebuilt only when the
+  // needed ring count changes (an arrival/departure at the frontier), never per push.
+  private lattice: THREE.LineSegments | null = null;
+  private latticeRings = -1;
 
   constructor(private root: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -801,8 +785,9 @@ class HiveWorld {
     this.scene.add(rim);
     this.scene.add(this.particles.points);
 
-    // the floor: a dark glossy disc with a faint accent grid riding just above it, both
-    // fading into the fog — the Tron ground the pads dock on
+    // the floor: a dark matte disc fading into the fog. The only pattern on it is the hex
+    // LATTICE (ensureLattice) — the square grid is gone: two grids at once fought the
+    // tessellation instead of underlining it (the user 2026-08-13)
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(150, 64),
       // matte enough that the key light can't smear a bloom highlight across the floor
@@ -811,19 +796,9 @@ class HiveWorld {
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = -0.02;
     this.scene.add(floor);
-    const grid = new THREE.Mesh(
-      new THREE.PlaneGeometry(300, 300),
-      new THREE.MeshBasicMaterial({
-        map: makeGridTexture(), transparent: true, opacity: 0.38,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-      }),
-    );
-    grid.rotation.x = -Math.PI / 2;
-    grid.position.y = 0.0;
-    this.scene.add(grid);
 
-    // bloom is the neon: everything over the threshold (rims, eyes, screens, grid majors)
-    // halos out; the dark slabs and floor stay dark
+    // bloom is the neon: everything over the threshold (the overdriven status lines, eyes,
+    // screens) halos out; the dark tiles, lattice and floor stay dark
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.7, 0.45, 0.72);
@@ -867,9 +842,7 @@ class HiveWorld {
 
     // deliberately QUIETER than any real pad: smaller, hairline ring, near-invisible fill —
     // an invitation at the spiral's frontier, not a resident
-    const ghostRing = new THREE.Mesh(
-      new THREE.RingGeometry(PAD_R * 0.72, PAD_R * 0.76, 6, 1, RIM_THETA), this.ghostRingMat);
-    ghostRing.rotation.x = -Math.PI / 2;
+    const ghostRing = new THREE.LineLoop(hexLineGeo(PAD_R * 0.74), this.ghostRingMat);
     ghostRing.position.y = 0.03;
     this.ghostFill = new THREE.Mesh(
       new THREE.CircleGeometry(PAD_R * 0.76, 6, RIM_THETA),
@@ -1059,6 +1032,8 @@ class HiveWorld {
     while (taken.has(free)) free++;
     const gp = axialToXZ(spiralSlot(free), HEX_SIZE);
     this.ghost.position.set(gp.x, 0, gp.z);
+    // …and keep the one-layer lattice one ring wider than anything on it
+    this.ensureLattice(Math.max(3, ringOf(Math.max(free, ...this.slots.values())) + 1));
 
     if (first || diff.added.length || diff.removed.length) {
       if (this.selected === null) this.frameAll();
@@ -1071,6 +1046,32 @@ class HiveWorld {
       if (sid && this.pads.has(sid)) this.select(sid);
     }
     this.ensureLoop();
+  }
+
+  // (re)build the empty-cell lattice for rings 0..n: one LineSegments of every unique edge
+  // (latticeSegments dedupes shared ones), faint accent, flat on the board — the layer the
+  // pads dock into
+  private ensureLattice(rings: number) {
+    if (rings === this.latticeRings) return;
+    this.latticeRings = rings;
+    if (this.lattice) {
+      this.scene.remove(this.lattice);
+      this.lattice.geometry.dispose();
+      (this.lattice.material as THREE.Material).dispose();
+    }
+    const seg = latticeSegments(rings, HEX_SIZE);
+    const pos = new Float32Array((seg.length / 4) * 6);
+    for (let i = 0, j = 0; i < seg.length; i += 4) {
+      pos[j++] = seg[i]; pos[j++] = 0; pos[j++] = seg[i + 1];
+      pos[j++] = seg[i + 2]; pos[j++] = 0; pos[j++] = seg[i + 3];
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    this.lattice = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+      color: ACCENT, transparent: true, opacity: 0.13, blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    this.lattice.position.y = 0.004;
+    this.scene.add(this.lattice);
   }
 
   private ensureLoop() {

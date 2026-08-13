@@ -60,6 +60,48 @@ export function hexDistance(a: Axial, b: Axial): number {
   return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
 }
 
+// Ring number of a spiral slot — the inverse of spiralSlot's ring arithmetic.
+export function ringOf(i: number): number {
+  if (!Number.isFinite(i) || i <= 0) return 0;
+  let k = 1;
+  while (3 * k * (k + 1) < i) k++;
+  return k;
+}
+
+// Corner k (0..5) of the hex at center (cx, cz) with circumradius r — the ONE place corner
+// positions are computed, in the same parametrization CylinderGeometry uses for the pad
+// prism (x = r·sinθ, z = r·cosθ, θ from PAD_THETA): the lattice below, hive.ts's line
+// loops, and the prism all agree on where a corner is by construction.
+export function hexCorner(cx: number, cz: number, r: number, k: number): { x: number; z: number } {
+  const th = PAD_THETA + (k * Math.PI) / 3;
+  return { x: cx + r * Math.sin(th), z: cz + r * Math.cos(th) };
+}
+
+// The one-layer board: every UNIQUE edge of the honeycomb covering rings 0..`rings`, flat
+// [ax, az, bx, bz, …] ready for a LineSegments buffer. The cells tessellate (PAD_R =
+// HEX_SIZE), so an interior edge belongs to exactly two cells — it is emitted ONCE, keyed
+// by its quantized endpoints, so every line in the lattice draws at the same weight
+// (the user 2026-08-13: one thin line, mathematically even — never doubled where cells
+// meet, never a second grid underneath).
+export function latticeSegments(rings: number, size: number): number[] {
+  const seen = new Set<string>();
+  const out: number[] = [];
+  const q = (v: number) => Math.round(v * 1e5);
+  const last = 3 * Math.max(0, rings) * (Math.max(0, rings) + 1);
+  for (let i = 0; i <= last; i++) {
+    const c = axialToXZ(spiralSlot(i), size);
+    for (let e = 0; e < 6; e++) {
+      const a = hexCorner(c.x, c.z, size, e), b = hexCorner(c.x, c.z, size, (e + 1) % 6);
+      const ka = q(a.x) + "," + q(a.z), kb = q(b.x) + "," + q(b.z);
+      const key = ka < kb ? ka + "|" + kb : kb + "|" + ka;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(a.x, a.z, b.x, b.z);
+    }
+  }
+  return out;
+}
+
 // Stable slot assignment. `prev` is the last known sid→slot map (persisted by the caller);
 // `sids` the sessions present NOW, in arrival order. Every sid that had a slot keeps it
 // (first claim wins on a corrupt duplicate); new sids fill the lowest free slots in order.

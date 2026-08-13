@@ -3,7 +3,7 @@
 // spatial memory of the board keeps working across pushes and reloads.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexDistance, PAD_R, PAD_THETA, RIM_THETA, spiralSlot } from "./hive-layout";
+import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, hexDistance, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, spiralSlot } from "./hive-layout";
 
 test("frameDt never goes negative or huge — a bad clock can't diverge the eases", () => {
   assert.equal(frameDt(1016, 1000), 0.016, "a normal frame passes through");
@@ -82,6 +82,47 @@ test("pads FIT, not overlap: adjacent hexes share exactly two corners (a whole e
     let shared = 0;
     for (const a of o) for (const b of n) if (Math.hypot(a.x - b.x, a.z - b.z) < 1e-9) shared++;
     assert.equal(shared, 2, `neighbour ${i} shares ${shared} corners`);
+  }
+});
+
+test("hexCorner IS the cylinder parametrization (the corners everything shares)", () => {
+  for (let k = 0; k < 6; k++) {
+    const th = PAD_THETA + (k * Math.PI) / 3;
+    const c = hexCorner(3, -2, PAD_R, k);
+    assert.ok(Math.abs(c.x - (3 + PAD_R * Math.sin(th))) < 1e-12);
+    assert.ok(Math.abs(c.z - (-2 + PAD_R * Math.cos(th))) < 1e-12);
+  }
+});
+
+test("ringOf inverts the spiral: it agrees with hex distance from the origin", () => {
+  const O = { q: 0, r: 0 };
+  for (let i = 0; i < 169; i++) assert.equal(ringOf(i), hexDistance(spiralSlot(i), O), `slot ${i}`);
+});
+
+test("lattice: shared edges are emitted once, so every line weighs the same", () => {
+  // ring 0 is one hex: 6 edges. rings 0..1 are 7 cells: 42 edge incidences, of which the
+  // 6 center–ring and 6 ring–ring adjacencies are shared pairs → 42 − 12 = 30 unique.
+  assert.equal(latticeSegments(0, HEX_SIZE).length / 4, 6);
+  assert.equal(latticeSegments(1, HEX_SIZE).length / 4, 30);
+});
+
+test("lattice: every segment is exactly one hex side long (side = circumradius)", () => {
+  const seg = latticeSegments(2, HEX_SIZE);
+  for (let i = 0; i < seg.length; i += 4) {
+    const d = Math.hypot(seg[i + 2] - seg[i], seg[i + 3] - seg[i + 1]);
+    assert.ok(Math.abs(d - HEX_SIZE) < 1e-9, `segment ${i / 4} has length ${d}`);
+  }
+});
+
+test("lattice: no duplicate segments in either direction", () => {
+  const seg = latticeSegments(3, HEX_SIZE);
+  const seen = new Set<string>();
+  const q = (v: number) => Math.round(v * 1e5);
+  for (let i = 0; i < seg.length; i += 4) {
+    const a = q(seg[i]) + "," + q(seg[i + 1]), b = q(seg[i + 2]) + "," + q(seg[i + 3]);
+    const key = a < b ? a + "|" + b : b + "|" + a;
+    assert.ok(!seen.has(key), `segment ${i / 4} repeats ${key}`);
+    seen.add(key);
   }
 });
 
