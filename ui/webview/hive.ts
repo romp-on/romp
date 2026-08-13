@@ -43,6 +43,8 @@ const PAD_H = 0.06;           // a hair of thickness so a lifted tile isn't pape
 const LABEL_W_MAX = 2.7;
 const LABEL_H = 0.4;
 const LABEL_FRONT = 0.92;     // parked in the camera-side half of the cell, clear of the bean
+const CARRY_Y = 1.05;         // the flat plane a carried bean rides — parallel to the board,
+                              // so cursor→bean stays projectively exact anywhere on screen
 // Tron world (the user 2026-08-13): near-black glossy ground with a faint accent grid, the
 // pads dark slabs whose STATUS light is their glowing rim, bloom doing the neon work. The
 // beans stay cute (session-colored, softly self-lit) with dark visors and glowing eyes.
@@ -219,7 +221,7 @@ class Pad {
     // springs home — the same everything-springs rule as the rest of the board
     if (this.carryTarget) this.carryWant.copy(this.carryTarget).sub(this.group.position);
     else this.carryWant.set(0, 0, 0);
-    this.carrier.position.lerp(this.carryWant, 1 - Math.exp(-16 * dt));
+    this.carrier.position.lerp(this.carryWant, 1 - Math.exp(-30 * dt));   // tight to the hand
     const cs = this.carryTarget ? 1.12 : 1;
     this.carrier.scale.x = ease(this.carrier.scale.x, cs, dt, 12);
     this.carrier.scale.y = this.carrier.scale.z = this.carrier.scale.x;
@@ -874,7 +876,7 @@ class HiveWorld {
   // the armed dock ends the session — the deliberate carry + highlighted dock IS the
   // confirmation (and an ended session still revives with its history from the picker).
   private pressedPad: { sid: string; x: number; y: number; bean: boolean } | null = null;
-  private dragSession: { sid: string; depth: number; over: boolean } | null = null;
+  private dragSession: { sid: string; over: boolean } | null = null;
   private trashEl: HTMLElement;
   private ghostRingMat = new THREE.LineBasicMaterial({
     color: ACCENT, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthWrite: false,
@@ -1101,8 +1103,9 @@ class HiveWorld {
   private beginSessionDrag(sid: string) {
     const pad = this.pads.get(sid);
     if (!pad || pad.dyingT >= 0) return;
-    // carry at the pad's own camera depth, so the bean stays screen-true under the cursor
-    this.dragSession = { sid, depth: this.camera.position.distanceTo(pad.group.position), over: false };
+    // the carry position itself is recomputed EVERY FRAME (see frame()) so the bean stays
+    // pinned under the cursor no matter how the camera eases; the event only arms the dock
+    this.dragSession = { sid, over: false };
     pad.lift = 0;
     const label = this.trashEl.querySelector(".ht-label") as HTMLElement;
     label.textContent = "Drop to end " + pad.sess.name;
@@ -1114,10 +1117,6 @@ class HiveWorld {
     const d = this.dragSession!;
     const pad = this.pads.get(d.sid);
     if (!pad || pad.dyingT >= 0) { this.dropSessionDrag(false); return; }
-    const p = new THREE.Vector3(this.pointer.x, this.pointer.y, 0.5).unproject(this.camera)
-      .sub(this.camera.position).normalize().multiplyScalar(d.depth).add(this.camera.position);
-    if (p.y < 0.4) p.y = 0.4;                // never carried below the board
-    pad.carryTo(p);
     const r = this.trashEl.getBoundingClientRect();
     const over = e.clientX >= r.left - 14 && e.clientX <= r.right + 14 && e.clientY >= r.top - 14;
     if (over !== d.over) { d.over = over; this.trashEl.classList.toggle("armed", over); }
@@ -1396,6 +1395,22 @@ class HiveWorld {
       this.targetCur.z + this.distCur * Math.cos(this.pitchCur) * Math.cos(this.yawCur),
     );
     this.camera.lookAt(this.targetCur);
+
+    // a carried bean is re-pinned under the CURSOR every frame — here, after the camera
+    // eases, not per pointer event — so nothing (spring, idle drift, a still pointer) can
+    // pull it out from under the pointer. Intersecting the flat CARRY_Y plane keeps the
+    // cursor→bean mapping exact anywhere on screen (the user 2026-08-13: it drifted).
+    if (this.dragSession) {
+      this.idleT = 0;                        // holding someone is not idle — no board sway mid-carry
+      const pad = this.pads.get(this.dragSession.sid);
+      if (pad && pad.dyingT < 0) {
+        this.camera.updateMatrixWorld();
+        const o = this.camera.position;
+        const v = new THREE.Vector3(this.pointer.x, this.pointer.y, 0.5).unproject(this.camera).sub(o).normalize();
+        const t = (CARRY_Y - o.y) / v.y;
+        if (t > 0) pad.carryTo(new THREE.Vector3(o.x + v.x * t, CARRY_Y, o.z + v.z * t));
+      }
+    }
 
     // ambient emitters, event-free by design: smoke while blocked, zzz while dozing — a
     // steady drizzle tied to the CURRENT state, not a transition (they stop the moment the

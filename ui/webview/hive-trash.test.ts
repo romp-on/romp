@@ -46,6 +46,18 @@ test("the dock arms only under the pointer, and shows WHO the drop would end", (
     assert.ok(CSS.includes(frag), "hive-pane.css carries: " + frag);
 });
 
+test("the carry is pinned under the cursor EVERY FRAME, on a flat plane", () => {
+  // Recomputed after the camera eases (frame()), never only per pointer event — a spring,
+  // idle drift, or a still pointer can no longer pull the bean out from under the cursor
+  // (the user 2026-08-13, who watched them drift apart). The flat CARRY_Y plane keeps the
+  // cursor→bean mapping projectively exact anywhere on screen; fixed camera DEPTH did not.
+  const frame = HIVE.slice(HIVE.indexOf("this.camera.lookAt(this.targetCur);"));
+  assert.match(frame, /if \(this\.dragSession\) \{\s*\n\s*this\.idleT = 0;/,
+    "holding someone is not idle — no board sway mid-carry");
+  assert.match(frame, /const t = \(CARRY_Y - o\.y\) \/ v\.y;/, "plane intersection, not camera depth");
+  assert.ok(!HIVE.includes("multiplyScalar(d.depth)"), "the depth-sphere carry is gone");
+});
+
 test("the carrier wraps the dweller, so a carry never fights the idle animation", () => {
   assert.match(HIVE, /this\.carrier\.add\(this\.guy\.group\);/);
   assert.match(HIVE, /this\.group\.add\(this\.carrier\);/);
