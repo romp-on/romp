@@ -35,8 +35,6 @@ const ST: Record<HiveState, number> = {
 const ACCENT = 0x9cd2ff;
 const PAD_H = 0.06;           // a hair of thickness so a lifted tile isn't paper; the board
                               // reads as ONE flat layer (HEX_SIZE/PAD_R: hive-layout.ts)
-const LINE_INSET = 0.94;      // a cell's own neon line sits just inside its boundary, so two
-                              // adjacent sessions' colors never fight over the shared edge
 // Tron world (the user 2026-08-13): near-black glossy ground with a faint accent grid, the
 // pads dark slabs whose STATUS light is their glowing rim, bloom doing the neon work. The
 // beans stay cute (session-colored, softly self-lit) with dark visors and glowing eyes.
@@ -103,14 +101,17 @@ class Pad {
     this.padMesh.position.y = PAD_H / 2;
     this.group.add(this.padMesh);
 
-    // the status LIGHT: ONE thin neon line tracing the cell, a hair inside its boundary
-    // (LINE_INSET) — additive + bloom does the glow; no halo, no thickness, the
-    // mathematically even look (the user 2026-08-13)
+    // the status LIGHT: ONE thin neon line tracing the cell's EXACT boundary — the same
+    // corners (hexCorner) and radius the lattice draws, so a used cell's walls ARE segments
+    // of the shared web, connected to the empty cells and to its neighbours (the user
+    // 2026-08-13, twice: connected, never floating inside its cell). Where two live
+    // sessions share a wall the additive lines blend — that wall belongs to both. Bloom
+    // does the glow; no halo, no thickness.
     this.ringMat = new THREE.LineBasicMaterial({
       color: ST[sess.state], transparent: true, opacity: 0.95,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    this.ring = new THREE.LineLoop(hexLineGeo(PAD_R * LINE_INSET), this.ringMat);
+    this.ring = new THREE.LineLoop(hexLineGeo(PAD_R), this.ringMat);
     this.ring.position.y = PAD_H + 0.012;
     this.group.add(this.ring);
 
@@ -119,7 +120,7 @@ class Pad {
       color: ST.awaiting, transparent: true, opacity: 0,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    this.sonar = new THREE.LineLoop(hexLineGeo(PAD_R * LINE_INSET), this.sonarMat);
+    this.sonar = new THREE.LineLoop(hexLineGeo(PAD_R), this.sonarMat);
     this.sonar.position.y = this.ring.position.y;
     this.group.add(this.sonar);
 
@@ -842,10 +843,12 @@ class HiveWorld {
 
     // deliberately QUIETER than any real pad: smaller, hairline ring, near-invisible fill —
     // an invitation at the spiral's frontier, not a resident
-    const ghostRing = new THREE.LineLoop(hexLineGeo(PAD_R * 0.74), this.ghostRingMat);
+    // the ghost lights its whole cell like a resident would, just barely: the full boundary
+    // line (connected to the web like every other cell) + a whisper of fill
+    const ghostRing = new THREE.LineLoop(hexLineGeo(PAD_R), this.ghostRingMat);
     ghostRing.position.y = 0.03;
     this.ghostFill = new THREE.Mesh(
-      new THREE.CircleGeometry(PAD_R * 0.76, 6, RIM_THETA),
+      new THREE.CircleGeometry(PAD_R, 6, RIM_THETA),
       new THREE.MeshBasicMaterial({ color: ACCENT, transparent: true, opacity: 0.012, depthWrite: false }));
     this.ghostFill.rotation.x = -Math.PI / 2;
     this.ghostFill.position.y = 0.02;

@@ -58,6 +58,17 @@ test("the talk path speaks the kernel's drive-op protocol", () => {
   assert.ok(HIVE.includes('{ type: "openSession", id: sid }'), "the card can jump to the full session");
 });
 
+test("cell lines trace the EXACT boundary, so used and empty cells are one connected web", () => {
+  // The status line, the sonar ping and the ghost all draw hexLineGeo(PAD_R) — the same
+  // corners and radius the lattice's edges use — never an inset copy floating inside the
+  // cell (the user 2026-08-13: they should be connected).
+  const loops = HIVE.match(/new THREE\.LineLoop\(hexLineGeo\([^)]*\)/g) || [];
+  assert.ok(loops.length >= 3, "the line treatment is in use");
+  for (const l of loops)
+    assert.equal(l, "new THREE.LineLoop(hexLineGeo(PAD_R)", "a line loop is not on the boundary: " + l);
+  assert.ok(!HIVE.includes("LINE_INSET"), "no inset constant survives");
+});
+
 test("hive's WebGL palette matches the styles.css status tokens (one meaning per color)", () => {
   // hive draws in WebGL where CSS vars can't reach, so it carries the values — this pin is
   // what keeps them the SAME values. Each pair: [styles.css token, hive.ts literal].
