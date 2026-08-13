@@ -11,6 +11,7 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { delegate } from "./actions";
+import { hostPrefix } from "./host-prefix";
 import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, PAD_R, PAD_THETA, RIM_THETA, spiralSlot } from "./hive-layout";
 import { buildSessions, diffSessions, HiveSession, HiveState, hiveAge, stateLine } from "./hive-model";
 
@@ -595,15 +596,20 @@ class HiveCard {
   private goal: HTMLElement; private brief: HTMLElement; private err: HTMLElement;
   private input: HTMLTextAreaElement; private sendBtn: HTMLButtonElement;
   sid: string | null = null;
+  private curName = "";                        // latest display name (refresh keeps it current)
+  private renaming = false;
+  private endEdit: ((commit: boolean) => void) | null = null;   // cancel handle for a live editor
   onSend: (sid: string, text: string) => void = () => {};
   onOpen: (sid: string) => void = () => {};
   onClose: () => void = () => {};
+  onRename: (sid: string, name: string) => void = () => {};
 
   constructor() {
     const el = document.createElement("div");
     el.id = "hive-card";
     el.innerHTML =
-      '<div class="hc-head"><span class="hc-dot"></span><span class="hc-name"></span>' +
+      '<div class="hc-head"><span class="hc-dot"></span>' +
+      '<span class="hc-name" data-act="rename" title="Rename"></span>' +
       '<button class="hc-x" data-act="close" title="Back to the board (Esc)" aria-label="Close">×</button></div>' +
       '<div class="hc-state"></div>' +
       '<div class="hc-goal" hidden></div>' +
@@ -626,6 +632,7 @@ class HiveCard {
       close: () => this.onClose(),
       open: () => { if (this.sid) this.onOpen(this.sid); },
       send: () => this.send(),
+      rename: () => this.startRename(),
     });
     this.input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.send(); }
@@ -647,8 +654,56 @@ class HiveCard {
     setTimeout(() => { b.disabled = false; b.textContent = "Send"; }, 1100);
   }
 
+  // Click the name to rename — the same inline editor contract as the chat tab strip
+  // (render.ts startTabRename): a remote session displays as "host:name" where "host:" is
+  // metadata THIS viewer prepends (host-prefix.ts) — the kernel that owns the session knows
+  // it by the bare name, so the host renders as fixed chrome beside the field and only the
+  // name is editable. Enter/blur commits, Esc cancels; the label only changes once the
+  // kernel's push lands with the new name (never optimistically — the push is the truth).
+  private startRename() {
+    if (!this.sid || this.renaming) return;
+    const sid = this.sid;                      // commit to the session the editor OPENED on —
+    const p = hostPrefix(this.curName, sid);   // a blur can land after the card switched sids
+    const base = p ? p.rest : this.curName;
+    const input = document.createElement("input");
+    input.className = "hc-rename";
+    input.value = base;
+    input.spellcheck = false;
+    const fixed = p ? document.createElement("span") : null;
+    if (fixed) { fixed.className = "host-prefix"; fixed.textContent = p!.host; }
+    this.renaming = true;
+    this.name.style.display = "none";
+    this.name.after(input);
+    if (fixed) input.before(fixed);
+    let finished = false;
+    const done = (commit: boolean) => {
+      if (finished) return;
+      finished = true;
+      this.endEdit = null;
+      const v = input.value.trim();
+      input.remove();
+      fixed?.remove();
+      this.name.style.display = "";
+      this.renaming = false;
+      // the bare name, never the display string: the owning kernel is addressed by sid
+      if (commit && v && v !== base) this.onRename(sid, v);
+    };
+    this.endEdit = done;
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();                     // typing must never orbit the camera / close the card
+      if (e.key === "Enter") { e.preventDefault(); done(true); }
+      else if (e.key === "Escape") { e.preventDefault(); done(false); }
+    });
+    input.addEventListener("blur", () => done(true));
+    for (const ev of ["click", "mousedown", "dblclick", "contextmenu"])
+      input.addEventListener(ev, (e) => e.stopPropagation());
+    input.focus();
+    input.select();
+  }
+
   show(s: HiveSession, now: number) {
     const fresh = this.sid !== s.sid;
+    if (fresh) this.endEdit?.(false);          // switching sessions abandons a half-typed rename
     this.sid = s.sid;
     this.refresh(s, now);
     if (fresh) { this.err.hidden = true; this.input.value = ""; }
@@ -659,9 +714,11 @@ class HiveCard {
 
   refresh(s: HiveSession, now: number) {
     if (this.sid !== s.sid) return;
+    this.curName = s.name;
     this.dot.style.background = s.color?.bg || "#8a8a8a";
     this.name.textContent = s.name;
     this.name.style.color = s.color?.bg || "#dddddd";
+    this.name.dataset.act = "rename";          // a live session is renameable (gone() revokes)
     this.state.textContent = stateLine(s, now);
     this.state.dataset.state = s.state;
     this.goal.hidden = !s.goal;
@@ -672,9 +729,12 @@ class HiveCard {
   }
 
   gone() {
-    // the selected session left the board — say so rather than silently going stale
+    // the selected session left the board — say so rather than silently going stale, and
+    // stop offering rename: there is nothing behind the sid for the kernel to rename
     this.state.textContent = "this session has ended";
     this.state.dataset.state = "";
+    this.endEdit?.(false);
+    delete this.name.dataset.act;
   }
 
   error(title: string, text: string) {
@@ -682,7 +742,7 @@ class HiveCard {
     this.err.textContent = title + (text ? " — " + text : "");
   }
 
-  hide() { this.sid = null; this.el.classList.remove("open"); }
+  hide() { this.endEdit?.(false); this.sid = null; this.el.classList.remove("open"); }
 }
 
 // ── the world ────────────────────────────────────────────────────────────────────────────
@@ -827,6 +887,11 @@ class HiveWorld {
     this.card.onOpen = (sid) => {
       vscodeApi?.postMessage({ type: "openSession", id: sid });
       try { if (window.parent !== window) window.parent.postMessage({ romp: "reveal", pane: "chat" }, "*"); } catch { /* standalone */ }
+    };
+    this.card.onRename = (sid, name) => {
+      // the SAME renameSession op the chat tab strip posts — the kernel renames the tmux
+      // session (or the names file for a dead one) and the new name rides the next push
+      vscodeApi?.postMessage({ type: "renameSession", id: sid, name });
     };
     this.card.onSend = (sid, text) => {
       vscodeApi?.postMessage({ type: "sendMessage", id: sid, text });
@@ -1120,6 +1185,13 @@ window.addEventListener("message", (e: MessageEvent) => {
   // card instead of letting the send silently vanish (the fail-loudly rule)
   if (m.type === "err" && world && world.card.sid && (!m.sid || m.sid === world.card.sid)) {
     world.card.error(String(m.title || "That message was not delivered"), String(m.text || ""));
+    return;
+  }
+  // a refused op that answers as a warn (renameSession's bad-name reply) — same fail-loudly
+  // rule: this socket only carries replies to ops THIS page sent, so an open card is the
+  // one that asked
+  if (m.type === "warn" && world && world.card.sid) {
+    world.card.error(String(m.text || "That didn't take"), "");
     return;
   }
   if (m.type !== "feed") return;
