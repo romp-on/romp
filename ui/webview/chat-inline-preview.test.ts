@@ -36,6 +36,16 @@ test("the chat strip uses the FULL render on web, and the host data-URL flow for
   assert.doesNotMatch(RENDER, /previewThumb/, "the chat no longer renders mention thumbnails — full renders now");
 });
 
+test("a photo the agent READ renders under its tool row, remote sessions included", () => {
+  // the user 2026-08-14: 'when it looked at photos, render them in the chat — even on the
+  // devbox'. The Read tool branch reuses the mention flow wholesale: previewFull(path, sid)
+  // → fileUrl's /remote/<host>/file relay for host-prefixed sids, buildPathImg for VS Code.
+  assert.match(RENDER, /if \(readPath && previewKind\(readPath\) === "img"\) \{/);
+  assert.match(RENDER, /const full = canPreview\(\) \? previewFull\(readPath, activeId\) : buildPathImg\(readPath\);/);
+  assert.match(RENDER, /if \(o && typeof o\.file_path === "string"\) readPath = o\.file_path;/,
+    "the path comes from the Read tool's own input, resolved like every other preview");
+});
+
 test("imgRequest carries the session id so RELATIVE mentioned paths resolve against the session cwd", () => {
   assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "imgRequest", path: p, id: activeId \}\);/);
   assert.match(KERNEL, /_img_data_url\(_resolve_open_path\(p, msg\.get\("id"\)\)\)/);

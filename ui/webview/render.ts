@@ -2910,6 +2910,22 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
     }
     inlineFold(head, turn, `+${add} −${del}`, pre, fkey);
   } else if (ev.name === "Read") {
+    // A photo the agent LOOKED AT renders as the photo, right under the tool row (the user
+    // 2026-08-14) — the same full-size treatment a path mentioned in prose gets (the
+    // 2026-07-20 rule: the image, not a thumbnail), through the same plumbing: previewFull
+    // rides fileUrl, whose /remote/<host>/file relay serves a REMOTE session's disk (devbox
+    // included), and it self-removes when the kernel can't serve the bytes. VS Code's
+    // sandbox keeps the host data-URL flow (buildPathImg). The textual fold stays below for
+    // the mechanics.
+    let readPath = "";
+    try {
+      const o = JSON.parse(ev.input || "{}");
+      if (o && typeof o.file_path === "string") readPath = o.file_path;
+    } catch { /* truncated input JSON → no preview, the head still stands */ }
+    if (readPath && previewKind(readPath) === "img") {
+      const full = canPreview() ? previewFull(readPath, activeId) : buildPathImg(readPath);
+      if (full) turn.appendChild(full);
+    }
     if (ev.output) inlineFold(head, turn, `${countLines(ev.output)} lines`, preEl(ev.output), fkey);
   } else if (ev.name === "Skill") {
     // A Skill invocation (the user 2026-07-08): the head names the skill, and the skill's INSTRUCTIONS
