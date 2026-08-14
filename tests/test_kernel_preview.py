@@ -77,10 +77,26 @@ class FilePreviewEndpoint(unittest.TestCase):
         code, _, _ = self._req("/file?path=" + urllib.parse.quote(os.path.join(self.tmp.name, "gone.png")))
         self.assertEqual(code, 404)
 
-    def test_non_renderable_extension_404s(self):
-        # the allowlist is RENDERABLE media only — a .txt (or anything else) never leaves the machine
-        code, _, _ = self._req("/file?path=" + urllib.parse.quote(self.txt))
-        self.assertEqual(code, 404)
+    def test_text_serves_inline_for_the_click_open(self):
+        # since 2026-08-14 the route is also the OPEN behind a remote path click (a devbox session's
+        # file has no other way onto the viewer's screen): text serves inline instead of 404ing
+        code, hdrs, body = self._req("/file?path=" + urllib.parse.quote(self.txt))
+        self.assertEqual(code, 200)
+        self.assertEqual(hdrs.get("Content-Type"), "text/plain; charset=utf-8")
+        self.assertEqual(body, b"not renderable")
+        self.assertIsNone(hdrs.get("Content-Disposition"), "inline — a click should SHOW text, not save it")
+
+    def test_binary_downloads_instead_of_rendering(self):
+        # a NUL byte in the sniff window = not text: the click still lands something — a download,
+        # the browser's `open` for a binary — never a mojibake tab and never a silent nothing
+        binp = os.path.join(self.tmp.name, "blob.dat")
+        with open(binp, "wb") as f:
+            f.write(b"\x00\x01\x02romp")
+        code, hdrs, body = self._req("/file?path=" + urllib.parse.quote(binp))
+        self.assertEqual(code, 200)
+        self.assertEqual(hdrs.get("Content-Type"), "application/octet-stream")
+        self.assertEqual(hdrs.get("Content-Disposition"), 'attachment; filename="blob.dat"')
+        self.assertEqual(body, b"\x00\x01\x02romp")
 
     def test_relative_path_without_sid_404s(self):
         # unresolvable relative path (no session cwd) must not fall back to the kernel's own cwd
@@ -102,7 +118,12 @@ class FilePreviewEndpoint(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(hdrs.get("Content-Length"), str(len(PNG)))
         self.assertEqual(body, b"")
-        code, _, _ = self._req("/file?path=" + urllib.parse.quote(self.txt), method="HEAD")
+        # a text file now reports existence too (it is openable since the click-open widening) —
+        # only a genuinely missing path HEADs 404
+        code, _, body = self._req("/file?path=" + urllib.parse.quote(self.txt), method="HEAD")
+        self.assertEqual((code, body), (200, b""))
+        code, _, _ = self._req("/file?path=" + urllib.parse.quote(os.path.join(self.tmp.name, "gone.txt")),
+                               method="HEAD")
         self.assertEqual(code, 404)
 
 

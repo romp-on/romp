@@ -864,6 +864,24 @@ function imgCaption(path: string): HTMLElement {
   cap.appendChild(copy);
   return cap;
 }
+// Open a clicked path where the VIEWER can actually see it (the user 2026-08-14: clicking a
+// devbox session's file did nothing — {type:"openFile"} runs `open <path>` on the OWNING
+// kernel, which is headless and on the wrong machine's display). On the web dashboard, a
+// REMOTE session's path opens in a browser tab through the same /remote/<host>/file relay
+// every preview rides — the kernel serves images/PDFs natively, text inline, and anything
+// else as a download, so every click lands something. A LOCAL session keeps the native host
+// open (the default app/editor on this machine IS the better open when the file is here),
+// and the VS Code webview keeps its host op on both.
+function openFileClick(open: string, relative = false): void {
+  const host = activeId ? hostOf(activeId) : "";
+  if (host && (location.protocol === "http:" || location.protocol === "https:")) {
+    window.open(fileUrl(open, activeId), "_blank", "noopener,noreferrer");
+    return;
+  }
+  if (vscodeApi) vscodeApi.postMessage(relative
+    ? { type: "openFile", path: open, id: activeId }   // kernel resolves against this session's cwd
+    : { type: "openFile", path: open });
+}
 // The full absolute path, clickable — opens the image file in the editor. Shown
 // verbatim (never shortened to a basename) so it can also be read and selected/
 // copied right where it stands.
@@ -873,7 +891,7 @@ function imgPathLink(path: string): HTMLElement {
   a.title = "Open " + path;
   a.addEventListener("click", (e) => {
     e.stopPropagation();
-    if (vscodeApi) vscodeApi.postMessage({ type: "openFile", path });
+    openFileClick(path);
   });
   return a;
 }
@@ -917,9 +935,7 @@ function openPathLink(raw: string, open: string, relative = false): HTMLElement 
   a.title = "Open " + open;
   a.addEventListener("click", (e) => {
     e.stopPropagation();
-    if (vscodeApi) vscodeApi.postMessage(relative
-      ? { type: "openFile", path: open, id: activeId }   // kernel resolves against this session's cwd
-      : { type: "openFile", path: open });
+    openFileClick(open, relative);           // remote session on web → the viewer's own tab (see openFileClick)
   });
   return a;
 }

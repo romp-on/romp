@@ -21865,15 +21865,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def _file_preview(self, q, head=False):
         """GET/HEAD /file — the preview bytes behind a chat path-thumbnail / feed artifact strip (the
-        user 2026-07-08). Same path resolution as click-to-open (~ expanded, relative → the session's
-        cwd — _resolve_open_path); RENDERABLE media only (_PREVIEW_MIME), anything else 404s and the
-        client keeps its plain link. Oversize 413s rather than silently truncating. HEAD is the
-        existence probe for a chip that can't self-verify like an <img> (a PDF): headers only, so a
+        user 2026-07-08), and since 2026-08-14 the OPEN behind a remote path click: renderable media
+        (_PREVIEW_MIME) serves natively, text serves inline, anything else downloads — a devbox
+        session's file has no other way onto the viewer's screen, so a click must always land
+        something. Same path resolution as click-to-open (~ expanded, relative → the session's cwd —
+        _resolve_open_path). Oversize 413s rather than silently truncating. HEAD is the existence
+        probe for a chip that can't self-verify like an <img> (a PDF): headers only, so a
         since-deleted file costs no download and never shows a dead chip."""
         fp = _resolve_open_path((q.get("path") or [""])[0], (q.get("sid") or [None])[0])
-        mime = _PREVIEW_MIME.get(os.path.splitext(fp)[1].lower())
-        if not mime or not os.path.isabs(fp) or not os.path.isfile(fp):
+        if not os.path.isabs(fp) or not os.path.isfile(fp):
             return self._send(404, b"" if head else "not found", "text/plain")
+        mime = _PREVIEW_MIME.get(os.path.splitext(fp)[1].lower())
+        dispo = None
+        if not mime:
+            # OPEN-on-click, not just previews (the user 2026-08-14): a REMOTE session's path can only
+            # open on the viewer's screen through this route, so a non-media file must still land
+            # something — text (no NUL in the first 8KB) serves inline as text/plain, anything else
+            # downloads (the browser's `open` for a binary). The client previews still key on
+            # _PREVIEW_MIME kinds; this widens only what a deliberate click can fetch.
+            try:
+                with open(fp, "rb") as f:
+                    sniff = f.read(8192)
+            except OSError:
+                return self._send(404, b"" if head else "not found", "text/plain")
+            if b"\x00" not in sniff:
+                mime = "text/plain; charset=utf-8"
+            else:
+                mime = "application/octet-stream"
+                dispo = 'attachment; filename="%s"' % os.path.basename(fp).replace('"', "")
         size = os.path.getsize(fp)
         if size > _PREVIEW_MAX_BYTES:
             return self._send(413, b"" if head else "too large to preview", "text/plain")
@@ -21882,13 +21901,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(size))   # the real length, no body (HEAD semantics)
             self.send_header("Cache-Control", "no-cache")
+            if dispo:
+                self.send_header("Content-Disposition", dispo)
             if getattr(self, "_cors_origin", None):         # the chat's fetch-HEAD probe rides CORS too
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
                 self.send_header("Vary", "Origin")
             self.end_headers()
             return
         with open(fp, "rb") as f:
-            return self._send(200, f.read(), mime, cache="no-cache")
+            return self._send(200, f.read(), mime, cache="no-cache",
+                              headers={"Content-Disposition": dispo} if dispo else None)
 
     def do_OPTIONS(self):
         """CORS preflight. The strip's tunnel actions POST JSON (Content-Type:

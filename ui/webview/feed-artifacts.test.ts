@@ -63,7 +63,11 @@ test("feed card: 'N artifacts' rides the bottom of the summary section and opens
 test("feed modal: artifacts strip below the tree — previews on the web, open-the-file chips in VS Code", () => {
   assert.match(FEED, /applyModalArtifacts\(body, it\);/, "wired in the single-ask modal branch");
   assert.match(FEED, /const sig = arts\.join\("\\n"\);\n  if \(strip && \(strip as any\)\._sig === sig\) return;/, "sig-guarded so a kernel repush doesn't re-fetch every thumb");
-  assert.match(FEED, /chip\.onclick = \(ev: Event\) => \{ ev\.stopPropagation\(\); vscodeApi\?\.postMessage\(\{ type: "openFile", path: p, id: it\.sid \}\); \};/, "no-preview fallback still opens the file");
+  assert.match(FEED, /vscodeApi\?\.postMessage\(\{ type: "openFile", path: p, id: it\.sid \}\);/, "no-preview fallback still opens the file");
+  // a REMOTE card's artifact must open on the VIEWER's screen (the user 2026-08-14: a devbox
+  // file click did nothing — `open` ran on the headless owning kernel): web origin + host-
+  // prefixed sid → the /remote/<host>/file relay in a new tab, local cards keep the native open
+  assert.match(FEED, /if \(hostOf\(it\.sid\) && \(location\.protocol === "http:" \|\| location\.protocol === "https:"\)\) \{\n\s*window\.open\(fileUrl\(p, it\.sid\), "_blank", "noopener,noreferrer"\);/);
   assert.match(FEED_CSS, /\.fmodal-arts \{ margin-top: 12px;/);
 });
 

@@ -26,6 +26,15 @@ test("a relative path click carries the active session id so the kernel resolves
   assert.match(RENDER, /function openPathLink\(raw: string, open: string, relative = false\)/);
   assert.match(RENDER, /\{ type: "openFile", path: open, id: activeId \}/);   // relative → send the session id
   assert.match(RENDER, /\{ type: "openFile", path: open \}/);                 // absolute/file:// → no id needed
+  // …but a REMOTE session's path opens on the VIEWER's screen instead (the user 2026-08-14:
+  // clicking a devbox file did nothing — the owning kernel's `open` has no display here): on a
+  // web origin the click rides the /remote/<host>/file relay in a new tab, via ONE shared
+  // helper every chat path-click uses (openPathLink and the image caption links alike)
+  assert.match(RENDER, /function openFileClick\(open: string, relative = false\): void \{/);
+  assert.match(RENDER, /const host = activeId \? hostOf\(activeId\) : "";/);
+  assert.match(RENDER, /window\.open\(fileUrl\(open, activeId\), "_blank", "noopener,noreferrer"\);/);
+  assert.ok((RENDER.match(/openFileClick\(/g) || []).length >= 3,
+    "declared once, used by both the path links and the image caption link");
 });
 
 test("the cheap pre-filter keys on a slash — or, inside inline code, a dot", () => {

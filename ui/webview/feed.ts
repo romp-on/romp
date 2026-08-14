@@ -9,7 +9,7 @@
 import { distillText, distillInputs, applyDistillLine, distillPending } from "./distiller-line";
 import { spinFor } from "./spin-caption";
 import { onlyTag, matchesOnly } from "./only-filter";
-import { hostNameNodes, hostPartsNodes, hostIsDown, hostDownNote } from "./host-prefix";
+import { hostNameNodes, hostPartsNodes, hostIsDown, hostDownNote, hostOf } from "./host-prefix";
 import { extHoverMatches } from "./card-key";
 import { provenanceRows, provenanceGroupRows, rootStart, type ProvFmt, type ProvRow } from "./provenance";
 import { ageColorReadable } from "./age-color";
@@ -17,7 +17,7 @@ import { badgeNotices, clearBoundaryNotices, sdkProblemNotices, syncNotices,
   type ClearNoticeRow, type SdkNoticeRow, type SyncNoticeRow } from "./badge-mirror";
 import { initStrip } from "./strip";
 import { installSettingsSync } from "./settings";
-import { previewThumb, previewKind } from "./preview";
+import { previewThumb, previewKind, fileUrl } from "./preview";
 import { VIEW_STATE_KEY, parseViewState, serializeViewState, pruneViewState, capViewState, type FeedViewState } from "./feed-view-state";
 
 // (The standalone-deliverable "FeedItem" subsystem was REMOVED 2026-07-07: the kernel had emitted
@@ -2204,7 +2204,17 @@ function applyModalArtifacts(host: HTMLElement, it: AskItem): void {
       const chip = el("button", "fmodal-art-chip");
       chip.textContent = name;
       chip.title = "open " + p;
-      chip.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openFile", path: p, id: it.sid }); };
+      chip.onclick = (ev: Event) => {
+        ev.stopPropagation();
+        // a REMOTE card's artifact lives on the owning kernel's disk — `open` there lands on a
+        // headless machine's display (the user 2026-08-14: click, nothing). On the web, open the
+        // bytes on the VIEWER's screen through the /remote/<host>/file relay instead.
+        if (hostOf(it.sid) && (location.protocol === "http:" || location.protocol === "https:")) {
+          window.open(fileUrl(p, it.sid), "_blank", "noopener,noreferrer");
+          return;
+        }
+        vscodeApi?.postMessage({ type: "openFile", path: p, id: it.sid });
+      };
       cell.appendChild(chip);
     }
     row.appendChild(cell);
