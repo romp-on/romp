@@ -15209,6 +15209,10 @@ def build_feed(now, tmux=None):
     # QUARANTINED PEER MAIL (per-host trust model): mail from a DIRECTED federated host is held, never
     # auto-injected — each is a human decision (approve/deny/edit), so it surfaces as a needs-you card.
     asks.extend(_quarantine_cards(now, cleared))
+    # HOOKLESS HOST (fail loudly, never degrade silently): terminal sessions whose @claude-state has
+    # never been written have no state source at all — say so as a needs-you card instead of letting
+    # every status surface quietly read calm (see _hookless_tmux_card).
+    asks.extend(_hookless_tmux_card(now, tmux, alive, cleared))
     # per-card bell (the user 2026-07-28): one pass over the FINAL ask list — goal cards, placeholders,
     # parked handoffs and quarantine cards alike — so every card's right-click menu reflects its armed
     # state, EFFECTIVE (card override > session override > the master default, 2026-08-09) — with the
@@ -15721,6 +15725,48 @@ def _quarantine_cards(now, cleared):
             "tree": []})
     out.sort(key=lambda c: c["t"])
     return out
+
+
+def _hookless_tmux_card(now, tmux, alive, cleared):
+    """ONE needs-you card when terminal sessions on THIS host are running with romp's Claude Code
+    hooks not firing — the authoritative-sources rule's loud half: without the hooks there is NO
+    state source for a tmux session (@claude-state stays empty), so the chip can never say
+    Awaiting, a live permission prompt reads Working, and the hive/feed never light up — silently
+    (the user 2026-08-13, whose fresh remote host skipped install.sh and lost exactly that).
+
+    Evidence is per-session and event-exact, no timers: a live tmux-backend session that HAS a
+    conversation (its SessionStart/UserPromptSubmit hooks would have fired long before the first
+    user turn landed on disk) yet whose @claude-state has never been written. Config guesses
+    (parsing settings.json) are deliberately not the trigger — a registered-but-broken hook must
+    trip this too. itemId 'hooks:<host>' rides cleared.jsonl so a Clear dismisses it for good on
+    that host. blocked stays None on purpose: feed.ts's ⏸ chip speaks permission/picker only, and
+    the card face already carries the remedy via blockSummary (the decision-brief line)."""
+    dark = sorted(s["name"] for s in alive
+                  if (tmux.get(s["sid"]) or {}).get("backend") == "tmux"
+                  and not (tmux.get(s["sid"]) or {}).get("state")
+                  and _session_has_history(s["sid"]))
+    if not dark:
+        return []
+    host = _self_host()
+    item_id = "hooks:" + host
+    if item_id in cleared:
+        return []
+    return [{
+        "itemId": item_id, "sid": "", "name": host, "color": None,
+        "text": "Terminal sessions here aren't reporting their state",
+        "t": now, "live": False,
+        "trgb": list(cm.age_rgb(0, _colormap())),
+        "turnId": item_id, "origin": None,
+        "followupPending": None, "waitingOn": None,
+        "summary": None, "background": None, "summaryAnchorUuid": None, "warns": None,
+        "nudged": None, "blocked": None,
+        "blockSummary": "romp's Claude Code hooks aren't firing on %s, so %s can't report "
+                        "working / needs-input / mode — a session stopped on a question will look "
+                        "calm everywhere. Run install.sh from the romp clone on %s, then relaunch "
+                        "the affected sessions (a running Claude only picks hooks up at launch)."
+                        % (host, ", ".join(dark[:6]) + (" +%d more" % (len(dark) - 6) if len(dark) > 6 else ""), host),
+        "column": "needs_input",
+        "tree": []}]
 
 
 def _seg_anchors(atoms):
