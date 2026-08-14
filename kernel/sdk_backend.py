@@ -1111,6 +1111,40 @@ def write_sdk_default(state_dir: Path, **fields) -> None:
     os.replace(tmp, p)
 
 
+# The launch-defaults FILE's validation — bin/romp's exact rules, kept in lockstep so the two
+# spawn paths can never accept different values for the same line (the launcher's regexes are
+# the reference; tests pin both). EFFORT deliberately excludes ultracode: per-session only.
+_SD_MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+(\[[0-9]+[a-z]\])?$")
+_SD_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_SD_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")
+
+
+def read_session_defaults() -> dict:
+    """The user's per-session LAUNCH defaults — ~/.config/romp/session-defaults, the SAME KEY=VALUE
+    file bin/romp's tmux launcher reads (the user 2026-08-13: ONE answer for what a new session
+    launches as). This is the SDK spawn's copy of that answer: without it the file governed tmux
+    launches only, and a board/tray spawn quietly kept the remembered-last-pick mode — the user set
+    PERM_MODE=auto and still watched an SDK session launch asking for permissions. Parsed
+    line-by-line and validated with the launcher's exact rules (values UNstripped, as in bash),
+    never sourced; malformed lines are skipped. {} when absent. Keys out: model / effort / mode."""
+    out: dict = {}
+    try:
+        lines = (Path(os.path.expanduser("~")) / ".config" / "romp" / "session-defaults").read_text().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        k, eq, v = line.partition("=")
+        if not eq:
+            continue
+        if k == "MODEL" and _SD_MODEL_RE.match(v):
+            out["model"] = v
+        elif k == "EFFORT" and v in _SD_EFFORTS:
+            out["effort"] = v
+        elif k == "PERM_MODE" and v in _SD_MODES:
+            out["mode"] = v
+    return out
+
+
 _WORK_KEY: str | None = None   # process-lifetime stash; None = not yet claimed from the environment
 
 
@@ -3406,15 +3440,19 @@ class SdkBackend:
         # fills in on connect from get_context_usage(). The seed lands in THIS session's reg — exactly what
         # _options launches with and what the badge reads — so the display can never desync from what's used.
         d = read_sdk_defaults(self.state_dir)
-        # An EXPLICIT per-spawn choice (the hive tray's model bean, the user 2026-08-13) outranks the
-        # remembered seed for THIS session only — the seed itself is untouched, so a one-off Haiku
-        # spawn never silently becomes everyone's default.
+        # Precedence, most deliberate first: an EXPLICIT per-spawn choice (the hive tray's model
+        # bean, the user 2026-08-13) > the launch-defaults FILE (~/.config/romp/session-defaults —
+        # the user's declared one answer, same file the tmux launcher reads) > the remembered
+        # last-pick seed > the hardcoded floor. The seed itself is untouched by the first two, so
+        # a one-off Haiku spawn never silently becomes everyone's default.
+        sd = read_session_defaults()
         eff = (effort if effort in EFFORT_LEVELS
+               else sd["effort"] if sd.get("effort") in EFFORT_LEVELS
                else d.get("effort") if d.get("effort") in EFFORT_LEVELS else DEFAULT_EFFORT)
-        mode = d.get("mode") or "acceptEdits"   # seed the permission mode from the remembered default too (the user 2026-06-27)
+        mode = sd.get("mode") or d.get("mode") or "acceptEdits"   # the file, else the remembered default (the user 2026-06-27)
         reg = {"sid": sid, "name": name, "cwd": cwd, "mode": mode,
                "effort": eff, "lastSid": "", "alive": True}
-        m = model or d.get("model")
+        m = model or sd.get("model") or d.get("model")
         if m and m != "default":
             reg["model"] = m
         # Auth: the picker's explicit pick wins; else the remembered default (a gear /auth pick on any

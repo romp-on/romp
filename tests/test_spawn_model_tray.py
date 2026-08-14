@@ -14,6 +14,9 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # Hermetic state BEFORE the load — the module resolves its state root at import time.
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
+# Hermetic HOME too: spawn() also reads the launch-defaults file (~/.config/romp/session-defaults,
+# which OUTRANKS the remembered seed) — the developer machine's real file must not leak in here.
+os.environ["HOME"] = tempfile.mkdtemp()
 sb = SourceFileLoader("romp_sdk_backend_tray", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
 
 
