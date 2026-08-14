@@ -107,12 +107,32 @@ class DriveOpsAckFast(unittest.TestCase):
         self.assertTrue(km._pusher_wake.is_set())
 
     def test_interrupt_stamps_and_marks_the_views_dirty(self):
-        before = km._views_dirty[0]
-        self.assertTrue(self._drive({"type": "interrupt", "id": SID}))
-        self.assertIn(SID, km._interrupt_clicked, "the optimistic 'Interrupting…' stamp lands first")
-        self.assertGreater(km._views_dirty[0], before,
-                           "the stamp is in-memory — no sig sees it, so the views must dirty-rebuild")
-        self.assertTrue(km._pusher_wake.is_set())
+        # the stamp is gated on a turn actually being open (_working_now): an idle press stops
+        # nothing, so it paints nothing — stamping it stranded 'Interrupting…' for the 120s wedge
+        # cap per press (the user 2026-08-14). Busy here, so the optimistic stamp lands as designed.
+        saved = km._working_now
+        km._working_now = lambda sid: True
+        try:
+            before = km._views_dirty[0]
+            self.assertTrue(self._drive({"type": "interrupt", "id": SID}))
+            self.assertIn(SID, km._interrupt_clicked, "the optimistic 'Interrupting…' stamp lands first")
+            self.assertGreater(km._views_dirty[0], before,
+                               "the stamp is in-memory — no sig sees it, so the views must dirty-rebuild")
+            self.assertTrue(km._pusher_wake.is_set())
+        finally:
+            km._working_now = saved
+
+    def test_an_idle_interrupt_paints_nothing_but_still_dispatches(self):
+        saved = km._working_now
+        km._working_now = lambda sid: False
+        try:
+            self.assertTrue(self._drive({"type": "interrupt", "id": SID}))
+            self.assertNotIn(SID, km._interrupt_clicked,
+                             "no open turn → no 'Interrupting…' stamp to strand (the user 2026-08-14)")
+            self.assertEqual([c for c in self.be.calls if c[0] == "interrupt"], [("interrupt", SID)],
+                             "the Esc/stop itself still reaches the backend")
+        finally:
+            km._working_now = saved
 
     def test_no_drive_op_calls_push_all_inline(self):
         src = inspect.getsource(km._drive)

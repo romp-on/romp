@@ -226,6 +226,64 @@ class InterruptingSdkFlag(unittest.TestCase):
         self.assertIn('"snapT": time.time()', src, "snapshot() stamps when it was taken")
 
 
+class IdleInterruptNeverStrands(unittest.TestCase):
+    """A stop pressed on an IDLE session must not paint (let alone strand) 'Interrupting…' (the user
+    2026-08-14: it never went back to normal). The flag's only clear events are the aborted turn's
+    ResultMessage or a fresh turn — an idle press produces NEITHER, so latching it pinned the snapshot
+    at interrupting:True forever, and every later press bought another 120s of 'stopping…' off the
+    eternal flag. Same guard _signal_cli has carried since the 2026-07-20 strand; and the kernel's op
+    sites stamp _interrupt_clicked only when a turn is actually open (_working_now), so a tmux idle
+    press doesn't ride the 120s wedge cap either."""
+
+    def _session(self, inflight):
+        sb = SourceFileLoader("romp_sdk_backend_intr", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        s = sb.SdkSession(be, {"sid": SID, "name": "web"})
+        s.inflight = inflight
+        return s
+
+    class _Loop:
+        def __init__(self):
+            self.scheduled = 0
+        def call_soon_threadsafe(self, fn):
+            self.scheduled += 1              # record the dispatch; never run it (no real loop here)
+
+    def test_an_idle_press_does_not_latch_the_flag_but_still_dispatches(self):
+        s = self._session(inflight=0)
+        s.loop, s.client = self._Loop(), object()          # channel up → the polite control rung
+        s.interrupt()
+        self.assertFalse(s._interrupted, "no turn to stop → no latch → nothing can strand")
+        self.assertEqual(s.loop.scheduled, 1, "the control request itself still goes out (Esc semantics)")
+
+    def test_a_busy_press_latches_exactly_as_before(self):
+        s = self._session(inflight=1)
+        s.loop, s.client = self._Loop(), object()
+        s.interrupt()
+        self.assertTrue(s._interrupted, "a running turn latches — its ResultMessage clears it")
+
+    def test_do_interrupt_carries_the_same_guard(self):
+        import asyncio
+        class _Client:
+            async def interrupt(self):
+                return None
+        s = self._session(inflight=0)
+        s.client = _Client()
+        asyncio.run(s._do_interrupt())
+        self.assertFalse(s._interrupted, "the async leg must not re-latch what interrupt() declined to")
+        s2 = self._session(inflight=2)
+        s2.client = _Client()
+        asyncio.run(s2._do_interrupt())
+        self.assertTrue(s2._interrupted)
+
+    def test_the_kernel_op_sites_gate_the_stamp_on_a_live_turn(self):
+        with open(os.path.join(BIN, "romp-kernel")) as f:
+            src = f.read()
+        self.assertEqual(src.count("_intr_live = _working_now(str(sid))"), 2,
+                         "both interrupt entry points (WS op + HTTP route) gauge before dispatch")
+        self.assertEqual(src.count("if _intr_live:"), 2,
+                         "…and stamp only when a turn was actually open")
+
+
 class FeedCardInterruptingBadge(unittest.TestCase):
     """The feed CARD wears a steady 'interrupting…' badge while a stop is in flight, then swaps to the
     past-tense 'interrupted' — never flickering between 'working' and 'interrupted' as the live-tail retires

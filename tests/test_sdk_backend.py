@@ -830,7 +830,10 @@ class LiveTail(unittest.TestCase):
     def test_interrupt_sets_the_flag_synchronously_at_dispatch(self):
         """interrupt() schedules the async _do_interrupt, but the kernel stamps _interrupt_clicked and pushes
         the instant it returns — so _interrupted must already be True SYNCHRONOUSLY, not one event-loop tick
-        later (else the first snapshot after the click misses it and the badge flickers, the user 2026-07-07)."""
+        later (else the first snapshot after the click misses it and the badge flickers, the user 2026-07-07).
+        FOR A RUNNING TURN only (inflight > 0): an idle press latches nothing — the flag's sole clear events
+        are that turn's ResultMessage / a fresh turn, so an idle latch stranded 'interrupting' forever (the
+        user 2026-08-14; tests/test_kernel_interrupt.py IdleInterruptNeverStrands)."""
         import asyncio
         be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
         s = sb.SdkSession(be, {"sid": "11111111-2222-3333-4444-555555555555", "name": "n", "cwd": "/tmp"})
@@ -838,6 +841,7 @@ class LiveTail(unittest.TestCase):
         try:
             s.loop = loop
             s.client = object()   # truthy — interrupt() only guards on `self.loop and self.client`
+            s.inflight = 1        # a turn is running — the case the synchronous flip exists for
             self.assertFalse(s._interrupted)
             s.interrupt()         # loop never runs → the scheduled _do_interrupt does NOT execute
             self.assertTrue(s._interrupted, "the flag flips synchronously, before the scheduled _do_interrupt")

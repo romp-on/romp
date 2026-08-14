@@ -1441,7 +1441,13 @@ class SdkSession:
             # call, and the very next snapshot() must already read 'interrupting' — otherwise the chip/feed
             # badge would miss the click and only catch up an event-loop tick later (the flicker this whole
             # signal exists to kill). _do_interrupt sets it again (harmless); the ResultMessage clears it.
-            self._interrupted = True
+            # ONLY when a turn exists for the stop to stop (the same guard _signal_cli carries): the flag's
+            # sole clear events are that turn's ResultMessage / a fresh turn, so latching on an IDLE press
+            # left the snapshot 'interrupting' FOREVER — every later stop press then bought another 120s of
+            # 'stopping…' off the eternal flag, which is exactly "it never goes back to normal" (the user
+            # 2026-08-14; the 2026-07-20 strand, polite-channel flavor).
+            if self.inflight > 0:
+                self._interrupted = True
             self.loop.call_soon_threadsafe(
                 lambda: asyncio.ensure_future(self._do_interrupt()))
             return
@@ -1536,8 +1542,11 @@ class SdkSession:
         # forcing inflight=0 here too would double-count and corrupt the next turn's release. The snapshot
         # reads 'waiting' while inflight>0 (kills the 2026-06-23 zombie-working); a truly-wedged turn that
         # never results keeps inflight>0 and PAUSES the queue — honest (kill recovers). A fresh turn clears
-        # _interrupted (see inputs()), and the ResultMessage clears it too.
-        self._interrupted = True
+        # _interrupted (see inputs()), and the ResultMessage clears it too — which is exactly why an IDLE
+        # press must NOT latch it (no turn → no clear event → 'interrupting' forever; interrupt() and
+        # _signal_cli carry the same inflight guard).
+        if self.inflight > 0:
+            self._interrupted = True
         self.backend._poke()
         try:
             await self.client.interrupt()

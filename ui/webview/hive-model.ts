@@ -85,15 +85,19 @@ export function buildSessions(msg: any): HiveSession[] | null {
     }
     // needs-you: a card FILED under needs_input (a judge verdict, a floored live prompt, a
     // synth placeholder) — the feed's own column vocabulary, not the "blocked" guess this
-    // code first shipped with (a column value the kernel never emits). rejudging/recheck
-    // cards are excluded: the user already answered those, the judges own the next move —
-    // counting them would wave ❗ at a person who owes nothing (and would clear again on
-    // the verdict, a move with no new information for the user).
+    // code first shipped with (a column value the kernel never emits). Excluded, because in
+    // each the user owes nothing NEW:
+    //   - rejudging/recheck: they already answered; the judges own the next move;
+    //   - interrupting/interrupted: THEIR OWN stop is why it's quiet (feed.ts calls that
+    //     quiet user-chosen — even auto-nudge holds off) — waving "waiting on your answer"
+    //     right after their own gesture claimed a question nobody asked (the user
+    //     2026-08-14, who was told a session waited on their response when it wasn't).
     let needsYou = false;
     // why it needs you — the blocked card's own copy, briefest honest form first
     let brief: string | null = null;
     for (const a of cards) {
-      const filed = a.column === "needs_input" && !a.rejudging && !a.recheck;
+      const filed = a.column === "needs_input" && !a.rejudging && !a.recheck
+        && !a.interrupting && !a.interrupted;
       if (filed) needsYou = true;
       // provisional cards are placeholders EXCEPT the needs-input one (a live prompt with
       // no goal to floor) — its boxed why is exactly the brief for that state

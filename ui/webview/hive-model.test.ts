@@ -112,6 +112,20 @@ test("an answered card pending judgment does NOT light (rejudging/recheck)", () 
   }
 });
 
+test("a session the user STOPPED does not claim to be waiting on them", () => {
+  // the interrupted card files under needs-you in the feed (re-engaging is the user's move,
+  // the badge says why) — but its quiet is user-chosen, so the board must not wave
+  // "waiting on your answer" at the person who just pressed stop
+  for (const flag of ["interrupting", "interrupted"]) {
+    const out = buildSessions(payload({
+      webState: "ready",
+      asks: [{ sid: SID_WEB, itemId: "g-ship", column: "needs_input", [flag]: true, blockSummary: "stopped by you" }],
+    }))!;
+    assert.equal(out[0].state, "ready", `${flag} card → chip state stands`);
+    assert.equal(out[0].needsYou, false);
+  }
+});
+
 test("the needs-you latch cannot flap across turn-boundary chip flips", () => {
   const card = { sid: SID_WEB, itemId: "g-ship", column: "needs_input", blockSummary: "Cookie or token?" };
   const a = buildSessions(payload({ webState: "working", asks: [card] }))!;

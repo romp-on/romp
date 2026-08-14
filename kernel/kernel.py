@@ -5081,8 +5081,15 @@ def _drive(msg, client):
         else:
             _push_soon()
     elif t == "interrupt":
+        # Gauge BEFORE dispatch (tmux interrupt records idle as part of settling): a stop pressed on a
+        # session with NO open turn stops nothing, so it must paint nothing — the stamp's only clear
+        # events are a settle (which an idle press never produces) and the 120s wedge cap, so stamping
+        # an idle press pinned "Interrupting…" for two minutes per press ("it never goes back to
+        # normal", the user 2026-08-14). _working_now is the authoritative-first busy read.
+        _intr_live = _working_now(str(sid))
         be.interrupt(sid)                                 # Esc/stop AND settle idle (in the backend)
-        _interrupt_clicked[str(sid)] = time.time()        # chip → "interrupting" NOW (event-cleared on settle)
+        if _intr_live:
+            _interrupt_clicked[str(sid)] = time.time()    # chip → "interrupting" NOW (event-cleared on settle)
         _suppress_session_retry(sid)                      # interrupting a thread STOPS romp's auto-retry into it until a
                                                           # successful turn re-arms (the user 2026-07-06) — the interrupt
                                                           # already aborted any in-flight CLI retry; this stops the relapse
@@ -22430,8 +22437,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps({"ok": True}), "application/json")
                 be = Sessions.backend_for(sid)
                 if u.path == "/interrupt":
+                    _intr_live = _working_now(str(sid))         # same idle-press gate as the WS op
                     be.interrupt(sid)                           # Esc/stop AND settle idle (in the backend)
-                    _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    if _intr_live:
+                        _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
                 else:
                     sys.stderr.write("kill: %s via /kill route\n" % sid)   # kill attribution (the user 2026-07-16)
                     be.kill(sid)
