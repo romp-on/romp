@@ -47,10 +47,13 @@ test("a click on a remote row routes to the kernel that owns the session", () =>
   assert.deepEqual([rev.host, rev.msg.id], ["TESTHOST", "1111-2222"]);
 });
 
-test("the request names the host, and every open starts from the local list", () => {
+test("the request names the host, and every open starts from the host it opened on", () => {
   assert.match(RENDER, /function requestSessionList\(host: string\): void \{\s*\n\s*pickerListHost = host;/);
   assert.match(RENDER, /postMessage\(\{ type: "requestSessions", host \}\)/);
-  assert.match(RENDER, /requestSessionList\(""\);   \/\/ the Host row resets to local on open/);
+  // was hardcoded to "" (always the local list). It now follows the Host row's opening selection —
+  // the kernel's default create host when that machine is attached, else this one (the user
+  // 2026-08-13); see create-defaults.test.ts for the selection rule itself.
+  assert.match(RENDER, /requestSessionList\(openHost\);/);
 });
 
 test("a reply for a host the picker has moved on from is dropped, not painted", () => {

@@ -999,3 +999,87 @@ PY
     grep -q '"backend": "sdk"' "$TEST_DIR/req.log"
     [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
+
+# ── per-session launch defaults: model / effort / permission mode ────────────────────────────
+# Every romp session takes one answer for these (the user 2026-08-13), from
+# ~/.config/romp/session-defaults — a FILE because the launchd-rooted kernel that spawns
+# sessions never sees a shell env var. A per-spawn --model/--effort (the hive tray's bean drop)
+# outranks the file; a resume keeps the conversation's own model/effort.
+
+_write_session_defaults() {
+    mkdir -p "$HOME/.config/romp"
+    printf '%s\n' "$@" > "$HOME/.config/romp/session-defaults"
+}
+
+@test "session-defaults: model, effort and permission mode reach the launch line" {
+    _write_session_defaults "MODEL=fable" "EFFORT=max" "PERM_MODE=auto"
+    run run_romp new -t myproject
+    [ "$status" -eq 0 ]
+    local line; line="$(grep -F 'respawn-pane' "$MOCK_LOG" | grep -F 'exec claude')"
+    [[ "$line" == *"--model fable"* ]]
+    [[ "$line" == *"--effort max"* ]]
+    [[ "$line" == *"--permission-mode auto"* ]]
+}
+
+@test "session-defaults: absent file leaves every flag off (the CLI's own settings stand)" {
+    run run_romp new -t myproject
+    [ "$status" -eq 0 ]
+    local line; line="$(grep -F 'respawn-pane' "$MOCK_LOG" | grep -F 'exec claude')"
+    [[ "$line" != *"--model"* ]]
+    [[ "$line" != *"--effort"* ]]
+    [[ "$line" != *"--permission-mode"* ]]
+}
+
+@test "session-defaults: a junk value is dropped rather than passed to the CLI" {
+    _write_session_defaults "MODEL=fable; touch INJECTED" "EFFORT=turbo" "PERM_MODE=yolo"
+    run run_romp new -t myproject
+    [ "$status" -eq 0 ]
+    local line; line="$(grep -F 'respawn-pane' "$MOCK_LOG" | grep -F 'exec claude')"
+    [[ "$line" != *"--model"* ]]
+    [[ "$line" != *"--effort"* ]]
+    [[ "$line" != *"--permission-mode"* ]]
+    [ ! -e INJECTED ]
+}
+
+@test "new --model/--effort (a tray bean drop) outrank the file for that session" {
+    _write_session_defaults "MODEL=fable" "EFFORT=max"
+    run run_romp new -t --model opus --effort high myproject
+    [ "$status" -eq 0 ]
+    local line; line="$(grep -F 'respawn-pane' "$MOCK_LOG" | grep -F 'exec claude')"
+    [[ "$line" == *"--model opus"* ]]
+    [[ "$line" == *"--effort high"* ]]
+    [[ "$line" != *"--model fable"* ]]
+}
+
+@test "a resume keeps the conversation's own model/effort, but still takes the mode" {
+    _write_session_defaults "MODEL=fable" "EFFORT=max" "PERM_MODE=auto"
+    run run_romp resume abc123-uuid --name web --detach
+    [ "$status" -eq 0 ]
+    local line; line="$(grep -F 'respawn-pane' "$MOCK_LOG" | grep -F 'exec claude')"
+    [[ "$line" == *"--resume abc123-uuid"* ]]
+    [[ "$line" != *"--model"* ]]
+    [[ "$line" != *"--effort"* ]]
+    [[ "$line" == *"--permission-mode auto"* ]]
+}
+
+# ── romp default-host: which machine new sessions land on ───────────────────────────────────
+@test "default-host: round-trips, prints, and clears" {
+    run run_romp default-host
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unset"* ]]
+    run run_romp default-host TESTHOST
+    [ "$status" -eq 0 ]
+    [ "$(cat "$HOME/.config/romp/default-host")" = "TESTHOST" ]
+    run run_romp default-host
+    [[ "$output" == *"TESTHOST"* ]]
+    run run_romp default-host ""
+    [ "$status" -eq 0 ]
+    [ ! -f "$HOME/.config/romp/default-host" ]
+}
+
+@test "default-host: refuses an ssh-option-shaped name" {
+    run run_romp default-host "-oProxyCommand=touch /tmp/pwned"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a host name"* ]]
+    [ ! -f "$HOME/.config/romp/default-host" ]
+}

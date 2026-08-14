@@ -1240,15 +1240,22 @@ def _alive_sessions(now, tmux):
     So: tmux reachable (sessions present, or a tmux binary exists) → trust the empty result and show
     only living sessions; no tmux at all → fall back so a headless box isn't blank."""
     alive = [s for s in _sessions(now) if s["sid"] in tmux]
-    # SDK sessions that are alive (in the merged `tmux` map) but have no transcript on disk yet — a
-    # just-created or never-run SDK session — aren't in discover()/_sessions, so add them here, else
-    # their tab never opens (the user 2026-06-22). Once they run and write a transcript, discover takes over.
+    # Sessions that are alive (in the merged `tmux` map) but have no transcript on disk yet aren't in
+    # discover()/_sessions, so add them here, else their tab never opens (the user 2026-06-22, for SDK
+    # sessions). This covers BOTH backends (the user 2026-08-13): a tmux session writes no transcript
+    # record until its first MESSAGE, so a freshly created one — or one parked on the CLI's first-run
+    # folder-trust prompt, which can sit there indefinitely — was filtered off every surface while
+    # running perfectly well. The client then never got a payload for the tab it was holding open, and
+    # its create cue timed out with "Couldn't start", naming a session that had in fact started. That
+    # is the exact silent-degradation the fail-loudly rule forbids: the session existed, so it must be
+    # SHOWN (build_session already synthesizes a frame for this case) and left to say what state it is
+    # in. Once it runs and writes a transcript, discover() takes over.
     be = _sdk()
-    if be:
-        have = {s["sid"] for s in alive}
-        for sid in tmux:
-            if sid not in have and be.owns(sid):
-                alive.append(_sdk_sess(sid, now))
+    have = {s["sid"] for s in alive}
+    for sid in tmux:
+        if sid in have:
+            continue
+        alive.append(_sdk_sess(sid, now) if (be and be.owns(sid)) else _tmux_sess(sid, now))
     if tmux or _has_tmux():
         return alive
     return _sessions(now)
@@ -4073,6 +4080,45 @@ def _set_default_dir(raw):
     return path, None
 
 
+_DEFAULT_HOST_FILE = Path(os.path.expanduser("~/.config/romp/default-host"))
+
+
+def _default_create_host():
+    """The machine a NEW session is created on by default — an attached host's name, or "" for this one.
+
+    A FILE for the same reason default-dir is one: the choice has to survive a kernel restart and reach a
+    launchd-rooted process that never sees a shell env var. The client preselects it in the + picker's Host
+    row and the hive tray drops on it, so someone who works on one box all day stops re-picking it every
+    time (the user 2026-08-13, whose sessions all live on a remote machine — the local laptop was never the
+    one they wanted). Not validated against the attached set here: a host can be detached and re-attached,
+    and a stored name that isn't up right now is still the right answer once it comes back; the client falls
+    back to this machine when the name isn't on its list."""
+    try:
+        return _DEFAULT_HOST_FILE.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _set_default_host(raw):
+    """Persist (or clear) the default create host → (name_or_'', error). Blank CLEARS (back to this
+    machine). The name is an ssh host alias, the same string the tunnel registry is keyed by."""
+    name = (raw or "").strip()
+    if not name:
+        try:
+            _DEFAULT_HOST_FILE.unlink()
+        except OSError:
+            pass
+        return "", None
+    if not _safe_ssh_host(name):        # the same gate the tunnel dialer applies (resolved at call time)
+        return None, "not a host name: %r" % name
+    try:
+        _DEFAULT_HOST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _DEFAULT_HOST_FILE.write_text(name + "\n")
+    except OSError as e:
+        return None, "could not save default host: %s" % e
+    return name, None
+
+
 def _true_case(path):
     """`path` (absolute) with every component in its true on-disk casing. os.path.realpath resolves
     symlinks but never case-corrects, and on macOS's case-insensitive filesystem a typed
@@ -4250,16 +4296,25 @@ def _reap_if_cancelled(name):
             _end_pending_sid(sid)
 
 
-def _spawn_session(name, cwd=None):
+def _spawn_session(name, cwd=None, model="", effort=""):
     """Create a detached romp session named `name` — the same launch the old TS backend ran
     (`romp new -t --detach <name>`, tmux-backend.ts). Threaded so the ~seconds-long launch never blocks the WS
     recv loop; the targeted push below then delivers the new tab. Scrub
     TMUX* so the child launcher never thinks it is already inside a tmux client. `cwd` is the session's
-    working directory (validated by _resolve_create_dir); None falls back to the kernel default."""
+    working directory (validated by _resolve_create_dir); None falls back to the kernel default.
+
+    `model`/`effort` are an explicit per-spawn choice (the hive tray's bean drop) forwarded to the
+    launcher, which otherwise reads the session-defaults file. Passed as separate argv items — never
+    interpolated — and the launcher validates them again before they reach the CLI's command line."""
     cwd = cwd or _default_create_dir()
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    argv = [str(BIN / "romp"), "new", "-t", "--detach", name]
+    if model in _MODEL_VALUES:
+        argv += ["--model", model]
+    if effort in _EFFORT_VALUES:
+        argv += ["--effort", effort]
     try:
-        subprocess.run([str(BIN / "romp"), "new", "-t", "--detach", name], cwd=cwd, env=env, timeout=25,
+        subprocess.run(argv, cwd=cwd, env=env, timeout=25,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         sys.stderr.write("spawn '%s': %s\n" % (name, traceback.format_exc()))
@@ -12324,6 +12379,15 @@ def _sdk_transcript_path(sid):
     except OSError:
         cwd = os.path.expanduser("~")
     return jd._proj_dir(cwd) / (sid + ".jsonl")
+
+
+def _tmux_sess(sid, now):
+    """A _sessions()-shaped entry for a LIVE tmux session discover() can't see yet — the CLI is up but has
+    written no transcript record (its first lands with the first message; a session parked on the CLI's
+    first-run folder-trust prompt never gets there at all). Same sentinel-path stub build_session
+    synthesizes for this case, so the two agree on what a transcriptless tmux session looks like."""
+    return {"sid": sid, "name": _name_of(sid) or sid[:8],
+            "path": str(jd.STATE / "boot-stub" / (sid + ".jsonl")), "mtime": now}
 
 
 def _sdk_sess(sid, now):
@@ -21912,8 +21976,15 @@ class Handler(BaseHTTPRequestHandler):
                 except (OSError, ValueError):
                     _sd = {}
                 _sd = _sd if isinstance(_sd, dict) else {}
+                _defaults = {k: _sd[k] for k in ("model", "effort") if _sd.get(k)}
+                # …and WHERE a tray drop lands (the user 2026-08-13): the same default create host the +
+                # picker preselects, so both spawn surfaces agree on the machine without the tray having
+                # to ask a second endpoint. "" = this machine (key omitted).
+                _dh = _default_create_host()
+                if _dh:
+                    _defaults["host"] = _dh
                 return self._send(200, json.dumps({"models": MODEL_CHOICES, "efforts": EFFORT_CHOICES,
-                                                   "defaults": {k: _sd[k] for k in ("model", "effort") if _sd.get(k)}}),
+                                                   "defaults": _defaults}),
                                   "application/json", cache="no-cache")
             if p == "/usage":                                 # the /usage rate-limit bars, re-read on demand: the rail's
                 # usage widget is click-to-refresh (the user 2026-06-30). Returns the freshest on-disk snapshot
@@ -22952,6 +23023,12 @@ class Handler(BaseHTTPRequestHandler):
                 # "that folder doesn't exist" dialog and chose to make it (see createDirMissing below).
                 cwd, derr = _resolve_create_dir(msg.get("dir"), create=bool(msg.get("mkdir")))
                 live = _live_names(_tmux_sessions())
+                # model/effort: the hive tray's per-spawn choice (the user 2026-08-13) — an explicit
+                # alias/level from the /models lists outranks the remembered seed for this one session;
+                # anything else means the seed, exactly as before. Vetted ONCE here because BOTH backends
+                # take them now.
+                mdl0 = msg.get("model") if msg.get("model") in _MODEL_VALUES else ""
+                eff0 = msg.get("effort") if msg.get("effort") in _EFFORT_VALUES else ""
                 if derr:
                     st = _dir_status(msg.get("dir"))
                     if st["canCreate"] and not msg.get("mkdir"):
@@ -22975,19 +23052,18 @@ class Handler(BaseHTTPRequestHandler):
                         # auth ('login'|'key') is the picker's per-session billing pick; anything else
                         # (older clients, no pick) means the remembered/ambient default (spawn's seed).
                         a = msg.get("auth")
-                        # model/effort: the hive tray's per-spawn choice (the user 2026-08-13) — an
-                        # explicit alias/level from the /models lists outranks the remembered seed for
-                        # this one session; anything else means the seed, exactly as before.
-                        mdl = msg.get("model") if msg.get("model") in _MODEL_VALUES else ""
-                        eff = msg.get("effort") if msg.get("effort") in _EFFORT_VALUES else ""
                         _create_sdk_session(nm, cwd, auth=(a if a in ("login", "key") else ""),
-                                            model=mdl, effort=eff)
+                                            model=mdl0, effort=eff0)
                     else:
                         # NEVER silently fall back to tmux (the user asked for SDK and got a mystery tmux
                         # session on a remote host without the venv, 2026-07-02). Say what's missing.
                         client["send"](json.dumps({"type": "warn", "text": SDK_SETUP_HINT}))
                 else:
-                    threading.Thread(target=_spawn_session, args=(nm, cwd), daemon=True).start()
+                    # tmux create: the tray's per-spawn model/effort ride along too (the user 2026-08-13),
+                    # so a bean drop means the same thing whichever backend the board is set to — before
+                    # this, a tmux drop silently ignored the bean and took the launcher's own default.
+                    threading.Thread(target=_spawn_session, args=(nm, cwd),
+                                     kwargs={"model": mdl0, "effort": eff0}, daemon=True).start()
         elif msg and msg.get("type") == "cancelCreate" and msg.get("name"):
             # The webview's "Opening…" cue was cancelled (the ✕/Esc/backdrop — the spawn hung/failed, or the
             # user changed their mind). We only know the NAME (no id yet). Tear down a matching LOCAL session
@@ -23007,6 +23083,10 @@ class Handler(BaseHTTPRequestHandler):
             client["send"](json.dumps({"type": "sessionList",
                                        "items": _session_list(int(time.time()), _tmux_sessions()),
                                        "defaultDir": _tilde(_default_create_dir()),   # prefill the new-session dir field
+                                       # …and which MACHINE that create lands on by default (~/.config/romp/
+                                       # default-host, `romp default-host`): the picker preselects it in the
+                                       # Host row and the hive tray drops onto it. "" = this machine.
+                                       "defaultHost": _default_create_host(),
                                        # …and whether Browse… can do anything here, so a kernel with no
                                        # desktop shows the button as unavailable rather than inert.
                                        "nativeDialogs": _native_dialogs(),

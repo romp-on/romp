@@ -83,7 +83,7 @@ test("Browse… disappears on a kernel with no desktop, and is disabled (not hid
   assert.match(RENDER, /function applyBrowseState\(host: string\)[\s\S]*?b\.style\.display = kernelNativeDialogs \? "" : "none";[\s\S]*?b\.disabled = !!host;/);
   // one helper, called from all three places the button's state can change
   assert.match(RENDER, /applyBrowseState\(h\);/);                // the host row was clicked
-  assert.match(RENDER, /applyBrowseState\(""\);/);               // the picker opened
+  assert.match(RENDER, /applyBrowseState\(openHost\);/);         // the picker opened (on its default host)
   assert.match(RENDER, /applyBrowseState\(pickerHost\(\)\);/);   // the capability landed while it was open
   assert.doesNotMatch(RENDER, /browse0/, "the old inline reset is gone — the state lives in the helper");
   assert.match(CSS, /\.picker-browse:disabled \{/, "a disabled button must LOOK disabled, not just ignore clicks");

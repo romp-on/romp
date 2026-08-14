@@ -948,6 +948,29 @@ if [[ "${1:-}" == "default-dir" ]]; then
     exit 0
 fi
 
+# `romp default-host [NAME]` — the machine NEW sessions are created on by default. Persisted to
+# ~/.config/romp/default-host and read by the kernel's _default_create_host(), which ships it to the
+# client: the + picker preselects that machine in its Host row and a hive tray drop lands there. No arg
+# prints it; an empty arg ("") clears it (back to this machine). Read live — no restart.
+if [[ "${1:-}" == "default-host" ]]; then
+    _dh_file="$HOME/.config/romp/default-host"
+    if [[ $# -lt 2 ]]; then
+        if [[ -s "$_dh_file" ]]; then cat "$_dh_file"; else echo "(unset — new sessions land on this machine)"; fi
+        exit 0
+    fi
+    if [[ -z "$2" ]]; then
+        rm -f "$_dh_file"; echo "default new-session host cleared (new sessions land on this machine)."
+        exit 0
+    fi
+    if [[ ! "$2" =~ ^[A-Za-z0-9._@:-]+$ ]]; then
+        echo "romp default-host: not a host name: $2" >&2; exit 1
+    fi
+    mkdir -p "$(dirname "$_dh_file")"
+    printf '%s\n' "$2" > "$_dh_file"
+    echo "default new-session host set to: $2"
+    exit 0
+fi
+
 # NB: `romp --serve` (a persisted 0.0.0.0 opt-in for direct tailnet binding) was
 # REMOVED 2026-07-19: phone/tailnet reach goes through `tailscale serve` proxying
 # to the loopback-bound kernel instead — the kernel never leaves 127.0.0.1, and
@@ -1080,6 +1103,8 @@ resume=false
 resume_id=""
 detach=false
 dir_arg=""
+model_arg=""
+effort_arg=""
 use_tmux=false
 
 case "${1:-}" in
@@ -1094,6 +1119,19 @@ case "${1:-}" in
                                echo "usage: romp new [-t] [-d <dir>] <name>" >&2; exit 2
                            fi
                            dir_arg="$1"; shift ;;
+                # Per-spawn model/effort (the hive tray's bean drop, the user 2026-08-13): an explicit
+                # choice for THIS session, outranking the session-defaults file below. Validated where
+                # they are appended to the launch command, like every other interpolated value.
+                --model)   shift
+                           if [[ $# -eq 0 || "$1" == -* ]]; then
+                               echo "usage: romp new [--model <model>] <name>" >&2; exit 2
+                           fi
+                           model_arg="$1"; shift ;;
+                --effort)  shift
+                           if [[ $# -eq 0 || "$1" == -* ]]; then
+                               echo "usage: romp new [--effort <level>] <name>" >&2; exit 2
+                           fi
+                           effort_arg="$1"; shift ;;
                 -*)        echo "romp new: unknown option: $1" >&2; exit 2 ;;
                 *)         if [[ -n "$session_arg" ]]; then
                                echo "usage: romp new [-t] [-d <dir>] <name>" >&2; exit 2
@@ -1350,6 +1388,37 @@ else
     sid="$(_romp_uuid)"
     claude_cmd="claude --name \"$display\" --session-id $sid"
 fi
+
+# Per-session launch defaults — model, effort level, permission mode — applied to EVERY romp session
+# (the user 2026-08-13, who wanted one answer for all of them rather than setting each session by hand).
+# A FILE (~/.config/romp/session-defaults, KEY=VALUE lines) for the same reason default-dir is one: the
+# kernel that spawns these is launchd-rooted and never sees a shell env var. Blank/absent value → the flag
+# is omitted entirely and the CLI's own settings.json default stands, so this can never pin a session to a
+# model that no longer exists. Parsed line-by-line, never sourced: a malformed line is skipped rather than
+# executed. The values are validated here because they land in the launch shell command below.
+_rsd_file="$HOME/.config/romp/session-defaults"
+_sd_model=""; _sd_effort=""; _sd_mode=""
+if [[ -f "$_rsd_file" ]]; then
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        case "$_line" in
+            MODEL=*)      _sd_model="${_line#MODEL=}" ;;
+            EFFORT=*)     _sd_effort="${_line#EFFORT=}" ;;
+            PERM_MODE=*)  _sd_mode="${_line#PERM_MODE=}" ;;
+        esac
+    done < "$_rsd_file"
+fi
+# An explicit per-spawn choice (`romp new --model/--effort`, which the hive tray's bean drop passes)
+# outranks the file for this one session.
+[[ -n "$model_arg" ]] && _sd_model="$model_arg"
+[[ -n "$effort_arg" ]] && _sd_effort="$effort_arg"
+# A resume keeps the conversation's own model/effort — re-pinning them at resume would silently rewrite
+# what that session was running (the mode is a per-launch choice, so it still applies).
+if ! $resume; then
+    [[ "$_sd_model" =~ ^[A-Za-z0-9._-]+(\[[0-9]+[a-z]\])?$ ]] && claude_cmd="$claude_cmd --model $_sd_model"
+    [[ "$_sd_effort" =~ ^(low|medium|high|xhigh|max)$ ]] && claude_cmd="$claude_cmd --effort $_sd_effort"
+fi
+[[ "$_sd_mode" =~ ^(acceptEdits|auto|bypassPermissions|manual|dontAsk|plan)$ ]] \
+    && claude_cmd="$claude_cmd --permission-mode $_sd_mode"
 
 # Load the Romp Postal Service MCP server (tool-native messaging) into romp
 # sessions only (scoped via --mcp-config), when installed.

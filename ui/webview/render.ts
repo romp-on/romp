@@ -4838,12 +4838,20 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     auWrapEl.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.remove("sel"));
   }
   const hostWrapEl = overlay.querySelector(".picker-host") as HTMLElement | null;
+  // Which machine this open STARTS on: the kernel's default create host when it is actually attached
+  // right now, else this one. A stored name whose host is detached must not preselect a button that
+  // isn't there — the create would be routed at a kernel this dashboard cannot reach. Read once here
+  // so the Host row, the dir prefill, the Browse state and the session list all open on the SAME host.
+  const openHost = (() => {
+    const hs: string[] = ((window as any).__rompFed?.hosts?.() || []) as string[];
+    return defaultCreateHost && hs.includes(defaultCreateHost) ? defaultCreateHost : "";
+  })();
   if (hostWrapEl) {   // rebuild the host options each open (attach/detach is live); hide with no remotes
     const hosts: string[] = ((window as any).__rompFed?.hosts?.() || []) as string[];
     hostWrapEl.style.display = pick || !hosts.length ? "none" : "";
     hostWrapEl.querySelectorAll(".picker-be-opt").forEach((x) => x.remove());
     for (const h of ["", ...hosts]) {
-      const b = el("button", "picker-be-opt" + (h === "" ? " sel" : "")) as HTMLButtonElement;
+      const b = el("button", "picker-be-opt" + (h === openHost ? " sel" : "")) as HTMLButtonElement;
       // This machine wears its REAL name, like the remote options wear theirs (the user 2026-08-12):
       // "local" made the row read as one named machine plus an unnamed one. The name rides the local
       // sessionList reply (selfHost), so the very first open may briefly say "local" until it lands —
@@ -4875,11 +4883,15 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
       hostWrapEl.appendChild(b);
     }
   }
-  applyBrowseState("");   // fresh open defaults back to local — enabled unless this kernel has no desktop
+  applyBrowseState(openHost);   // Browse… only stands for the LOCAL disk, so a remote open disables it
   const di = document.getElementById("picker-dir") as HTMLInputElement | null;
-  // the host row resets to local on every open, so this is the local prefill: what you last used here,
-  // else the kernel's persisted default (file→env; localStorage is a same-tab cache)
-  if (di) di.value = dirPrefill("");
+  // the prefill for the host this open starts on: what you last used THERE, else (locally) the kernel's
+  // persisted default (file→env; localStorage is a same-tab cache)
+  if (di) {
+    di.value = dirPrefill(openHost);
+    di.placeholder = openHost ? `New-session directory on ${openHost} (blank = its default)`
+                              : "New-session directory (blank = default)";
+  }
   closeDirMenu();                       // a previous open's folder list is not this one's
   if (di && !pick) askDirComplete(di.value);   // the status line says what the prefilled path is, before anything is typed
   // In a filtered view (#only=<tag>), a new session created here would vanish from the view unless its name
@@ -4899,7 +4911,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
   }
   filterPicker(seed); // reset row visibility; arm the New-session button for the (possibly seeded) value
   pickerError(null);
-  requestSessionList("");   // the Host row resets to local on open, so the list starts local too
+  requestSessionList(openHost);   // the list belongs to whichever machine the Host row opened on
 }
 
 // ---- revive loader (the user 2026-07-05) ----
@@ -5210,6 +5222,11 @@ let kernelDefaultDir = "";
 // override), from the same payload. The + picker's Host row labels its first option with it, so the
 // row reads as a list of machines by name rather than named hosts plus a "local" (the user 2026-08-12).
 let localSelfHost = "";
+// The machine NEW sessions land on by default (the LOCAL kernel's ~/.config/romp/default-host, from the
+// same payload; "" = this machine). The + picker preselects it in the Host row and the hive tray drops
+// onto it, so someone whose work all lives on one remote box stops re-picking it every single time (the
+// user 2026-08-13). Exported for the tray, which creates without opening the picker at all.
+export let defaultCreateHost = "";
 // Is this session already an open tab in THIS dashboard? (loaded session, or a not-yet-loaded placeholder tab
 // the kernel's order carries.) The + picker uses it to hide sessions you can already reach by a tab-click.
 function isOpenTab(id: string): boolean {
@@ -8585,6 +8602,10 @@ window.addEventListener("message", (e: MessageEvent) => {
     }
     if (from !== pickerListHost) return;
     if (typeof m.defaultDir === "string" && !from) kernelDefaultDir = m.defaultDir;   // the LOCAL default dir
+    // …and the LOCAL kernel's default create HOST. Like selfHost this is a preference, not list data, so
+    // only the local reply carries it — a remote kernel's own default says nothing about where THIS
+    // dashboard creates.
+    if (typeof m.defaultHost === "string" && !from) defaultCreateHost = m.defaultHost;
     // …and whether that kernel can open a folder dialog at all. It arrives after the picker is already on
     // screen, so re-settle the button now rather than leaving it live until the next open.
     if (typeof m.nativeDialogs === "boolean" && !from) {

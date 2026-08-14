@@ -208,7 +208,8 @@ test("a remote's prefill is what you used THERE, never this machine's default", 
   // the gear default is one path on this machine; prefilling it into a Linux box's field is a path
   // that cannot exist there. Blank asks that kernel for its own default instead.
   assert.match(RENDER, /return host \? "" : \(kernelDefaultDir \|\| loadSettings\(\)\.defaultDir \|\| ""\);/);
-  assert.match(RENDER, /if \(di\) di\.value = dirPrefill\(""\);/, "the open prefill goes through it");
+  assert.match(RENDER, /di\.value = dirPrefill\(openHost\);/,
+    "the open prefill goes through it, for whichever host the picker opened on (the user 2026-08-13)");
   assert.match(RENDER, /if \(dirIn\) \{ dirIn\.value = dirPrefill\(h\); askDirComplete\(dirIn\.value\); \}/,
     "switching host swaps the path AND re-vets it against that host");
 });

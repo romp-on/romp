@@ -16,17 +16,22 @@ const SDK = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk_bac
 test("the tray builds from /models — the shared list plus the remembered defaults", () => {
   assert.match(HIVE, /fetch\("\/models", \{ cache: "no-store" \}\)/, "choices come from the kernel");
   assert.ok(!/["'](fable|opus|sonnet|haiku)["']/.test(HIVE), "no model literal is hardcoded in the hive");
-  assert.ok(KERNEL.includes('"defaults": {k: _sd[k] for k in ("model", "effort") if _sd.get(k)}'),
+  assert.ok(KERNEL.includes('_defaults = {k: _sd[k] for k in ("model", "effort") if _sd.get(k)}'),
     "/models now reports the remembered seed, so the tray can mark the default bean");
+  assert.ok(KERNEL.includes('_defaults["host"] = _dh'),
+    "…and WHERE a drop lands, so the tray spawns on the same machine the + picker does");
 });
 
 test("a dropped bean spawns THAT model there: reservation + createSession(model, effort)", () => {
   assert.match(HIVE, /world\.spawnAt\(slot, mc\.value, effort\)/, "the drop hands cell+model+effort over");
-  assert.match(HIVE, /\{ type: "createSession", name: this\.autoName\(model\), backend: "sdk", model, effort \}/,
-    "an SDK session, auto-named, with the bean's choice riding the create op");
-  assert.ok(KERNEL.includes('mdl = msg.get("model") if msg.get("model") in _MODEL_VALUES else ""'),
+  // auto-named, with the bean's choice riding the create op — on the gear's backend rather than a
+  // hardcoded "sdk" (the user 2026-08-13), and on the default create host when there is one
+  assert.match(HIVE, /type: "createSession", name: this\.autoName\(model\),\s*\n\s*backend: loadSettings\(\)\.backend, model, effort/);
+  assert.ok(KERNEL.includes('mdl0 = msg.get("model") if msg.get("model") in _MODEL_VALUES else ""'),
     "the kernel validates the model against the offered choices");
-  assert.ok(KERNEL.includes("model=mdl, effort=eff)"), "…and hands it to the SDK spawn");
+  assert.ok(KERNEL.includes("model=mdl0, effort=eff0)"), "…and hands it to the SDK spawn");
+  assert.ok(KERNEL.includes('kwargs={"model": mdl0, "effort": eff0}'),
+    "…and to the tmux spawn, so a bean drop means the same thing on either backend");
   assert.ok(SDK.includes("eff = (effort if effort in EFFORT_LEVELS"),
     "spawn(): the explicit choice outranks the remembered seed");
 });

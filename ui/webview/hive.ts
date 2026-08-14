@@ -12,6 +12,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { delegate } from "./actions";
 import { hostPrefix } from "./host-prefix";
+import { loadSettings } from "./settings";
 import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, hexDistance, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, slotOfAxial, spiralSlot, xzToAxial } from "./hive-layout";
 import { buildSessions, diffSessions, HiveSession, HiveState, hiveAge, stateLine } from "./hive-model";
 
@@ -1232,7 +1233,13 @@ class HiveWorld {
     this.reservedSlot = slot;
     const p = axialToXZ(spiralSlot(slot), HEX_SIZE);
     this.particles.burst(new THREE.Vector3(p.x, 0.6, p.z), [ACCENT, 0xd6ecff], 16, 1.8);
-    vscodeApi?.postMessage({ type: "createSession", name: this.autoName(model), backend: "sdk", model, effort });
+    // backend: the ONE gear default every create surface reads (the user 2026-08-13) — the tray used to
+    // hardcode "sdk", so a board set to terminal sessions still dropped SDK ones. host: the default
+    // create machine, which the federation manager routes on (the field is stripped before the kernel
+    // sees it); absent = this machine, exactly as before.
+    const host = SPAWN_DEFAULTS.host || "";
+    vscodeApi?.postMessage({ type: "createSession", name: this.autoName(model),
+                             backend: loadSettings().backend, model, effort, ...(host ? { host } : {}) });
   }
 
   // In-place board rename (the user 2026-08-13, who wanted renaming to feel like a great
@@ -1723,7 +1730,10 @@ window.addEventListener("message", (e: MessageEvent) => {
 interface SpawnChoice { value: string; label: string }
 let SPAWN_MODELS: SpawnChoice[] = [];
 let SPAWN_EFFORTS: string[] = [];
-const SPAWN_DEFAULTS: { model?: string; effort?: string } = {};
+// The remembered new-session seed (model + effort) AND the machine a drop lands on — all three from
+// /models, so the tray and the + picker spawn the same way without asking two endpoints. `host` absent
+// = this machine (the user 2026-08-13: a drop should land where their sessions actually live).
+const SPAWN_DEFAULTS: { model?: string; effort?: string; host?: string } = {};
 let trayBuilt = false;
 
 fetch("/models", { cache: "no-store" }).then((r) => r.json()).then((d) => {

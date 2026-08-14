@@ -25,8 +25,10 @@ test("both judge-set toggles default OFF (the user 2026-06-29): the timeline's j
   assert.equal(DEFAULT_SETTINGS.showTriageJudges, false);
 });
 
-test("Default backend defaults to sdk (the user 2026-07-13, superseding the 06-22 tmux default); both backends coexist", () => {
-  assert.equal(DEFAULT_SETTINGS.backend, "sdk");
+test("Default backend defaults to tmux (the user 2026-08-13, superseding the 07-13 sdk default); both backends coexist", () => {
+  // the terminal session is what this user actually works in, and the default is what every create
+  // surface reads — the + picker's backend row AND the hive tray's bean drop
+  assert.equal(DEFAULT_SETTINGS.backend, "tmux");
 });
 
 test("Compact transcript defaults ON (the user 2026-07-14): fresh installs read the tidy transcript", () => {
