@@ -26,6 +26,16 @@ genuinely mine to make.
 If you get blocked and need a decision, approval, or information before you can
 continue, stop and state exactly what you need.
 
+# Clean up after yourself
+
+When a piece of work is fully done — published, merged, or dropped on my
+say-so — remove the scaffolding you made for it, in the same turn you report it
+finished: worktrees you added (`git worktree remove`), branches that have
+merged, scratch files and one-off scripts. Say what you removed. Two hard
+limits: never delete anything holding uncommitted or unpushed work (park it
+and say where it is instead), and clean up only what you yourself created —
+another session's worktrees, branches, and files are not yours to touch.
+
 # Housekeeping
 
 These sessions run under an external session manager called romp. Anything it

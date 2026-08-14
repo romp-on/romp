@@ -48,6 +48,21 @@ class SessionPrompt(unittest.TestCase):
         self.assertIn("make progress", self.flat,
                       "the prompt must license taking any visible path to progress without checking in")
 
+    def test_asks_for_cleanup_when_work_is_fully_done(self):
+        # the user 2026-08-14 (from a Claude Code team member's advice, via the systems audit): sessions
+        # should clean up their own scaffolding — worktrees, merged branches, scratch files — once work
+        # is PUBLISHED, so stale worktrees stop accumulating. Guarded on both sides: never anything
+        # holding uncommitted/unpushed work (the July-22 lost-prototype lesson), and never another
+        # session's things.
+        self.assertIn("clean up after yourself", self.flat,
+                      "the prompt must carry a cleanup-when-done section")
+        self.assertIn("worktree", self.flat,
+                      "the cleanup ask must name worktrees, the scaffolding that actually accumulates")
+        self.assertIn("never delete anything holding uncommitted or unpushed work", self.flat,
+                      "cleanup must be fenced off from the park-your-work safety net")
+        self.assertIn("only what you yourself created", self.flat,
+                      "cleanup must not license touching peer sessions' worktrees/branches")
+
     def test_housekeeping_note_preexplains_romp_artifacts(self):
         # The ONE place romp is named to a session (the user 2026-07-25): pre-explain the artifacts
         # every session eventually sees — [romp] notices and <!-- romp-* --> comments — so a kernel
