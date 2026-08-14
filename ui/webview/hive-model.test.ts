@@ -4,7 +4,7 @@
 // done-transition. All fixture data is synthetic (notes-api demo world, placeholder sids).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { buildSessions, diffSessions, finishedLine, foldSeenDone, HiveSession, hiveAge, stateLine } from "./hive-model";
+import { buildSessions, diffSessions, finishedLine, foldSeenAsk, foldSeenDone, HiveSession, hiveAge, stateLine } from "./hive-model";
 
 const SID_WEB = "11111111-2222-3333-4444-555555555555";
 const SID_API = "66666666-7777-8888-9999-aaaaaaaaaaaa";
@@ -241,6 +241,40 @@ test("foldSeenDone: history is not an event; a NEW completion latches until acke
   // the ack (the user's look gesture advances the watermark) clears it for good
   const acked = { ...f1.seen, [SID_WEB]: 400 };
   assert.deepEqual([...foldSeenDone(acked, after).unseen], []);
+});
+
+test("filed asks carry their time and the live-prompt bit rides separately", () => {
+  const card = { sid: SID_WEB, itemId: "g-ship", column: "needs_input", t: 900, blockSummary: "Cookie or token?" };
+  const out = buildSessions(payload({ webState: "ready", asks: [card] }))!;
+  assert.equal(out[0].needsYouT, 900, "the newest filed card's own time is the watermark evidence");
+  assert.equal(out[0].liveAsk, false, "a filed question is not a live prompt");
+  const live = buildSessions(payload({ webState: "awaiting" }))!;
+  assert.equal(live[0].liveAsk, true);
+  assert.equal(live[0].needsYouT, 0);
+});
+
+test("the awaiting line: a live prompt speaks in the present, a filed ask wears its age", () => {
+  const card = { sid: SID_WEB, itemId: "g-ship", column: "needs_input", t: 900 };
+  const filed = buildSessions(payload({ webState: "ready", asks: [card] }))![0];
+  assert.equal(stateLine(filed, 900 + 7200), "needs you — asked 2h ago",
+    "last night's question must not read as being asked right now");
+  const live = buildSessions(payload({ webState: "awaiting" }))![0];
+  assert.equal(stateLine(live, 1000), "needs you — waiting on your answer");
+});
+
+test("foldSeenAsk: a filed question is a DEBT — no first-sight seeding, shouts until looked at", () => {
+  const card = { sid: SID_WEB, itemId: "g-ship", column: "needs_input", t: 900 };
+  const sessions = buildSessions(payload({ webState: "ready", asks: [card] }))!;
+  // unlike foldSeenDone, an unknown sid does NOT seed away: a fresh browser/reload still owes the shout
+  const f0 = foldSeenAsk({}, sessions);
+  assert.deepEqual([...f0.unseen], [SID_WEB], "a standing question survives any reload");
+  assert.equal(f0.seen[SID_WEB], undefined, "…and nothing is written until the user actually looks");
+  // the look (the ack writes the card's time) quiets it…
+  const acked = { [SID_WEB]: 900 };
+  assert.deepEqual([...foldSeenAsk(acked, sessions).unseen], []);
+  // …until a NEWER filed ask arrives (a fresh judge verdict = new information)
+  const newer = buildSessions(payload({ webState: "ready", asks: [{ ...card, t: 950 }] }))!;
+  assert.deepEqual([...foldSeenAsk(acked, newer).unseen], [SID_WEB], "a new question re-arms the shout");
 });
 
 test("foldSeenDone keeps absentees for revival, bounded like the slot map", () => {

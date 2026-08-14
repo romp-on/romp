@@ -117,11 +117,22 @@ test("a finished session holds its ✓ until the user goes to look (the unseen-d
   assert.match(HIVE, /st === "ready" && this\.unseenDone/,
     "shown only over a READY pad — a new turn hides it, needs-you (the bang) outranks it");
   assert.match(HIVE, /foldSeenDone\(this\.seenDone, sessions\)/, "the latch derives per payload");
-  for (const frag of ["this.lookedAt(sid);", 'localStorage.getItem(SEEN_KEY)', 'localStorage.setItem(SEEN_KEY']) {
+  for (const frag of ["this.lookedAt(sid);", "loadSeen(SEEN_DONE_KEY)", "saveSeen(SEEN_DONE_KEY"]) {
     assert.ok(HIVE.includes(frag), "hive.ts carries: " + frag);
   }
   assert.ok(HIVE.indexOf("this.lookedAt(sid);") !== HIVE.lastIndexOf("this.lookedAt(sid);"),
     "BOTH look gestures ack: the chat click-through and the deep-link select");
+});
+
+test("a filed question shouts only until looked at; a live prompt always shouts", () => {
+  assert.match(HIVE, /st === "awaiting" && !this\.askAck/,
+    "the bang/sonar shout is gated on the ask being unseen");
+  assert.match(HIVE, /foldSeenAsk\(this\.seenAsk, sessions\)/, "the ask latch derives per payload");
+  assert.match(HIVE, /s\.state === "awaiting" && !s\.liveAsk && !ask\.unseen\.has\(s\.sid\)/,
+    "acked = filed (never live) and looked at — the red ring stays, the shout stops");
+  for (const frag of ["loadSeen(SEEN_ASK_KEY)", "saveSeen(SEEN_ASK_KEY"]) {
+    assert.ok(HIVE.includes(frag), "hive.ts carries: " + frag);
+  }
 });
 
 test("hive's WebGL palette matches the styles.css status tokens (one meaning per color)", () => {

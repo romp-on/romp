@@ -27,6 +27,8 @@ export interface HiveSession {
   topIds: string[];               // every known top-level goal id (live + archived)
   doneTopIds: string[];           // the done subset — goalDone transition detection
   needsYou: boolean;              // a filed needs-you card exists (see buildSessions) — why state may read "awaiting" beyond the live-prompt chip
+  needsYouT: number;              // the newest filed needs-you card's time (0 = none) — the unseen-ask watermark
+  liveAsk: boolean;               // the CHIP itself says awaiting (a live permission/picker prompt) — always shouts, no watermark
   doneT: number;                  // the LATEST completion event across its top goals (0 = none) — the unseen-finished watermark
 }
 
@@ -93,12 +95,13 @@ export function buildSessions(msg: any): HiveSession[] | null {
     //     right after their own gesture claimed a question nobody asked (the user
     //     2026-08-14, who was told a session waited on their response when it wasn't).
     let needsYou = false;
+    let needsYouT = 0;              // the newest filed ask's own time — what the shout watermark compares
     // why it needs you — the blocked card's own copy, briefest honest form first
     let brief: string | null = null;
     for (const a of cards) {
       const filed = a.column === "needs_input" && !a.rejudging && !a.recheck
         && !a.interrupting && !a.interrupted;
-      if (filed) needsYou = true;
+      if (filed) { needsYou = true; needsYouT = Math.max(needsYouT, Number(a.t) || 0); }
       // provisional cards are placeholders EXCEPT the needs-input one (a live prompt with
       // no goal to floor) — its boxed why is exactly the brief for that state
       if (a.provisional && !filed) continue;
@@ -127,6 +130,7 @@ export function buildSessions(msg: any): HiveSession[] | null {
       doneT = Math.max(doneT, (n.mt ?? n.t ?? 0) || 0);
     }
     let state = normState(m.status && m.status.state);
+    const liveAsk = state === "awaiting";   // the chip's own live prompt — before any card override
     // The board must LIGHT UP whenever the session has a question filed for the user (the
     // user 2026-08-13: a session with a question showed a calm pad) — the chip alone only
     // covers the LIVE prompt ("awaiting"); a session that ended its turn by asking, or has
@@ -144,7 +148,7 @@ export function buildSessions(msg: any): HiveSession[] | null {
       color: m.color && typeof m.color.bg === "string" ? { bg: m.color.bg, fg: m.color.fg || "#000" } : null,
       state,
       faded: !!(m.status && m.status.faded),
-      goal, brief, narration, needsYou, doneT,
+      goal, brief, narration, needsYou, needsYouT, liveAsk, doneT,
       topIds: [...new Set(topIds)].sort(),
       doneTopIds: [...new Set(doneTopIds)].sort(),
     });
@@ -170,9 +174,13 @@ export function stateLine(s: HiveSession, now: number): string {
       return n ? `working — ${n.toolUses} tool${n.toolUses === 1 ? "" : "s"} in, ${hiveAge(now - n.since)}`
                : "working";
     }
-    // covers the live prompt AND a filed question (needsYou): the session may even still be
-    // working a sibling goal, so "waiting on your answer" — never "stopped" — stays true
-    case "awaiting": return "needs you — waiting on your answer";
+    // a LIVE prompt is now; a FILED question wears its age — "asked 9h ago" reads honestly
+    // stale where a bare "waiting on your answer" claimed a live question (the user
+    // 2026-08-14, shown last night's asks as if they were being asked right then)
+    case "awaiting":
+      return s.liveAsk || !s.needsYouT
+        ? "needs you — waiting on your answer"
+        : `needs you — asked ${hiveAge(now - s.needsYouT)} ago`;
     case "blocked": return "stopped on an API error";
     case "retrying": return "hitting API errors, retrying";
     case "awaitingBg": return "idle, waiting on background work";
@@ -215,6 +223,33 @@ export function foldSeenDone(prev: SeenDone, sessions: HiveSession[]):
     live.add(s.sid);
     if (!(s.sid in seen)) { seen[s.sid] = s.doneT; changed = true; }
     else if (s.doneT > seen[s.sid]) unseen.add(s.sid);
+  }
+  let extra = Object.keys(seen).length - 200;
+  if (extra > 0) {
+    for (const k of Object.keys(seen)) {
+      if (extra <= 0) break;
+      if (!live.has(k)) { delete seen[k]; changed = true; extra--; }
+    }
+  }
+  return { seen, unseen, changed };
+}
+
+// The unseen-ASK twin (the user 2026-08-14, whose board banged last night's filed questions
+// as if they were being asked right then): a filed needs-you SHOUTS (bang/sonar/wave) only
+// until the user has gone to look — then the pad keeps its honest red (the card still sits
+// in the feed's needs-you column) but stops shouting. ONE deliberate difference from
+// foldSeenDone: NO first-sight seeding. A completion is news (history can be swallowed); a
+// filed question is a DEBT — it must survive reloads, fresh browsers, and this feature
+// shipping, so an unknown sid compares against 0 and shouts until the first real look.
+export function foldSeenAsk(prev: SeenDone, sessions: HiveSession[]):
+    { seen: SeenDone; unseen: Set<string>; changed: boolean } {
+  const seen: SeenDone = { ...prev };
+  const unseen = new Set<string>();
+  let changed = false;
+  const live = new Set<string>();
+  for (const s of sessions) {
+    live.add(s.sid);
+    if (s.needsYouT > (seen[s.sid] ?? 0)) unseen.add(s.sid);
   }
   let extra = Object.keys(seen).length - 200;
   if (extra > 0) {

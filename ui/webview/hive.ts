@@ -14,7 +14,7 @@ import { delegate } from "./actions";
 import { hostPrefix } from "./host-prefix";
 import { loadSettings } from "./settings";
 import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, hexDistance, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, slotOfAxial, spiralSlot, xzToAxial } from "./hive-layout";
-import { buildSessions, diffSessions, finishedLine, foldSeenDone, HiveSession, HiveState, hiveAge, SeenDone, stateLine } from "./hive-model";
+import { buildSessions, diffSessions, finishedLine, foldSeenAsk, foldSeenDone, HiveSession, HiveState, hiveAge, SeenDone, stateLine } from "./hive-model";
 
 const vscodeApi =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
@@ -82,6 +82,10 @@ class Pad {
   private bang: THREE.Sprite;              // the ❗ that bobs over a needs-you pad
   private tick: THREE.Sprite;              // the ✓ held up over an unseen-finished pad (HiveWorld sets unseenDone)
   unseenDone = false;                       // finished work the user hasn't gone to look at (foldSeenDone)
+  // a FILED ask the user has already looked at (foldSeenAsk): the ring keeps its honest red
+  // — the card still sits in the feed's needs-you column — but the SHOUT (bang/sonar/wave)
+  // stops. A live prompt is never acked (always now). HiveWorld.setAskAck drives this.
+  private askAck = false;
   private guy: Dweller;
   carrier = new THREE.Group();              // rides the pointer while the user carries them
   private carryTarget: THREE.Vector3 | null = null;
@@ -169,11 +173,24 @@ class Pad {
     // drag moves the carrier — so picking them up never fights the idle animation
     this.carrier.add(this.guy.group);
     this.group.add(this.carrier);
-    this.guy.setState(sess.state, sess.faded);
+    this.guy.setState(this.guyState(), sess.faded);
 
     this.group.scale.setScalar(0.001);      // arrival pop plays from ~zero
     this.ringColor.setHex(ST[sess.state]);
     this.ringTarget.setHex(ST[sess.state]);
+  }
+
+  // the pose the bean acts out: an ACKNOWLEDGED filed ask stands calm (ready) under its red
+  // ring — the wave is part of the shout, and the shout is for unseen needs-you only
+  private guyState(): HiveState {
+    return this.sess.state === "awaiting" && this.askAck ? "ready" : this.sess.state;
+  }
+
+  // the user's look (or a new filed ask) flips the shout without any chip state change
+  setAskAck(ack: boolean) {
+    if (this.askAck === ack) return;
+    this.askAck = ack;
+    if (this.sess.state === "awaiting") this.guy.setState(this.guyState(), this.sess.faded);
   }
 
   // a real state/name change arrived (diff event) — retarget; update() animates the morph
@@ -182,7 +199,7 @@ class Pad {
     this.sess = sess;
     if (stateChanged) {
       this.ringTarget.setHex(ST[sess.state]);
-      this.guy.setState(sess.state, sess.faded);
+      this.guy.setState(this.guyState(), sess.faded);
     }
     if (sess.name !== prevName || sess.color?.bg !== prevColor) {
       this.labelYaw.remove(this.labelMesh);
@@ -262,12 +279,15 @@ class Pad {
     const st = this.sess.state;
     // pulse only the states that are genuinely in motion; steady states hold steady
     if (st === "working") this.ringMat.opacity = 0.62 + 0.3 * (0.5 + 0.5 * Math.sin(this.t * 3.6));
-    else if (st === "awaiting") this.ringMat.opacity = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(this.t * 7));
+    else if (st === "awaiting" && !this.askAck) this.ringMat.opacity = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(this.t * 7));   // acked → the steady red below
     else if (st === "retrying") this.ringMat.opacity = 0.5 + 0.5 * (Math.sin(this.t * 11) > 0.2 ? 1 : 0.35);
     else this.ringMat.opacity = 0.95;
 
-    if (st === "awaiting") {
-      // sonar ping: 1.4s loop, ring swells to ~1.8× and fades — visible from any zoom
+    if (st === "awaiting" && !this.askAck) {
+      // the SHOUT — sonar ping (1.4s loop, ring swells ~1.8× and fades, visible from any
+      // zoom) + the bobbing ❗ — is for needs-you the user hasn't seen: a live prompt, or a
+      // filed question they haven't looked at. Once looked at, the red ring alone carries
+      // the standing fact (the user 2026-08-14: last night's asks kept shouting as if live).
       const p = (this.t % 1.4) / 1.4;
       this.sonarMat.opacity = (1 - p) * 0.5;
       this.sonar.scale.setScalar(1 + p * 0.85);
@@ -894,9 +914,10 @@ class HiveWorld {
   private dragging: { mode: "orbit" | "pan"; x: number; y: number } | null = null;
   private clock = 0;
   card = new HiveCard();
-  // per-sid completion watermarks the user has LOOKED at (localStorage — the latch survives
-  // a reload); foldSeenDone derives the unseen set from these each payload
-  private seenDone: SeenDone = loadSeenDone();
+  // per-sid completion/ask watermarks the user has LOOKED at (localStorage — the latch
+  // survives a reload); foldSeenDone / foldSeenAsk derive the unseen sets each payload
+  private seenDone: SeenDone = loadSeen(SEEN_DONE_KEY);
+  private seenAsk: SeenDone = loadSeen(SEEN_ASK_KEY);
   // the ghost hex: the standing invitation. It parks on the first FREE slot, and GLIDES
   // under the pointer whenever any empty cell is hovered — every empty hexagon is
   // clickable to spawn a session there (the user 2026-08-13). A clean click (down+up,
@@ -1396,16 +1417,24 @@ class HiveWorld {
   }
 
   // The user's own gesture toward a session — the ONE event that clears its finished note
-  // (never a timer, never a re-render): the watermark advances to the completion they just
-  // went to see, persisted so a reload can't resurrect an acknowledged ✓. Known gap, on
-  // purpose for now: reading the outcome in the chat/feed PANES doesn't reach this board,
-  // so the note can outlive a look that happened elsewhere — one click here retires it.
+  // and quiets a filed ask's shout (never a timer, never a re-render): both watermarks
+  // advance to the evidence they just went to see, persisted so a reload can't resurrect an
+  // acknowledged cue. Known gap, on purpose for now: reading the outcome in the chat/feed
+  // PANES doesn't reach this board, so a cue can outlive a look that happened elsewhere —
+  // one click here retires it.
   private lookedAt(sid: string) {
     const pad = this.pads.get(sid);
-    if (!pad || pad.sess.doneT <= (this.seenDone[sid] ?? 0)) return;
-    this.seenDone[sid] = pad.sess.doneT;
-    pad.unseenDone = false;
-    saveSeenDone(this.seenDone);
+    if (!pad) return;
+    if (pad.sess.doneT > (this.seenDone[sid] ?? 0)) {
+      this.seenDone[sid] = pad.sess.doneT;
+      pad.unseenDone = false;
+      saveSeen(SEEN_DONE_KEY, this.seenDone);
+    }
+    if (pad.sess.needsYouT > (this.seenAsk[sid] ?? 0)) {
+      this.seenAsk[sid] = pad.sess.needsYouT;
+      pad.setAskAck(pad.sess.state === "awaiting" && !pad.sess.liveAsk);
+      saveSeen(SEEN_ASK_KEY, this.seenAsk);
+    }
   }
 
   // aim the ghost at a cell; frame() glides it there (everything springs, nothing teleports)
@@ -1525,7 +1554,21 @@ class HiveWorld {
       const pad = this.pads.get(s.sid);
       if (pad) pad.unseenDone = fold.unseen.has(s.sid);
     }
-    if (seenChanged) saveSeenDone(this.seenDone);
+    if (seenChanged) saveSeen(SEEN_DONE_KEY, this.seenDone);
+    // …and its ASK twin (foldSeenAsk): a filed question shouts until looked at, then the pad
+    // keeps its red ring and calms. A live prompt (liveAsk) never acks — it is now.
+    const ask = foldSeenAsk(this.seenAsk, sessions);
+    this.seenAsk = ask.seen;
+    let askChanged = ask.changed;
+    if (this.selected && ask.unseen.has(this.selected)) {
+      const s = bySid.get(this.selected);
+      if (s && !s.liveAsk) { this.seenAsk[this.selected] = s.needsYouT; ask.unseen.delete(this.selected); askChanged = true; }
+    }
+    for (const s of sessions) {
+      const pad = this.pads.get(s.sid);
+      if (pad) pad.setAskAck(s.state === "awaiting" && !s.liveAsk && !ask.unseen.has(s.sid));
+    }
+    if (askChanged) saveSeen(SEEN_ASK_KEY, this.seenAsk);
     for (const sid of diff.goalDone) {
       const pad = this.pads.get(sid);
       if (pad) {
@@ -1736,20 +1779,22 @@ function saveSlots(m: Map<string, number>) {
   } catch { /* private mode etc — the board still works, it just re-deals on reload */ }
 }
 
-// unseen-finished persistence: the same memory policy as the slot map — the latch must
-// survive a reload (stepping away is safe), absentees keep their stamps for revival, and
-// foldSeenDone bounds the record. Unreadable/private-mode storage just resets the cues.
-const SEEN_KEY = "romp:hiveSeenDone";
-function loadSeenDone(): SeenDone {
+// unseen-cue persistence (the finished ✓ and the filed-ask shout share one shape): the same
+// memory policy as the slot map — the latch must survive a reload (stepping away is safe),
+// absentees keep their stamps for revival, and the folds bound the records. Unreadable /
+// private-mode storage just resets the cues.
+const SEEN_DONE_KEY = "romp:hiveSeenDone";
+const SEEN_ASK_KEY = "romp:hiveSeenAsk";
+function loadSeen(key: string): SeenDone {
   try {
-    const d = JSON.parse(localStorage.getItem(SEEN_KEY) || "null");
+    const d = JSON.parse(localStorage.getItem(key) || "null");
     const out: SeenDone = {};
     if (d && typeof d === "object") for (const k of Object.keys(d)) if (Number.isFinite(d[k])) out[k] = d[k];
     return out;
   } catch { return {}; }
 }
-function saveSeenDone(m: SeenDone) {
-  try { localStorage.setItem(SEEN_KEY, JSON.stringify(m)); } catch { /* see saveSlots */ }
+function saveSeen(key: string, m: SeenDone) {
+  try { localStorage.setItem(key, JSON.stringify(m)); } catch { /* see saveSlots */ }
 }
 
 // ── boot ─────────────────────────────────────────────────────────────────────────────────
