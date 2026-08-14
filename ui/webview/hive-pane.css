@@ -89,6 +89,9 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #090b10; }
 #hive-tip[data-state="awaiting"], #hive-tip[data-state="blocked"] { color: #ff8589; }
 #hive-tip[data-state="awaitingBg"] { color: #7fd24a; }
 #hive-tip[data-state="compacting"], #hive-tip[data-state="clearing"] { color: #2dd4bf; }
+/* the unseen-finished line — the done-check family (--check-bg #1EA1EB), brightened for dark
+   ground the way the other tip hues are */
+#hive-tip[data-state="done"] { color: #4db9f2; }
 
 /* ── the tray: one draggable model bean per /models entry (bottom-left). Drag a bean onto
    a free hexagon to spawn that model there; the badge cycles its effort; a clean click

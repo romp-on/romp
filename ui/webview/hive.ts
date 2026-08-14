@@ -14,7 +14,7 @@ import { delegate } from "./actions";
 import { hostPrefix } from "./host-prefix";
 import { loadSettings } from "./settings";
 import { assignSlots, axialToXZ, frameDt, frameRadius, HEX_SIZE, hexCorner, hexDistance, latticeSegments, PAD_R, PAD_THETA, RIM_THETA, ringOf, slotOfAxial, spiralSlot, xzToAxial } from "./hive-layout";
-import { buildSessions, diffSessions, HiveSession, HiveState, hiveAge, stateLine } from "./hive-model";
+import { buildSessions, diffSessions, finishedLine, foldSeenDone, HiveSession, HiveState, hiveAge, SeenDone, stateLine } from "./hive-model";
 
 const vscodeApi =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
@@ -80,6 +80,8 @@ class Pad {
   private labelYaw = new THREE.Group();     // yaws to face the camera; the nameplate rides its +z
   private labelMesh: THREE.Mesh;
   private bang: THREE.Sprite;              // the ❗ that bobs over a needs-you pad
+  private tick: THREE.Sprite;              // the ✓ held up over an unseen-finished pad (HiveWorld sets unseenDone)
+  unseenDone = false;                       // finished work the user hasn't gone to look at (foldSeenDone)
   private guy: Dweller;
   carrier = new THREE.Group();              // rides the pointer while the user carries them
   private carryTarget: THREE.Vector3 | null = null;
@@ -150,6 +152,16 @@ class Pad {
     this.bang.position.y = 2.05;             // floats over the bean — the one deliberate float
     this.bang.visible = false;
     this.group.add(this.bang);
+
+    // the finished note: the app's done-check (white ✓ on --check-bg #1EA1EB — the ledger
+    // mark, the feed check) held up like the bang, but calm. Shown only while the session
+    // sits ready with a completion the user hasn't looked at (the user 2026-08-14): the
+    // one-shot confetti marks the MOMENT; this holds the FACT until their own click clears
+    // it. Needs-you outranks it by construction — the bang owns every non-ready state.
+    this.tick = makeTextSprite("✓", "#ffffff", "#1EA1EB");
+    this.tick.position.y = 2.05;
+    this.tick.visible = false;
+    this.group.add(this.tick);
 
     this.guy = new Dweller(sess.color?.bg || "#9cd2ff");
     this.guy.group.position.y = PAD_H;
@@ -265,6 +277,10 @@ class Pad {
       this.sonarMat.opacity = 0;
       this.bang.visible = false;
     }
+    // the finished note holds only over a READY pad: a new turn hides it (working again),
+    // needs-you replaces it (the bang), and the user's own click retires it for good
+    this.tick.visible = st === "ready" && this.unseenDone;
+    if (this.tick.visible) this.tick.position.y = 2.05 + 0.07 * Math.sin(this.t * 2.1);
     this.guy.update(dt, this.t, camYaw);
     return false;
   }
@@ -878,6 +894,9 @@ class HiveWorld {
   private dragging: { mode: "orbit" | "pan"; x: number; y: number } | null = null;
   private clock = 0;
   card = new HiveCard();
+  // per-sid completion watermarks the user has LOOKED at (localStorage — the latch survives
+  // a reload); foldSeenDone derives the unseen set from these each payload
+  private seenDone: SeenDone = loadSeenDone();
   // the ghost hex: the standing invitation. It parks on the first FREE slot, and GLIDES
   // under the pointer whenever any empty cell is hovered — every empty hexagon is
   // clickable to spawn a session there (the user 2026-08-13). A clean click (down+up,
@@ -1366,6 +1385,7 @@ class HiveWorld {
   // dead-session revive prompt). Board sessions are live, so the local flip is never
   // showing something the kernel would have refused.
   openChat(sid: string) {
+    this.lookedAt(sid);                      // going to its chat IS looking — the ✓ note retires
     try {
       if (window.parent !== window) {
         window.parent.postMessage({ romp: "focusChat", id: sid }, "*");
@@ -1373,6 +1393,19 @@ class HiveWorld {
       }
     } catch { /* standalone */ }
     vscodeApi?.postMessage({ type: "openSession", id: sid });
+  }
+
+  // The user's own gesture toward a session — the ONE event that clears its finished note
+  // (never a timer, never a re-render): the watermark advances to the completion they just
+  // went to see, persisted so a reload can't resurrect an acknowledged ✓. Known gap, on
+  // purpose for now: reading the outcome in the chat/feed PANES doesn't reach this board,
+  // so the note can outlive a look that happened elsewhere — one click here retires it.
+  private lookedAt(sid: string) {
+    const pad = this.pads.get(sid);
+    if (!pad || pad.sess.doneT <= (this.seenDone[sid] ?? 0)) return;
+    this.seenDone[sid] = pad.sess.doneT;
+    pad.unseenDone = false;
+    saveSeenDone(this.seenDone);
   }
 
   // aim the ghost at a cell; frame() glides it there (everything springs, nothing teleports)
@@ -1386,6 +1419,7 @@ class HiveWorld {
   // only — a feed/outline "show me" jump lands here (#focus=<sid>). A plain click never
   // opens it: the chat on the left is the click's whole answer (the user 2026-08-13).
   select(sid: string) {
+    this.lookedAt(sid);                      // a deep-link jump is the user arriving to look
     this.selected = sid;
     const pad = this.pads.get(sid);
     if (pad) {
@@ -1477,6 +1511,21 @@ class HiveWorld {
       if (pad && !diff.added.includes(s.sid)) pad.apply(s, changed.has(s.sid));
       if (this.selected === s.sid) this.card.refresh(s, nowS);
     }
+    // the unseen-finished latch (hive-model foldSeenDone): completions the user hasn't gone
+    // to look at wear the ✓ note until their own gesture clears it (lookedAt). The open
+    // card IS looking — a completion landing on the selected session is seen as it lands.
+    const fold = foldSeenDone(this.seenDone, sessions);
+    this.seenDone = fold.seen;
+    let seenChanged = fold.changed;
+    if (this.selected && fold.unseen.has(this.selected)) {
+      const s = bySid.get(this.selected);
+      if (s) { this.seenDone[this.selected] = s.doneT; fold.unseen.delete(this.selected); seenChanged = true; }
+    }
+    for (const s of sessions) {
+      const pad = this.pads.get(s.sid);
+      if (pad) pad.unseenDone = fold.unseen.has(s.sid);
+    }
+    if (seenChanged) saveSeenDone(this.seenDone);
     for (const sid of diff.goalDone) {
       const pad = this.pads.get(sid);
       if (pad) {
@@ -1579,12 +1628,16 @@ class HiveWorld {
           ((p.x * 0.5 + 0.5) * rr.width + rr.left).toFixed(1) + "px, " +
           ((0.5 - p.y * 0.5) * rr.height + rr.top).toFixed(1) + "px)";
         this.tipEl.classList.add("show");
-        const line = stateLine(tipPad.sess, Math.floor(Date.now() / 1000));
+        // an unseen finish outranks the plain "ready" line: the tip says what the ✓ means
+        // and how long it has been waiting for you (finishedLine)
+        const done = tipPad.unseenDone && tipPad.sess.state === "ready";
+        const line = done ? finishedLine(tipPad.sess, Math.floor(Date.now() / 1000))
+                          : stateLine(tipPad.sess, Math.floor(Date.now() / 1000));
         if (line !== this.tipText) {
           this.tipText = line;
           (this.tipEl.querySelector(".tip-state") as HTMLElement).textContent = line;
           (this.tipEl.querySelector(".tip-dot") as HTMLElement).style.background = tipPad.sess.color?.bg || "#8a8a8a";
-          this.tipEl.dataset.state = tipPad.sess.state;
+          this.tipEl.dataset.state = done ? "done" : tipPad.sess.state;
         }
       } else this.tipEl.classList.remove("show");
     } else {
@@ -1681,6 +1734,22 @@ function saveSlots(m: Map<string, number>) {
     for (const [k, v] of m) o[k] = v;
     localStorage.setItem(SLOTS_KEY, JSON.stringify(o));
   } catch { /* private mode etc — the board still works, it just re-deals on reload */ }
+}
+
+// unseen-finished persistence: the same memory policy as the slot map — the latch must
+// survive a reload (stepping away is safe), absentees keep their stamps for revival, and
+// foldSeenDone bounds the record. Unreadable/private-mode storage just resets the cues.
+const SEEN_KEY = "romp:hiveSeenDone";
+function loadSeenDone(): SeenDone {
+  try {
+    const d = JSON.parse(localStorage.getItem(SEEN_KEY) || "null");
+    const out: SeenDone = {};
+    if (d && typeof d === "object") for (const k of Object.keys(d)) if (Number.isFinite(d[k])) out[k] = d[k];
+    return out;
+  } catch { return {}; }
+}
+function saveSeenDone(m: SeenDone) {
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify(m)); } catch { /* see saveSlots */ }
 }
 
 // ── boot ─────────────────────────────────────────────────────────────────────────────────

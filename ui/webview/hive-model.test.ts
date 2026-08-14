@@ -4,7 +4,7 @@
 // done-transition. All fixture data is synthetic (notes-api demo world, placeholder sids).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { buildSessions, diffSessions, HiveSession, hiveAge, stateLine } from "./hive-model";
+import { buildSessions, diffSessions, finishedLine, foldSeenDone, HiveSession, hiveAge, stateLine } from "./hive-model";
 
 const SID_WEB = "11111111-2222-3333-4444-555555555555";
 const SID_API = "66666666-7777-8888-9999-aaaaaaaaaaaa";
@@ -192,6 +192,53 @@ test("hiveAge compacts like the outline's ages", () => {
   assert.equal(hiveAge(7200), "2h");
   assert.equal(hiveAge(200000), "2d");
   assert.equal(hiveAge(-5), "0s");
+});
+
+test("doneT is the newest completion event across live + archived tops", () => {
+  const out = buildSessions(payload())!;
+  assert.equal(out[0].doneT, 120, "g-old done at mt 120 beats archived g-arch at 60");
+  assert.equal(out[1].doneT, 0, "api has no completions");
+  const after = buildSessions(payload({ webDone: true }))!;
+  assert.equal(after[0].doneT, 400, "g-ship completing moves the watermark to its mt");
+});
+
+test("finishedLine says what the ✓ means, with the completion's age", () => {
+  const s = buildSessions(payload({ webDone: true }))![0];
+  assert.equal(finishedLine(s, 520), "finished working — 2m ago");
+  assert.equal(finishedLine(s, 400), "finished working — 0s ago");
+});
+
+test("foldSeenDone: history is not an event; a NEW completion latches until acked", () => {
+  const before = buildSessions(payload({ webDone: false }))!;
+  // first sight seeds watermarks to the current doneT — a board opening onto old
+  // completions must not celebrate history (the goalDone rule, applied to the latch)
+  const f0 = foldSeenDone({}, before);
+  assert.deepEqual([...f0.unseen], []);
+  assert.equal(f0.seen[SID_WEB], 120);
+  assert.equal(f0.changed, true, "the seeding is a persistable change");
+  // a completion after the seed latches…
+  const after = buildSessions(payload({ webDone: true }))!;
+  const f1 = foldSeenDone(f0.seen, after);
+  assert.deepEqual([...f1.unseen], [SID_WEB]);
+  assert.equal(f1.changed, false, "deriving the unseen set writes nothing by itself");
+  // …and holds across a reload (the persisted record is the whole latch)
+  const f2 = foldSeenDone(f1.seen, after);
+  assert.deepEqual([...f2.unseen], [SID_WEB], "reload cannot swallow an unseen finish");
+  // the ack (the user's look gesture advances the watermark) clears it for good
+  const acked = { ...f1.seen, [SID_WEB]: 400 };
+  assert.deepEqual([...foldSeenDone(acked, after).unseen], []);
+});
+
+test("foldSeenDone keeps absentees for revival, bounded like the slot map", () => {
+  const sessions = buildSessions(payload())!;
+  const seed: Record<string, number> = { "dead-1": 50 };
+  const f = foldSeenDone(seed, sessions);
+  assert.equal(f.seen["dead-1"], 50, "a departed sid keeps its stamp — revival must not celebrate its past");
+  const big: Record<string, number> = {};
+  for (let i = 0; i < 220; i++) big["gone-" + i] = i;
+  const pruned = foldSeenDone(big, sessions).seen;
+  assert.ok(Object.keys(pruned).length <= 202, "absentees drop once the record outgrows the memory cap");
+  assert.equal(pruned[SID_WEB], 120, "live sids always survive the prune");
 });
 
 test("a top completing straight into the archive still fires (known id, newly done)", () => {

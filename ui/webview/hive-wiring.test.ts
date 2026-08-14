@@ -99,12 +99,29 @@ test("hovering a session floats its live status over the bean (the card's own st
   assert.match(HIVE, /this\.tipEl\.id = "hive-tip";/, "the tip element exists");
   assert.match(HIVE, /stateLine\(tipPad\.sess, Math\.floor\(Date\.now\(\) \/ 1000\)\)/,
     "the text is the SAME line the card's state row shows — one vocabulary for status");
-  assert.match(HIVE, /this\.tipEl\.dataset\.state = tipPad\.sess\.state;/, "state drives the color");
+  assert.match(HIVE, /finishedLine\(tipPad\.sess, Math\.floor\(Date\.now\(\) \/ 1000\)\)/,
+    "…except an unseen finish, which says what the ✓ is holding for you");
+  assert.match(HIVE, /this\.tipEl\.dataset\.state = done \? "done" : tipPad\.sess\.state;/,
+    "state drives the color (an unseen finish wears the done hue)");
   assert.match(HIVE, /!this\.dragSession\s*\n\s*\? this\.pads\.get\(this\.hovered\) : null;/,
     "no tip mid-carry — the dock speaks then");
   for (const frag of ['#hive-tip {', "pointer-events: none;", '#hive-tip[data-state="working"] { color: #e0b020; }',
-    '#hive-tip[data-state="awaiting"], #hive-tip[data-state="blocked"] { color: #ff8589; }'])
+    '#hive-tip[data-state="awaiting"], #hive-tip[data-state="blocked"] { color: #ff8589; }',
+    '#hive-tip[data-state="done"] { color: #4db9f2; }'])
     assert.ok(CSS2.includes(frag), "hive-pane.css carries: " + frag);
+});
+
+test("a finished session holds its ✓ until the user goes to look (the unseen-done latch)", () => {
+  assert.match(HIVE, /makeTextSprite\("✓", "#ffffff", "#1EA1EB"\)/,
+    "the note is the app's done-check: white ✓ on --check-bg, the ledger/feed mark");
+  assert.match(HIVE, /st === "ready" && this\.unseenDone/,
+    "shown only over a READY pad — a new turn hides it, needs-you (the bang) outranks it");
+  assert.match(HIVE, /foldSeenDone\(this\.seenDone, sessions\)/, "the latch derives per payload");
+  for (const frag of ["this.lookedAt(sid);", 'localStorage.getItem(SEEN_KEY)', 'localStorage.setItem(SEEN_KEY']) {
+    assert.ok(HIVE.includes(frag), "hive.ts carries: " + frag);
+  }
+  assert.ok(HIVE.indexOf("this.lookedAt(sid);") !== HIVE.lastIndexOf("this.lookedAt(sid);"),
+    "BOTH look gestures ack: the chat click-through and the deep-link select");
 });
 
 test("hive's WebGL palette matches the styles.css status tokens (one meaning per color)", () => {
