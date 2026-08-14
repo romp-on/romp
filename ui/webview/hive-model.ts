@@ -26,6 +26,7 @@ export interface HiveSession {
   narration: { since: number; toolUses: number } | null;   // open-turn progress (working cards)
   topIds: string[];               // every known top-level goal id (live + archived)
   doneTopIds: string[];           // the done subset — goalDone transition detection
+  needsYou: boolean;              // a filed needs-you card exists (see buildSessions) — why state may read "awaiting" beyond the live-prompt chip
 }
 
 export interface HiveDiff {
@@ -81,14 +82,25 @@ export function buildSessions(msg: any): HiveSession[] | null {
       const prov = cards.find((a) => a.provisional && typeof a.text === "string" && a.text.trim());
       if (prov) goal = prov.text.trim();
     }
+    // needs-you: a card FILED under needs_input (a judge verdict, a floored live prompt, a
+    // synth placeholder) — the feed's own column vocabulary, not the "blocked" guess this
+    // code first shipped with (a column value the kernel never emits). rejudging/recheck
+    // cards are excluded: the user already answered those, the judges own the next move —
+    // counting them would wave ❗ at a person who owes nothing (and would clear again on
+    // the verdict, a move with no new information for the user).
+    let needsYou = false;
     // why it needs you — the blocked card's own copy, briefest honest form first
     let brief: string | null = null;
     for (const a of cards) {
-      if (a.provisional) continue;
+      const filed = a.column === "needs_input" && !a.rejudging && !a.recheck;
+      if (filed) needsYou = true;
+      // provisional cards are placeholders EXCEPT the needs-input one (a live prompt with
+      // no goal to floor) — its boxed why is exactly the brief for that state
+      if (a.provisional && !filed) continue;
       const b = (typeof a.blockSummary === "string" && a.blockSummary.trim())
         || (a.blocked && typeof a.blocked.what === "string" && a.blocked.what.trim())
         || (a.awaiting && typeof a.awaiting.why === "string" && a.awaiting.why.trim()) || "";
-      if (b && (a.column === "blocked" || a.blocked)) { brief = b; break; }
+      if (b && filed) { brief = b; break; }
       if (b && !brief) brief = b;
     }
     // open-turn narration rides the working card (kernel _open_turn_progress)
@@ -102,13 +114,25 @@ export function buildSessions(msg: any): HiveSession[] | null {
     }
     const topIds = [...live, ...archived].map((n) => n.id as string);
     const doneTopIds = [...live.filter((n) => !!n.done), ...archived].map((n) => n.id as string);
+    let state = normState(m.status && m.status.state);
+    // The board must LIGHT UP whenever the session has a question filed for the user (the
+    // user 2026-08-13: a session with a question showed a calm pad) — the chip alone only
+    // covers the LIVE prompt ("awaiting"); a session that ended its turn by asking, or has
+    // one goal blocked on you while it works another, reads ready/working there. The filed
+    // card is the deciding event (a judge verdict / floor), so this can't flap between
+    // builds: it latches "awaiting" across turn-boundary chip flips (working↔ready) until
+    // the verdict that retires the card. Chip states with their own urgent story — blocked,
+    // retrying, the context ops, opening — keep it; the card evidence outranks only calm.
+    if (needsYou && (state === "ready" || state === "awaitingBg" || state === "working")) {
+      state = "awaiting";
+    }
     out.push({
       sid: m.sid,
       name: typeof m.name === "string" ? m.name : m.sid.slice(0, 8),
       color: m.color && typeof m.color.bg === "string" ? { bg: m.color.bg, fg: m.color.fg || "#000" } : null,
-      state: normState(m.status && m.status.state),
+      state,
       faded: !!(m.status && m.status.faded),
-      goal, brief, narration,
+      goal, brief, narration, needsYou,
       topIds: [...new Set(topIds)].sort(),
       doneTopIds: [...new Set(doneTopIds)].sort(),
     });
@@ -134,7 +158,9 @@ export function stateLine(s: HiveSession, now: number): string {
       return n ? `working — ${n.toolUses} tool${n.toolUses === 1 ? "" : "s"} in, ${hiveAge(now - n.since)}`
                : "working";
     }
-    case "awaiting": return "needs you — stopped on a question";
+    // covers the live prompt AND a filed question (needsYou): the session may even still be
+    // working a sibling goal, so "waiting on your answer" — never "stopped" — stays true
+    case "awaiting": return "needs you — waiting on your answer";
     case "blocked": return "stopped on an API error";
     case "retrying": return "hitting API errors, retrying";
     case "awaitingBg": return "idle, waiting on background work";

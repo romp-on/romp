@@ -63,15 +63,64 @@ test("goal = the freshest not-done top; provisional gist when no node exists yet
   assert.equal(prov[1].goal, "Refactor the auth flow");
 });
 
-test("brief prefers the blocked card's decision brief, then its boxed why", () => {
+test("brief prefers the needs-input card's decision brief, then its boxed why", () => {
+  // column values are the kernel's REAL vocabulary (working | needs_input | completed) —
+  // the first cut of this file guessed "blocked", a value build_feed never emits
   const withBrief = buildSessions(payload({
-    asks: [{ sid: SID_WEB, itemId: "g-ship", column: "blocked", blockSummary: "Pick auth: cookie or token?" }],
+    asks: [{ sid: SID_WEB, itemId: "g-ship", column: "needs_input", blockSummary: "Pick auth: cookie or token?" }],
   }))!;
   assert.equal(withBrief[0].brief, "Pick auth: cookie or token?");
   const withWhat = buildSessions(payload({
-    asks: [{ sid: SID_WEB, itemId: "g-ship", column: "blocked", blocked: { state: "apiError", what: "stopped on an API error" } }],
+    asks: [{ sid: SID_WEB, itemId: "g-ship", column: "needs_input", blocked: { state: "apiError", what: "stopped on an API error" } }],
   }))!;
   assert.equal(withWhat[0].brief, "stopped on an API error");
+});
+
+test("a filed needs-you card lights the session: calm chips read awaiting", () => {
+  const card = { sid: SID_WEB, itemId: "g-ship", column: "needs_input", blockSummary: "Cookie or token?" };
+  for (const chip of ["ready", "awaitingBg", "working"]) {
+    const out = buildSessions(payload({ webState: chip, asks: [card] }))!;
+    assert.equal(out[0].state, "awaiting", `chip ${chip} + filed card → awaiting`);
+    assert.equal(out[0].needsYou, true);
+    assert.equal(out[0].brief, "Cookie or token?");
+  }
+  // chips that carry their own urgent story keep it — the card evidence outranks only calm
+  for (const chip of ["blocked", "retrying", "compacting", "clearing", "interrupting", "opening"]) {
+    const out = buildSessions(payload({ webState: chip, asks: [card] }))!;
+    assert.equal(out[0].state, chip, `chip ${chip} keeps its own state`);
+    assert.equal(out[0].needsYou, true, "…but the evidence still rides along");
+  }
+  // the synth placeholder for a live prompt with no goal is provisional AND needs_input —
+  // it lights too, and its boxed why is the brief
+  const synth = buildSessions(payload({
+    webState: "ready",
+    asks: [{ sid: SID_WEB, itemId: "blocked:" + SID_WEB, column: "needs_input", provisional: true,
+             blocked: { state: "permission", what: "this session is stopped awaiting your approval" } }],
+  }))!;
+  assert.equal(synth[0].state, "awaiting");
+  assert.equal(synth[0].brief, "this session is stopped awaiting your approval");
+});
+
+test("an answered card pending judgment does NOT light (rejudging/recheck)", () => {
+  for (const flag of ["rejudging", "recheck"]) {
+    const out = buildSessions(payload({
+      webState: "working",
+      asks: [{ sid: SID_WEB, itemId: "g-ship", column: "needs_input", [flag]: true, blockSummary: "answered already" }],
+    }))!;
+    assert.equal(out[0].state, "working", `${flag} card → chip state stands`);
+    assert.equal(out[0].needsYou, false);
+  }
+});
+
+test("the needs-you latch cannot flap across turn-boundary chip flips", () => {
+  const card = { sid: SID_WEB, itemId: "g-ship", column: "needs_input", blockSummary: "Cookie or token?" };
+  const a = buildSessions(payload({ webState: "working", asks: [card] }))!;
+  const b = buildSessions(payload({ webState: "ready", asks: [card] }))!;
+  assert.deepEqual(diffSessions(a, b).stateChanged, [],
+    "chip working→ready under a filed card is NOT an event — awaiting holds");
+  const answered = buildSessions(payload({ webState: "ready", asks: [{ ...card, rejudging: true }] }))!;
+  assert.equal(diffSessions(b, answered).stateChanged.length, 1,
+    "…the reply (rejudging) IS the event that releases it");
 });
 
 test("open-turn narration rides through from the working card", () => {
@@ -125,7 +174,7 @@ test("the card's state line speaks the user's terms for every chip", () => {
   assert.equal(
     stateLine({ ...base, state: "working", narration: { since: 990, toolUses: 1 } }, 1000),
     "working — 1 tool in, 10s");
-  assert.equal(at("awaiting"), "needs you — stopped on a question");
+  assert.equal(at("awaiting"), "needs you — waiting on your answer");
   assert.equal(at("blocked"), "stopped on an API error");
   assert.equal(at("retrying"), "hitting API errors, retrying");
   assert.equal(at("awaitingBg"), "idle, waiting on background work");
