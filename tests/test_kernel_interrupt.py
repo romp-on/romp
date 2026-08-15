@@ -588,6 +588,100 @@ class AutoNudgeInterruptGate(unittest.TestCase):
         self.assertFalse(card.get("interrupted"), "the user's next message retires the badge")
 
 
+class AutoNudgeLoopGate(AutoNudgeInterruptGate):
+    """A session that schedules its own next move is not stalled (the user 2026-08-15, whose looping
+    workers were nudged four times in an hour — every iteration's ended turn re-armed the nudge, the
+    goal never completes because it's a loop, and each status-ask burned the next beat and could
+    supersede the pending wakeup). While the newest genuine ended turn carries a ScheduleWakeup or
+    CronCreate tool_use, auto-nudge stands down; the first genuine turn that ends WITHOUT scheduling
+    lifts the gate — an event, never a timer."""
+
+    def _sched_line(self, uuid, parent, tool):
+        return {"type": "assistant", "timestamp": iso(T0 + 220), "uuid": uuid, "parentUuid": parent,
+                "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "quiet hold; next pass on the timer"},
+                                        {"type": "tool_use", "name": tool, "input": {"delaySeconds": 1200}}],
+                            "stop_reason": "end_turn"}}
+
+    def _loop_transcript(self, tool="ScheduleWakeup"):
+        self._transcript(interrupted=False)
+        self._append([uline(T0 + 200, "keep the batches coming on your own cadence", "u5", "a3"),
+                      self._sched_line("a5", "u5", tool)])
+
+    def test_a_self_pacing_session_is_never_nudged(self):
+        for tool in ("ScheduleWakeup", "CronCreate"):
+            km._parse_cache.clear()
+            km._autonudge_cache.clear()
+            self._loop_transcript(tool)
+            self._goal()
+            sent, restore = self._stub()
+            try:
+                km._auto_nudge_tick(NOW, self.tmux)
+                self.assertEqual(sent, [], "%s = the session paces itself — let it loop" % tool)
+            finally:
+                restore()
+
+    def test_a_nudge_response_cannot_strip_the_loops_protection(self):
+        # one derailment already happened (a nudge's own romp-injected response turn ended, without
+        # scheduling) — the arm scan skips injected turns, so the loop's own last word still rules
+        self._loop_transcript()
+        self._append([uline(T0 + 300, "<!-- romp-injected -->[romp] where does this stand?", "u6", "a5"),
+                      aline(T0 + 320, "still iterating on the timer.", "a6", "u6", "end_turn")])
+        self._goal()
+        sent, restore = self._stub()
+        try:
+            km._auto_nudge_tick(NOW, self.tmux)
+            self.assertEqual(sent, [], "a romp-injected turn neither re-arms nor lifts the loop gate")
+        finally:
+            restore()
+
+    def test_a_genuine_unscheduled_end_lifts_the_gate(self):
+        # the loop finished (or the user redirected it): its last genuine turn ends with no
+        # scheduling tool → normal stall rules resume and the orphaned working goal is nudged
+        self._loop_transcript()
+        self._append([uline(T0 + 300, "wrap it up and summarize", "u6", "a5"),
+                      aline(T0 + 320, "stopping the loop; summary next.", "a6", "u6", "end_turn")])
+        self._goal()
+        sent, restore = self._stub()
+        try:
+            km._auto_nudge_tick(NOW, self.tmux)
+            self.assertEqual(len(sent), 1, "no pending self-schedule → the stall is real again")
+        finally:
+            restore()
+
+
+class WakeupScheduledUnit(unittest.TestCase):
+    """_wakeup_scheduled in isolation: the newest genuine ended turn's tool_use blocks decide."""
+
+    def _turn(self, ended=True, tools=(), injected=False):
+        atoms = []
+        if injected:
+            atoms.append({"type": "user", "t": T0,
+                          "message": {"role": "user", "content": "<!-- romp-injected -->[romp] hi"}})
+        else:
+            atoms.append({"type": "user", "t": T0, "message": {"role": "user", "content": "go"}})
+        content = [{"type": "text", "text": "ok"}] + [{"type": "tool_use", "name": t, "input": {}} for t in tools]
+        atoms.append({"type": "assistant", "t": T0 + 1, "message": {"role": "assistant", "content": content}})
+        return {"id": "t", "t": T0, "ended": ended, "atoms": atoms,
+                "trigger": None if injected else {"uuid": "u"}}
+
+    def test_schedule_and_cron_both_count_nothing_else_does(self):
+        self.assertTrue(km._wakeup_scheduled([self._turn(tools=("ScheduleWakeup",))]))
+        self.assertTrue(km._wakeup_scheduled([self._turn(tools=("Bash", "CronCreate"))]))
+        self.assertFalse(km._wakeup_scheduled([self._turn(tools=("Bash", "TaskCreate"))]))
+        self.assertFalse(km._wakeup_scheduled([self._turn(tools=())]))
+        self.assertFalse(km._wakeup_scheduled([]))
+
+    def test_only_the_newest_genuine_ended_turn_rules(self):
+        older = self._turn(tools=("ScheduleWakeup",))
+        newer = self._turn(tools=())
+        self.assertFalse(km._wakeup_scheduled([older, newer]),
+                         "a later genuine turn without scheduling lifts the gate")
+        open_turn = self._turn(ended=False, tools=())
+        self.assertTrue(km._wakeup_scheduled([older, open_turn]),
+                        "an OPEN turn has not ruled yet — the loop's last ended word stands")
+
+
 class AutoNudgeArming(AutoNudgeInterruptGate):
     """Arming keys on the newest GENUINE ended turn (arm_id), not the latest turn (the user 2026-07-06,
     business): a kernel-restart resume banner (romp-injected) opened a session's last turn and the old

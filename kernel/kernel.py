@@ -310,6 +310,30 @@ def _interrupt_marks(turns, sid=""):
     return last_intr, last_human
 
 
+def _wakeup_scheduled(turns):
+    """True while the session's newest GENUINE ended turn scheduled its own future work — the /loop
+    dynamic-pacing ScheduleWakeup, or a CronCreate self-invocation. Such a session is deliberately
+    idle between iterations it paces ITSELF: a timer, not the human and not a stall, owns the next
+    move — so auto-nudge must stand down (the user 2026-08-15, who ran looping workers and watched
+    romp nudge one four times in an hour, twice 69s apart: every iteration's ended turn re-armed the
+    nudge, the goal never completes because it's a loop, and each 'where does this stand?' landed as
+    a boss-message that burned the next beat and could supersede the pending wakeup — the loop died
+    of concern). Romp-injected turns (a nudge's own response) are skipped exactly like the arming
+    scan below, so one derailment can't strip a loop that still claims its cadence; the gate lifts
+    on the first genuine turn that ends WITHOUT scheduling (the loop finished, or the user redirected
+    it) — an event, never a timer."""
+    arm = next((tn for tn in reversed(turns) if tn.get("ended") and not _turn_romp_injected(tn)), None)
+    for a in (arm or {}).get("atoms") or []:
+        if a.get("type") != "assistant":
+            continue
+        blocks = (a.get("message") or {}).get("content")
+        if isinstance(blocks, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_use"
+                and b.get("name") in ("ScheduleWakeup", "CronCreate") for b in blocks):
+            return True
+    return False
+
+
 def _interrupt_suppresses_nudge(turns, sid=""):
     """True while the session's most recent USER action is a GENUINE user INTERRUPT: the user stopped
     the agent and hasn't spoken since, so they're at the controls — auto-nudge stays suppressed until
@@ -3540,6 +3564,9 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None):
         return False                                # driving; suppressed until their NEXT message. The stopped
         #                                              focus goal's BLOCKED-on-you flip is owned by the always-on
         #                                              _interrupt_block_tick (a needs-you rule, not a nudge feature).
+    if _wakeup_scheduled(turns):                     # the session paced ITSELF (ScheduleWakeup / a self-cron):
+        return False                                #   idle between iterations is the loop working as designed —
+        #                                              let it loop (the user 2026-08-15); see _wakeup_scheduled.
     if _pending_ops.get(str(sid)) or _backend_queued(sid):   # the user has messages queued — parked drive ops OR the
         return False                                         # backend's own queue (SDK _pending, where composer sends now
         #                                                      wait) → queued intent; a nudge would jump it (the user 2026-07-05)
