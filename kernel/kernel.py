@@ -18248,16 +18248,14 @@ def _run_judging(t0, alive_sids, semantic):
     for v in by.values():
         v.sort(key=lambda m: m["t"])
     out = []
-    try:
-        lines = (jd.STATE / "judge-usage.jsonl").read_text(errors="replace").splitlines()
-    except OSError:
-        return out
     done = set()                                      # (sid, judge, sent) of completed runs — to dedup live ones
-    for ln in lines:
-        try:
-            o = json.loads(ln)
-        except Exception:
-            continue
+    # Rows come from the SHARED incremental cache (_judge_usage_rows), never a full re-read: this used
+    # to slurp and json-parse the whole append-only log on EVERY bars build, on the GIL — at 60 MB /
+    # 225k rows (2026-08-18) the pusher thread was pinned parsing it and the bars frame effectively
+    # never shipped, so every lane on this kernel showed skeleton furniture (chips, comments, awaiting
+    # stripes) but NO work bars. The 2026-08-13 fix that introduced the cache converted the analytics
+    # reader and missed this one. The cache retains 31 days; TL_HORIZON is far inside that.
+    for o in _judge_usage_rows():
         sid, judge = o.get("fsid"), o.get("judge")
         judge = _JUDGE_FAMILY.get(judge, judge)
         if sid not in alive_sids:
