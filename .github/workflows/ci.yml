@@ -82,7 +82,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install bats + tmux (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bats tmux
+        # A hung apt mirror used to eat the whole job's 35-minute box — three PRs stalled that way
+        # on 2026-08-19 alone, each needing a manual rerun. Cap every apt call at 90s and retry
+        # twice, with a step-level box as the backstop, so a bad mirror costs seconds, not the job.
+        timeout-minutes: 6
+        run: |
+          for i in 1 2 3; do
+            sudo timeout 90 apt-get update && sudo timeout 90 apt-get install -y bats tmux && exit 0
+            echo "apt attempt $i timed out or failed; retrying"; sleep 5
+          done
+          exit 1
       - name: Install bats + tmux (macOS)
         if: runner.os == 'macOS'
         run: brew install bats-core tmux
