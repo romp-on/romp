@@ -73,10 +73,16 @@ This repo may go public; assume every commit is permanent and world-readable.
 Do ALL non-trivial work on its own git worktree, not the shared main tree — concurrent
 peer sessions clobber/commit each other's uncommitted edits in the shared tree (a peer's
 broad `git add` will sweep up your work). Conventions:
-- **One worktree per session, named after the session.** Branch + directory take the
-  session's name, e.g. session `bugsdk2` → branch `bugsdk2`, dir `../romp-bugsdk2`
-  (`git worktree add -b <session> ../romp-<session> HEAD`). So a glance at
-  `git worktree list` says who owns what.
+- **One worktree per session, named after the session, inside the repo** (user rule,
+  2026-08-21 — previously sibling `../romp-<session>` dirs). Branch takes the session's
+  name and the tree lives under `worktrees/`, e.g. session `bugsdk2` → branch `bugsdk2`,
+  dir `worktrees/bugsdk2` (`git worktree add -b <session> worktrees/<session> HEAD`). So
+  a glance at `git worktree list` says who owns what, and the parent directory stays one
+  folder per project. `/worktrees/` is gitignored, and the root `conftest.py` keeps a
+  bare `pytest` run at the repo root from collecting the nested trees' test suites. A
+  leftover sibling `../romp-<session>` dir from before the change migrates with
+  `git worktree move ../romp-<x> worktrees/<x>` whenever its owner next touches it —
+  never move one that isn't yours.
 - **Never commit on the shared `main` checkout** (user rule, 2026-07-24). Branches and
   worktrees are how work happens here, with no "quick one in main" exception. A commit
   that lands on the local `main` branch and is not pushed immediately makes local `main`
@@ -97,7 +103,7 @@ broad `git add` will sweep up your work). Conventions:
      `gh pr merge --auto --merge` — it lands itself when the six required Linux
      checks pass. There is no way to move `main` except a green PR.
 - **Clean up when finished.** After publishing, remove the worktree
-  (`git worktree remove ../romp-<session>`) and delete its branch — don't leave stale
+  (`git worktree remove worktrees/<session>`) and delete its branch — don't leave stale
   worktrees lying around.
 - **When you do touch the shared tree** (reading, or an explicit "do this in main"), use
   a focused `git add <paths>` — never `git add -A`, which sweeps peers' edits — and never

@@ -10,3 +10,6 @@ __pycache__/
 # path and private strings, none of which mean anything on anyone else's clone.
 # Untracked on purpose so a contributor's test run never trips over it.
 tests/test_no_personal_identifiers.py
+
+# Per-session worktrees live inside the repo (see CLAUDE.md "Worktrees")
+/worktrees/
