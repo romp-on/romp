@@ -14,6 +14,8 @@
   --accent: #9cd2ff;  /* the romp accent (CLAUDE.md Design) — feed.css has its OWN :root, so selected-state
                        chrome here needs it defined locally or var(--accent) silently falls back */
   --accent-fg: #0c1a2e;  /* dark text ON the accent (CLAUDE.md) — for the reverse-highlight on a selected toggle */
+  --cmt-hl: #ffd54a;  /* comment-highlight yellow — mirrors styles.css, same trap as --err: the viewer's
+                       review-comment marks (mark.fv-hl) render HERE too when the file browser hosts it */
   --st-working-bg: #e0b020; --st-working-fg: #332600;  /* the WORKING yellow — mirrors styles.css, same trap
                        as --err: .fask-stallbtn and .fask-interrupting referenced these while they lived only
                        in styles.css, so the "filled yellow so the stall is noticed" chip rendered as a quiet
@@ -1059,6 +1061,143 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(255, 255, 255, 0.08);
   white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow-y: auto; }
 
+/* ── file viewer (file-view.ts) ────────────────────────────────────────────────────────────────────
+   The viewer is a MODAL over whatever document opened it (the user 2026-08-15) — here the feed, whose
+   file BROWSER (file-browse.ts) opens files through the same module. One treatment, two sheets: the
+   ~95% card and dimmed backdrop mirror styles.css exactly (the panels treatment: the listing behind
+   stays visible, never hidden). `body.fileview-open` stops the cards underneath scrolling behind it. */
+#romp-fileview { position: fixed; inset: 0; z-index: 1200; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center; }
+.fileview { width: 95%; height: 95%; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px;
+  box-shadow: 0 12px 44px rgba(0, 0, 0, 0.6); }
+body.fileview-open { overflow: hidden; }
+.fileview-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 7px 10px; border-bottom: 1px solid var(--box-border); }
+/* Only the DIRECTORY may be truncated: the filename identifies the file, so it holds its width however
+   deep the path is, and the dimmed directory in front of it gives up room first. */
+.fileview-name { flex: 1 1 auto; min-width: 0; font-size: 0.86em; color: var(--fg);
+  display: flex; align-items: baseline; white-space: nowrap; }
+.fileview-dir { flex: 0 1 auto; min-width: 0; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; }
+.fileview-base { flex: 0 0 auto; }
+.fileview-acts { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.fileview-btn { font: inherit; font-size: 0.82em; cursor: pointer; flex: 0 0 auto;
+  padding: 3px 9px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--fg);
+  border: 1px solid var(--box-border); }
+.fileview-btn:hover { border-color: var(--accent); }
+.fileview-body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+/* gutter + code as two columns of ONE scroller: the numbers stay put horizontally against long lines,
+   and because they are a sibling element a selection of the code copies without dragging them along */
+.fileview-code { display: flex; align-items: flex-start; min-height: 100%; }
+.fileview-gutter { flex: 0 0 auto; position: sticky; left: 0; z-index: 1;
+  padding: 10px 8px 10px 10px; text-align: right; user-select: none;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  color: var(--dim); opacity: 0.55; background: var(--bg, #1e1e1e);
+  border-right: 1px solid var(--box-border); white-space: pre; }
+.fileview-pre { flex: 1 1 auto; margin: 0; padding: 10px 12px;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  white-space: pre; tab-size: 4; }
+.fileview-pre code { background: none; padding: 0; font: inherit; }
+/* a refusal explains itself in place, in the kernel's own words (too large — with the size and the
+   cap; not a text file; not found) over the path it was asked for. Never a blank pane. */
+.fileview-err { padding: 18px 14px; font-size: 0.86em; color: #e0a030; }
+.fileview-err-hint { margin-top: 6px; color: var(--dim); font-size: 0.92em;
+  font-family: var(--mono, ui-monospace, monospace); word-break: break-all; }
+/* the way out of a refusal: when the file exists but cannot render (413/415), the kernel's words are
+   followed by the Download the view could not be — same button treatment as the title bar's */
+.fileview-err-dl { display: block; margin-top: 10px; }
+/* the romp loader, per the loading-state rule: swirl + wordmark + three pulsing accent dots */
+.fileview-load { display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 30px 0; color: var(--dim); font-size: 0.86em; }
+.fileview-load img { width: 17px; height: 17px; animation: fileview-spin 1.6s linear infinite reverse; }
+.fileview-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--accent);
+  animation: fileview-pulse 1.1s ease-in-out infinite; }
+.fileview-dot:nth-of-type(2) { animation-delay: 0.18s; }
+.fileview-dot:nth-of-type(3) { animation-delay: 0.36s; }
+@keyframes fileview-spin { to { transform: rotate(360deg); } }
+@keyframes fileview-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+/* A pressed viewer toggle (Rendered/Raw, Wrap) wears the app-wide selected language — accent text +
+   border + faint wash, gray = off (the .fask-secbtn.on / .feed-modetoggle.on treatment) — with the same
+   reverse-highlight hover so a selected toggle never reads as dead. */
+.fileview-btn.on { color: var(--accent); border-color: var(--accent);
+  background: rgba(156, 210, 255, 0.10); font-weight: 600; }
+.fileview-btn.on:hover { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+
+/* Wrap mode (the Wrap toggle, persisted per browser): long lines soft-wrap instead of scrolling
+   sideways. The flat sibling gutter cannot survive that — one logical line becomes several visual lines
+   and every number below it drifts — so wrap mode restructures: each logical line is a flex row (.fv-cl)
+   numbered by a CSS counter in its ::before (the chat's .cl/.ct treatment in styles.css). The number is
+   ::before content and user-select: none, so a selection still copies clean, same as the gutter it
+   replaces. */
+.fileview-pre.fileview-wrap { white-space: pre-wrap; overflow-wrap: anywhere;
+  counter-reset: fvln; padding-left: 0; }
+.fileview-wrap .fv-cl { display: flex; align-items: baseline; }
+.fileview-wrap .fv-cl::before {
+  counter-increment: fvln; content: counter(fvln);
+  flex: 0 0 3.5em; padding-right: 10px; text-align: right;
+  color: var(--dim); opacity: 0.55; user-select: none;
+}
+.fileview-wrap .fv-ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Rendered markdown (the Raw ⇄ Rendered toggle; Rendered is the default — the user 2026-08-09).
+   Typography mirrors the chat's .md block in styles.css, the reference aesthetic (one treatment, two
+   sheets — the .romp-acted precedent); font sizes reuse what this surface already wears (the page base,
+   12px mono, the err-hint's 0.92em). Vars the feed sheet does not define carry the chat's literals as
+   fallbacks (feed-css-vars.test.ts holds that line). */
+.fileview-md { padding: 14px 18px; max-width: 860px; overflow-wrap: anywhere; }
+.fileview-md > :first-child { margin-top: 0; }
+.fileview-md > :last-child { margin-bottom: 0; }
+.fileview-md p { margin: 0.5em 0; }
+.fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4 {
+  font-weight: 600; color: var(--fg); margin: 1em 0 0.4em; line-height: 1.3; }
+.fileview-md h1 { font-size: 1.3em; } .fileview-md h2 { font-size: 1.15em; } .fileview-md h3 { font-size: 1.05em; }
+.fileview-md ul, .fileview-md ol { margin: 0.4em 0; padding-left: 1.4em; }
+.fileview-md li { margin: 0.2em 0; }
+.fileview-md strong { color: var(--fg); font-weight: 600; }
+.fileview-md em { font-style: italic; }
+.fileview-md a { color: var(--vscode-textLink-foreground, #4daafc); text-decoration: none; }
+.fileview-md a:hover { text-decoration: underline; }
+.fileview-md blockquote { margin: 0.5em 0; padding-left: 12px;
+  border-left: 2px solid var(--box-border); color: var(--dim); }
+.fileview-md hr { border: none; border-top: 1px solid var(--box-border); margin: 1em 0; }
+.fileview-md :not(pre) > code {
+  font-family: var(--mono, ui-monospace, monospace); font-size: 0.92em;
+  color: var(--code-fg, #e1c08d); background: var(--code-bg, rgba(217, 119, 87, 0.10));
+  padding: 0.12em 0.4em; border-radius: 4px;
+}
+.fileview-md pre {
+  background: var(--box-bg, rgba(255, 255, 255, 0.03)); border: 1px solid var(--box-border);
+  border-radius: 6px; padding: 11px 14px; margin: 0.6em 0; overflow-x: auto;
+}
+.fileview-md pre code {
+  background: none; padding: 0; display: block;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  color: var(--code-fg, #e1c08d); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.fileview-md table { border-collapse: collapse; margin: 0.6em 0; }
+.fileview-md th, .fileview-md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
+.fileview-md th { background: rgba(255, 255, 255, 0.03); }
+.fileview-md img { max-width: 100%; }
+
+/* ---------- syntax highlighting (warm, restrained) ----------
+   The hljs token palette, mirrored from styles.css (one treatment, two sheets — the .romp-acted
+   precedent: each page loads only its own sheet). The viewer wraps every token in .hljs-* spans, and
+   until this block landed the feed sheet had NO rules for them, so highlighting rendered colorless. */
+.hljs { color: #d8c6a8; background: transparent; }
+.hljs-keyword, .hljs-built_in, .hljs-literal, .hljs-type { color: #c98a6a; }
+.hljs-string, .hljs-attr, .hljs-regexp { color: #9fb878; }
+.hljs-number { color: #d4a36a; }
+.hljs-comment, .hljs-quote { color: #6f6a5f; font-style: italic; }
+.hljs-title, .hljs-title.function_, .hljs-section { color: #e1c08d; }
+.hljs-name, .hljs-tag { color: #c98a6a; }
+.hljs-params, .hljs-variable, .hljs-property { color: #d8c6a8; }
+.hljs-meta { color: #9a8f7a; }
+.hljs-attribute { color: #cdaf7e; }
+.hljs-addition { color: #9fb878; }
+.hljs-deletion { color: var(--err); }
+
 /* the "host:" prefix on a federated session's name — see styles.css (one treatment, two sheets) */
 .host-prefix { color: var(--dim); font-weight: 400; font-style: italic; font-size: 0.88em; }
 /* DISCONNECTED host (the user 2026-07-29): its sessions keep their tabs, lanes and cards — dropping them
@@ -1147,6 +1286,84 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .fitem.ask:hover .fask-bellbtn { visibility: visible; }
 .fitem.ask .fask-bellbtn:hover { opacity: 1; background: rgba(255, 255, 255, 0.10); }
 .fask-bellbtn.on { visibility: visible; opacity: 0.85; color: var(--accent); }
+
+/* ── the file BROWSER (file-browse.ts) ── the viewer's sibling overlay, one z layer BENEATH it
+   so a file opened from a listing overlays the listing and closing the file returns to it. Same
+   pane-takeover reasoning as .fileview; body.filebrowse-open stops the cards scrolling behind it. */
+.filebrowse { position: fixed; inset: 0; z-index: 890; display: flex; flex-direction: column;
+  background: var(--bg, #1e1e1e); }
+body.filebrowse-open { overflow: hidden; }
+.fb-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 7px 10px; border-bottom: 1px solid var(--box-border); }
+/* the breadcrumb is the up affordance: every ancestor is a click, and it survives a listing error so
+   there is never a dead end */
+.fb-crumbs { flex: 1 1 auto; min-width: 0; font-size: 0.86em; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.fb-crumbs > * { direction: ltr; unicode-bidi: isolate; }
+.fb-crumb { cursor: pointer; }
+.fb-crumb:hover { color: var(--accent); text-decoration: underline; }
+.fb-crumb:last-child { color: var(--fg); }
+.fb-crumb-sep { margin: 0 3px; opacity: 0.6; }
+.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
+/* compact one-line rows (progressive disclosure): marker + name, size right-aligned on files; mtime
+   and the full path live in the row's hover title */
+.fb-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; cursor: pointer;
+  font-size: 0.86em; }
+.fb-row:hover, .fb-row.active { background: rgba(255, 255, 255, 0.07); }
+.fb-row.active { outline: 1px solid rgba(156, 210, 255, 0.35); outline-offset: -1px; }
+.fb-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: var(--mono, ui-monospace, monospace); }
+.fb-dir .fb-name { color: var(--accent); }
+.fb-size { flex: 0 0 auto; margin-left: auto; color: var(--dim); font-size: 0.92em; }
+/* download-only rows are dimmed and say so up front (server-side `viewable`) — honest, not dead */
+.fb-dlonly .fb-name { color: var(--dim); }
+.fb-more { padding: 6px 14px; color: var(--dim); font-size: 0.82em; }
+/* the viewer's directory half is the click into the BROWSER — the discoverability path */
+.fileview-dir-link { cursor: pointer; }
+.fileview-dir-link:hover { color: var(--accent); text-decoration: underline; }
+/* the row menu must sit above the browser overlay at 890 (base .ctx-menu z is for card menus
+   over the feed; the viewer's #romp-fileview backdrop sits higher at 1200, but opening the
+   browser closes the viewer and a row click dismisses this menu, so they never stack) */
+#fb-ctx { z-index: 950; }
+/* the way above a "~"-rooted trail: the kernel-sent parent, worn as a dim leading crumb */
+.fb-crumb-up { opacity: 0.65; }
+/* the raw-mode editor: a plain textarea wearing the code view's own metrics — an editor component
+   is a different project; a textarea that keeps your changes beats a half-editor.
+   height: 100% (not flex): .fileview-body is a plain overflow block, not a flex container, so a
+   flex basis on its child is inert — the textarea sat at the UA's default rows (the user 2026-08-17,
+   whose edit window was a few lines tall). The percentage resolves because the body's own height is
+   fixed by the pane's flex layout. */
+.fileview-editor { display: block; height: 100%; width: 100%; box-sizing: border-box;
+  margin: 0; padding: 10px 12px; border: none; outline: none; resize: none;
+  background: var(--bg, #1e1e1e); color: var(--fg);
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  white-space: pre; tab-size: 4; }
+.fileview-editor:focus { box-shadow: inset 0 0 0 1px rgba(156, 210, 255, 0.35); }
+
+/* ── review comments in the file viewer — mirrored from styles.css (one treatment, two sheets — the
+   hljs-palette precedent): the file BROWSER opens files through the same file-view.ts module in THIS
+   document, so the comment layer must render here too. Keep identical to styles.css. */
+.fileview-cmtcount { font-size: 0.82em; opacity: 0.6; flex: 0 0 auto; }
+.fileview-submit { border-color: var(--accent); color: var(--accent); }
+mark.fv-hl { background: color-mix(in srgb, var(--cmt-hl) 30%, transparent); color: inherit; cursor: pointer; }
+mark.fv-hl:hover { background: color-mix(in srgb, var(--cmt-hl) 58%, transparent); }
+.fv-num { margin-left: 2px; padding: 0 3px; border-radius: 6px; cursor: pointer;
+  background: var(--vscode-menu-background, #252526); color: var(--accent);
+  font-size: 9px; line-height: 13px; }
+.fv-note { display: inline-flex; align-items: baseline; gap: 6px; margin: 0 4px; padding: 2px 6px;
+  border-radius: 4px; background: rgba(255, 255, 255, 0.06); font-size: 0.86em; }
+.fv-note-x { border: 0; background: none; color: inherit; opacity: 0.6; cursor: pointer; font-size: 11px; }
+.fv-note-x:hover { opacity: 1; }
+.fv-new { display: flex; flex-direction: column; gap: 6px; padding: 10px;
+  border-top: 1px solid var(--box-border); }
+.fv-at { font-size: 0.86em; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fv-ta { min-height: 62px; padding: 6px 8px; resize: vertical; font: inherit; font-size: 0.92em;
+  background: var(--vscode-input-background, #3c3c3c); color: inherit;
+  border: 1px solid var(--box-border); border-radius: 4px; }
+.fv-newrow { display: flex; gap: 6px; justify-content: flex-end; }
+/* The viewer's backdrop is z 1200 and this page's base .ctx-menu is 100 — without this lift the
+   comment menu renders BEHIND the viewer and the right-click looks dead (styles.css, 2026-08-18). */
+.ctx-menu.fv-menu { z-index: 1300; }
 
 /* usage-limit banner (2026-08-18): analysis paused on a usage limit says so above the columns —
    loud but compact, one line + (Fable only) the switch-to-Opus action. Neutral card chrome, never

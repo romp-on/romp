@@ -9,12 +9,16 @@ import * as path from "node:path";
 const SRC = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
-test("asFolderLink makes an element open the folder (data-act + cwd + affordance)", () => {
+test("asFolderLink routes by host: BROWSE on the web, folder-open in VS Code (the user 2026-08-14)", () => {
   assert.match(SRC, /function asFolderLink\(elem: HTMLElement, cwd: string, sid\?: string\): void/);
-  assert.match(SRC, /elem\.dataset\.act = "openFolder";/);
+  // web dashboard → the file browser (works from every device); VS Code keeps the host-side open
+  assert.match(SRC, /elem\.dataset\.act = web && window\.parent !== window \? "browseFiles" : "openFolder";/);
   assert.match(SRC, /elem\.dataset\.cwd = cwd;/);
   assert.match(SRC, /elem\.classList\.add\("folder-link"\)/);
+  assert.match(SRC, /click to browse this folder/);
   assert.match(SRC, /click to open this folder/);
+  // OS-open demoted, not deleted: the folder link's right-click still posts the old openFolder
+  assert.match(SRC, /item\.textContent = "Open folder window";/);
 });
 
 test("it's applied to the statusline folder AND the System-context Directory row, carrying the session id", () => {

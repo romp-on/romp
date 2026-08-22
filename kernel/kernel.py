@@ -11,7 +11,7 @@ zero protocol change at switchover. WS is hand-rolled on the stdlib socket (no d
 
 Run:  bin/romp-kernel   → opens http://127.0.0.1:29855
 """
-import json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid
+import json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat
 from pathlib import Path
 from datetime import datetime, timezone
 from importlib.machinery import SourceFileLoader
@@ -4628,6 +4628,67 @@ def _dir_completions(raw, limit=DIR_COMPLETE_MAX):
     return {"base": _tilde(base or "/"),
             "items": [{"name": n, "path": _tilde(os.path.join(base, n))} for n in names[:limit]],
             "truncated": len(names) > limit}
+
+
+DIR_LIST_MAX = 500               # listing rows per reply — bounded like DIR_COMPLETE_MAX, sized for a browse
+
+
+def _list_dir(raw, sid=None, hidden=False, limit=DIR_LIST_MAX):
+    """One directory's entries for the dashboard's file browser: files AND directories with
+    sizes/mtimes, plus a server-side `viewable` verdict per file — the same _PREVIEW_MIME +
+    _is_text_path tables /file's view half applies — so the client can mark download-only rows up
+    front instead of letting every click fail into a 415.
+
+    Resolution is _resolve_open_path semantics (~ expanded, a relative path against the sid's session
+    cwd) — the SAME rules /file uses, so every listed path can be handed straight to the /file URL
+    builder. Deliberately a SIBLING of _dir_completions, not a widening: the completer's dirs-only /
+    50-row / dot-gated semantics are the picker's, pinned by its tests. Hidden entries only when
+    asked; symlinks are shown and marked, is_dir() following them for typing like the completer.
+    Errors are LOUD and name the resolved path (fail loudly — never a silent empty list). One bounded
+    JSON frame: capped with `truncated` + `total` so the client can say what was left out."""
+    p = _resolve_open_path(str(raw or ""), sid)
+    if not os.path.isabs(p):
+        return {"error": "cannot list %s: not an absolute path (no session cwd to resolve against)" % _tilde(p)}
+    p = os.path.normpath(p)     # "." from a card menu resolves to "<cwd>/." — lexical only, never realpath
+    # Error replies carry base/parent too, so the client can build a WALKABLE crumb trail over the
+    # failure — a first open that errors with no trail was a dead end (review, 2026-08-14).
+    err_ctx = {"base": _tilde(p),
+               "parent": None if p == "/" else _tilde(os.path.dirname(p.rstrip("/")) or "/")}
+    if not os.path.isdir(p):
+        return dict(err_ctx, error="cannot list %s: not a directory" % _tilde(p))
+    dirs, files = [], []
+    try:
+        with os.scandir(p) as it:
+            for e in it:
+                if e.name.startswith(".") and not hidden:
+                    continue
+                try:
+                    is_dir = e.is_dir()                 # follows symlinks: a symlinked repo browses as one
+                except OSError:
+                    is_dir = False
+                size = mtime = 0
+                is_link = False
+                try:
+                    is_link = e.is_symlink()
+                    st = e.stat()                       # follows too; a dangling link keeps the zeros
+                    size, mtime = int(st.st_size), int(st.st_mtime)
+                except OSError:
+                    pass
+                row = {"name": e.name, "isDir": is_dir, "isLink": is_link,
+                       "size": 0 if is_dir else size, "mtime": mtime}
+                if not is_dir:
+                    row["viewable"] = bool(_PREVIEW_MIME.get(os.path.splitext(e.name)[1].lower())) \
+                        or _is_text_path(e.name)
+                (dirs if is_dir else files).append(row)
+    except OSError as ex:
+        return dict(err_ctx,
+                    error="cannot list %s: %s" % (_tilde(p), getattr(ex, "strerror", None) or str(ex)))
+    dirs.sort(key=lambda r: (r["name"].lower(), r["name"]))
+    files.sort(key=lambda r: (r["name"].lower(), r["name"]))
+    rows = dirs + files
+    parent = os.path.dirname(p.rstrip("/")) or "/"
+    return {"base": _tilde(p), "parent": None if p == "/" else _tilde(parent),
+            "entries": rows[:limit], "total": len(rows), "truncated": len(rows) > limit}
 
 
 def _session_has_history(sid):
@@ -19990,6 +20051,85 @@ def _resolve_open_path(p, sid=None):
     return p
 
 
+def _httpdate(t):
+    """Epoch → the RFC 7231 form a Last-Modified header wears (the viewer's Date.parse reads it)."""
+    from email.utils import formatdate
+    return formatdate(t, usegmt=True)
+
+
+def _save_file(raw, sid, content, base_mtime_ns):
+    """The viewer's raw-mode SAVE (the file browser's slice 2, the user 2026-08-14): write `content`
+    over an existing text file, atomically, refusing when the disk moved on. Returns (mtime_ns, None)
+    on success, (None, error) on refusal — every refusal names the resolved path (fail loudly).
+
+    THE guard is optimistic concurrency: agents edit these same trees while a human has the viewer
+    open, and a silent last-writer-wins would eat one side's work. The client sends the mtime_ns it
+    LOADED at (/file's X-Romp-Mtime-Ns — NANOSECONDS, because an HTTP date's whole seconds let an
+    agent write landing in the same second slip the guard, the review's finding); a moved disk
+    refuses with reload-and-say-so — never a merge, never an overwrite.
+
+    Scope is exactly what raw mode can faithfully round-trip: _is_text_path names within
+    _TEXT_MAX_BYTES, existing files only (no create in this slice), and UTF-8 ONLY — /file's latin-1
+    fallback means a non-UTF-8 file reaches the textarea re-decoded, and writing it back as UTF-8
+    silently rewrote every non-ASCII byte (review, executed repro), so the save refuses instead.
+    A symlinked path writes THROUGH the link (realpath) — os.replace on the link itself destroyed it
+    while the viewer showed and guarded the target. The write is temp-file + os.replace in the same
+    directory, mode preserved — a full disk or a kill mid-write leaves the original intact."""
+    p = _resolve_open_path(str(raw or ""), sid)
+    if not os.path.isabs(p):
+        return None, "cannot save %s: not an absolute path (no session cwd to resolve against)" % _tilde(p)
+    p = os.path.normpath(p)
+    if not isinstance(content, str):
+        # a malformed frame must refuse, not truncate: str(None or "") wrote ZERO bytes with a
+        # success ack before this check (review)
+        return None, "cannot save %s: the request carried no text" % _tilde(p)
+    if not _is_text_path(p):
+        return None, "cannot save %s: not a text file the viewer edits" % _tilde(p)
+    if not os.path.isfile(p):
+        return None, "cannot save %s: no such file (creating files is not a viewer edit)" % _tilde(p)
+    try:
+        data = content.encode("utf-8")
+    except UnicodeError:
+        # a lone surrogate raised OUTSIDE the OSError net and the client never got a reply (review)
+        return None, "cannot save %s: the text contains bytes UTF-8 cannot encode" % _tilde(p)
+    if len(data) > _TEXT_MAX_BYTES:
+        return None, ("cannot save %s: %s exceeds the %s text cap"
+                      % (_tilde(p), _human_bytes(len(data)), _human_bytes(_TEXT_MAX_BYTES)))
+    try:
+        base_ns = int(base_mtime_ns or 0)
+    except (TypeError, ValueError):
+        return None, "cannot save %s: the request carried no load-time anchor" % _tilde(p)
+    try:
+        wp = os.path.realpath(p)                # write THROUGH a symlink, never over it
+        st = os.stat(wp)
+        if st.st_mtime_ns != base_ns:
+            return None, ("%s changed on disk since you opened it — reload before editing "
+                          "(someone else, likely an agent, wrote it)" % _tilde(p))
+        with open(wp, "rb") as f:
+            cur = f.read()
+        try:
+            cur.decode("utf-8")
+        except UnicodeError:
+            return None, ("cannot save %s: the file is not UTF-8 on disk — saving would silently "
+                          "re-encode bytes you never touched" % _tilde(p))
+        d = os.path.dirname(wp)
+        fd, tmp = tempfile.mkstemp(prefix=".romp-save-", dir=d)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))   # the original's mode survives the replace
+            os.replace(tmp, wp)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return os.stat(wp).st_mtime_ns, None
+    except OSError as ex:
+        return None, "cannot save %s: %s" % (_tilde(p), getattr(ex, "strerror", None) or str(ex))
+
+
 # Inline-code spans that name an EXISTING file despite containing spaces (the user 2026-08-04: a note
 # titled `Moving from correlation to causal components.md` linkified only its last word). The client's
 # token linkifier can never span a space — in prose that boundary is exactly what keeps ordinary text
@@ -22675,10 +22815,20 @@ _LANDING_SETTINGS_JS = """
 (function(){window.addEventListener('message',function(e){var m=e.data;if(!m)return;
 if(m.romp==='settings')document.body.classList.toggle('settings-open',!!m.on);
 // the /chat iframe's new-session picker asks the shell to lift it full-window (see body.picker-open CSS)
-if(m.romp==='picker')document.body.classList.toggle('picker-open',!!m.on);});
-// (The viewFile relay is gone: the file viewer opens as a modal over the CHAT pane itself —
-// file-view.ts lives in the chat bundle now (the user 2026-08-15) — so no cross-pane forwarding
-// and no feed-pane bring-forward/put-back.)
+if(m.romp==='picker')document.body.classList.toggle('picker-open',!!m.on);
+// "Browse files" from any pane surfaces the FILE BROWSER in the FEED pane, which is a different
+// document — so the shell relays it. If the feed pane is toggled off we turn it on for the duration
+// and remember to put it back, so the browser never costs the user their layout. (File VIEWS need
+// none of this since 2026-08-15: the viewer is a modal over whatever document clicked, so it never
+// touches the panes and has nothing to restore.)
+if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');
+  if(!document.body.classList.contains('po-feed')){window.__rompFeedWasOff=true;
+    try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',true);}catch(e){}}
+  try{window.__rompMobileTab&&window.__rompMobileTab('feed');}catch(e){}   // phone: one pane at a time
+  try{bf&&bf.contentWindow&&bf.contentWindow.postMessage({romp:'browseFiles',path:m.path,sid:m.sid},'*');}catch(e){}}
+// the browser owns the restore: browseClosed alone puts a brought-forward feed back the way it was
+if(m.romp==='browseClosed'&&window.__rompFeedWasOff){window.__rompFeedWasOff=false;
+  try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',false);}catch(e){}}});
 // One id per dashboard (per browser tab/window), minted here so every pane in it reports the same one.
 // sessionStorage, deliberately: it survives a reload (the panes keep their identity) and a second window
 // gets its own, which is what makes "the dashboard that asked" a thing the kernel can address.
@@ -24752,10 +24902,19 @@ class Handler(BaseHTTPRequestHandler):
                               "too large to show: %s (%s, limit %s)"
                               % (_tilde(fp), _human_bytes(size), _human_bytes(cap)),
                               "text/plain")
+        # The file's mtime rides every success twice: Last-Modified (the standard form) and
+        # X-Romp-Mtime-Ns — NANOSECONDS, the anchor saveFile's conflict floor actually compares,
+        # because the HTTP date's whole seconds let an agent write landing in the same second slip
+        # the guard (the raw-mode edit slice; the granularity hole was the review's finding).
+        fst = os.stat(fp)
+        lastmod = _httpdate(fst.st_mtime)
+        mtime_ns = str(fst.st_mtime_ns)
         if head:
             self.send_response(200)
             self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(size))   # the real length, no body (HEAD semantics)
+            self.send_header("Last-Modified", lastmod)
+            self.send_header("X-Romp-Mtime-Ns", mtime_ns)
             self.send_header("X-Content-Type-Options", "nosniff")   # _send's guarantee, restated on the HEAD path
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):         # the chat's fetch-HEAD probe rides CORS too
@@ -24799,8 +24958,20 @@ class Handler(BaseHTTPRequestHandler):
             body = _decode_text(raw)
             if body is None:                     # named like text, isn't — say so rather than serve garbage
                 return self._send(415, "not a text file: %s" % _tilde(fp), "text/plain")
-            return self._send(200, body, mime, cache="no-cache")
-        return self._send(200, raw, mime, cache="no-cache")
+            # Which decode branch produced the text travels WITH it: _decode_text's latin-1 fallback
+            # re-decodes a non-UTF-8 file, and an Edit armed on that text would re-encode every
+            # non-ASCII byte on save (the review's executed repro) — so Edit arms only on "1", and
+            # _save_file refuses the "0" case server-side regardless.
+            try:
+                raw.decode("utf-8")
+                u8 = "1"
+            except UnicodeError:
+                u8 = "0"
+            return self._send(200, body, mime, cache="no-cache",
+                              headers={"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns,
+                                       "X-Romp-Text-Utf8": u8})
+        return self._send(200, raw, mime, cache="no-cache",
+                          headers={"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns})
 
     def _file_download(self, fp, head=False):
         """GET/HEAD /file?download=1 — the SAVE half of the route (the user 2026-08-09): any file that
@@ -26323,6 +26494,31 @@ class Handler(BaseHTTPRequestHandler):
             _reply(client, dict({"type": "dirCompletions", "reqId": msg.get("reqId"), "host": "",
                                  "value": _val, "status": _dir_status(_val)},
                                 **_dir_completions(_val)))
+        elif msg and msg.get("type") == "listDir":
+            # The dashboard's file browser. Answered by the kernel that OWNS the sid's session —
+            # federation routes by the sid field, so browsing a remote session lists THAT machine's
+            # disk over the existing splice, no relay clause needed. reqId echoes back so a slow
+            # reply landing after a newer navigation is dropped by the client, never rendered (the
+            # dirComplete protocol); `host` rides for the same stale-drop. Resolution is /file's own
+            # (_resolve_open_path), so every listed path feeds the /file URL builder as-is.
+            _reply(client, dict({"type": "dirListing", "reqId": msg.get("reqId"), "host": "",
+                                 "sid": msg.get("sid") or ""},
+                                **_list_dir(msg.get("path"), msg.get("sid") or None,
+                                            hidden=bool(msg.get("hidden")))))
+        elif msg and msg.get("type") == "saveFile":
+            # The viewer's raw-mode save (the file browser's slice 2). Routed by sid to the
+            # session-OWNING kernel like listDir, so a remote session's file saves on ITS machine.
+            # The reply is the ACK the client's Save button waits on; a refusal (the mtime conflict
+            # above all) rides back verbatim for the viewer to present — never a silent drop.
+            mt, err = _save_file(msg.get("path"), msg.get("sid") or None,
+                                 msg.get("content"), msg.get("baseMtimeNs"))
+            if err:
+                _reply(client, {"type": "fileSaveFailed", "reqId": msg.get("reqId"), "error": err})
+            else:
+                # mtimeNs travels as a STRING: ~1.7e18 exceeds JS's safe-integer range, so a JSON
+                # number would round in the browser and every next save would falsely conflict
+                _reply(client, {"type": "fileSaved", "reqId": msg.get("reqId"),
+                                "path": str(msg.get("path") or ""), "mtimeNs": str(mt)})
         elif msg and msg.get("type") == "browseDir":
             tgt = str(msg.get("target") or "picker")          # which dir field to fill: the new-session picker or the gear
             if not _native_dialogs():
@@ -26569,6 +26765,13 @@ class Handler(BaseHTTPRequestHandler):
             body = b"" if head else resp.read(_PREVIEW_MAX_BYTES + 1)
             status, ctype = resp.status, mime          # OUR mime, never resp.getheader("Content-Type")
             clen = resp.getheader("Content-Length")
+            # These three are MIRRORED, unlike Content-Type: they are data about the remote's file
+            # (the save-conflict floor and the Edit gate ride on them), not instructions to this
+            # browser — nothing executes off a date or a flag, and deriving them locally would be a
+            # lie about a remote disk.
+            lastmod = resp.getheader("Last-Modified")
+            r_ns = resp.getheader("X-Romp-Mtime-Ns")
+            r_u8 = resp.getheader("X-Romp-Text-Utf8")
             crange = resp.getheader("Content-Range") or ""
         except (OSError, http.client.HTTPException) as e:
             _demand_redial(host, "refused" if isinstance(e, ConnectionRefusedError) else "timeout")
@@ -26587,6 +26790,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             if clen is not None:
                 self.send_header("Content-Length", clen)
+            if lastmod:
+                self.send_header("Last-Modified", lastmod)
+            if r_ns:
+                self.send_header("X-Romp-Mtime-Ns", r_ns)
             self.send_header("X-Content-Type-Options", "nosniff")   # _send's guarantee, restated on the HEAD path
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):
@@ -26612,7 +26819,11 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        return self._send(status, body, ctype, cache="no-cache")
+        # These three are MIRRORED for the same reason they were read above: the save-conflict floor
+        # and the Edit gate ride on them, and deriving them locally would lie about a remote disk.
+        mirrored = {k: v for k, v in (("Last-Modified", lastmod), ("X-Romp-Mtime-Ns", r_ns),
+                                      ("X-Romp-Text-Utf8", r_u8)) if v}
+        return self._send(status, body, ctype, cache="no-cache", headers=mirrored or None)
 
     def _relay_download(self, host, port, rtok, q, head=False):
         """GET/HEAD /remote/<host>/file?download=1 — the download half of the relay. Forwards the one

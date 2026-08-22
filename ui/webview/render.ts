@@ -35,6 +35,8 @@ import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, type AgentNotif } from "./agent-notif";
 import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews } from "./preview";
 import { openFileView, setCommentSink } from "./file-view";
+// initFileView rides its OWN line: the import above is pinned verbatim by file-view-comments.test.ts
+import { initFileView } from "./file-view";
 import { pastedFilePath } from "./paste-path";
 import { hostNameNodes, hostPrefix, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
 import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from "./dir-complete";
@@ -740,6 +742,32 @@ function openPath(path: string, sid?: string | null): void {
   }
   vscodeApi.postMessage(sid ? { type: "openFile", path, id: sid } : { type: "openFile", path });
 }
+
+// Surface the FILE BROWSER at `path` for the session: the shell brings the feed pane forward and the
+// browser overlay opens there (unlike openPath's in-pane viewer modal, the browser overlay lives in
+// the feed document). Web-only, and only when a shell exists to relay to; VS Code's affordances are
+// gated off at their call sites (the editor has its own explorer, and the webview can't reach the
+// kernel origin anyway).
+function openBrowse(path: string, sid?: string | null): void {
+  const web = location.protocol === "http:" || location.protocol === "https:";
+  if (!web || window.parent === window) return;
+  try {
+    window.parent.postMessage({ romp: "browseFiles", path: path || ".", sid: sid || activeId || null }, "*");
+  } catch { /* no shell — nothing to surface into */ }
+}
+
+// The viewer's directory half asks for the BROWSER by posting {romp:'browseFiles'} to its OWN window
+// (file-view.ts): in the feed document initFileBrowse answers it, but the chat hosts no browser, so
+// this forwarder hands the ask to the shell — openBrowse's exact relay — which brings the feed pane
+// forward and delivers it there. Without it that click is a silent no-op in a chat-opened viewer.
+// openBrowse's own gates apply (web-only, framed-only: standalone /chat has no feed to surface, and
+// a repost to window.parent === window would only echo back here). Own-window messages only — the
+// pane shim redispatches kernel frames through this channel too, and no OTHER window sends this ask.
+window.addEventListener("message", (e: MessageEvent) => {
+  const m = e.data as { romp?: unknown; path?: unknown; sid?: unknown } | null;
+  if (!m || m.romp !== "browseFiles" || e.source !== window) return;
+  openBrowse(typeof m.path === "string" ? m.path : ".", typeof m.sid === "string" ? m.sid : null);
+});
 
 // A clickable file name that opens the real file — in the editor (VS Code) or the in-pane viewer
 // modal (web). Shared open/navigate surface; see extension.ts's openFile handler and file-view.ts.
@@ -2365,20 +2393,28 @@ function prettyModel(id: string): string {
 // written to the transcript, so it can't be shown; the closing note says so. Carries no dot/timestamp
 // (no ts/uuid) → renderEvent leaves it off the conversational rail. Its open/closed state is persisted
 // per session (keyed by renderingSid) so a send/turn re-render never snaps it shut.
-// Make `elem` open the folder `cwd` with the configured opener on click (the user 2026-06-27): used
-// EVERYWHERE a folder location is shown (statusline, the System-context Directory row, …). Click-safe — the
-// action rides a data-act caught by the document-level openFolder delegate, so it works under any re-rendering
-// surface without per-node handlers. `sid` (the owning session's, possibly host-prefixed, id — the user
+// Make `elem` act on the folder `cwd` on click (the user 2026-06-27; rerouted 2026-08-14): used
+// EVERYWHERE a folder location is shown (statusline, the System-context Directory row, …) — on the web it
+// BROWSES the folder in the dashboard, in VS Code it keeps the configured opener. Click-safe — the
+// action rides a data-act caught by a document-level delegate (browseFiles/openFolder), so it works under
+// any re-rendering surface without per-node handlers. `sid` (the owning session's, possibly host-prefixed, id — the user
 // 2026-07-03) rides along as data-id: for a REMOTE session this is how the kernel knows to SSH out instead
 // of treating a remote path as local (a silent no-op, since that path doesn't exist here). This pane stays
 // host-BLIND as designed (see federation.ts) — sid is just echoed back opaquely, never parsed here.
 function asFolderLink(elem: HTMLElement, cwd: string, sid?: string): void {
   if (!cwd) return;
-  elem.dataset.act = "openFolder";
+  // On the web a click BROWSES the folder in the dashboard (the user 2026-08-14) — the affordance
+  // that works from every device, where OS-open acted on the KERNEL's machine (the wrong-machine
+  // class the 📎 picker and file links were cured of). OS-open survives on
+  // the row's right-click menu for the genuinely-local case (the contextmenu delegate below). In
+  // VS Code the browser overlay doesn't exist, so the click keeps opening the folder host-side.
+  const web = location.protocol === "http:" || location.protocol === "https:";
+  elem.dataset.act = web && window.parent !== window ? "browseFiles" : "openFolder";
   elem.dataset.cwd = cwd;
   if (sid) elem.dataset.id = sid;
   elem.classList.add("folder-link");
-  elem.title = cwd + "  ·  click to open this folder";
+  elem.title = cwd + (elem.dataset.act === "browseFiles"
+    ? "  ·  click to browse this folder" : "  ·  click to open this folder");
 }
 
 // Small inline-SVG folder in the romp line-icon style (matches ctxIcon: 16-unit viewBox, currentColor, so it
@@ -4356,6 +4392,18 @@ function showTabMenu(e: MouseEvent, id: string) {
     offMail ? "Rejoin mail" : "Mute mail",
     offMail ? "reconnect it to the postal service" : "hide from peers — no messages in or out",
     () => setSessionFlag(id, "postalServiceOff", !offMail));
+  // Browse the session's working tree in the feed pane. Web-only: openBrowse no-ops outside the
+  // shell, and VS Code's editor has its own explorer, so the row only renders where the click can
+  // land.
+  if ((location.protocol === "http:" || location.protocol === "https:") && window.parent !== window) {
+    const browse = el("div", "ctx-item");
+    browse.textContent = "Browse files";
+    browse.addEventListener("click", (ev) => {
+      ev.stopPropagation(); dismissTabMenu();
+      openBrowse(s?.cwd || ".", id);
+    });
+    menu.appendChild(browse);
+  }
   // system-notification bell (the user 2026-07-28) — same flag the timeline lane bell toggles. NOTE the
   // inverted polarity vs the two above: `notify` true is the ENABLED state, so the icon slashes on !onBell.
   toggle("bell", !onBell,
@@ -11249,11 +11297,46 @@ setupSettings();
   // applied — opens that folder on click. Body is stable across every per-push rebuild, so a click is never
   // dropped mid-press. (Only elements carrying data-act="openFolder" are matched; nothing else is affected.)
   // `id` (data-id, the session's own possibly host-prefixed id) rides along opaquely — see asFolderLink.
+  // OS-open demoted to the folder-link's right-click (the user 2026-08-14): the click now browses in
+  // the dashboard, and this menu keeps "open a folder window" reachable for whoever IS at that
+  // machine's screen. One document-level listener — folder links live in re-rendered surfaces.
+  document.addEventListener("contextmenu", (ev) => {
+    const link = (ev.target as HTMLElement).closest?.(".folder-link[data-cwd]") as HTMLElement | null;
+    if (!link || link.dataset.act !== "browseFiles") return;   // openFolder clicks need no second door
+    ev.preventDefault();
+    document.getElementById("folder-ctx")?.remove();
+    const menu = el("div", "ctx-menu");
+    menu.id = "folder-ctx";
+    const item = el("div", "ctx-item");
+    item.textContent = "Open folder window";
+    const sub = el("span", "ctx-item-sub");
+    sub.textContent = "on the machine the session runs on";
+    item.appendChild(sub);
+    const cwd = link.dataset.cwd || "";
+    const id = link.dataset.id;
+    item.addEventListener("click", (e2) => {
+      e2.stopPropagation();
+      menu.remove();
+      vscodeApi?.postMessage(id ? { type: "openFolder", cwd, id } : { type: "openFolder", cwd });
+    });
+    menu.appendChild(item);
+    document.body.appendChild(menu);
+    const r = menu.getBoundingClientRect();
+    menu.style.left = Math.max(0, Math.min(ev.clientX, window.innerWidth - r.width - 4)) + "px";
+    menu.style.top = Math.max(0, Math.min(ev.clientY, window.innerHeight - r.height - 4)) + "px";
+    const dismiss = () => { menu.remove(); document.removeEventListener("click", dismiss); };
+    document.addEventListener("click", dismiss);
+  });
   delegate(document.body, {
     openFolder: (el) => {
       const cwd = el.dataset.cwd; if (!cwd || !vscodeApi) return;
       const id = el.dataset.id;
       vscodeApi.postMessage(id ? { type: "openFolder", cwd, id } : { type: "openFolder", cwd });
+    },
+    // the web twin of openFolder: surface the file browser at this folder
+    browseFiles: (el) => {
+      const cwd = el.dataset.cwd; if (!cwd) return;
+      openBrowse(cwd, el.dataset.id);
     },
     // "Stop retrying" on the live api_retry element (the user 2026-07-24). The CLI owns the backoff and the
     // SDK exposes no handle on it, so the honest stop is the SAME interrupt the stop button and Ctrl+C send:
@@ -11474,4 +11557,9 @@ setCommentSink((sid, text) => {
   persistDrafts();
   return true;
 });
+// The chat document hosts the viewer itself (openPath), so it boots the viewer's listener with the
+// same WS poster the feed hands it: Edit/Save round-trips ride post(), and the kernel's replies come
+// back as window MessageEvents via the pane shim — either document, one mechanism (file-view.ts
+// initFileView).
+initFileView((m) => vscodeApi?.postMessage(m));
 if (vscodeApi) vscodeApi.postMessage({ type: "ready" });
