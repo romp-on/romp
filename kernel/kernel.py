@@ -19990,6 +19990,72 @@ def _resolve_open_path(p, sid=None):
     return p
 
 
+def _git_out(args, cwd, timeout=5):
+    """One read-only git query → stripped stdout, or None on any failure (no repo, no git, timeout).
+    List argv, never a shell; quiet — an absent repo is a normal answer here, not an error."""
+    try:
+        r = subprocess.run(["git", "-C", cwd] + args, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+# origin remote → the https://github.com/<owner>/<repo> base, for the spellings git actually writes:
+# scp-like ssh, ssh:// (with an optional port, and GitHub's own documented SSH-over-HTTPS host
+# ssh.github.com), https (with an explicit :443), .git suffix and all. Anchored, so
+# github.example.com and github.com.evil.io lookalikes never match.
+_GITHUB_REMOTE = re.compile(
+    r"^(?:git@github\.com:|ssh://git@(?:ssh\.)?github\.com(?::\d+)?/|https://github\.com(?::443)?/)"
+    r"([\w.-]+)/([\w.-]+?)(?:\.git)?/?$")
+
+
+def _file_github_url(raw, sid):
+    """The GitHub web URL for a viewed file, or "" when there is none to give (the user 2026-08-15:
+    the viewer links to the file on GitHub when it is tracked there). Answered by the kernel that
+    OWNS the file — git on ITS disk is the authoritative source — and lazily, per viewer open, never
+    on the /file byte path (thumbnails must not pay three subprocesses each).
+
+    "" is a VERDICT, not an error: an untracked file, a non-repo path, or a non-GitHub origin all
+    honestly have no link, and the viewer simply never shows the button. The ref is the current
+    branch (what a human expects to read on GitHub), or the commit sha when HEAD is detached; a
+    branch that was never pushed 404s on GitHub's end, which is the truthful outcome for a file
+    that is not there yet."""
+    p = _resolve_open_path(str(raw or ""), sid)
+    if not os.path.isabs(p):
+        return ""
+    # realpath, not normpath (two executed repros): a lexical '..' collapse built a URL for a
+    # DIFFERENT file than the bytes the viewer shows when the '..' followed a symlink — a wrong link,
+    # strictly worse than none — and a symlinked path PREFIX made relpath escape the PHYSICAL toplevel
+    # git reports, silently un-linking every tracked file behind a symlink (macOS /tmp, a linked ~/code).
+    p = os.path.realpath(p)
+    d = os.path.dirname(p)
+    top = _git_out(["rev-parse", "--show-toplevel"], d)
+    if not top:
+        return ""
+    rel = os.path.relpath(p, top)
+    if rel == ".." or rel.startswith(".." + os.sep):
+        return ""                                   # escaped the repo — NOT a name-prefix test: a root
+    #                                                 file literally named ..cfg is inside and links fine
+    if _git_out(["ls-files", "--error-unmatch", "--", rel], top) is None:
+        return ""                                   # exists but untracked — no link to a thing not there
+    remote = _git_out(["remote", "get-url", "origin"], top)
+    m = _GITHUB_REMOTE.match(remote or "")
+    if not m:
+        return ""
+    ref = _git_out(["rev-parse", "--abbrev-ref", "HEAD"], top)
+    if not ref:
+        return ""
+    if ref == "HEAD":                               # detached — the sha is the only honest ref
+        ref = _git_out(["rev-parse", "HEAD"], top) or ""
+        if not ref:
+            return ""
+    return "https://github.com/%s/%s/blob/%s/%s" % (
+        # safe="/" keeps a slashed branch name (feat/x) literal — the form GitHub's own UI writes;
+        # GitHub resolves the ref/path ambiguity by longest match, exactly as it does for its users
+        m.group(1), m.group(2), quote(ref, safe="/"),
+        "/".join(quote(seg) for seg in rel.split(os.sep)))
+
+
 # Inline-code spans that name an EXISTING file despite containing spaces (the user 2026-08-04: a note
 # titled `Moving from correlation to causal components.md` linkified only its last word). The client's
 # token linkifier can never span a space — in prose that boundary is exactly what keeps ordinary text
@@ -26323,6 +26389,17 @@ class Handler(BaseHTTPRequestHandler):
             _reply(client, dict({"type": "dirCompletions", "reqId": msg.get("reqId"), "host": "",
                                  "value": _val, "status": _dir_status(_val)},
                                 **_dir_completions(_val)))
+        elif msg and msg.get("type") == "fileGitLink":
+            # The viewer's GitHub link (the user 2026-08-15), asked lazily per open. Answered by the
+            # kernel that OWNS the file — git on ITS disk is the authority, and a remote page's WS
+            # already terminates on the owning kernel (the /remote/<host>/ws splice), so no relay
+            # clause is needed; sid only resolves a relative path against that session's cwd. reqId
+            # is echoed for the stale-drop; an empty url is the no-link verdict and the viewer just
+            # never shows the button. Threaded: three git subprocesses must not block the recv loop.
+            def _gl(c=client, m=msg):
+                _reply(c, {"type": "fileGitLink", "reqId": m.get("reqId"),
+                           "url": _file_github_url(m.get("path"), m.get("sid") or None)})
+            threading.Thread(target=_gl, daemon=True).start()
         elif msg and msg.get("type") == "browseDir":
             tgt = str(msg.get("target") or "picker")          # which dir field to fill: the new-session picker or the gear
             if not _native_dialogs():

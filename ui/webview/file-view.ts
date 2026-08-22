@@ -107,6 +107,14 @@ function el(tag: string, cls?: string): HTMLElement {
   return e;
 }
 
+// ── the GitHub link's plumbing (the user 2026-08-15) ───────────────────────────────────────────────
+// The ask rides the WS poster the pane's boot hands initFileView; the reply routes back to the OPEN
+// viewer through these module-level hooks (the viewer itself is a per-open closure). One lazy
+// question per open, reqId-guarded; an empty url is the no-link verdict and the anchor never appears.
+let post: (m: Record<string, unknown>) => void = () => { /* bound by initFileView */ };
+let gitSeq = 0;
+let gitHooks: { reqId: number; apply: (url: string) => void } | null = null;
+
 // ── review comments (the user 2026-08-14, who found coordinating a doc review painful) ─────────────
 // Reading a doc an agent wrote used to mean hand-copying every line you wanted changed back into the
 // chat. Now you comment on passages IN the viewer and one Submit hands the whole set over as a single
@@ -146,12 +154,14 @@ export function setCommentSink(fn: (sid: string, text: string) => boolean): void
 export function closeFileView(): void {
   const wrap = document.getElementById("romp-fileview");
   if (!wrap) return;
+  gitHooks = null;                                     // a reply landing after the close decorates nothing
   wrap.remove();
   document.body.classList.remove("fileview-open");
 }
 
 /** Show `path` in a modal over this pane. Re-opening replaces whatever is up — never stacks. */
 export function openFileView(path: string, sid?: string | null): void {
+  gitHooks = null;                                     // the replace path skips closeFileView — same drop
   document.getElementById("romp-fileview")?.remove();
   // backdrop (the whole overlay carries the id every open/closed check targets) + the ~95% card.
   // The backdrop treatment matches the lightbox: dimmed, click outside the card closes, content
@@ -215,6 +225,26 @@ export function openFileView(path: string, sid?: string | null): void {
   wrapBtn.type = "button"; wrapBtn.textContent = "Wrap"; wrapBtn.title = "Soft-wrap long lines";
   wrapBtn.addEventListener("click", () => { fmt.wrap = !fmt.wrap; saveFmt(fmt); renderBody(); });
   acts.appendChild(wrapBtn);
+
+  // ── GitHub link (the user 2026-08-15) ── an anchor, not a button: the browser owns opening a new
+  // tab. Hidden until the OWNING kernel answers the lazy fileGitLink ask with a real URL — an
+  // untracked file, a non-repo path, or a non-GitHub origin all honestly have no link, and this
+  // simply never appears.
+  const gh = el("a", "fileview-btn fileview-gh") as HTMLAnchorElement;
+  gh.textContent = "GitHub ↗";
+  gh.target = "_blank"; gh.rel = "noopener";
+  gh.hidden = true;
+  acts.appendChild(gh);
+  gitHooks = {
+    reqId: ++gitSeq,
+    apply: (url) => {
+      if (!url) return;
+      gh.href = url;
+      gh.title = url;                            // the full URL one hover away
+      gh.hidden = false;
+    },
+  };
+  post({ type: "fileGitLink", path, sid: sid || undefined, reqId: gitSeq });
 
   // ── download (the user 2026-08-09) ── Any linked file can be SAVED, including everything the pane
   // cannot show: the kernel's ?download=1 serves anything on disk (the rationale lives with
@@ -590,4 +620,19 @@ function mdBlock(text: string): HTMLElement {
     } catch { /* leave plain */ }
   });
   return box;
+}
+
+/** Bind the pane's WS poster and route fileGitLink replies back to the open viewer. Called once,
+ *  from the boot of whichever document hosts the viewer (render.ts today): the kernel's WS frames
+ *  arrive as window MessageEvents via the pane shim, and the reqId guard means a reply that lands
+ *  after a close or a replace-open touches nothing. */
+export function initFileView(poster: (m: Record<string, unknown>) => void): void {
+  post = poster;
+  window.addEventListener("message", (e: MessageEvent) => {
+    const m = e.data;
+    if (m && m.type === "fileGitLink" && gitHooks && m.reqId === gitHooks.reqId) {
+      const h = gitHooks; gitHooks = null;
+      h.apply(String(m.url || ""));
+    }
+  });
 }

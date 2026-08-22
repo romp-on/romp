@@ -35,6 +35,8 @@ import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, type AgentNotif } from "./agent-notif";
 import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews } from "./preview";
 import { openFileView, setCommentSink } from "./file-view";
+// initFileView rides its OWN line: the import above is pinned verbatim by file-view-comments.test.ts
+import { initFileView } from "./file-view";
 import { pastedFilePath } from "./paste-path";
 import { hostNameNodes, hostPrefix, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
 import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from "./dir-complete";
@@ -11474,4 +11476,8 @@ setCommentSink((sid, text) => {
   persistDrafts();
   return true;
 });
+// This document hosts the viewer (openPath), so it boots the viewer's listener with the pane's own
+// WS poster: the GitHub-link ask rides post(), and the kernel's reply comes back as a window
+// MessageEvent via the pane shim — reqId-guarded in file-view.ts.
+initFileView((m) => vscodeApi?.postMessage(m));
 if (vscodeApi) vscodeApi.postMessage({ type: "ready" });
