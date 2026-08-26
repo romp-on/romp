@@ -121,7 +121,10 @@ def _backlog(count=3, minute0=14):
 
 class WakeTail(unittest.TestCase):
     """kernel._undelivered_wake_tail — the trailing unconsumed enqueues, from the transcript's own
-    queue-operation records (the authoritative queue; the display fold _pending_queued is untouched)."""
+    queue-operation records (the authoritative queue). The display fold _pending_queued is a SEPARATE
+    reader with its own semantics — it credits a dequeue, which this one deliberately does not — and the
+    two agree only on the record kinds whose meaning is unambiguous: a content-addressed remove, a
+    content-less remove taking the oldest, and popAll withdrawing everything."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -157,6 +160,21 @@ class WakeTail(unittest.TestCase):
                                            _qop("enqueue", _wrap(1), ts=TS % (15, 0)), _qop("remove")])
         self.assertEqual([e["text"] for e in entries], [_wrap(1)],
                          "no content → FIFO, exactly as _pending_queued folds the same records")
+
+    def test_popAll_withdraws_the_whole_tail(self):
+        # popAll — the whole queue recalled in one record — was unhandled here too (the user 2026-08-26),
+        # so a recalled backlog went on reading as signals still owed a turn and kept the session a drive
+        # candidate indefinitely (one live session was holding twelve).
+        entries, mark = self._tail(_turn() + [_qop("enqueue", _wrap(0)),
+                                              _qop("enqueue", _wrap(1), ts=TS % (15, 0)),
+                                              _qop("popAll", _wrap(0))])
+        self.assertEqual((entries, mark), ([], None), "a withdrawn queue owes no turn")
+
+    def test_an_enqueue_after_popAll_is_still_owed_a_turn(self):
+        entries, mark = self._tail(_turn() + [_qop("enqueue", _wrap(0)), _qop("popAll", _wrap(0)),
+                                              _qop("enqueue", _wrap(1), ts=TS % (15, 0))])
+        self.assertEqual([e["text"] for e in entries], [_wrap(1)], "the recall clears only what preceded it")
+        self.assertIsNotNone(mark)
 
     def test_a_remove_matching_nothing_drops_nothing(self):
         entries, _ = self._tail(_turn() + [_qop("enqueue", _wrap(0)), _qop("remove", _wrap(7))])

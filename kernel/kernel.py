@@ -8467,9 +8467,34 @@ class TmuxBackend(sb.SessionBackend):
         return _tmux_echo_atoms(str(sid))
 
     def prune_live(self, sid, tx_uuids, tx_user_texts=(), human_floor=0):
-        # human_floor is SDK-only: a tmux echo must SURVIVE a later turn to keep a dropped send visible, so it
-        # keeps the text/uuid-only prune (the SDK's FIFO-floor echo retirement doesn't apply here).
+        # The floor never PRUNES a plain tmux echo: it must SURVIVE a later turn to keep a dropped send
+        # visible, so retirement stays text/uuid-only. It does SETTLE it — an echo the transcript has
+        # overtaken is marked dropped (the "never delivered" treatment), which is what keeps a two-day-old
+        # loss from posing as a pending queued message (_tmux_echo_settle).
         _tmux_echo_prune(str(sid), tx_uuids, tx_user_texts)
+        _tmux_echo_settle(str(sid), human_floor)
+
+    def dismiss_echo(self, sid, uuid=None, t=None):
+        """Drop ONE settled echo on the user's ✕ (the chat's echodismiss), by synthetic uuid or send time.
+        Without this the "never delivered" bubble's dismiss button was a fake affordance on tmux — the
+        kernel's drive op is gated on hasattr(be, "dismiss_echo"), so the click acknowledged and the bubble
+        came straight back on the next push. Only a DROPPED echo is dismissible: an in-flight send is not
+        the user's to clear, and mirroring sdk_backend.dismiss_echo keeps one rule across both backends.
+        Matched exactly as sdk_backend.dismiss_echo matches — store key first, else the echo's send time,
+        as an OR so a client whose handle came from a different paint still lands. Returns the dismissed
+        text (idempotent: None when it's already gone)."""
+        d = _tmux_echo.get(str(sid))
+        if not d:
+            return None
+        for k, a in list(d.items()):
+            if not (a.get("_echo_text") and a.get("dropped")):
+                continue
+            if (uuid is not None and k == uuid) or (t is not None and int(a.get("t") or 0) == t):
+                d.pop(k, None)
+                if not d:
+                    _tmux_echo.pop(str(sid), None)
+                return a.get("_echo_text")
+        return None
 
     # ask picker — translate a webview action into pane keystrokes (AskDriver); current_ask SCRAPES the pane
     # (the SDK answers its own callback / reads its stored ask instead).
@@ -12644,12 +12669,31 @@ def _split_followup(text):
 
 
 def _pending_queued(path):
-    """Still-pending queued messages, folded FIFO from the transcript's queue-operation records
-    (type:"queue-operation"; operation enqueue/dequeue/remove; content on enqueue). enqueue appends; each
-    dequeue/remove resolves the oldest pending one; the unresolved genuine tail is what's still queued, in
-    submission order. Claude Code writes these the instant a message is queued (while busy/compacting), so
-    they show before reaching the turn DAG — the archive's foldQueue, event-based instead of pane-scraped
-    (the pane scrape mis-parsed a second queued message and dropped both — the user 2026-06-16)."""
+    """Still-pending queued messages, folded from the transcript's queue-operation records
+    (type:"queue-operation"; operation enqueue/dequeue/remove/popAll; content on enqueue, and usually on a
+    remove/popAll too). enqueue appends; a content-bearing `remove` discards exactly the entry carrying that
+    text (the CLI's removes are content-addressed single-item discards — measured live 2026-08-18, see
+    _undelivered_wake_tail, which resolves this same ledger for the idle-queue drive); a content-less remove
+    and every `dequeue` resolve the OLDEST pending entry; a `popAll` is the whole queue recalled at once, so
+    it clears everything pending. The unresolved genuine tail is what's still queued, in submission order.
+    Claude Code writes these the instant a message is queued (while busy/compacting), so they show before
+    reaching the turn DAG — the archive's foldQueue, event-based instead of pane-scraped (the pane scrape
+    mis-parsed a second queued message and dropped both — the user 2026-06-16).
+
+    popAll WAS UNHANDLED until 2026-08-26, and an unrecognized clear is no harmless no-op: its enqueues
+    stayed pending forever, so every later dequeue resolved an entry one slot too old and the newest
+    DELIVERED message sat in the chat as a queued bubble for good — a session showed a slash command it had
+    already finished running, and the same phantom held the queue-aware nudge gate (_backend_queued) shut.
+    Content-addressed removes land in the same pass for the same reason: the FIFO pairing is the fragile
+    part, and one missing or extra resolution shifts every later one (the failure that made the event model
+    drop this ledger for placement altogether — see event_model._absorbed).
+
+    One DELIBERATE divergence from _undelivered_wake_tail: a content-bearing remove naming text that isn't
+    pending here (this fold credits dequeues, so a dequeue may already have taken it) still resolves the
+    oldest, where the drive's reader resolves nothing. The two failure directions are not symmetric for a
+    DISPLAY — an unresolved entry is a bubble that never leaves, the bug this whole pass exists to end,
+    while an over-resolved one self-heals at the next record — and the case is vanishingly rare besides
+    (live corpus: one such remove in 305, and it is where a credited dequeue had already taken the entry)."""
     try:
         st = os.stat(path)
         key = (st.st_mtime, st.st_size)
@@ -12658,7 +12702,7 @@ def _pending_queued(path):
     hit = _queued_parse_cache.get(path)
     if hit is not None and key is not None and hit[0] == key:
         return hit[1]
-    texts, resolved = [], 0
+    pending = []
     try:
         with open(path, errors="replace") as f:
             for line in f:
@@ -12671,13 +12715,18 @@ def _pending_queued(path):
                 if o.get("type") != "queue-operation":
                     continue
                 op = o.get("operation")
+                content = o.get("content") if isinstance(o.get("content"), str) else None
                 if op == "enqueue":
-                    texts.append(o.get("content") if isinstance(o.get("content"), str) else "")
-                elif op in ("dequeue", "remove") and resolved < len(texts):
-                    resolved += 1                            # FIFO: this dequeue clears the oldest enqueue
+                    pending.append(content or "")
+                elif op == "popAll":                         # the whole queue recalled — nothing is left owed
+                    pending.clear()
+                elif op == "remove" and content is not None and content in pending:
+                    pending.remove(content)                  # that entry only; the rest keep their places
+                elif op in ("dequeue", "remove") and pending:
+                    del pending[0]                           # anonymous resolution: the oldest is the one taken
     except OSError:
         return []
-    out = [t.strip() for t in texts[resolved:] if _genuine_queued(t)]
+    out = [t.strip() for t in pending if _genuine_queued(t)]
     if key is not None:
         if len(_queued_parse_cache) > 256:                   # bounded by fleet size; never unbounded
             _queued_parse_cache.clear()
@@ -12735,7 +12784,10 @@ def _undelivered_wake_tail(path):
     CLI actually writes (measured live 2026-08-18 — the comment block above):
       * a `remove` carrying content discards exactly the entry with that text (the CLI's removes are
         content-addressed single-item discards, routinely of a NON-oldest entry while others stay
-        pending); a content-less remove discards the oldest, matching _pending_queued's FIFO fold;
+        pending); a content-less remove discards the oldest, matching _pending_queued's fold;
+      * a `popAll` discards EVERY pending entry — the whole queue withdrawn in one record, so none of it
+        is still owed a turn (unhandled until 2026-08-26: a recalled queue went on reading as undriven
+        signals indefinitely, one session holding twelve of them);
       * a `dequeue` alone clears NOTHING — the CLI's idle deliveries write no dequeue at all, and an
         agent notification's instant dequeue must not wipe an older undriven signal; the delivery
         evidence is the user record it produces;
@@ -12797,6 +12849,10 @@ def _undelivered_wake_tail(path):
                                 del tail[i]                  # the CLI's call on THAT entry only
                         elif tail:
                             del tail[0]                      # content-less: the oldest, as _pending_queued folds
+                    elif op == "popAll":                     # the whole queue recalled at once: every entry is
+                        tail.clear()                         # withdrawn, so nothing here is owed a turn any more
+                        #                                      (unhandled until 2026-08-26 — a recalled queue kept
+                        #                                      reading as undriven signals, one session holding 12)
                     #      a `dequeue` clears nothing — its delivery evidence is the user record it produces
                     continue
                 if not tail:
@@ -16512,6 +16568,60 @@ def _tmux_echo_prune(sid, tx_uuids, tx_texts):
         _tmux_echo.pop(sid, None)
 
 
+def _human_turn_floor(session):
+    """The newest GENUINE-HUMAN user atom's timestamp in the parsed session, or 0. The one event that says
+    "the transcript has moved past anything typed before this": read by the SDK's echo floor
+    (sdk_backend.prune_live), by the tmux echo's settle below, and by the queued fold.
+
+    EXCLUDES the interrupt record (the user 2026-07-07): it authors 'human' but is a STOP event, not a
+    message that landed and processed the echo. When a just-sent message hadn't hit disk yet, the
+    interrupt's timestamp floored past the echo and retired it — so an interrupted send that got a partial
+    reply then VANISHED on the next push. Mirrors _last_genuine_turn_t, which floors on genuine turns only."""
+    return max((a.get("t", 0) for turn in session["turns"] for a in turn["atoms"]
+                if a.get("type") == "user" and a.get("author") == "human"
+                and not em.is_interrupt_record(a)), default=0)
+
+
+def _echo_overtaken(atom, human_floor):
+    """True when the transcript has taken a genuine-human turn STRICTLY LATER than this echo's send — the
+    event that settles whether the send is still in flight. The pane is FIFO, so a message the CLI still
+    held could not be overtaken by one typed after it: past this point the echo is a LOSS, not a pending
+    message. Strictly later, never at-or-later, so a send landing in the same second as another turn keeps
+    the optimistic queued treatment (the no-flicker path the 2026-06-29 fold bought)."""
+    return bool(atom.get("_echo_text")) and bool(human_floor) and human_floor > atom.get("t", 0)
+
+
+def _tmux_echo_settle(sid, human_floor):
+    """Mark every overtaken tmux echo `dropped`, so the chat draws the shipped "never delivered" treatment
+    (dashed bubble + restore/dismiss, renderQueued's sibling) instead of an ordinary sent bubble, and the
+    queued fold stops enlisting it as a pending message (the user 2026-08-26: a session's queued header
+    counted sends from two days earlier, which it had long since answered — one of them genuinely lost at
+    the pane, two delivered under text the transcript recorded differently, all three indistinguishable
+    from a message actually waiting in the CLI's queue).
+
+    Marking, NOT pruning: a tmux echo is the only record of a send the pane dropped, and that loss must
+    stay on screen — the whole reason the echo outlives a later turn (see TmuxBackend.prune_live). The one
+    exception mirrors the SDK's own floor: a PATH-BEARING echo can fail the text match STRUCTURALLY,
+    because the transcript extracts image paths out of the user text, so that flavor is retired the way
+    sdk_backend.prune_live retires it rather than labelled a loss it may not be. With the SDK module
+    unavailable the predicate is simply unavailable too, and marking (the visible, reversible outcome)
+    covers every echo."""
+    d = _tmux_echo.get(sid)
+    if not d:
+        return
+    path_bearing = getattr(sys.modules.get("romp_sdk_backend"), "_path_bearing", None)
+    for k in list(d.keys()):
+        a = d[k]
+        if not _echo_overtaken(a, human_floor):
+            continue
+        if path_bearing is not None and path_bearing(a.get("_echo_text") or ""):
+            d.pop(k, None)
+        else:
+            a["dropped"] = True
+    if not d:
+        _tmux_echo.pop(sid, None)
+
+
 def _sendvis_diag(sid):
     """Send-visibility snapshot for /diag/sendvis (the user 2026-07-20): the exact inputs the chat build
     consults to render an in-flight send. When a sent message is invisible, this names the layer that
@@ -16541,7 +16651,10 @@ def _sendvis_diag(sid):
                             for a in (be.live_atoms(sid) if be else [])]
     except Exception as e:
         out["liveAtoms"] = "error: %s" % e
-    out["tmuxEchoes"] = [{"t": a.get("t"), "echo": (a.get("_echo_text") or "")[:120]}
+    # `dropped` is the whole diagnosis for a stale echo (the user 2026-08-26): without it a settled loss and
+    # a genuinely in-flight send read identically here, which is how three days-old echoes went unexplained.
+    out["tmuxEchoes"] = [{"t": a.get("t"), "echo": (a.get("_echo_text") or "")[:120],
+                          "dropped": bool(a.get("dropped"))}
                          for a in _tmux_echo_atoms(sid)]
     try:
         out["compacting"] = bool(_compacting_now(sid))
@@ -16585,17 +16698,7 @@ def _merge_live_atoms(session, sid, shown_texts=()):
                        and _atom_prose_chars(a) > 0}
     tx_uuids -= (live_text_uuids - tx_text_uuids)
     tx_texts = {t for turn in session["turns"] for a in turn["atoms"] for t in _atom_user_texts(a)}
-    # FIFO floor: the newest GENUINE-HUMAN turn the transcript has — retires an input echo whose text can't
-    # match because the transcript extracted an image path out of it (screenshots piling up at the bottom, the
-    # user 2026-06-25). SDK-only semantics: TmuxBackend.prune_live IGNORES the floor, since a tmux echo must
-    # SURVIVE a later turn to keep a dropped send visible (it keeps the text/uuid-only prune).
-    # EXCLUDE the interrupt record (the user 2026-07-07): it authors 'human' but is a STOP event, not a message
-    # that landed and processed the echo. When a just-sent message hadn't hit disk yet, the interrupt's
-    # timestamp floored past the echo and retired it — so an interrupted send that got a partial reply then
-    # VANISHED on the next push. Mirror _last_genuine_turn_t, which floors on genuine turns only.
-    human_floor = max((a.get("t", 0) for turn in session["turns"] for a in turn["atoms"]
-                       if a.get("type") == "user" and a.get("author") == "human"
-                       and not em.is_interrupt_record(a)), default=0)
+    human_floor = _human_turn_floor(session)
     be.prune_live(sid, tx_uuids, tx_texts, human_floor)
     hide = tx_texts | {t.strip() for t in shown_texts if t}    # transcript dups + already-shown queued msgs
     fresh = [a for a in live if a.get("uuid") not in tx_uuids
@@ -16938,12 +17041,19 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
     compacting_now = (False if path_override else
                       _compacting(sid, (tm0 or {}).get("state", ""), parsed, now, (tm0 or {}).get("since")))
     busy = not path_override and (_session_working(parsed["turns"]) or compacting_now)
+    # The fold takes only echoes STILL IN FLIGHT — one the transcript has already overtaken with a later
+    # genuine-human turn is a loss, not a pending message, and enlisting it here was how sends from days
+    # earlier kept inflating the queued header on a busy session (the user 2026-08-26). _echo_overtaken is
+    # the same event TmuxBackend.prune_live settles them on, read directly rather than off the `dropped`
+    # mark, since the mark is written by the merge BELOW this fold (one build later would be one build of
+    # phantom).
     if not hasattr(be, "unqueue") and busy:
         already = {q.strip() for q in queued}
         tx_user = {t for turn in parsed["turns"] for a in turn["atoms"] for t in _atom_user_texts(a)}
+        echo_floor = _human_turn_floor(parsed)
         for a in be.live_atoms(sid):
             et = (a.get("_echo_text") or "").strip()
-            if et and et not in already and et not in tx_user:
+            if et and et not in already and et not in tx_user and not _echo_overtaken(a, echo_floor):
                 queued = queued + [et]; already.add(et)
     session = parsed if path_override else _merge_live_atoms(parsed, sid, shown_texts=queued)
     caps = _captions(sid)

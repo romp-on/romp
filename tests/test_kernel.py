@@ -1096,6 +1096,31 @@ class ViewBuilder(unittest.TestCase):
         sent = [e for e in events if e["kind"] == "user" and e.get("md") == "and also fix the header"]
         self.assertEqual(sent, [], "it must NOT also show as a sent (solid) user bubble — that was the flip")
 
+    def test_tmux_echo_the_transcript_OVERTOOK_is_not_counted_as_queued(self):
+        # The reported bug (the user 2026-08-26): a busy session's queued header counted sends from DAYS
+        # earlier — echoes whose text never landed verbatim (one lost at the pane, two delivered under text
+        # the transcript recorded differently), sitting in _tmux_echo forever and folded in as "queued" on
+        # every push. The pane is FIFO, so a genuine-human turn landing AFTER a send settles it: that send
+        # is a loss, not a pending message. It stays VISIBLE (the whole point of the tmux echo) but as the
+        # "never delivered" treatment, which carries a ✕ — never as one of N queued messages.
+        with self.tpath.open("a") as f:                  # an OPEN turn → the session reads busy
+            f.write(json.dumps(uline(NOW, "keep working on the strip", "uOpen", parent="a2")) + "\n")
+        km._parse_cache.clear()
+        km._tmux_echo.pop(SID, None)
+        stale = "does the notes-api build still fail"
+        km._tmux_echo_add(SID, stale)
+        for echo_atom in km._tmux_echo[SID].values():
+            echo_atom["t"] = NOW - 3600                  # typed before the turn the transcript has since taken
+        try:
+            events = km.build_session(SID, NOW)["events"]
+        finally:
+            km._tmux_echo.pop(SID, None)
+        qmsgs = [m["md"] for e in events if e["kind"] == "queued" for m in e["texts"]]
+        self.assertNotIn(stale, qmsgs, "an overtaken send is a loss, not a message waiting in the queue")
+        lost = [e for e in events if e["kind"] == "user" and e.get("md") == stale]
+        self.assertEqual(len(lost), 1, "it stays on screen — the loss must not vanish silently")
+        self.assertTrue(lost[0].get("undelivered"), "and reads as never delivered, with the dismiss affordance")
+
     def test_tmux_send_while_IDLE_echoes_as_a_sent_bubble_not_queued(self):
         # the gate: when the session is IDLE (default fixture ends on an ended turn), the SAME echo is a
         # genuine sent message — it shows as a solid user bubble, never the dotted queued indicator.
@@ -6196,6 +6221,44 @@ class TestPendingQueued(unittest.TestCase):
         self._write(("enqueue", "first"), ("enqueue", "second"), ("remove",), ("remove",))
         self.assertEqual(km._pending_queued(self.p), [], "remove drains like dequeue")
 
+    def test_popAll_clears_the_whole_queue(self):
+        # The phantom (the user 2026-08-26): popAll — the CLI's record for the whole queue being recalled
+        # at once — was UNHANDLED, so its enqueues stayed pending forever. Nothing here is still owed.
+        self._write(("enqueue", "first"), ("enqueue", "second"), ("popAll", "first"))
+        self.assertEqual(km._pending_queued(self.p), [], "a recalled queue owes nothing")
+
+    def test_popAll_does_not_shift_later_resolutions(self):
+        # The DAMAGE the unhandled op did, and the actual bug reported: with popAll ignored, its two
+        # enqueues stayed on the pending list, so the dequeue below resolved one of THEM instead of the
+        # message it actually delivered — leaving the delivered one on screen as a queued bubble for good.
+        self._write(("enqueue", "recalled one"), ("enqueue", "recalled two"), ("popAll", "recalled one"),
+                    ("enqueue", "typed after the recall"), ("dequeue",))
+        self.assertEqual(km._pending_queued(self.p), [],
+                         "the dequeue resolves the message that followed the recall, not a recalled one")
+
+    def test_enqueue_after_popAll_is_still_pending(self):
+        # the other direction: a recall clears what was queued THEN, never what arrives after it
+        self._write(("enqueue", "recalled"), ("popAll", "recalled"), ("enqueue", "still waiting"))
+        self.assertEqual(km._pending_queued(self.p), ["still waiting"])
+
+    def test_remove_with_content_takes_that_entry_not_the_oldest(self):
+        # The CLI's removes are content-addressed single-item discards, routinely of a NON-oldest entry
+        # (measured live 2026-08-18 — _undelivered_wake_tail resolves the same ledger this way). Folding
+        # one as "the oldest went" mispairs every later resolution, which is the same class of drift popAll
+        # caused: the survivor shown is not the message still waiting.
+        self._write(("enqueue", "first"), ("enqueue", "second"), ("enqueue", "third"),
+                    ("remove", "second"))
+        self.assertEqual(km._pending_queued(self.p), ["first", "third"])
+
+    def test_a_content_remove_naming_nothing_pending_still_resolves_the_oldest(self):
+        # The deliberate split from _undelivered_wake_tail, which resolves nothing here. This fold credits
+        # dequeues, so a dequeue may already have taken the named entry — and for a DISPLAY the two errors
+        # are not symmetric: an unresolved entry is a bubble that never leaves (the reported bug), while an
+        # over-resolved one self-heals at the next record.
+        self._write(("enqueue", "first"), ("enqueue", "second"), ("dequeue",), ("remove", "first"))
+        self.assertEqual(km._pending_queued(self.p), [],
+                         "the CLI resolved something; the display must not strand the survivor")
+
     def test_drops_postal_and_harness_injections(self):
         # romp delivers a peer message by ENQUEUEing it (carries romp-msg-id / 📬 / a #### banner); those
         # must not masquerade as the user's pending input — only the genuine typed message remains.
@@ -7152,6 +7215,91 @@ class TmuxInputEcho(unittest.TestCase):
         merged = km._merge_live_atoms(self._session([]), SID, shown_texts=["padded message"])
         texts = [km._atom_user_text(a) for a in merged["turns"][-1]["atoms"]]
         self.assertNotIn("padded message", texts, "stripped-text match suppresses the echo against the queued bubble")
+
+
+class TmuxEchoSettledByALaterTurn(unittest.TestCase):
+    """A tmux echo the transcript has OVERTAKEN (the user 2026-08-26). The echo outlives a later turn on
+    purpose — that is how a send the pane dropped stays visible — but "still visible" had come to mean
+    "still posing as pending": days-old echoes were folded into the queued indicator on every busy push,
+    and off it they drew as ordinary sent bubbles with no way to clear them. The settling EVENT is a
+    genuine-human turn landing strictly later than the send: the pane is FIFO, so nothing typed after a
+    message the CLI still held could overtake it. Past that, the echo is marked dropped — the shipped
+    "never delivered" treatment, restore + dismiss — and never pruned out from under the user. Synthetic
+    only; the SDK's own floor semantics live in test_sdk_echo_durability.py."""
+
+    LANDED_AT = T0 + 500
+    SENT_BEFORE = T0 + 100          # overtaken: the transcript took a human turn after this
+    SENT_AFTER = T0 + 900           # still in flight: nothing has overtaken it
+
+    def setUp(self):
+        self._saved_sdk = km._sdk
+        km._sdk = lambda: None                 # tmux path: no SDK backend owns the sid
+        km._tmux_echo.clear()
+
+    def tearDown(self):
+        km._sdk = self._saved_sdk
+        km._tmux_echo.clear()
+
+    def _session_with_landed_human_turn(self):
+        return {"turns": [{"id": "t", "trigger": None, "t": T0, "end": T0, "ended": True,
+                           "atoms": [{"type": "user", "uuid": "real-1", "author": "human",
+                                      "t": self.LANDED_AT,
+                                      "message": {"role": "user",
+                                                  "content": [{"type": "text", "text": "a later ask"}]}}]}]}
+
+    def _echo_at(self, text, sent_at):
+        km._tmux_echo_add(SID, text)
+        for echo_atom in km._tmux_echo[SID].values():
+            if echo_atom.get("_echo_text") == text:
+                echo_atom["t"] = sent_at
+                return echo_atom
+        raise AssertionError("the echo was not stored")
+
+    def test_overtaken_echo_is_MARKED_dropped_and_kept_visible(self):
+        echo_atom = self._echo_at("this one never made it in", self.SENT_BEFORE)
+        km._merge_live_atoms(self._session_with_landed_human_turn(), SID)
+        self.assertTrue(echo_atom.get("dropped"), "an overtaken send reads as the loss it is")
+        self.assertIn(SID, km._tmux_echo, "marked, never pruned — the only copy of the text is in here")
+
+    def test_in_flight_echo_is_left_untouched(self):
+        echo_atom = self._echo_at("just typed, still going out", self.SENT_AFTER)
+        km._merge_live_atoms(self._session_with_landed_human_turn(), SID)
+        self.assertFalse(echo_atom.get("dropped"), "nothing has overtaken it — it is still in flight")
+
+    def test_a_send_in_the_SAME_second_as_a_landed_turn_stays_in_flight(self):
+        # Strictly later, never at-or-later: the equality case is a send racing the turn that happens to
+        # share its second, and treating that as overtaken would put the 2026-06-29 solid-then-dotted
+        # flicker back for it.
+        echo_atom = self._echo_at("same second as the turn", self.LANDED_AT)
+        km._merge_live_atoms(self._session_with_landed_human_turn(), SID)
+        self.assertFalse(echo_atom.get("dropped"))
+
+    def test_an_interrupt_record_does_not_settle_an_echo(self):
+        # _human_turn_floor excludes the interrupt record (the user 2026-07-07): it authors human but is a
+        # STOP event, not a message that landed and processed the send.
+        session = self._session_with_landed_human_turn()
+        session["turns"][0]["atoms"] = [
+            {"type": "user", "uuid": "int-1", "author": "human", "t": self.LANDED_AT,
+             "message": {"role": "user", "content": [{"type": "text",
+                                                      "text": "[Request interrupted by user]"}]}}]
+        echo_atom = self._echo_at("sent just before the stop", self.SENT_BEFORE)
+        km._merge_live_atoms(session, SID)
+        self.assertFalse(echo_atom.get("dropped"), "a stop is not a delivered turn")
+
+    def test_dismiss_echo_clears_a_settled_one_and_refuses_an_in_flight_one(self):
+        # Without a tmux dismiss_echo the ✕ on the "never delivered" bubble was a fake affordance: the
+        # kernel's drive op is gated on hasattr(be, "dismiss_echo"), so the click acknowledged and the
+        # bubble returned on the next push.
+        backend = km.TmuxBackend()
+        in_flight = self._echo_at("still going out", self.SENT_AFTER)
+        settled = self._echo_at("gone for good", self.SENT_BEFORE)
+        km._merge_live_atoms(self._session_with_landed_human_turn(), SID)
+        self.assertIsNone(backend.dismiss_echo(SID, uuid=in_flight["uuid"]),
+                          "an in-flight send is not the user's to clear")
+        self.assertEqual(backend.dismiss_echo(SID, uuid=settled["uuid"]), "gone for good")
+        self.assertIsNone(backend.dismiss_echo(SID, uuid=settled["uuid"]), "idempotent: a miss is a no-op")
+        remaining = [a.get("_echo_text") for a in km._tmux_echo_atoms(SID)]
+        self.assertEqual(remaining, ["still going out"], "only the dismissed one goes")
 
 
 class TestCloserSettledGate(unittest.TestCase):
