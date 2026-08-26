@@ -1425,10 +1425,10 @@ class PlanSubRef(unittest.TestCase):
 
 
 class Grouper(unittest.TestCase):
-    """The grouper judge (the user 2026-06-17): a separate pass after the planner that reshapes a
-    session's OPEN top goals into coherent trees — relinking one top under another, or minting a fresh
-    higher-level umbrella and nesting tops under it. Event-gated per session (groupedSig) so a stable
-    board is never re-grouped."""
+    """The grouper judge, post-T101 (the user 2026-08-26: the board's unit is the individual ask —
+    tops never nest, containers never mint): housekeeping only — merge true twins, split drifted
+    tangents, retitle outgrown cards. The retired mint/group ops parse away and are ignored if
+    hand-built. Event-gated per session (groupedSig) so a stable board is never re-examined."""
 
     def setUp(self):
         # _group_tops now consults STATE/cleared.jsonl (the view-cleared set) — sandbox STATE to a fresh
@@ -1444,85 +1444,52 @@ class Grouper(unittest.TestCase):
         return s, s["placements"]["s1"], s["placements"]["s2"]
 
     # ── parse ──
-    def test_parse_mint_group_and_empty(self):
-        self.assertEqual(jd._parse_group('{"ops":[{"why":"x","do":"group","goal":2,"under":1}]}', 3),
-                         [{"do": "group", "why": "x", "goal": 2, "under": 1}])
+    def test_parse_drops_the_retired_container_ops(self):
+        # T101 (the user 2026-08-26): mint + group parse away — an older cached reply that still
+        # emits them applies NOTHING; the housekeeping ops survive beside them
         ops = jd._parse_group('{"ops":[{"why":"u","do":"mint","text":"Umbrella"},'
-                              '{"why":"x","do":"group","goal":1,"ref":1}]}', 2)
-        self.assertEqual(ops[0], {"do": "mint", "why": "u", "text": "Umbrella"})
-        self.assertEqual(ops[1], {"do": "group", "why": "x", "goal": 1, "ref": 1}, "group via a same-reply ref")
-        self.assertEqual(jd._parse_group('{"ops":[{"why":"x","do":"group","goal":1,"under":1}]}', 3), [],
-                         "self-group (goal == under) is dropped")
-        self.assertEqual(jd._parse_group('{"ops":[]}', 3), [], "empty ops is valid: nothing to group")
+                              '{"why":"x","do":"group","goal":1,"under":2},'
+                              '{"why":"r","do":"retitle","goal":1,"text":"A, clarified"}]}', 3)
+        self.assertEqual([o["do"] for o in ops], ["retitle"])
+        self.assertEqual(jd._parse_group('{"ops":[]}', 3), [], "empty ops is valid: nothing to do")
         self.assertIsNone(jd._parse_group("not json", 3), "unusable JSON → None (retry)")
 
-    def test_parse_group_with_optional_retitle(self):
-        # the user 2026-07-01: a relink may ALSO retitle the child, now that continuous card identity in
-        # the UI (it visibly moves under the new parent) means a title change no longer reads as a new card.
-        ops = jd._parse_group('{"ops":[{"why":"x","do":"group","goal":2,"under":1,'
-                              '"retitle":"a clearer title"}]}', 3)
-        self.assertEqual(ops, [{"do": "group", "why": "x", "goal": 2, "under": 1, "retitle": "a clearer title"}])
-        # blank/whitespace-only retitle is dropped, same as an empty mint/sub text
-        ops2 = jd._parse_group('{"ops":[{"why":"x","do":"group","goal":2,"under":1,"retitle":"   "}]}', 3)
-        self.assertNotIn("retitle", ops2[0], "a blank retitle is dropped, not applied as an empty title")
-
     # ── apply ──
-    def test_relinks_a_top_under_another(self):
-        s, a, b = self._two_tops()
-        tops = jd._group_tops(s)                                  # [A, B] oldest-first
-        ai = next(i for i, nd in enumerate(tops, 1) if nd["id"] == a)
-        bi = next(i for i, nd in enumerate(tops, 1) if nd["id"] == b)
-        n = jd.apply_group(s, tops, [{"do": "group", "why": "both serve X", "goal": bi, "under": ai}], T0 + 20)
-        self.assertEqual(n, 1, "one relink applied")
-        self.assertEqual(s["nodes"][b]["parentId"], a, "B is relinked under A (its subtree moves with it)")
-        self.assertIsNone(s["nodes"][a]["parentId"], "A stays a top")
-
-    def test_relink_can_retitle_the_child(self):
+    def test_apply_ignores_the_retired_container_ops(self):
+        # T101: every top stays its own card — a hand-built group/mint op list applies NOTHING
         s, a, b = self._two_tops()
         tops = jd._group_tops(s)
         ai = next(i for i, nd in enumerate(tops, 1) if nd["id"] == a)
         bi = next(i for i, nd in enumerate(tops, 1) if nd["id"] == b)
-        jd.apply_group(s, tops, [{"do": "group", "why": "both serve X", "goal": bi, "under": ai,
-                                  "retitle": "B, narrowed"}], T0 + 20)
-        self.assertEqual(s["nodes"][b]["text"], "B, narrowed", "the relink also retitled the child")
+        n = jd.apply_group(s, tops, [{"do": "mint", "why": "x", "text": "Umbrella X"},
+                                     {"do": "group", "why": "x", "goal": bi, "under": ai}], T0 + 20)
+        self.assertEqual(n, 0, "nothing applied")
+        self.assertIsNone(s["nodes"][a]["parentId"], "A stays its own card")
+        self.assertIsNone(s["nodes"][b]["parentId"], "B stays its own card")
+        self.assertFalse(any(nd.get("umbrella") for nd in s["nodes"].values()), "no container minted")
+
+    def test_retitle_still_applies_standalone(self):
+        s, a, b = self._two_tops()
+        tops = jd._group_tops(s)
+        bi = next(i for i, nd in enumerate(tops, 1) if nd["id"] == b)
+        n = jd.apply_group(s, tops, [{"do": "retitle", "why": "outgrown", "goal": bi,
+                                      "text": "B, narrowed"}], T0 + 20)
+        self.assertEqual(n, 1)
+        self.assertEqual(s["nodes"][b]["text"], "B, narrowed")
         self.assertEqual(s["nodes"][b]["mt"], T0 + 20)
 
-    def test_relink_without_retitle_leaves_the_childs_title_alone(self):
-        s, a, b = self._two_tops()
-        tops = jd._group_tops(s)
-        ai = next(i for i, nd in enumerate(tops, 1) if nd["id"] == a)
-        bi = next(i for i, nd in enumerate(tops, 1) if nd["id"] == b)
-        jd.apply_group(s, tops, [{"do": "group", "why": "both serve X", "goal": bi, "under": ai}], T0 + 20)
-        self.assertEqual(s["nodes"][b]["text"], "Goal B", "no retitle in the op -> title unchanged")
-
-    def test_two_tops_under_a_fresh_umbrella_with_anchor_backfill(self):
-        s, a, b = self._two_tops()
-        s["nodes"][a]["trail"] = ["s1"]                           # A has a real anchor seg; B has none
-        tops = jd._group_tops(s)
-        ai = next(i for i, nd in enumerate(tops, 1) if nd["id"] == a)
-        bi = next(i for i, nd in enumerate(tops, 1) if nd["id"] == b)
-        jd.apply_group(s, tops, [{"do": "mint", "why": "both serve X", "text": "Umbrella X"},
-                                 {"do": "group", "why": "x", "goal": ai, "ref": 1},
-                                 {"do": "group", "why": "x", "goal": bi, "ref": 1}], T0 + 20)
-        um = next(nd for nd in s["nodes"].values() if nd["text"] == "Umbrella X")
-        self.assertEqual(s["nodes"][a]["parentId"], um["id"], "A grouped under the fresh umbrella")
-        self.assertEqual(s["nodes"][b]["parentId"], um["id"], "B grouped under the fresh umbrella")
-        self.assertIsNone(um["parentId"], "the umbrella is the new top")
-        self.assertTrue(um.get("umbrella"), "a minted umbrella is tagged")
-        self.assertEqual(um["trail"], ["s1"], "umbrella inherits its earliest grouped child's anchor seg")
-
-    def test_refuses_a_cycle(self):
+    def test_group_ops_cannot_create_cycles_because_they_apply_nothing(self):
         s = _store()
         jd.apply_plan(s, "s1", T0, [{"do": "mint", "why": "x", "text": "Parent"}], [])
         jd.apply_plan(s, "s2", T0 + 10, [{"do": "sub", "why": "x", "under": 1, "text": "Child"}], jd.open_menu(s))
         parent, child = s["placements"]["s1"], s["placements"]["s2"]
-        tops = [s["nodes"][parent], s["nodes"][child]]            # force Child into the candidate list to exercise the guard
+        tops = [s["nodes"][parent], s["nodes"][child]]
         n = jd.apply_group(s, tops, [{"do": "group", "why": "x", "goal": 1, "under": 2}], T0 + 20)
-        self.assertEqual(n, 0, "the cyclic relink is refused")
-        self.assertIsNone(s["nodes"][parent]["parentId"], "grouping Parent under its own Child is refused (no cycle)")
+        self.assertEqual(n, 0, "retired op — nothing applies, no cycle possible")
+        self.assertIsNone(s["nodes"][parent]["parentId"])
         self.assertEqual(s["nodes"][child]["parentId"], parent, "Child stays under Parent")
 
-    def test_relink_clamps_at_max_depth(self):
+    def test_retired_group_op_never_deepens_a_tree(self):
         s = _store()
         jd.apply_plan(s, "s0", T0, [{"do": "mint", "why": "x", "text": "A"}], [])
         for i in range(1, jd.MAX_DEPTH + 1):                     # chain A -> step1 -> ... down to MAX_DEPTH
@@ -1535,9 +1502,9 @@ class Grouper(unittest.TestCase):
         b = s["placements"]["sb"]
         tops = [deepest, s["nodes"][b]]                          # group B under the deepest node
         jd.apply_group(s, tops, [{"do": "group", "why": "x", "goal": 2, "under": 1}], T0 + 60)
-        self.assertLessEqual(jd._depth(s["nodes"], b), jd.MAX_DEPTH, "B's relink is clamped to MAX_DEPTH")
+        self.assertIsNone(s["nodes"][b]["parentId"], "the retired op applies nothing — B stays a top")
 
-    def test_reopened_once_done_node_is_groupable_again(self):
+    def test_reopened_once_done_node_is_mergeable_again(self):
         # INVERTED 2026-07-06 (the user): the old never-move-an-everDone-node guard is REMOVED — a reopened
         # once-done top is live work again, so an erroneously split pair the user pushes back into Working
         # can be re-merged by the grouper. (The guard's original motive — a done card vanishing under an
@@ -1554,13 +1521,13 @@ class Grouper(unittest.TestCase):
         tops = jd._group_tops(s)                                  # B is an open top again
         ai = next(i for i, nd in enumerate(tops, 1) if nd["id"] == a)
         bi = next(i for i, nd in enumerate(tops, 1) if nd["id"] == b)
-        n = jd.apply_group(s, tops, [{"do": "group", "why": "both serve X", "goal": bi, "under": ai}], T0 + 30)
-        self.assertEqual(n, 1, "a reopened once-done top relinks like any other open top")
-        self.assertEqual(s["nodes"][b]["parentId"], a, "B nests under A — the split re-merges")
+        n = jd.apply_group(s, tops, [{"do": "merge", "why": "same work twice", "goal": bi, "into": ai}], T0 + 30)
+        self.assertEqual(n, 1, "a reopened once-done top merges like any other open top (T101: merge, not nest)")
+        self.assertNotIn(b, s["nodes"], "the twin folded into the keeper")
 
-    def test_once_done_node_can_still_be_an_umbrella_parent(self):
-        # the exemption blocks MOVING a once-done node, not nesting OTHERS under it: A (never done) groups
-        # under B (once done, reopened) fine — B is a valid relink TARGET, just never a source.
+    def test_nesting_stays_retired_even_onto_a_reopened_top(self):
+        # T101: no relink target exists at all — a once-done reopened top is live work again, but
+        # nothing nests under it (the ask-unit rule has no exceptions)
         s, a, b = self._two_tops()
         di = next(i for i, nd in enumerate(jd.open_menu(s), 1) if nd["id"] == b)
         jd.apply_plan(s, "sd", T0 + 15, [{"do": "done", "why": "shipped", "goal": di}], jd.open_menu(s))
@@ -1569,8 +1536,8 @@ class Grouper(unittest.TestCase):
         ai = next(i for i, nd in enumerate(tops, 1) if nd["id"] == a)
         bi = next(i for i, nd in enumerate(tops, 1) if nd["id"] == b)
         n = jd.apply_group(s, tops, [{"do": "group", "why": "x", "goal": ai, "under": bi}], T0 + 30)
-        self.assertEqual(n, 1, "A (never done) is relinked under B")
-        self.assertEqual(s["nodes"][a]["parentId"], b, "the once-done node serves as the parent")
+        self.assertEqual(n, 0)
+        self.assertIsNone(s["nodes"][a]["parentId"], "A stays its own card")
 
     def test_a_bottom_up_completed_top_is_not_a_grouper_candidate(self):
         # the user 2026-06-25: a goal the board shows as DONE must never be a grouper source/target — else it
@@ -1648,12 +1615,13 @@ class Grouper(unittest.TestCase):
 
         def fake_group(menu):
             calls.append(menu)
-            return '{"ops":[{"why":"both serve X","do":"group","goal":2,"under":1}]}'   # B under A
+            bi = 2 if "Goal B" in menu.splitlines()[1] else 1     # retitle B wherever it landed
+            return '{"ops":[{"why":"outgrown","do":"retitle","goal":%d,"text":"Goal B, narrowed"}]}' % bi
         jd.group_llm = fake_group
         now = T0 + 5000
         jd.run_group(now=now)
         st = jd.load_goals(SID)
-        self.assertEqual(st["nodes"][b]["parentId"], a, "B nested under A")
+        self.assertEqual(st["nodes"][b]["text"], "Goal B, narrowed", "the housekeeping op applied")
         self.assertEqual(len(calls), 1, "the grouper called the model once")
         self.assertTrue(st.get("groupedSig"), "groupedSig recorded")
         jd.run_group(now=now)
@@ -1676,10 +1644,12 @@ class Grouper(unittest.TestCase):
         self.assertEqual(len(calls), 0, "fewer than two tops → nothing to group, model not called")
         self.assertIsNotNone(jd.load_goals(SID).get("groupedSig"), "the (single-top) set is still recorded")
 
-    def test_prompt_carries_the_grouping_steer(self):
-        for phrase in ('"do":"group"', '"do":"mint"', "relink open top", "umbrella",
-                       "aggressive about grouping", "look-alike wording"):
+    def test_prompt_carries_the_ask_unit_steer(self):
+        # T101: the prompt no longer teaches containers or nesting; the ask-unit rule is explicit
+        for phrase in ("its own card by design", '"do":"merge"', '"do":"split"', '"do":"retitle"'):
             self.assertIn(phrase, jd.GROUP_SYS, phrase)
+        for gone in ('"do":"group"', '"do":"mint"', "umbrella"):
+            self.assertNotIn(gone, jd.GROUP_SYS, gone)
         self.assertNotIn("genuine", jd.GROUP_SYS.lower(), "the grouper prompt avoids 'genuine' too")
 
     def test_prompt_allows_doing_nothing(self):
@@ -1719,12 +1689,12 @@ class Grouper(unittest.TestCase):
 
             def fake_group(menu):
                 gcalls.append(menu)
-                return '{"ops":[{"why":"both serve X","do":"group","goal":2,"under":1}]}'   # B under A
+                return '{"ops":[{"why":"same work twice","do":"merge","goal":2,"into":1}]}'   # twins fold
             jd.group_llm = fake_group
             jd.run_plan(now=T0 + 5000)
             st = jd.load_goals(SID)
             tops = [nd for nd in st["nodes"].values() if nd["parentId"] is None]
-            self.assertEqual(len(tops), 1, "2nd top grouped under the 1st INLINE — no separate run_group needed")
+            self.assertEqual(len(tops), 1, "the twin merged INLINE after placement — no separate run_group needed")
             self.assertGreaterEqual(len(gcalls), 1, "the planner invoked the grouper after a placement")
         finally:
             (jd.NAMES, jd.PROJECTS, jd.GOALDIR, jd.plan_llm, jd.group_llm) = saved
@@ -1798,19 +1768,18 @@ class Consolidator(unittest.TestCase):
         self.assertEqual(ids, {SID + ":g2"}, "a top the user crossed off the feed is never re-grouped")
 
     # ── apply-level: done nodes relink unconditionally (the allow_done lift is gone with its guard) ──
-    def test_apply_group_moves_a_once_done_node(self):
-        # 2026-07-06 (the user): apply_group no longer carries the once-done guard or the allow_done
-        # parameter — the consolidator (all-done candidates) and the working grouper (open candidates,
-        # possibly reopened-once-done) both relink through the same unconditional path.
+    def test_apply_group_never_nests_done_cards_either(self):
+        # T101: the retired group op applies nothing in the done column too
         s = self._completed_store([("g1", "A", ["sA"]), ("g2", "B", ["sB"])])
         tops = jd._consolidate_tops(s)
         ops = [{"do": "group", "why": "both done parts of X", "goal": 2, "under": 1}]
-        self.assertEqual(jd.apply_group(s, tops, ops, T0 + 20), 1,
-                         "a completed node relinks with no special lift")
-        self.assertEqual(s["nodes"][SID + ":g2"]["parentId"], SID + ":g1")
+        self.assertEqual(jd.apply_group(s, tops, ops, T0 + 20), 0)
+        self.assertIsNone(s["nodes"][SID + ":g2"].get("parentId"), "B stays its own done card")
 
     # ── the session pass ──
-    def test_groups_completed_siblings_under_a_completed_umbrella(self):
+    def test_completed_siblings_stay_their_own_cards(self):
+        # T101: the consolidator no longer containers the done column — an older cached reply that
+        # still asks for it applies nothing, and both cards keep their own identity and status row
         s = self._completed_store([("g1", "A", ["sA"]), ("g2", "B", ["sB"])])
         self._setup(s, self._RECORDS)
         jd.group_llm = lambda menu, **k: ('{"ops":[{"why":"both finish X","do":"mint","text":"Umbrella X"},'
@@ -1818,35 +1787,34 @@ class Consolidator(unittest.TestCase):
                                      '{"why":"x","do":"group","goal":2,"ref":1}]}')
         jd.run_consolidate(now=T0 + 5000)
         st = jd.load_goals(SID)
-        um = next((nd for nd in st["nodes"].values() if nd.get("umbrella")), None)
-        self.assertIsNotNone(um, "a completed umbrella was minted")
-        self.assertEqual(st["nodes"][SID + ":g1"]["parentId"], um["id"], "A nested under the umbrella")
-        self.assertEqual(st["nodes"][SID + ":g2"]["parentId"], um["id"], "B nested under the umbrella")
-        self.assertEqual(st["status"].get(um["id"]), "completed",
-                         "the umbrella rolls up to completed (all children done) — nothing reverts to working")
-        self.assertNotIn(SID + ":g1", st["status"], "the grouped children drop off the top-level status map")
-        self.assertNotIn(SID + ":g2", st["status"])
-        self.assertEqual(um["trail"], ["sA"], "the umbrella inherits its earliest child's anchor (deep-links to the work)")
+        self.assertIsNone(next((nd for nd in st["nodes"].values() if nd.get("umbrella")), None),
+                          "no container minted")
+        self.assertIsNone(st["nodes"][SID + ":g1"].get("parentId"), "A stays its own card")
+        self.assertIsNone(st["nodes"][SID + ":g2"].get("parentId"), "B stays its own card")
+        self.assertEqual(st["status"].get(SID + ":g1"), "completed")
+        self.assertEqual(st["status"].get(SID + ":g2"), "completed")
 
-    def test_reopened_child_reverts_the_whole_umbrella_to_working(self):
-        # the user's choice 2026-06-19: re-poking a child of a completed group reverts the umbrella to working,
-        # together — driven entirely by rollup_status (an umbrella is complete only while ALL kids are).
+    def test_a_legacy_umbrella_dissolves_and_its_children_stand_alone(self):
+        # T101: the dissolution sweep (rollup pre-pass) un-containers legacy stores — a reopened
+        # child then moves only ITSELF back to working; its done sibling rests untouched
         s = self._completed_store([("g1", "A", ["sA"]), ("g2", "B", ["sB"])])
-        tops = jd._consolidate_tops(s)
-        jd.apply_group(s, tops, [{"do": "mint", "why": "x", "text": "Umb"},
-                                 {"do": "group", "why": "x", "goal": 1, "ref": 1},
-                                 {"do": "group", "why": "x", "goal": 2, "ref": 1}], T0 + 20)
+        uid = SID + ":u9"
+        s["nodes"][uid] = {"id": uid, "text": "Umb", "parentId": None, "nodeComplete": False,
+                           "blocked": False, "cleared": False, "trail": [], "t": T0, "mt": T0,
+                           "umbrella": True, "log": []}
+        s["nodes"][SID + ":g1"]["parentId"] = uid
+        s["nodes"][SID + ":g2"]["parentId"] = uid
         jd.rollup_status(s, True)
-        um = next(nd for nd in s["nodes"].values() if nd.get("umbrella"))
-        self.assertEqual(s["status"][um["id"]], "completed", "all children done → umbrella completed")
-        jd._reopen(s, SID + ":g1", by="followup")     # a follow-up reopens child A — the REAL reopen:
-        jd.rollup_status(s, True)                     # post-P3.3, a hand-flipped flag with no event is
-        #                                               simply restored from the verdict log
-        self.assertEqual(s["status"][um["id"]], "working",
-                         "one reopened child reverts the whole umbrella to working")
+        self.assertNotIn(uid, s["nodes"], "the container dissolved")
+        self.assertEqual(s["status"].get(SID + ":g1"), "completed")
+        self.assertEqual(s["status"].get(SID + ":g2"), "completed")
+        jd._reopen(s, SID + ":g1", by="followup")
+        jd.rollup_status(s, True)
+        self.assertEqual(s["status"].get(SID + ":g1"), "working", "the reopened ask moves alone")
+        self.assertEqual(s["status"].get(SID + ":g2"), "completed", "its sibling rests — no shared fate")
 
-    # ── empty-umbrella cleanup ──
-    def test_empty_umbrella_is_cleared_but_a_populated_one_is_not(self):
+    # ── empty-umbrella cleanup: subsumed by the T101 dissolution (T103 deleted the old helper) ──
+    def test_dissolution_subsumes_empty_umbrella_cleanup(self):
         s = _store()
         s["nodes"][SID + ":g1"] = {"id": SID + ":g1", "text": "Empty header", "parentId": None,
                                    "nodeComplete": True, "blocked": False, "cleared": False,
@@ -1858,10 +1826,11 @@ class Consolidator(unittest.TestCase):
                                    "nodeComplete": True, "blocked": False, "cleared": False, "trail": ["s"],
                                    "t": T0, "mt": T0}
         jd.migrate_store(s)                                # legacy-shaped fixture: adopt diaries first
-        self.assertTrue(jd._clear_empty_umbrellas(s), "an empty umbrella is cleared")
-        self.assertTrue(s["nodes"][SID + ":g1"]["cleared"], "the childless umbrella is crossed off")
-        self.assertFalse(s["nodes"][SID + ":g2"]["cleared"], "the umbrella with a live child is left alone")
-        self.assertFalse(jd._clear_empty_umbrellas(s), "idempotent: a second pass clears nothing new")
+        jd.rollup_status(s, False)
+        self.assertNotIn(SID + ":g1", s["nodes"], "the empty container is gone entirely")
+        self.assertNotIn(SID + ":g2", s["nodes"], "the populated one too — its child stands alone")
+        self.assertIsNone(s["nodes"][SID + ":g3"].get("parentId"), "the child is its own card")
+        self.assertFalse(hasattr(jd, "_clear_empty_umbrellas"), "the old helper is deleted, not orphaned")
 
     # ── event gating ──
     def test_stable_completed_set_does_not_re_call_the_model(self):
@@ -3657,11 +3626,17 @@ class StatusReportMenu(unittest.TestCase):
         blocked = _mknode(store, "waiting on the user"); blocked["blocked"] = True
         owed = _mknode(store, "agent still owes work")
         owed["agentTask"] = {"key": "k1", "status": "open"}
-        sub = _mknode(store, "a sub, not a card", parent=g1["id"])
+        cited_sub = _mknode(store, "the cited goals own open leaf", parent=g1["id"])
+        other_top = _mknode(store, "an unrelated top")
+        other_sub = _mknode(store, "a sub of an uncited top", parent=other_top["id"])
         captured = self._spy('{"done": []}')
         jd._close_turn(store, turn)
-        for absent in ("already finished", "waiting on the user", "agent still owes work", "a sub, not a card"):
+        for absent in ("already finished", "waiting on the user", "agent still owes work",
+                       "a sub of an uncited top", "the cited goals own open leaf"):
             self.assertNotIn(absent, captured["mt"], "%r must not ride the widened menu" % absent)
+        # T103: the cited-umbrella descendants channel retired with containers (T101 dissolves
+        # them in every rollup, so a once-stranded leaf is its own TOP and rides the plain
+        # channel) — the widened menu is tops-only again, byte-identical to the 2026-07-26 shape
 
 
 class SweepSession(unittest.TestCase):
@@ -4124,16 +4099,14 @@ class FollowUp(unittest.TestCase):
                          "nothing was buried under the cited goal itself")
         top = next(nd for nd in st["nodes"].values() if nd.get("pivotFrom") == gid)
         self.assertEqual(top["text"], "Rework the export flow")
-        umb = st["nodes"][top["parentId"]]
-        self.assertTrue(umb.get("umbrella"), "the pivot goal lives under an umbrella, not loose on the board")
-        self.assertEqual(st["nodes"][gid]["parentId"], umb["id"],
-                         "the cited card sits under the same umbrella — followed-up work stays together")
-        self.assertEqual(umb["text"], "Ship the release", "the umbrella wears the cited card's title")
-        self.assertIsNone(umb["parentId"])
+        # T101 (the user 2026-08-26): the STRUCTURAL tie retired with the umbrella — the pivot's
+        # goal is its own card, and pivotFrom is the provenance display layers may group on
+        self.assertIsNone(top.get("parentId"), "the pivot goal is its own card")
+        self.assertFalse(any(nd.get("umbrella") for nd in st["nodes"].values()), "no container minted")
 
-    def test_followup_pivot_joins_the_cited_cards_existing_umbrella(self):
-        # the tie reuses an existing roof: when the cited card already lives under an umbrella, the pivot's
-        # goal relinks under THAT umbrella — no umbrella-of-umbrellas.
+    def test_a_pivot_on_a_legacy_umbrella_child_dissolves_the_container(self):
+        # T101: a legacy umbrella around the cited card dissolves on the pass's own rollup — the
+        # cited card and the pivot goal both end as their own cards, tied by pivotFrom provenance
         gid, uid = SID + ":g1", SID + ":g9"
         store = self._completed_top(gid)
         store["nodes"][uid] = {"id": uid, "text": "Release work", "parentId": None, "umbrella": True,
@@ -4148,9 +4121,9 @@ class FollowUp(unittest.TestCase):
         jd.run_plan(now=T0 + 5000)
         st = jd.load_goals(SID)
         top = next(nd for nd in st["nodes"].values() if nd.get("pivotFrom") == gid)
-        self.assertEqual(top["parentId"], uid, "the pivot goal joined the existing umbrella")
-        self.assertEqual(sum(1 for nd in st["nodes"].values() if nd.get("umbrella")), 1,
-                         "no second umbrella was minted")
+        self.assertIsNone(top.get("parentId"), "the pivot goal is its own card")
+        self.assertNotIn(uid, st["nodes"], "the legacy container dissolved on the pass's rollup")
+        self.assertIsNone(st["nodes"][gid].get("parentId"), "the cited card stands alone again")
 
     def test_pivot_clears_followup_pending_on_a_blocked_cited_goal(self):
         # the user 2026-07-03: the track card sat in Working with a "Re-judging…" swirl for 8+ hours.
@@ -4172,9 +4145,10 @@ class FollowUp(unittest.TestCase):
         self.assertNotIn("followupPending", st["nodes"][gid],
                          "the pivot verdict processed the follow-up — the optimistic flag drops")
         self.assertTrue(st["nodes"][gid]["blocked"], "the block stands on the cited goal")
-        umb = st["nodes"][st["nodes"][gid]["parentId"]]   # the 07-09 tie grouped the pivot with the cited card
-        self.assertEqual(st["status"][umb["id"]], "blocked",
-                         "the umbrella card carries the block to Needs-You, not a permanent Re-judging swirl")
+        self.assertIsNone(st["nodes"][gid].get("parentId"),
+                          "T101: no umbrella tie — the cited card is its own card")
+        self.assertEqual(st["status"][gid], "blocked",
+                         "the cited card itself carries the block to Needs-You, not a permanent Re-judging swirl")
 
     def test_followup_parse_failure_keeps_the_forced_sub_floor(self):
         # ambiguity never pivots: an unparseable planner reply falls to the forced-sub default, so an
@@ -4421,7 +4395,7 @@ class DeltaScopedDistill(unittest.TestCase):
             store["nodes"][g]["deltaSince"] = deltaSince
         jd.save_goals(SID, store)
         captured = {}
-        jd.distill_llm = lambda goal_text, work_text, done_why="", prior_summary="", items=None: (
+        jd.distill_llm = lambda goal_text, work_text, done_why="", prior_summary="", items=None, frame=None, user_ask=None: (
             captured.update(work=work_text, prior=prior_summary) or "BACKGROUND: b.\nTAKEAWAY: t.\nSOURCE: m2")
         jd._distill_session(SID, str(path), NOW)
         return captured.get("work", ""), jd.load_goals(SID)["nodes"][g]
@@ -4461,7 +4435,7 @@ class DeltaScopedDistill(unittest.TestCase):
                                "settledAt": T0 + 200, "deltaSince": T0 + 50, "doneWhy": "finished it"}}}
         jd.save_goals(SID, store)
         captured = {}
-        jd.distill_llm = lambda goal_text, work_text, done_why="", prior_summary="", items=None: (
+        jd.distill_llm = lambda goal_text, work_text, done_why="", prior_summary="", items=None, frame=None, user_ask=None: (
             captured.update(work=work_text, prior=prior_summary) or "BACKGROUND: b.\nTAKEAWAY: t2.\nSOURCE: m1")
         jd._distill_session(SID, str(path), NOW)
         return captured, jd.load_goals(SID)["nodes"][g]
@@ -4518,7 +4492,7 @@ class DeltaScopedDistill(unittest.TestCase):
                  "status": {g: "completed"}, "nodes": nodes}
         jd.save_goals(SID, store)
         captured = {}
-        jd.distill_llm = lambda goal_text, work_text, done_why="", prior_summary="", items=None: (
+        jd.distill_llm = lambda goal_text, work_text, done_why="", prior_summary="", items=None, frame=None, user_ask=None: (
             captured.update(work=work_text, prior=prior_summary, items=items)
             or "BACKGROUND: b.\nTAKEAWAY: t3.\nSOURCE: m1")
         jd._distill_session(SID, str(path), NOW)
@@ -4747,7 +4721,7 @@ class ProceduralBlockStillSpeaks(unittest.TestCase):
         jd.stall_llm = lambda goal_text, work_text, holding: (
             calls["stall"].append(holding) or
             ("BACKGROUND: b.\nTAKEAWAY: stall take.\nSOURCE: m1" if stall_ret is None else stall_ret))
-        jd.brief_llm = lambda goal_text, work_text, owed: (
+        jd.brief_llm = lambda goal_text, work_text, owed, frame=None, user_ask=None: (
             calls["brief"].append(owed) or
             ("BACKGROUND: b.\nTAKEAWAY: brief take.\nSOURCE: m1" if brief_ret is None else brief_ret))
         jd._distill_session(SID, str(path), NOW)
@@ -4880,7 +4854,7 @@ class DeadBlockNeverPinsTheBrief(unittest.TestCase):
     def test_the_owed_decision_reaches_the_briefer_past_a_dead_interrupt(self):
         path, _store, top = self._store()
         calls = []
-        jd.brief_llm = lambda goal_text, work_text, owed: (
+        jd.brief_llm = lambda goal_text, work_text, owed, frame=None, user_ask=None: (
             calls.append(owed) or "BACKGROUND: b.\nTAKEAWAY: decide the gate.\nSOURCE: m1")
         jd.stall_llm = lambda *a, **k: self.fail("the staller does not speak for a substantive block")
         jd._distill_session(SID, path, NOW)
@@ -5038,7 +5012,7 @@ class DistillArtifacts(unittest.TestCase):
                                                 "nodeComplete": True, "blocked": False, "cleared": False,
                                                 "artifacts": ["/tmp/out/spec.md"],   # an earlier distill saw it
                                                 "trail": [s1], "t": T0, "mt": T0 + 10}}})
-            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "TAKEAWAY: The doc reads better."
+            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "TAKEAWAY: The doc reads better."
             self.assertEqual(jd.run_distill(now=now), 1)
             self.assertEqual(jd.load_goals(SID)["nodes"][gid]["artifacts"], ["/tmp/out/spec.md"],
                              "a silent second pass must not erase what the first one recorded")
@@ -5060,7 +5034,7 @@ class DistillArtifacts(unittest.TestCase):
                                 "nodes": {gid: {"id": gid, "text": "Plot the results", "parentId": None,
                                                 "nodeComplete": True, "blocked": False, "cleared": False,
                                                 "trail": [s1], "t": T0, "mt": T0 + 10}}})
-            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: ("BACKGROUND: You asked for a results plot.\n"
+            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: ("BACKGROUND: You asked for a results plot.\n"
                                                   "TAKEAWAY: The plot is saved and ready.\n"
                                                   "ARTIFACTS: /tmp/out/plot.png\nSOURCE: m1")
             self.assertEqual(jd.run_distill(now=now), 1)
@@ -5084,7 +5058,7 @@ class DistillArtifacts(unittest.TestCase):
                                 "nodes": {gid: {"id": gid, "text": "Do it", "parentId": None,
                                                 "nodeComplete": True, "blocked": False, "cleared": False,
                                                 "trail": [s1], "t": T0, "mt": T0 + 10}}})
-            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "TAKEAWAY: Delivered."
+            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "TAKEAWAY: Delivered."
             self.assertEqual(jd.run_distill(now=now), 1)
             self.assertIsNone(jd.load_goals(SID)["nodes"][gid]["artifacts"])
         finally:
@@ -5141,7 +5115,7 @@ class DistillSections(unittest.TestCase):
                                 "nodes": {gid: {"id": gid, "text": "Faster export", "parentId": None,
                                                 "nodeComplete": True, "blocked": False, "cleared": False,
                                                 "trail": [s1], "t": T0, "mt": T0 + 10}}})
-            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: ("BACKGROUND: You asked for a faster export.\n"
+            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: ("BACKGROUND: You asked for a faster export.\n"
                                                   "TAKEAWAY: It ships gzip now.\nSOURCE: m1")
             self.assertEqual(jd.run_distill(now=now), 1)
             nd = jd.load_goals(SID)["nodes"][gid]
@@ -5164,7 +5138,7 @@ class DistillSections(unittest.TestCase):
                                 "nodes": {gid: {"id": gid, "text": "Ship the feature", "parentId": None,
                                                 "nodeComplete": False, "blocked": True, "cleared": False,
                                                 "blockWhy": "A or B?", "trail": [s1], "t": T0, "mt": T0 + 10}}})
-            jd.brief_llm = lambda g, w, ow="": "BACKGROUND: You asked to ship the feature.\nTAKEAWAY: Decide A or B."
+            jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: "BACKGROUND: You asked to ship the feature.\nTAKEAWAY: Decide A or B."
             self.assertEqual(jd.run_distill(now=now), 1)
             nd = jd.load_goals(SID)["nodes"][gid]
             self.assertEqual(nd["blockSummary"], "Decide A or B.")
@@ -5185,7 +5159,7 @@ class DistillSections(unittest.TestCase):
                                 "nodes": {gid: {"id": gid, "text": "Do it", "parentId": None,
                                                 "nodeComplete": True, "blocked": False, "cleared": False,
                                                 "trail": [s1], "t": T0, "mt": T0 + 10}}})
-            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "Delivered."       # an older-style reply
+            jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "Delivered."       # an older-style reply
             self.assertEqual(jd.run_distill(now=now), 1)
             nd = jd.load_goals(SID)["nodes"][gid]
             self.assertEqual(nd["summary"], "Delivered.")
@@ -5355,7 +5329,7 @@ class Distiller(unittest.TestCase):
                                             "doneWhy": "Both parts shipped and verified"}}})
         captured = {}
 
-        def fake_distill(goal_text, work_text, done_why="", prior_summary="", items=None):
+        def fake_distill(goal_text, work_text, done_why="", prior_summary="", items=None, frame=None, user_ask=None):
             captured["goal"], captured["work"], captured["done"] = goal_text, work_text, done_why
             return "Part one and part two delivered."
         jd.distill_llm = fake_distill
@@ -5369,7 +5343,7 @@ class Distiller(unittest.TestCase):
         self.assertEqual(captured["done"], "Both parts shipped and verified",
                          "the closer's doneWhy is fed to the distiller as <completed> ground truth")
         calls = []                                          # event-gated: re-running distills nothing
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: (calls.append(1), "x")[1]
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: (calls.append(1), "x")[1]
         self.assertEqual(jd.run_distill(now=now), 0)
         self.assertEqual(calls, [], "a goal already distilled at this mt is not re-distilled")
 
@@ -5393,7 +5367,7 @@ class Distiller(unittest.TestCase):
                                             "nodeComplete": True, "blocked": False, "cleared": False,
                                             "trail": trail, "t": T0, "mt": T0 + 210}}})
         seen = {}
-        def fake_distill(goal_text, work_text, done_why="", prior_summary="", items=None):
+        def fake_distill(goal_text, work_text, done_why="", prior_summary="", items=None, frame=None, user_ask=None):
             seen["work"] = work_text
             return "Both parts delivered.\nSOURCE: m2"
         jd.distill_llm = fake_distill
@@ -5417,7 +5391,7 @@ class Distiller(unittest.TestCase):
                             "nodes": {gid: {"id": gid, "text": "Build the thing", "parentId": None,
                                             "nodeComplete": True, "blocked": False, "cleared": False,
                                             "trail": [s1], "t": T0, "mt": T0 + 10}}})
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "Delivered without a citation."
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "Delivered without a citation."
         self.assertEqual(jd.run_distill(now=now), 1)
         nd = jd.load_goals(SID)["nodes"][gid]
         self.assertEqual(nd["summary"], "Delivered without a citation.")
@@ -5439,7 +5413,7 @@ class Distiller(unittest.TestCase):
                             "nodes": {gid: {"id": gid, "text": "Build the thing", "parentId": None,
                                             "nodeComplete": True, "blocked": False, "cleared": False,
                                             "trail": [s1], "t": T0, "mt": T0 + 10}}})
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "Delivered, but no citation line."
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "Delivered, but no citation line."
         d = Path(tempfile.mkdtemp()); saved_errors = jd.ERRORS
         try:
             jd.ERRORS = d / "judge-errors.jsonl"
@@ -5472,7 +5446,7 @@ class Distiller(unittest.TestCase):
                             "nodes": {gid: {"id": gid, "text": "Build the thing", "parentId": None,
                                             "nodeComplete": True, "blocked": False, "cleared": False,
                                             "trail": [s1], "t": T0, "mt": T0 + 10}}})
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "Delivered.\nSOURCE: m99"
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "Delivered.\nSOURCE: m99"
         d = Path(tempfile.mkdtemp()); saved_errors = jd.ERRORS
         try:
             jd.ERRORS = d / "judge-errors.jsonl"
@@ -5502,7 +5476,7 @@ class Distiller(unittest.TestCase):
                                             "trail": [s1], "t": T0, "mt": T0 + 10,
                                             "warns": [{"kind": "cite-miss", "t": T0, "msg": "m",
                                                        "detail": "d"}]}}})
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "Delivered.\nSOURCE: m1"
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "Delivered.\nSOURCE: m1"
         self.assertEqual(jd.run_distill(now=now), 1)
         nd = jd.load_goals(SID)["nodes"][gid]
         self.assertEqual(nd["summaryAnchor"], "a1")
@@ -5524,7 +5498,7 @@ class Distiller(unittest.TestCase):
                                             "nodeComplete": False, "blocked": True, "cleared": False,
                                             "blockWhy": "Which approach?", "trail": [s1],
                                             "t": T0, "mt": T0 + 10}}})
-        jd.brief_llm = lambda g, w, ow="": "Decide the approach, options laid out."
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: "Decide the approach, options laid out."
         d = Path(tempfile.mkdtemp()); saved_errors = jd.ERRORS
         try:
             jd.ERRORS = d / "judge-errors.jsonl"
@@ -5553,7 +5527,7 @@ class Distiller(unittest.TestCase):
                                             "nodeComplete": False, "blocked": True, "cleared": False,
                                             "blockWhy": "Which approach — A or B?", "trail": [s1],
                                             "t": T0, "mt": T0 + 10}}})
-        jd.brief_llm = lambda g, w, ow="": "Decide A or B.\nSOURCE: [m1]"
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: "Decide A or B.\nSOURCE: [m1]"
         self.assertEqual(jd.run_distill(now=now), 1)
         nd = jd.load_goals(SID)["nodes"][gid]
         self.assertEqual(nd["blockSummary"], "Decide A or B.", "the SOURCE line is parsed off the brief")
@@ -5584,7 +5558,7 @@ class Distiller(unittest.TestCase):
         self.assertEqual(store["status"][gid], "blocked", "the open-todo block rolls the top to blocked")
         jd.save_goals(SID, store)
         seen = {}
-        def fake_brief(goal_text, work_text, block_why):
+        def fake_brief(goal_text, work_text, block_why, frame=None, user_ask=None):
             seen["owed"] = block_why
             return "Provide the staging credentials so the migration can run."
         jd.brief_llm = fake_brief
@@ -5621,7 +5595,7 @@ class Distiller(unittest.TestCase):
         self.assertEqual(store["status"][gid], "blocked", "two blocked subs roll the top to blocked")
         jd.save_goals(SID, store)
         seen = {}
-        def fake_brief(goal_text, work_text, owed):
+        def fake_brief(goal_text, work_text, owed, frame=None, user_ask=None):
             seen["owed"] = owed
             return "Decide the screencast: record it now.\n\nDecide the Internals: merge or leave."
         jd.brief_llm = fake_brief
@@ -5650,7 +5624,7 @@ class Distiller(unittest.TestCase):
                             "nodes": {gid: {"id": gid, "text": "Build the thing", "parentId": None,
                                             "nodeComplete": True, "blocked": False, "cleared": False,
                                             "trail": [s1], "t": T0, "mt": T0 + 10}}})
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: ""             # the call always fails (empty)
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: ""             # the call always fails (empty)
         for i in range(1, jd.DISTILL_FAIL_CAP):             # the pre-cap passes: keep retrying, count climbs
             jd.run_distill(now=now)
             nd = jd.load_goals(SID)["nodes"][gid]
@@ -5663,7 +5637,7 @@ class Distiller(unittest.TestCase):
         self.assertEqual(nd.get("distilledMt"), T0 + 10, "distilledMt stamped → never re-enters")
         self.assertEqual(nd.get("distillFails"), 0, "counter reset for a future re-open")
         ran = []                                            # the sentinel is non-null → no more distills
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: (ran.append(1), "late")[1]
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: (ran.append(1), "late")[1]
         jd.run_distill(now=now)
         self.assertEqual(ran, [], "a settled card is not re-distilled — the loop is broken")
 
@@ -5681,7 +5655,7 @@ class Distiller(unittest.TestCase):
                                             "nodeComplete": False, "blocked": True, "cleared": False,
                                             "blockWhy": "Which approach — A or B?", "trail": [s1],
                                             "t": T0, "mt": T0 + 10}}})
-        jd.brief_llm = lambda g, w, ow="": ""               # the brief call always fails
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: ""               # the brief call always fails
         for i in range(1, jd.DISTILL_FAIL_CAP):
             jd.run_distill(now=now)
             nd = jd.load_goals(SID)["nodes"][gid]
@@ -5711,14 +5685,14 @@ class Distiller(unittest.TestCase):
                                             "blockWhy": "Which approach — A or B?", "trail": [s1],
                                             "t": T0, "mt": T0 + 10}}})
         # simulate a pause-skip exactly as _judge_run does: mark _judge_ctx.paused and return "" (API not asked)
-        jd.brief_llm = lambda g, w, ow="": (setattr(jd._judge_ctx, "paused", True), "")[1]
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: (setattr(jd._judge_ctx, "paused", True), "")[1]
         for _ in range(jd.DISTILL_FAIL_CAP + 2):            # MORE passes than the cap — still must not give up
             jd.run_distill(now=now)
             nd = jd.load_goals(SID)["nodes"][gid]
             self.assertIsNone(nd.get("blockSummary"), "a pause-skip leaves the brief null → re-enters next pass")
             self.assertIn(nd.get("briefFails"), (None, 0), "a pause-skip never increments the give-up counter")
             self.assertIsNone(nd.get("briefedMt"), "never stamped → never a permanent give-up while paused")
-        jd.brief_llm = lambda g, w, ow="": (setattr(jd._judge_ctx, "paused", False), "Decide A or B.")[1]
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: (setattr(jd._judge_ctx, "paused", False), "Decide A or B.")[1]
         jd.run_distill(now=now)                             # pause cleared → the brief lands normally
         self.assertEqual(jd.load_goals(SID)["nodes"][gid].get("blockSummary"), "Decide A or B.",
                          "once the pause clears the brief lands — the card was never permanently blanked")
@@ -5743,7 +5717,7 @@ class Distiller(unittest.TestCase):
         (jd.STATE).mkdir(parents=True, exist_ok=True)       # no maxed account window → the generic cause
         (jd.STATE / "usage.json").write_text(json.dumps({"five_hour": {"pct": 20}, "seven_day": {"pct": 40}}))
         gid, now = self._blocked_goal()
-        jd.brief_llm = lambda g, w, ow="": ""               # every call fails (real, not a pause-skip)
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: ""               # every call fails (real, not a pause-skip)
         for _ in range(jd.DISTILL_FAIL_CAP):
             jd.run_distill(now=now)
         nd = jd.load_goals(SID)["nodes"][gid]
@@ -5763,7 +5737,7 @@ class Distiller(unittest.TestCase):
             "seven_day": {"pct": 40, "resets_at": FUT},
             "fable": {"pct": 100, "resets_at": FUT}}))
         gid, now = self._blocked_goal()
-        jd.brief_llm = lambda g, w, ow="": ""
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: ""
         for _ in range(jd.DISTILL_FAIL_CAP):
             jd.run_distill(now=now)
         det = [w for w in jd.load_goals(SID)["nodes"][gid].get("warns") or []
@@ -5774,14 +5748,14 @@ class Distiller(unittest.TestCase):
 
     def test_a_successful_summary_clears_the_failed_warn(self):
         gid, now = self._blocked_goal()
-        jd.brief_llm = lambda g, w, ow="": ""
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: ""
         for _ in range(jd.DISTILL_FAIL_CAP):
             jd.run_distill(now=now)
         self.assertTrue(any(w.get("kind") == "brief-failed"
                             for w in jd.load_goals(SID)["nodes"][gid].get("warns") or []))
         # re-arm + a working brief → the warn clears
         st = jd.load_goals(SID); st["nodes"][gid]["blockSummary"] = None; jd.save_goals(SID, st)
-        jd.brief_llm = lambda g, w, ow="": "Decide A or B."
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: "Decide A or B."
         jd.run_distill(now=now)
         nd = jd.load_goals(SID)["nodes"][gid]
         self.assertEqual(nd.get("blockSummary"), "Decide A or B.")
@@ -5792,7 +5766,7 @@ class Distiller(unittest.TestCase):
         # the chip's hover/modal history (the user 2026-08-18): every failed try lands as when + model +
         # literal error, and the line's eventual success clears its rows
         gid, now = self._blocked_goal()
-        jd.brief_llm = lambda g, w, ow="": (setattr(jd._judge_ctx, "last_call_fail",
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: (setattr(jd._judge_ctx, "last_call_fail",
             {"note": "API Error: Repeated 529 Overloaded errors.", "model": "opus"}), "")[1]
         for _ in range(jd.DISTILL_FAIL_CAP):
             jd.run_distill(now=now)
@@ -5801,7 +5775,7 @@ class Distiller(unittest.TestCase):
         self.assertTrue(all(e["model"] == "opus" and "529" in e["note"] and e["line"] == "brief"
                             for e in log), "each row carries the model and the literal error")
         st = jd.load_goals(SID); st["nodes"][gid]["blockSummary"] = None; jd.save_goals(SID, st)
-        jd.brief_llm = lambda g, w, ow="": (setattr(jd._judge_ctx, "last_call_fail", None), "Decide A or B.")[1]
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: (setattr(jd._judge_ctx, "last_call_fail", None), "Decide A or B.")[1]
         jd.run_distill(now=now)
         self.assertNotIn("failLog", jd.load_goals(SID)["nodes"][gid],
                          "the landed brief clears its line's attempt history")
@@ -5811,14 +5785,14 @@ class Distiller(unittest.TestCase):
         # the whole suite still passed — so pin them through the REAL path: an auto-re-armed line whose
         # retry succeeds must drop its era mark, or the health edge is one-per-lifetime per card
         gid, now = self._blocked_goal()
-        jd.brief_llm = lambda g, w, ow="": ""
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: ""
         for _ in range(jd.DISTILL_FAIL_CAP):
             jd.run_distill(now=now)
         st = jd.load_goals(SID)                          # the health edge re-armed it (as rearm would):
         st["nodes"][gid]["blockSummary"] = None          # line owed again, era spent
         st["nodes"][gid]["autoRearmed"] = {"brief-failed": True}
         jd.save_goals(SID, st)
-        jd.brief_llm = lambda g, w, ow="": "Decide A or B."
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: "Decide A or B."
         jd.run_distill(now=now)
         nd = jd.load_goals(SID)["nodes"][gid]
         self.assertEqual(nd.get("blockSummary"), "Decide A or B.")
@@ -5827,7 +5801,7 @@ class Distiller(unittest.TestCase):
 
     def test_scan_counts_failures_and_rearm_reopens_only_warned_cards(self):
         gid, now = self._blocked_goal()
-        jd.brief_llm = lambda g, w, ow="": ""
+        jd.brief_llm = lambda g, w, ow="", frame=None, user_ask=None: ""
         for _ in range(jd.DISTILL_FAIL_CAP):
             jd.run_distill(now=now)
         scan = jd.judge_failure_scan()
@@ -5855,7 +5829,7 @@ class Distiller(unittest.TestCase):
                             "nodes": {gid: {"id": gid, "text": "G", "parentId": None, "nodeComplete": True,
                                             "blocked": False, "cleared": False, "trail": [s1], "t": T0,
                                             "mt": T0 + 10, "distilledMt": T0 + 10, "summary": "old"}}})
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "fresh"
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "fresh"
         self.assertEqual(jd.run_distill(now=now), 0, "already distilled at this mt -> no-op")
         st = jd.load_goals(SID); st["nodes"][gid]["mt"] = T0 + 999; jd.save_goals(SID, st)   # reopened + re-completed
         self.assertEqual(jd.run_distill(now=now), 1, "mt advanced (re-completed) -> re-distill")
@@ -5874,7 +5848,7 @@ class Distiller(unittest.TestCase):
                             "nodes": {gid: {"id": gid, "text": "Build and verify the feature", "parentId": None,
                                             "nodeComplete": True, "blocked": False, "cleared": False,
                                             "trail": [], "t": T0, "mt": T0 + 10}}})   # empty trail → no work
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: (_ for _ in ()).throw(AssertionError("no work → distill_llm must not run"))
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: (_ for _ in ()).throw(AssertionError("no work → distill_llm must not run"))
         jd.run_distill(now=now)
         nd = jd.load_goals(SID)["nodes"][gid]
         self.assertEqual(nd["summary"], "", "no-work top settles to the \"\" sentinel, not a null/'(generating…)'")
@@ -5893,11 +5867,11 @@ class Distiller(unittest.TestCase):
                                             "nodeComplete": True, "blocked": False, "cleared": False,
                                             "trail": [], "t": T0, "mt": T0 + 10,
                                             "distilledMt": T0 + 10, "summary": None}}})   # stamped but null
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "should-not-run"
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "should-not-run"
         jd.run_distill(now=now)
         self.assertEqual(jd.load_goals(SID)["nodes"][gid]["summary"], "", "stuck null summary heals to \"\"")
         calls = []
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: (calls.append(1), "x")[1]
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: (calls.append(1), "x")[1]
         jd.run_distill(now=now)
         self.assertEqual(calls, [], "once settled to \"\" (non-null), the goal is not reprocessed")
 
@@ -5930,11 +5904,11 @@ class Distiller(unittest.TestCase):
                                             "blockWhy": "Redis or Postgres for sessions?"}}})
         captured = {}
 
-        def fake_brief(goal_text, work_text, owed):
+        def fake_brief(goal_text, work_text, owed, frame=None, user_ask=None):
             captured["goal"], captured["work"], captured["owed"] = goal_text, work_text, owed
             return "Decide: Redis or Postgres for the session store."
         jd.brief_llm = fake_brief
-        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None: "should-not-run"
+        jd.distill_llm = lambda g, w, dw="", prior_summary="", items=None, frame=None, user_ask=None: "should-not-run"
         self.assertEqual(jd.run_distill(now=now), 1, "the blocked top is briefed")
         nd = jd.load_goals(SID)["nodes"][gid]
         self.assertEqual(nd["blockSummary"], "Decide: Redis or Postgres for the session store.")
@@ -5943,7 +5917,7 @@ class Distiller(unittest.TestCase):
         self.assertEqual(captured["owed"], "Redis or Postgres for sessions?", "the owed question is fed in")
         self.assertIn("two options", captured["work"], "the goal's work history is fed in")
         calls = []                                          # event-gated: re-running briefs nothing
-        jd.brief_llm = lambda g, w, o: (calls.append(1), "x")[1]
+        jd.brief_llm = lambda g, w, o, frame=None, user_ask=None: (calls.append(1), "x")[1]
         self.assertEqual(jd.run_distill(now=now), 0)
         self.assertEqual(calls, [], "a block already briefed at this mt is not re-briefed")
 
@@ -5959,7 +5933,7 @@ class Distiller(unittest.TestCase):
                             "nodes": {gid: {"id": gid, "text": "G", "parentId": None, "nodeComplete": False,
                                             "blocked": True, "cleared": False, "trail": [s1], "t": T0,
                                             "mt": T0 + 10, "blockWhy": "which way?"}}})
-        jd.brief_llm = lambda g, w, o: ""              # permanent failure
+        jd.brief_llm = lambda g, w, o, frame=None, user_ask=None: ""              # permanent failure
         self.assertEqual(jd.run_distill(now=now), 0, "a failed brief produced nothing")
         nd = jd.load_goals(SID)["nodes"][gid]
         self.assertNotIn("blockSummary", nd, "NO fallback — blockSummary stays null")
@@ -6243,7 +6217,7 @@ class LivePickerBrief(unittest.TestCase):
 
     def test_live_picker_briefs_a_working_focus_top(self):
         path, g = self._setup("picker")
-        jd.brief_llm = lambda goal, work, owed: "Decide: option A or B. Context provided."
+        jd.brief_llm = lambda goal, work, owed, frame=None, user_ask=None: "Decide: option A or B. Context provided."
         jd.distill_llm = lambda *a, **k: self.fail("a working goal must not take the DONE-distiller path")
         n = jd._distill_session(SID, path, NOW)
         nd = jd.load_goals(SID)["nodes"][g]
@@ -6255,14 +6229,14 @@ class LivePickerBrief(unittest.TestCase):
 
     def test_permission_also_briefs(self):
         path, g = self._setup("permission")
-        jd.brief_llm = lambda goal, work, owed: "Approve the edit to keep going?"
+        jd.brief_llm = lambda goal, work, owed, frame=None, user_ask=None: "Approve the edit to keep going?"
         n = jd._distill_session(SID, path, NOW)
         self.assertEqual(n, 1, "a live PERMISSION prompt briefs its focus top too, like a picker")
 
     def test_idempotent_while_parked(self):
         path, g = self._setup("picker")
         calls = []
-        jd.brief_llm = lambda goal, work, owed: (calls.append(1), "brief")[1]
+        jd.brief_llm = lambda goal, work, owed, frame=None, user_ask=None: (calls.append(1), "brief")[1]
         jd._distill_session(SID, path, NOW)
         jd._distill_session(SID, path, NOW)            # a 2nd pass while STILL parked
         self.assertEqual(len(calls), 1, "briefed ONCE per episode (promptBriefedT gate), not every producer pass")
@@ -6287,7 +6261,7 @@ class LivePickerBrief(unittest.TestCase):
         path, g = self._setup("picker")
         briefs = iter(["Pick the retry budget: 3 or 5?", "Name the config key: timeout or deadline?"])
         calls = []
-        jd.brief_llm = lambda goal, work, owed: (calls.append(1), next(briefs))[1]
+        jd.brief_llm = lambda goal, work, owed, frame=None, user_ask=None: (calls.append(1), next(briefs))[1]
         jd._distill_session(SID, path, NOW)
         self._append_states((NOW - 15, "working"), (NOW - 10, "picker"))   # answered → NEW question
         jd._distill_session(SID, path, NOW)
@@ -6300,7 +6274,7 @@ class LivePickerBrief(unittest.TestCase):
     def test_one_park_spanning_picker_and_permission_is_one_episode(self):
         path, g = self._setup("picker")
         calls = []
-        jd.brief_llm = lambda goal, work, owed: (calls.append(1), "brief")[1]
+        jd.brief_llm = lambda goal, work, owed, frame=None, user_ask=None: (calls.append(1), "brief")[1]
         jd._distill_session(SID, path, NOW)
         self._append_states((NOW - 15, "permission"))   # the same park, another prompt flavor — no exit between
         jd._distill_session(SID, path, NOW)
@@ -6319,7 +6293,7 @@ class LivePickerBrief(unittest.TestCase):
         store["status"][g] = "blocked"
         jd.save_goals(SID, store)
         calls = []
-        jd.brief_llm = lambda goal, work, owed: (calls.append(1), "Pick the port.")[1]
+        jd.brief_llm = lambda goal, work, owed, frame=None, user_ask=None: (calls.append(1), "Pick the port.")[1]
         jd._distill_session(SID, path, NOW)
         jd._distill_session(SID, path, NOW)
         nd = jd.load_goals(SID)["nodes"][g]
@@ -7219,7 +7193,7 @@ class OrphanedHistory(unittest.TestCase):
                                "summary": None, "doneWhy": "finished it"}}}
         jd.save_goals(SID, store)
         captured = {}
-        jd.distill_llm = lambda goal_text, work_text, done_why="", prior_summary="", items=None: (
+        jd.distill_llm = lambda goal_text, work_text, done_why="", prior_summary="", items=None, frame=None, user_ask=None: (
             captured.update(work=work_text) or "TAKEAWAY: t.\nSOURCE: m1")
         jd._distill_session(SID, str(path), NOW)
         return captured, jd.load_goals(SID)["nodes"][g]
@@ -7746,7 +7720,11 @@ class AwaitingVerdict(unittest.TestCase):
         # then suppressed the goal's awaiting entirely (blocked outranks awaiting by design), so a
         # session genuinely watching an external job read as needing the user.
         for phrase in ("The mirror image is NOT blocked", "will report back on its own",
-                       "never blocked; filing it blocked parks a card on the user"):
+                       # narrowed 2026-08-24 (the awaiting-peer audit): a handoff is the peer's own
+                       # (omitted, tracked by the handoff graph); "peer" needs an open sent-question
+                       'never blocked: an external process still running is awaiting (kind "job")',
+                       '"peer" is only for a question this session sent and still needs answered',
+                       "Filing these blocked parks a card on the user"):
             self.assertIn(phrase, jd.CLOSER_SYS)
 
     def test_closer_prompt_offers_awaiting_with_the_tight_rule(self):

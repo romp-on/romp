@@ -1,0 +1,29 @@
+<!-- SYNTHETIC fixture: the chat pane's dropdown/tooltip family side by side, for eyeballing the ONE
+     menu vocabulary (CLAUDE.md): #252526 card, hairline, --radius-menu, --shadow-menu. All content
+     invented (notes-api demo domain). These elements are position:fixed (and .tab-tip display:none)
+     in real life — the runner statically places them (body must be re-flexed to a ROW: the chat
+     sheet's own body is a flex column):
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/menus-chat.html \
+           --out /tmp/menus-chat.png --size 940x260 --extra-css '.ctx-menu,.meta-menu,.tab-tip,.slash-pop{position:static;display:block} body{background:#1e1e1e;padding:24px;display:flex;flex-direction:row;align-items:flex-start;gap:28px}'
+-->
+<div class="ctx-menu">
+  <div class="ctx-item">Rename</div>
+  <div class="ctx-item">Change color</div>
+  <div class="ctx-item">Close tab</div>
+</div>
+<div class="meta-menu">
+  <div class="meta-item current">sonnet</div>
+  <div class="meta-item">opus</div>
+  <div class="meta-item">haiku</div>
+</div>
+<div class="tab-tip">
+  <b style="color:#1EA1EB">sdk</b><br>
+  ~/notes-api<br>
+  main · sonnet · high<br>
+  context 41%
+</div>
+<div class="slash-pop">
+  <div class="slash-row sel"><span class="slash-name">/review</span><span class="slash-desc">review the current diff</span></div>
+  <div class="slash-row"><span class="slash-name">/tests</span><span class="slash-desc">run the test suite</span></div>
+  <div class="slash-row"><span class="slash-name">/deploy</span><span class="slash-desc">ship to staging</span></div>
+</div>

@@ -25,20 +25,29 @@ test("renderTabs renders the union of arrived sessions and tabMeta, placeholders
   assert.match(RENDER, /if \(!s\) \{ bar\.appendChild\(makePlaceholderTab\(id\)\); continue; \}/);
 });
 
-test("makePlaceholderTab draws name + identity color, non-interactive (no data-act)", () => {
+test("makePlaceholderTab draws name + identity color, and is CLICKABLE while loading", () => {
   assert.match(RENDER, /function makePlaceholderTab\(id: string\): HTMLElement/);
   assert.match(RENDER, /tab\.classList\.add\("colored"\)/);
-  // a placeholder must NOT declare a select/close action — it's inert until the session lands
+  // the user 2026-08-25: click a loading tab to be there when it opens — it rides the SAME stable
+  // #tabs select delegate as a real tab (activation → MRU + peek), keyboard included; still no
+  // close/drag (no session to end yet)
   const fn = RENDER.slice(RENDER.indexOf("function makePlaceholderTab"), RENDER.indexOf("function renderTabs"));
-  assert.doesNotMatch(fn, /dataset\.act/);
+  assert.match(fn, /tab\.dataset\.act = "select";/);
+  assert.match(fn, /tab\.tabIndex = 0;/);
+  assert.match(fn, /tab\.addEventListener\("keydown", onTabKey\);/);
+  assert.ok(!/close|draggable/.test(fn), "no close ✕, no drag — the only new power is selection");
+  // …and the ACTIVE loading tab's thread area holds the pane-local romp loader until frames land in place
+  assert.match(RENDER, /if \(activeId && tabMeta\.has\(activeId\)\) \{/);
+  assert.match(RENDER, /wait\.appendChild\(rompLoaderInner\("opening “" \+ \(tabMeta\.get\(activeId\)\?\.name \|\| "session"\) \+ "”…"\)\);/);
+  assert.match(RENDER, /document\.getElementById\("tab-loading"\)\?\.remove\(\);   \/\/ the payload landed — the real view takes over in place/);
 });
 
-test("the placeholder shows the mini romp swirl loader (not a whole-tab opacity pulse) and is non-interactive", () => {
+test("the placeholder shows the mini romp swirl loader (not a whole-tab opacity pulse)", () => {
   // the user 2026-07-03: a still-building tab shows the spinning romp swirl glyph — the loader motif — rather
   // than the old .tab-ph-pulse opacity breathing on the whole tab.
   assert.match(RENDER, /swirl\.src = mediaSrc\("romp-swirl-glyph\.svg"\)/);
   assert.match(RENDER, /tab\.appendChild\(swirl\);/);
-  assert.match(CSS, /\.tab\.tab-placeholder \{ cursor: default; \}/);
+  assert.match(CSS, /\.tab\.tab-placeholder \{ cursor: pointer; \}/);   // clickable while loading (2026-08-25)
   assert.match(CSS, /\.tab-ph-swirl \{[\s\S]*?animation: tab-ph-swirl-spin/);
   assert.match(CSS, /@keyframes tab-ph-swirl-spin \{ to \{ transform: rotate\(-360deg\); \} \}/);
   assert.doesNotMatch(CSS, /tab-ph-pulse/, "the whole-tab opacity pulse is gone");

@@ -33,7 +33,7 @@ These are for scripting and for agents rather than daily use:
 | `romp url` | Print only the tokened dashboard URL, for piping |
 | `romp sessions [--json]` | The fleet with each session's state, identity colours, directory and backend |
 | `romp mail …` | The postal service from the shell (below) |
-| `romp send <session> <text>` | Hand a session a message, on either backend |
+| `romp send <session> [--tag <label>] <text>` | Hand a session a message, on either backend. Anything a script, cron job, or launcher composes SHOULD carry a tag (one word, letters/digits/dashes, up to 24 chars): the chat then renders it as machine-sent under that label instead of as the user's typed words. Raw POST /send callers pass it as the JSON `tag` field (`{name, text, tag}` — a malformed tag fails the whole send, loudly); `--tag` is the CLI's equivalent. Both resolve to the `<!-- romp-tag: <label> -->` marker in the delivered text |
 | `romp interrupt <session>` | Interrupt whatever turn a session is taking |
 | `romp end <session>` | End a session |
 | `romp checkin <host>` / `romp checkout <host>` | Publish this machine to an attached hub, or withdraw it |
@@ -158,13 +158,28 @@ environment, which the kernel does not control.
 Each chat tab's hover tooltip carries the same fact as a `Billing` row —
 `API key`, or `Login (name@example.com)` — whenever the session's backend
 reports it, one-auth machines included; only tmux sessions, whose billing romp
-cannot know, show no row.
+cannot know, show no row. When the CLI's own report disagrees with what the
+session was launched for — a key found through `apiKeyHelper`, say — the row
+carries both: `Login (CLI reports API key)`.
 
 Failures are loud rather than silent: a session that lands on the other auth
 than it was launched for (say, a key found through `apiKeyHelper`) is flagged
 in the Log panel, and a dead credential — "Not logged in", an invalid or
 expired key — blocks the session's card with the fix named, and is never
 auto-retried.
+
+One side of that check can be the box's *design*: on a machine whose sessions
+are all meant to bill a key that arrives through `apiKeyHelper` — so it never
+appears in `service.env` — the landed-on-the-other-auth warning would fire on
+every init, permanently. Declaring the intent fixes it: set
+`ROMP_EXPECTED_AUTH=key` (or `login`) in `service.env`, and a session landing
+on the declared side is quiet while one landing on the other side is flagged,
+naming the declaration. The check inverts rather than disappearing; unset (or
+any other value), it compares against what the session was launched with, as
+before. One explicit gear **Billing** pick supersedes the declaration from then
+on: the remembered pick becomes the box's expectation and the env var goes
+inert (it described the unpicked design), so re-seeded spawns are judged
+against your pick, never against stale doctrine.
 
 The usage rail reflects a mixed machine: the window bars (5 hours / 7 days /
 Fable 5) are drawn once, aggregated across every connected host's login as the
@@ -174,6 +189,29 @@ breaks both down per host — one column per host, side by side — and a host
 can show its login's windows and its key's spend together. Only turns whose
 session billed the key count toward the API numbers — a login turn's computed
 cost is dollars nobody pays.
+
+### Self-scheduled work wakes an idle session
+
+A session's own scheduled work (a recurring Monitor, a cron firing, a
+background task's completion notice) arrives as a queued notification even
+while the session is idle. The Claude Code CLI usually delivers it on its
+own, starting the turn within a fraction of a second; but a session can fall
+into a stuck state where the CLI only queues, nothing ever starts the turn
+that reads the queue, and the backlog waits silently until your next message.
+Romp watches for that: once a queued notification has sat undelivered for a
+minute (well past the CLI's own delivery window) with no turn running, one
+driven turn delivers every text that has waited out that minute, verbatim and
+with no words of Romp's own, and logs one kernel-log line per wake; a newer
+arrival waits out its own minute rather than delaying the rest. A
+notification that arrives mid-turn is delivered once the turn settles, and
+one whose delivery a kernel restart interrupted is re-driven on the next
+boot rather than dropped. Notifications
+the CLI delivers itself in either state (a background agent finishing) are
+left to it, and sessions that are mid-turn, compacting, blocked on an API
+error, retry-paused, or that you interrupted or ended are left alone. On the
+first run after an upgrade, a session holding a genuinely old queued backlog
+may get one catch-up turn delivering it; that is this feature doing its job
+once.
 
 ### Install-time switches
 

@@ -51,6 +51,14 @@ class AwaitingCard(unittest.TestCase):
         self.assertEqual(c["awaiting"]["tasks"], ["watching CI run"])
         self.assertEqual(c["awaiting"]["why"], "waiting on a background task: watching CI run")
 
+    def test_awaiting_carries_the_waits_own_start_for_the_elapsed_readout(self):
+        # the user 2026-08-23: Working shows how long it has been running, the awaiting states showed
+        # nothing — `since` (the wait's own event time, never wall-clock now) feeds the chips' duration
+        c = km._awaiting_card({"sid": SID, "path": "/tmp/x"}, "docs", COLOR, SID, True, 2000,
+                              "waiting on a background task", kind="task", since=1234)
+        self.assertEqual(c["awaiting"]["since"], 1234)
+        self.assertIsNone(self._card()["awaiting"]["since"])   # absent → None: the UI shows no duration, never a guess
+
     def test_headline_capitalizes_the_why(self):
         self.assertTrue(self._card()["text"].startswith("Waiting on a background task"))
 

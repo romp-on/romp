@@ -182,6 +182,160 @@ MOCK
     grep '/fork' "$MOCK_LOG" | grep -q '"at": *"aaaabbbb-1111-2222-3333-444455556666"'
 }
 
+@test "rename: POST /rename with target and new name; usage and no-token are loud" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run run_romp rename exp-web cross_model
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'is now "cross_model"'* ]]
+    grep '/rename' "$MOCK_LOG" | grep -q '"target": *"exp-web"'
+    grep '/rename' "$MOCK_LOG" | grep -q '"name": *"cross_model"'
+    run run_romp rename only-one-arg
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp rename"* ]]
+    unset ROMP_SERVE_TOKEN
+    run run_romp rename exp-web cross_model
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"kernel isn't running"* ]]
+}
+
+@test "color: POST /color with target and a literal hex; prints the new color" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run run_romp color exp-web '#1EA1EB'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'is now #1EA1EB'* ]]
+    grep '/color' "$MOCK_LOG" | grep -q '"target": *"exp-web"'
+    grep '/color' "$MOCK_LOG" | grep -q '"bg": *"#1EA1EB"'
+}
+
+@test "color: a slot digit resolves through the kernel's palette-colors mirror; no mirror is loud" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    # the mirror the kernel writes at boot: bg<TAB>fg per line; slot 3 = line 3's first field
+    mkdir -p "$XDG_STATE_HOME/romp"
+    printf '#AA0000\twhite\n#00BB00\tblack\n#0000CC\twhite\n' > "$XDG_STATE_HOME/romp/palette-colors"
+    run run_romp color exp-api 3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'is now #0000CC'* ]]
+    grep '/color' "$MOCK_LOG" | grep -q '"target": *"exp-api"'
+    grep '/color' "$MOCK_LOG" | grep -q '"bg": *"#0000CC"'
+    # a missing mirror never falls back to a built-in set — the kernel writes it at boot
+    rm "$XDG_STATE_HOME/romp/palette-colors"
+    run run_romp color exp-api 3
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"palette mirror"* ]]
+}
+
+@test "tag: POST /tag carries the name and the whole --add list" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run run_romp tag workers --add exp-web exp-api --color '#54B204'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'romp tag: "workers"'* ]]
+    grep '/tag' "$MOCK_LOG" | grep -q '"name": *"workers"'
+    grep '/tag' "$MOCK_LOG" | grep -q '"add": *\["exp-web", *"exp-api"\]'
+    grep '/tag' "$MOCK_LOG" | grep -q '"color": *"#54B204"'
+}
+
+@test "tag: a bare name reads the tag — GET /views, never a POST that could create" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run run_romp tag workers
+    grep -q '/views' "$MOCK_LOG"
+    [ "$(grep -c '/tag' "$MOCK_LOG")" -eq 0 ]
+}
+
+@test "tag: --host rides the payload (an edit on an attached kernel's store)" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run run_romp tag team --host alpha --add exp-web
+    [ "$status" -eq 0 ]
+    grep '/tag' "$MOCK_LOG" | grep -q '"host": *"alpha"'
+    # …and --host with no edit flag is a usage error: v0 reads stay local (the menu shows the union)
+    run run_romp tag team --host alpha
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--host goes with an edit"* ]]
+}
+
+@test "watch-pr: posts pr+repo+session; self needs ROMP_SID; usage errors exit 2" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" watch-pr 7 --repo TESTORG/testrepo
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"watching TESTORG/testrepo#7"* ]]
+    grep '/watch-pr' "$MOCK_LOG" | grep -q '"pr": *7'
+    grep '/watch-pr' "$MOCK_LOG" | grep -q '"repo": *"TESTORG/testrepo"'
+    grep '/watch-pr' "$MOCK_LOG" | grep -q '"id": *"11111111-2222-3333-4444-555555555555"'
+    # --session overrides self and rides as a NAME
+    run env ROMP_SID= "$ROMP_SCRIPT" watch-pr 8 --repo TESTORG/testrepo --session web
+    [ "$status" -eq 0 ]
+    grep '/watch-pr' "$MOCK_LOG" | grep -q '"name": *"web"'
+    # outside a session with no --session: a loud usage refusal, never a silent guess
+    run env ROMP_SID= "$ROMP_SCRIPT" watch-pr 9 --repo TESTORG/testrepo
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--session <name> required"* ]]
+    run run_romp watch-pr
+    [ "$status" -eq 2 ]
+}
+
+@test "tag: --rename rides the payload and counts as an edit" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run run_romp tag team --rename crew
+    [ "$status" -eq 0 ]
+    grep '/tag' "$MOCK_LOG" | grep -q '"rename": *"crew"'
+    run run_romp tag team --host alpha --rename crew
+    [ "$status" -eq 0 ]
+    grep '/tag' "$MOCK_LOG" | grep -q '"host": *"alpha"'
+}
+
+@test "tag: the pre-rename group verb still works, posting the new /tag route" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run run_romp group workers --add exp-web
+    [ "$status" -eq 0 ]
+    grep '/tag' "$MOCK_LOG" | grep -q '"name": *"workers"'
+}
+
+@test "color/tag: usage errors exit 2" {
+    run run_romp color
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp color"* ]]
+    run run_romp color exp-web '#1EA1EB' extra
+    [ "$status" -eq 2 ]
+    run run_romp tag workers stray-word
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp tag"* ]]
+    run run_romp tag --add exp-web
+    [ "$status" -eq 2 ]
+    run run_romp tag workers --color
+    [ "$status" -eq 2 ]
+    run run_romp tag --json workers
+    [ "$status" -eq 2 ]
+}
+
+@test "color/group: no kernel token is a loud exit 1, and no API call is made" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    run run_romp color exp-web '#1EA1EB'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"kernel isn't running"* ]]
+    run run_romp group workers --add exp-web
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"kernel isn't running"* ]]
+    [ "$(grep -Ec '/(color|group)' "$MOCK_LOG")" -eq 0 ]
+}
+
 @test "fork: usage errors exit 2; no kernel token is a loud exit 1" {
     touch "$MOCK_LOG"
     run run_romp fork
@@ -592,10 +746,11 @@ MOCK
 
 # ─── No attach/rename subcommands (use tmux a / tmux rename) ─────────
 
-@test "'a', 'attach', 'rename' are unknown commands, never sessions" {
-    # There is no attach/rename command (plain tmux does both), and round 3 made
-    # every non-command bare word a loud error pointing at `romp new`.
-    for word in a attach rename; do
+@test "'a' and 'attach' are unknown commands, never sessions" {
+    # There is no attach command (plain tmux does that), and round 3 made every
+    # non-command bare word a loud error pointing at `romp new`. (`rename` left
+    # this list when it became a real verb — see the rename tests above.)
+    for word in a attach; do
         : > "$MOCK_LOG"
         run run_romp "$word"
         [ "$status" -eq 2 ]

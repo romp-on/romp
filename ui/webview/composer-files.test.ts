@@ -52,7 +52,7 @@ test("an image thumbnail renders per surface; other files wear an ext + name chi
   // reach the kernel origin, the same split every chat image rides
   assert.match(fn, /if \(canPreview\(\)\) \{/);
   assert.match(fn, /img\.src = fileUrl\(p, id\);/);
-  assert.match(fn, /const w = buildPathImg\(p\);/);
+  assert.match(fn, /const w = buildPathImg\(p, id\);/);   // the composer's own session, in scope — never the render-owner global
   // name first, pixels when ready (the user 2026-08-04): the ext + name chip renders immediately and
   // the image swaps in on its own load event — a slow fetch never shows a blank box, a 404 keeps the chip
   assert.match(fn, /const doc = composerFileDoc\(p\);\s*\n\s*box\.appendChild\(doc\);/);

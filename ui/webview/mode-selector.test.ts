@@ -15,7 +15,7 @@ test("MetaKind includes mode; the status carries it; there's a MODE_CHOICES menu
 });
 
 test("the mode button renders FIRST (left of model) and the picker posts setMode", () => {
-  assert.match(RENDER, /if \(st\.mode\) meta\.appendChild\(metaButton\("mode", prettyMode\(st\.mode\)\)\);\s*\n\s*if \(st\.model\)/);
+  assert.match(RENDER, /if \(st\.mode\) meta\.appendChild\(metaButton\("mode", prettyMode\(st\.mode\), forSid\)\);\s*\n\s*if \(st\.model\)/);   // sid-scoped for the popover statusline (2026-08-25)
   assert.match(RENDER, /"setMode"/);
   assert.match(RENDER, /const META_CHOICES: Record<MetaKind/);   // model/effort + mode share the menu path
 });

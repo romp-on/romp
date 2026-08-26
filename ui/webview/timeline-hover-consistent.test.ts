@@ -25,13 +25,18 @@ test("a cross-lit bar is drawn GROWN + opaque in its own color, and a local hove
 test("a cross-lit connector lights via its native own-color highlight overlay, not a white casing", () => {
   assert.match(SRC, /const msgLit = dagOrHoverMsg\(mm\.id\);/);
   assert.match(SRC, /opacity: msgLit \? 0\.95 : 0/, "the hl overlay starts lit");
-  assert.match(SRC, /hl\.setAttribute\('opacity', msgLit \? '0\.95' : '0'\)/, "mouseleave restores the lit overlay");
+  // overlap-hover (2026-08-24): enters/leaves route through the shared set machinery; the lit
+  // restore lives in msgSetLight's one formula, which every covered unit passes through
+  assert.match(SRC, /msgSetLight\(u\.hoverSet \|\| \[i\], false\)/, "mouseleave restores the whole hovered set");
+  assert.match(SRC, /u\.hl\.setAttribute\('opacity', \(on \|\| u\.lit\) \? '0\.95' : '0'\)/,
+    "…and the restore formula keeps a cross-lit overlay lit");
 });
 
 test("cross-lit dots are drawn grown via dot()'s lit param — arrival and prompt dots both", () => {
-  assert.match(SRC, /const dot = \(cx, cy, color, html, onClick, linkedHl, lit\) =>/);
+  assert.match(SRC, /const dot = \(cx, cy, color, html, onClick, linkedHl, lit, msgI\) =>/);
   assert.match(SRC, /r: lit \? DOT_R \+ 2 : DOT_R/, "lit → the same +2 growth the native hover applies");
   assert.match(SRC, /c\.setAttribute\('r', lit \? DOT_R \+ 2 : DOT_R\)/, "mouseleave restores the lit radius");
-  assert.match(SRC, /dot\(x\(execAt\(mm\)\), cy, col, msgHtml\(mm\), msgNav\(mm\), u && u\.hl, dagOrHoverMsg\(mm\.id\)\)/);
+  assert.match(SRC, /dot\(x\(landXT\(mm\)\), cy, col, msgHtml\(mm\), msgNav\(mm\), u && u\.hl, dagOrHoverMsg\(mm\.id\), i\)/,
+    "the arrival dot carries its message index — it hovers as its whole overlap set");
   assert.match(SRC, /, null, dotLit\(t, dagOrHover\)\);/, "the prompt dot passes its lit state through");
 });

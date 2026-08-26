@@ -15,7 +15,7 @@ test("the interrupting badge is built once and rides the wrapping chip row", () 
   assert.match(FEED, /const intingBadge = el\("span", "fask-interrupting"\)/);
   assert.match(FEED, /intingBadge\.textContent = "interrupting…"/, "text label, no emoji/glyph");
   // sits immediately left of the past-tense interrupted badge on the same wrapping row
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
   assert.match(FEED, /a\._interrupting = intingBadge;/);
 });
 

@@ -398,7 +398,7 @@ function initNetPopover(button: HTMLButtonElement, post?: (m: Record<string, unk
 
   const LBL: Record<string, string> = {
     up: "connected", authorizing: "authorizing…", connecting: "connecting…", starting: "connecting…",
-    "no-kernel": "kernel not answering", down: "disconnected", error: "error",
+    "no-kernel": "kernel not answering", down: "reconnecting…", error: "error",   // a row exists = intent stands; romp never stops dialing (the user 2026-08-24)
   };
   // Every status explains itself on hover (the user 2026-07-22: learn it from tooltips, not the CLI).
   // Mirrors the web popover's TIP map — the two copies must say the same thing.

@@ -242,21 +242,40 @@ class DeferBackstop(Base):
                          "the first deferral is stamped with its reason and session — no counter "
                          "(2026-08-13: the sweep owns retirement; existence IS the standing hold)")
 
-    def test_a_legacy_bare_int_deferral_still_backstops(self):
+    def test_a_legacy_bare_int_deferral_still_fires_on_the_pass(self):
         # A live state file written before the record grew a reason still holds bare epoch ints; reading one
         # must keep working (and never crash the tick), it just has no why to tell the card about.
+        km.jd._PASS_DONE.clear()                      # module state: a prior cell's stamp must not leak
         self._d["deferred"] = {GID: NOW}
-        self.assertFalse(km._nudge_deferred_ok(GID, "the agent's to-do sync is due", NOW + 5),
+        self.assertFalse(km._nudge_deferred_ok(GID, "the agent's to-do sync is due", NOW + 5, sid=SID),
                          "an int record is read as a deferral that started at that time")
-        self.assertTrue(km._nudge_deferred_ok(GID, "the agent's to-do sync is due",
-                                              NOW + km.NUDGE_DEFER_BACKSTOP_SECS + 1),
-                        "…and its backstop still fires")
+        km.jd.pass_done("plan", SID)
+        self.assertTrue(km._nudge_deferred_ok(GID, "the agent's to-do sync is due", NOW + 10, sid=SID),
+                        "…and the owning tier's completed pass still fires it")
 
-    def test_a_deferral_past_the_backstop_fires_anyway(self):
-        km._nudge_deferred_ok(GID, "the agent's to-do sync is due", NOW)
-        self.assertTrue(km._nudge_deferred_ok(GID, "the agent's to-do sync is due",
-                                              NOW + km.NUDGE_DEFER_BACKSTOP_SECS + 1),
-                        "a wedged reviver defers the nudge but can never LOSE it")
+    def test_a_deferral_fires_when_the_owning_pass_ran_and_the_reason_stands(self):
+        # W2c (the user 2026-08-24): the wedge event is the owning tier COMPLETING a pass over this
+        # fsid after the mint with the reason still standing — the pass ran and did not retire it.
+        # No clock: without a pass the deferral holds at any age (a PAUSED fleet has no owner, and
+        # the unpause's first pass is the deciding event, re-evaluated immediately).
+        km.jd._PASS_DONE.clear()
+        km._nudge_deferred_ok(GID, "the agent's to-do sync is due", NOW, sid=SID)
+        self.assertFalse(km._nudge_deferred_ok(GID, "the agent's to-do sync is due",
+                                               NOW + 300 * 3600, sid=SID),
+                         "no pass yet → the hold stands, whatever the age")
+        km.jd.pass_done("close", SID)
+        self.assertTrue(km._nudge_deferred_ok(GID, "the agent's to-do sync is due", NOW + 300 * 3600 + 5,
+                                              sid=SID),
+                        "the pass ran, the reason stands → wedged, fire — a reviver can defer a "
+                        "nudge but can never LOSE it")
+
+    def test_a_paused_fleet_defers_indefinitely(self):
+        km.jd._PASS_DONE.clear()
+        why = "the judge tiers are paused (nothing could revive it)"
+        km._nudge_deferred_ok(GID, why, NOW, sid=SID)
+        km.jd.pass_done("close", SID)                 # even a (stray) stamp cannot override the pause
+        self.assertFalse(km._nudge_deferred_ok(GID, why, NOW + 300 * 3600, sid=SID),
+                         "the pause is the user's own hold — no owner, no clock; the unpause re-arms")
 
     def test_the_reviver_clearing_forgets_the_deferral(self):
         km._nudge_deferred_ok(GID, "the agent's to-do sync is due", NOW)

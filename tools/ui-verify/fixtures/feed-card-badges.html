@@ -1,0 +1,29 @@
+<!-- SYNTHETIC fixture: one ask card whose row carries every status badge side by side —
+     .fask-blocked, .fask-apierror (+ Retry), .fask-retrying, .fask-jauth — plus the column head's
+     .fcol-chip, for eyeballing the same-row badge metric set (they claim "same information type";
+     before 2026-08-26 .fask-blocked alone wore 0.72em/700/6px/1px 8px). Invented content
+     (notes-api demo domain). Run:
+       tools/ui-verify/shot.sh --css ui/webview/feed.css --body tools/ui-verify/fixtures/feed-card-badges.html \
+           --out /tmp/feed-badges.png --size 760x240 --extra-css '#feed-list { min-height: 170px; }'
+-->
+<div id="feed-head"></div>
+<div id="feed-list">
+  <div class="feed-cols">
+    <div class="feed-col col-asks">
+      <div class="feed-col-head"><span class="feed-col-name fcol-chip fcol-chip-blocked">Blocked</span><span class="feed-col-count">1</span></div>
+      <div class="feed-col-list">
+        <div class="fitem ask" style="background:#26262e;border-color:rgba(192,57,43,.5)"><div class="fitem-main">
+          <div class="fask-row1"><div class="fcard-title nav">ship the notes-api exporter</div><span class="ftime">2m ago</span></div>
+          <div class="fask-row2">
+            <div class="fask-id"><a class="fname" style="color:#E0A030">api</a></div>
+            <span class="fask-blocked">⏸ permission</span>
+            <span class="fask-apierror">⚠ API error</span>
+            <button class="fdismiss fretry">Retry</button>
+            <span class="fask-retrying">⚠ retrying since 14:02</span>
+            <span class="fask-jauth">⚠ Can’t analyze · API key</span>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>

@@ -23,7 +23,7 @@ class SdkAgentsVisibleToPostal(unittest.TestCase):
     def setUp(self):
         # stub the kernel fetch: the kernel reports the OPEN SDK session (alive) in its unified /sessions.
         self._saved = pm._kernel_sessions
-        pm._kernel_sessions = lambda: [
+        pm._kernel_sessions = lambda threads=False: [
             {"id": SID, "name": "sdksess", "state": "waiting", "dir": "/work/dir",
              "bg": "", "fg": "", "working": "", "backend": "sdk"}]
 
@@ -44,13 +44,13 @@ class SdkAgentsVisibleToPostal(unittest.TestCase):
         self.assertEqual(pm._recip_id_for("sdksess"), SID)
 
     def test_session_absent_from_kernel_is_not_a_live_agent(self):
-        pm._kernel_sessions = lambda: []            # the kernel reports nothing live (dead/ended) → not an agent
+        pm._kernel_sessions = lambda threads=False: []            # the kernel reports nothing live (dead/ended) → not an agent
         self.assertNotIn(SID, {x["id"] for x in pm.local_agents()})
 
     def test_unreachable_kernel_yields_no_local_agents(self):
         # _kernel_sessions returns [] on any failure (the real impl swallows the urlopen error); the bus then
         # shows no local agents rather than shelling tmux behind the abstraction.
-        pm._kernel_sessions = lambda: []
+        pm._kernel_sessions = lambda threads=False: []
         self.assertEqual(pm.local_agents(), [])
 
 

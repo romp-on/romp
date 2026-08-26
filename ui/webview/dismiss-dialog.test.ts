@@ -15,12 +15,14 @@ const K = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py
 const apiErr = R.slice(R.indexOf("function renderApiError"), R.indexOf("// ── API-error auto-retry"));
 
 test("a spend cap suppresses the Retry button entirely", () => {
-  assert.match(apiErr, /const spendCap = !!st\?\.apiSpendLimit \|\| !!st\?\.apiModelLimit \|\| !!st\?\.apiAuthErr;/);
+  // a safeguards refusal joins the no-Retry classes (the user 2026-08-15) — see apierror-refusal.test.ts
+  assert.match(apiErr, /const spendCap = !!st\?\.apiSpendLimit \|\| !!st\?\.apiModelLimit \|\| !!st\?\.apiAuthErr \|\| refusal;/);
   assert.match(apiErr, /if \(!spendCap\) \{[\s\S]*?retry\.textContent = "Retry now";/);
 });
 
 test("a tmux spend cap offers Dismiss dialog, posting the dismissDialog op", () => {
-  assert.match(apiErr, /\} else if \(st\?\.backend === "tmux"\) \{/);
+  // refusal-gated: the Esc-sender is for the CLI's spend-limit dialog — a refusal parks no menu
+  assert.match(apiErr, /\} else if \(st\?\.backend === "tmux" && !refusal\) \{/);
   assert.match(apiErr, /dismiss\.textContent = "Dismiss dialog";/);
   assert.match(apiErr, /vscodeApi\.postMessage\(\{ type: "dismissDialog", id: activeId \}\)/);
   // acknowledges the click at once (disable + "Dismissing…"), like every other card control
@@ -29,11 +31,11 @@ test("a tmux spend cap offers Dismiss dialog, posting the dismissDialog op", () 
 
 test("an SDK spend cap shows neither Retry nor a Dismiss button (raise-the-cap line only)", () => {
   // the Dismiss branch is tmux-gated, so an SDK spend cap falls through with no button appended
-  assert.match(apiErr, /\} else if \(st\?\.backend === "tmux"\) \{[\s\S]*?head\.appendChild\(dismiss\);\s*\}/);
+  assert.match(apiErr, /\} else if \(st\?\.backend === "tmux" && !refusal\) \{[\s\S]*?head\.appendChild\(dismiss\);\s*\}/);
 });
 
 test("the countdown reads the spend-cap message, never a fake retry countdown", () => {
-  assert.match(apiErr, /if \(spendCap\) countdown\.textContent = "spend limit reached — raise it at claude\.ai\/settings\/usage";/);
+  assert.match(apiErr, /else if \(spendCap\) countdown\.textContent = "spend limit reached — raise it at claude\.ai\/settings\/usage";/);
 });
 
 // kernel contract this card codes against (node-tests-pin-kernel-source precedent)

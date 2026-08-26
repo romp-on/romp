@@ -163,5 +163,78 @@ class ParseSessionEquivalence(unittest.TestCase):
             em._read_jsonl_incremental(self.p)                # warm the cache at this prefix
 
 
+def _manual_compact_recs():
+    """A transcript containing a LIVE manual /compact's on-disk shape (synthetic content;
+    shape mirrors the live corpus): the DETACHED boundary + summary side branch appended
+    first at completion time, then the command wrappers, then the stdout — plus the
+    post-compact growth appended separately. Returns (prefix, growth)."""
+    b = lambda i: "11111111-2222-3333-4444-%012d" % i
+    ts = lambda s: "2026-07-05T10:%02d:%02dZ" % (s // 60, s % 60)
+    prefix = [
+        {"type": "user", "uuid": b(0), "parentUuid": None, "timestamp": ts(0),
+         "promptSource": "typed", "message": {"role": "user", "content": "start the refactor"}},
+        {"type": "assistant", "uuid": b(1), "parentUuid": b(0), "timestamp": ts(10),
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "refactor done"}],
+                     "stop_reason": "end_turn"}},
+        {"type": "system", "subtype": "compact_boundary", "uuid": b(2), "parentUuid": None,
+         "logicalParentUuid": b(1), "timestamp": ts(40),
+         "compactMetadata": {"trigger": "manual", "preTokens": 120000, "postTokens": 5000}},
+        {"type": "user", "uuid": b(3), "parentUuid": b(2), "timestamp": ts(40),
+         "isCompactSummary": True,
+         "message": {"role": "user", "content": "synthetic compact summary"}},
+        {"type": "user", "uuid": b(4), "parentUuid": b(1), "timestamp": ts(30),
+         "isMeta": True, "promptId": "p1", "message": {"role": "user", "content": "/compact"}},
+        {"type": "user", "uuid": b(5), "parentUuid": b(4), "timestamp": ts(30), "promptId": "p1",
+         "message": {"role": "user", "content": "<command-name>/compact</command-name>"}},
+        {"type": "user", "uuid": b(6), "parentUuid": b(5), "timestamp": ts(40), "promptId": "p1",
+         "message": {"role": "user",
+                     "content": "<local-command-stdout>Compacted</local-command-stdout>"}},
+    ]
+    growth = [
+        {"type": "user", "uuid": b(7), "parentUuid": b(6), "timestamp": ts(60),
+         "promptSource": "typed",
+         "message": {"role": "user", "content": "carry on after the compact"}},
+        {"type": "assistant", "uuid": b(8), "parentUuid": b(7), "timestamp": ts(70),
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "carried on"}],
+                     "stop_reason": "end_turn"}},
+    ]
+    return prefix, growth
+
+
+class ManualCompactAdoptionEquivalence(unittest.TestCase):
+    """A transcript that grows PAST a live manual /compact must produce the same adopted
+    compact atom incrementally as cold: the adoption repair (_adopt_detached_compactions)
+    reads only the assembled graph and must never mutate the cache's shared record lists,
+    so the grew-branch reuse stays intact across parses that ran the repair."""
+
+    def setUp(self):
+        em._JSONL_CACHE.clear()
+        fd, self.p = tempfile.mkstemp(suffix=".jsonl")
+        os.close(fd)
+
+    def tearDown(self):
+        em._JSONL_CACHE.clear()
+        os.unlink(self.p)
+
+    def _cards(self, out):
+        return [a for t in out["turns"] for a in t["atoms"]
+                if a.get("subtype") == "compact_boundary"]
+
+    def test_growth_past_a_manual_compact_adopts_identically_warm_and_cold(self):
+        prefix, growth = _manual_compact_recs()
+        _write(self.p, prefix)
+        first = em.parse_session(self.p)                  # cold; primes the cache
+        self.assertEqual(len(self._cards(first)), 1,
+                         "the detached boundary is adopted before any growth")
+        _append(self.p, growth)
+        warm = em.parse_session(self.p)                   # rides the grew-branch reuse
+        self.assertEqual(em.parse_session(self.p), warm,
+                         "a re-parse from the warm cache is stable — the repair mutated no cached record")
+        em._JSONL_CACHE.clear()
+        cold = em.parse_session(self.p)
+        self.assertEqual(warm, cold, "grown past the compact: warm == cold, adoption included")
+        self.assertEqual(len(self._cards(cold)), 1, "exactly one adopted card either way")
+
+
 if __name__ == "__main__":
     unittest.main()

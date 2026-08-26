@@ -108,7 +108,13 @@ class TimelineMessageHover(unittest.TestCase):
         end = self.src.index("dot helper: optional onClick")
         pass1 = self.src[start:end]
         self.assertIn("hit.__tlHoverIn = mEnter", pass1, "the hit must stay re-armable after draw() rebuilds it")
-        self.assertRegex(pass1, r"u\.dot\.setAttribute\('r', DOT_R \+ 2\)", "hovering the line grows its arrival dot")
+        # the co-highlight routes through the overlap-hover set since 2026-08-24 (hovering lists
+        # every message under the point): the grow lives in msgSetLight's one formula, which the
+        # connector's mEnter reaches for its whole hovered set — the invariant (hovering the line
+        # grows its arrival dot) holds through it
+        self.assertRegex(pass1, r"msgSetLight\(u\.hoverSet, true\)", "hovering lights the hovered set")
+        self.assertRegex(self.src, r"u\.dot\.setAttribute\('r', \(on \|\| u\.lit\) \? DOT_R \+ 2 : DOT_R\)",
+                         "…whose one formula grows the arrival dot")
 
 
 if __name__ == "__main__":

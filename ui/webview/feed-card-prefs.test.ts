@@ -21,7 +21,7 @@ test("feed prefs from romp:settings: newestFirst/collapsed default OFF, grouped 
   assert.doesNotMatch(FEED, /explanations/);   // every trace of the old pref is gone from the feed
 });
 
-test("footer layout: view toggles left, Clear all + Undo clear dock right (the user 2026-07-13)", () => {
+test("footer layout: view controls left, Clear all + Undo dock right (the user 2026-07-13)", () => {
   const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.css"), "utf8");
   // flex `order` + margin-left:auto so the split holds whatever order the ensure* calls appended in
   assert.match(CSS, /#feed-clearall \{ order: 10; margin-left: auto; \}/);

@@ -78,7 +78,10 @@ test("a filtered view re-points the CHAT BODY, not just the tab bar", () => {
   // the re-point covers BOTH filters since session views landed (2026-08-18): a hidden or
   // filtered-out active session must not keep its transcript on screen
   assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/);
-  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId !== next\) setActive\(next\); \}, 0\);/);
+  // the deferred bounce re-validates at FIRE time since the ephemeral peek (2026-08-24): an
+  // activation between schedule and fire (a feed click opening a peek) makes the active tab
+  // visible again — bouncing then would kick the user off the tab they just opened
+  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId !== next && activeId && !tabInView\(activeId\)\) setActive\(next\); \}, 0\);/);
 });
 
 test("feed cards filter by the #only tag; clear bookkeeping still uses the FULL payload", () => {

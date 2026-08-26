@@ -70,8 +70,8 @@ test("creating a session opens the provisional tab instead of a modal", () => {
 });
 
 test("a send on a provisional tab is HELD, not posted to a session that doesn't exist", () => {
-  assert.match(RENDER, /provisionalQueue\.push\(text\);\s*\n\s*registerOptimistic\(sid, text\);/,
-    "the dashed bubble goes up now — romp has it, it is not delivered");
+  assert.match(RENDER, /provisionalQueue\.push\(text\);\s*\n\s*registerOptimistic\(sid, text, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/,
+    "the dashed bubble goes up now — with its dragged-image thumbnails — romp has it, it is not delivered");
   // a FAILED tab has no pending spawn to queue onto: refuse loudly, the box keeps the only copy
   assert.match(RENDER, /if \(sid !== provisionalId\) \{\s*\n\s*warnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\)/);
 });

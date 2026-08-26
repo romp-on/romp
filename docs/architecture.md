@@ -46,7 +46,7 @@ Code, so this is where most of it lands:
   entries and leaves every other hook you have registered untouched.
 - `romp-postal.mcp.json`, the MCP config that gives sessions their mailbox.
 - `romp-session-prompt.md`, appended to a session's system prompt.
-- The `romp` and `romp-postal` skills, into `~/.claude/skills/`.
+- The `romp-postal` skill, into `~/.claude/skills/`.
 
 **Running afterwards.** A login service, a launchd agent in
 `~/Library/LaunchAgents` on macOS or a systemd `--user` unit on Linux. It runs

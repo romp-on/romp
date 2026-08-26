@@ -95,3 +95,19 @@ test("only panel pipes check drift — the passive status pipe never toasts", ()
   assert.ok(EXT.includes('if (m && m.type === "ka" && !this.passive) maybeBuildNotice(m.dv);'),
     "the ka hook rides the pipe message handler, gated off the passive (status) pipe");
 });
+
+test("waiting never blocks the editor: progress in the status bar, action survives toast dismissal (2026-08-18)", () => {
+  const upd = slice("async function updateExtension", "function runInstall");
+  // A Notification-located progress toast is native chrome that covers content and cannot be moved;
+  // Window location renders as a status-bar spinner instead.
+  assert.ok(upd.includes("vscode.ProgressLocation.Window"), "update progress lives in the status bar");
+  assert.ok(!upd.includes("ProgressLocation.Notification"), "no blocking progress toast during the update");
+  // Dismissing the drift toast must not lose the update affordance: a status-bar item carries it
+  // until an update SUCCEEDS.
+  const notice = slice("function maybeBuildNotice(dv: unknown)", "async function updateExtension");
+  assert.ok(notice.includes("showDriftStatusItem(!!target)"), "the drift notice arms the status-bar item");
+  assert.ok(upd.includes("clearDriftStatusItem()"), "a successful update clears it");
+  const item = slice("function showDriftStatusItem", "function maybeBuildNotice");
+  assert.ok(item.includes('"rompChat.updateExtension"') && item.includes('"rompChat.copyInstallCommand"'),
+    "the item's click matches the toast's action for this host (update when rebuildable, copy otherwise)");
+});

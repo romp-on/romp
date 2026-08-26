@@ -135,9 +135,10 @@ class SurfacesPinTheOnYouTreatment(unittest.TestCase):
 
     def test_the_card_floors_to_needs_you(self):
         src = inspect.getsource(km.build_feed)
-        self.assertIn('or aerr.get("modelLimit") or aerr.get("authErr"))))', src,
+        self.assertIn('or aerr.get("modelLimit")', src,
                       "api_block must include the model limit — otherwise the card sits in Working "
                       "with the nudge suppressed and nothing able to move it")
+        self.assertIn('or aerr.get("authErr") or aerr.get("refusal"))))', src)
 
     def test_the_card_names_the_real_remedy(self):
         src = inspect.getsource(km.build_feed)

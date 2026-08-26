@@ -1,0 +1,182 @@
+{
+ "color": "#888888",
+ "dir": "/TESTDIR",
+ "landedTextUuids": [
+  "a1",
+  "a2"
+ ],
+ "leafFsid": "11111111-2222-3333-4444-555555555555",
+ "name": "impl",
+ "rompUuid": "11111111-2222-3333-4444-555555555555",
+ "turns": [
+  {
+   "atoms": [
+    {
+     "author": "human",
+     "fsid": "11111111-2222-3333-4444-555555555555",
+     "message": {
+      "content": [
+       {
+        "text": "start the long build",
+        "type": "text"
+       }
+      ],
+      "role": "user"
+     },
+     "parentUuid": null,
+     "promptSource": "typed",
+     "session_id": "11111111-2222-3333-4444-555555555555",
+     "t": 1781096400,
+     "type": "user",
+     "uuid": "u1"
+    },
+    {
+     "fsid": "11111111-2222-3333-4444-555555555555",
+     "message": {
+      "content": [
+       {
+        "text": "Working on it.",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "stop_reason": "end_turn"
+     },
+     "parentUuid": "u1",
+     "session_id": "11111111-2222-3333-4444-555555555555",
+     "t": 1781096430,
+     "type": "assistant",
+     "uuid": "a1"
+    }
+   ],
+   "end": 1781096430,
+   "ended": true,
+   "id": "11111111-2222-3333-4444-555555555555:1781096400:a3503980",
+   "t": 1781096400,
+   "trigger": {
+    "uuid": "u1"
+   }
+  },
+  {
+   "atoms": [
+    {
+     "author": "human",
+     "command": "/compact",
+     "fsid": "11111111-2222-3333-4444-555555555555",
+     "message": {
+      "content": [
+       {
+        "text": "/compact",
+        "type": "text"
+       }
+      ],
+      "role": "user"
+     },
+     "parentUuid": "rt1",
+     "session_id": "11111111-2222-3333-4444-555555555555",
+     "t": 1781096790,
+     "type": "user",
+     "uuid": "cw1"
+    },
+    {
+     "command": true,
+     "fsid": "11111111-2222-3333-4444-555555555555",
+     "message": {
+      "content": [
+       {
+        "text": "Compacted (ctrl+o to see full summary)",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "stop_reason": "end_turn"
+     },
+     "parentUuid": "cw1",
+     "session_id": "11111111-2222-3333-4444-555555555555",
+     "t": 1781096800,
+     "type": "assistant",
+     "uuid": "so1"
+    }
+   ],
+   "end": 1781096800,
+   "ended": true,
+   "id": "11111111-2222-3333-4444-555555555555:1781096790:9b15c581",
+   "t": 1781096790,
+   "trigger": {
+    "uuid": "cw1"
+   }
+  },
+  {
+   "atoms": [
+    {
+     "compact_metadata": {
+      "post_tokens": 6514,
+      "pre_tokens": 263239,
+      "trigger": "manual"
+     },
+     "fsid": "11111111-2222-3333-4444-555555555555",
+     "parentUuid": "so1",
+     "session_id": "11111111-2222-3333-4444-555555555555",
+     "subtype": "compact_boundary",
+     "summary": "summary of the conversation so far",
+     "t": 1781096800,
+     "type": "system",
+     "uuid": "cb1"
+    }
+   ],
+   "end": 1781096800,
+   "ended": true,
+   "id": "11111111-2222-3333-4444-555555555555:1781096800:da39a3ee",
+   "t": 1781096800,
+   "trigger": null
+  },
+  {
+   "atoms": [
+    {
+     "author": "human",
+     "fsid": "11111111-2222-3333-4444-555555555555",
+     "message": {
+      "content": [
+       {
+        "text": "carry on with the build",
+        "type": "text"
+       }
+      ],
+      "role": "user"
+     },
+     "parentUuid": "so1",
+     "promptSource": "typed",
+     "session_id": "11111111-2222-3333-4444-555555555555",
+     "t": 1781096900,
+     "type": "user",
+     "uuid": "u2"
+    },
+    {
+     "fsid": "11111111-2222-3333-4444-555555555555",
+     "message": {
+      "content": [
+       {
+        "text": "Continuing.",
+        "type": "text"
+       }
+      ],
+      "role": "assistant",
+      "stop_reason": "end_turn"
+     },
+     "parentUuid": "u2",
+     "session_id": "11111111-2222-3333-4444-555555555555",
+     "t": 1781096930,
+     "type": "assistant",
+     "uuid": "a2"
+    }
+   ],
+   "end": 1781096930,
+   "ended": true,
+   "id": "11111111-2222-3333-4444-555555555555:1781096900:b249da83",
+   "t": 1781096900,
+   "trigger": {
+    "uuid": "u2"
+   }
+  }
+ ]
+}

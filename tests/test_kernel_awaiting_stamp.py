@@ -154,9 +154,10 @@ class SessionLevelStamp(unittest.TestCase):
         (km.jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
             "rompUuid": SID, "seq": 1, "placements": {}, "status": {}, "nodes": nodes}))
         self.assertEqual(km._session_awaiting(SID, "/p", True, stamp=True),
-                         {"kind": "job", "why": "slurm 4821 regenerating the parts"})
+                         {"kind": "job", "why": "slurm 4821 regenerating the parts",
+                          "since": 200})   # the stamp's awaitingAt → the chips' elapsed readout (the user 2026-08-23)
         self.assertEqual(km._session_stamp_full(SID),
-                         ("g1", 200, "slurm 4821 regenerating the parts", "job"))
+                         ("g1", 200, "slurm 4821 regenerating the parts", "job", ()))
 
     def test_session_stamp_takes_the_freshest_across_ALL_tops(self):
         # session-level, so it scans every goal (not one subtree like _goal_awaiting_stamp) for the newest
@@ -166,7 +167,8 @@ class SessionLevelStamp(unittest.TestCase):
     def test_stamp_true_lifts_a_live_session_whose_live_sources_are_dark(self):
         self._seed(("g1", "the watcher it armed; files the clip when it triggers", 200))
         self.assertEqual(km._session_awaiting(SID, "/p", True, stamp=True),
-                         {"kind": None, "why": "the watcher it armed; files the clip when it triggers"})
+                         {"kind": None, "since": 200,
+                          "why": "the watcher it armed; files the clip when it triggers"})
 
     def test_stamp_false_stays_none_so_the_feed_scopes_per_goal(self):
         # the crux: the feed calls stamp=False, so the session-level signal is None for a stamp-only session
@@ -253,7 +255,30 @@ class SessionLevelDelegation(unittest.TestCase):
     def test_a_fully_delegated_session_reads_awaiting_on_the_session_surfaces(self):
         self._seed(self._delegated_store())
         self.assertEqual(km._session_awaiting(SID, "/p", True, stamp=True),
-                         {"kind": "peer", "why": "delegated to probe; waiting on their result"})
+                         {"kind": "peer", "why": "delegated to probe; waiting on their result",
+                          "since": None,   # the handoff graph has no single event time here → no duration
+                          "peers": [{"name": "probe", "host": "", "sid": self.PEER, "color": None}]})
+
+    def test_handoff_peer_identities_carry_name_host_and_colour_for_the_card(self):
+        # the card's awaiting box names the peers the way the origin line does (the user 2026-08-23):
+        # identity colour + quiet host: prefix. The helper resolves the live registry name first; a
+        # sid it cannot resolve keeps federation's recorded host marker and falls to the sid stub.
+        saved = km._name_color
+        km._name_color = lambda s: {"bg": "#abc", "fg": "#000"}
+        try:
+            far = "farhost:88888888-9999-aaaa-bbbb-cccccccccccc"
+            nodes = self._delegated_store()
+            h2 = self._handoff("h2", "g1"); h2["handoff"]["peer"] = far
+            h3 = self._handoff("h3", "g1")                       # duplicate peer → one identity
+            nodes.update({"h2": h2, "h3": h3})
+            got = km._handoff_peer_identities(nodes, ["h1", "h2", "h3"])
+            self.assertEqual(got, [
+                {"name": "88888888", "host": "farhost", "sid": far, "color": {"bg": "#abc", "fg": "#000"}},
+                {"name": "probe", "host": "", "sid": self.PEER, "color": {"bg": "#abc", "fg": "#000"}},
+            ])
+            self.assertIsNone(km._handoff_peer_identities(nodes, []), "no handoffs, no list — never []")
+        finally:
+            km._name_color = saved
 
     def test_stamp_false_stays_none_so_the_feed_keeps_scoping_per_card(self):
         self._seed(self._delegated_store())
@@ -264,7 +289,7 @@ class SessionLevelDelegation(unittest.TestCase):
         nodes["g1"]["awaitingWhy"], nodes["g1"]["awaitingAt"] = "the sweep it launched", 200
         self._seed(nodes)
         self.assertEqual(km._session_awaiting(SID, "/p", True, stamp=True),
-                         {"kind": None, "why": "the sweep it launched"})
+                         {"kind": None, "why": "the sweep it launched", "since": 200})
 
     def test_a_pure_delegation_top_stays_dark_matching_its_suppressed_card(self):
         # EVERY leaf a handoff → the feed suppresses the card in every column, so its dot never lights;
@@ -340,7 +365,7 @@ class KindScopedRules(unittest.TestCase):
     def test_a_peer_answer_supersedes_only_peer_waits(self):
         self._seed("job")
         self.assertEqual(km._session_awaiting(SID, "/p", True, stamp=True),
-                         {"kind": "job", "why": "the wait"},
+                         {"kind": "job", "why": "the wait", "since": 200},
                          "unrelated mail cannot end a wait on an external job")
         self._seed("peer")
         self.assertIsNone(km._session_awaiting(SID, "/p", True, stamp=True),
@@ -352,7 +377,7 @@ class KindScopedRules(unittest.TestCase):
     def test_the_goal_level_read_scopes_the_same_way(self):
         nodes = {"g1": dict(_node("g1", why="the wait", at=200), awaitingKind="job")}
         self.assertEqual(km._goal_awaiting_stamp_full(nodes, "g1", answered_at=900),
-                         (200, "the wait", "job"))
+                         (200, "the wait", "job", ()))
         nodes["g1"]["awaitingKind"] = "peer"
         self.assertIsNone(km._goal_awaiting_stamp_full(nodes, "g1", answered_at=900))
         nodes["g1"].pop("awaitingKind")
@@ -408,14 +433,15 @@ class OverlayDoesNotVeto(unittest.TestCase):
         self._overlay({"t": 100, "awaiting": False})
         self._seed()
         self.assertEqual(km._session_awaiting(SID, "/p", True, stamp=True),
-                         {"kind": None, "why": "a dispatched release watch; tags when green"},
+                         {"kind": None, "why": "a dispatched release watch; tags when green",
+                          "since": 200},
                          "the Stop hook's ambient false must not hide the judge's stamp")
 
     def test_a_live_true_row_still_wins_with_its_own_why(self):
         self._overlay({"t": 100, "awaiting": True, "why": "a job the hook reported"})
         self._seed()
         self.assertEqual(km._session_awaiting(SID, "/p", True, stamp=True),
-                         {"kind": None, "why": "a job the hook reported"},
+                         {"kind": None, "why": "a job the hook reported", "since": 100},
                          "a positive overlay row keeps its channel")
 
     def test_false_row_and_no_stamp_is_plain_none(self):
@@ -498,7 +524,7 @@ class AwaitingWake(unittest.TestCase):
     def test_stamp_full_exposes_gid_and_at(self):
         self._seed(at=500)
         self.assertEqual(km._session_stamp_full(SID),
-                         (self.gid, 500, "the trace it dispatched; reports when it returns", None))
+                         (self.gid, 500, "the trace it dispatched; reports when it returns", None, ()))
 
     def test_fires_past_the_window_and_records_the_episode(self):
         now = 1_000_000
@@ -570,6 +596,23 @@ class AwaitingWake(unittest.TestCase):
                          "the episode re-arms from the ANSWER — the anchor may never move (coalesced "
                          "re-asserts keep the original stamp), so it cannot be the episode key")
         self.assertFalse(km.jd.load_goals(SID)["nodes"][self.gid]["blocked"])
+        # THE ANSWER IS A FILED EVENT (the user 2026-08-25, C2 — closing the awaiting audit's last
+        # live mechanism): the response segment was often placed under NO goal, so an answered wake
+        # re-affirmed a dead wait forever with nothing ever re-nominating the closer. The answered
+        # leg now files a same-why re-assert AT THE ORIGINAL ANCHOR — the anchor never moves, but
+        # the row's ARRIVAL opens the closer's filed-since gate, so it re-audits with the answer in
+        # view; the re-affirm-forever shape is impossible by construction.
+        nd = km.jd.load_goals(SID)["nodes"][self.gid]
+        filed = [e for e in nd["log"] if e.get("src") == "nudge" and e.get("kind") == "awaiting"
+                 and not e.get("lift")]
+        self.assertEqual(len(filed), 1, "the answered wake filed its outcome into the diary")
+        self.assertEqual(filed[0].get("ev_t"), now - 20 * 3600, "…at the frozen anchor (no churn)")
+        self.assertEqual(nd.get("awaitingAt"), now - 20 * 3600, "the stamp's anchor never moved")
+        look = {"closerLookT": nd["log"][0]["at"]}    # the closer last looked when the stamp filed
+        kids = {None: [self.gid]}
+        self.assertTrue(km.jd._filed_since({self.gid: dict(nd, **look)}, kids, self.gid,
+                                           km.jd._look_stamp(dict(nd, **look))),
+                        "…and the filing re-nominates: the closer's gate opens on the answer")
         # ...and the next wake fires once the ANSWER goes stale, same stamp anchor throughout
         self.assertFalse(self._wake(now - 6 * 3600 + 60, rec=rec2), "still patient after the answer")
         self.assertTrue(self._wake(now + 3600, rec=rec2), "re-armed: 6h past the answer it asks again")
@@ -585,11 +628,30 @@ class AwaitingWake(unittest.TestCase):
         self._seed(at=now - 7 * 3600)                # the closer filed a genuinely NEW wait
         self.assertTrue(self._wake(now, rec=rec), "a fresh anchor re-arms the wake")
 
-    def test_dormant_session_is_not_woken(self):
+    def test_dormant_session_is_not_woken_but_converts_to_the_dead_wait_block(self):
+        # (the user 2026-08-22) a dormant CLI still gets no WAKE — its dispatched work is gone, not
+        # asleep — but the branch no longer dead-ends: the stamped Working card converts once to the
+        # dead-wait procedural block, so it reaches a terminal column instead of pausing forever.
+        # The conversion is owner-corroborated: the session carries its launch record (the names
+        # entry both backends write — without it no owner here could answer for the sid), and the
+        # owner scan is pinned to an authoritative empty answer rather than this box's real tmux.
+        km.jd.NAMES.mkdir(parents=True, exist_ok=True)
+        (km.jd.NAMES / SID).write_text("web\t~/notes-api\t#3355aa\t#ffffff\n")
+        self.addCleanup(lambda: (km.jd.NAMES / SID).unlink())
+        km._TMUX.available = lambda: True
+        km._TMUX.alive_sids = lambda t=3: set()
+        self.addCleanup(lambda: [km._TMUX.__dict__.pop(nm, None)
+                                 for nm in ("available", "alive_sids")])
         now = 1_000_000
         self._seed(at=now - 7 * 3600)
-        self.assertFalse(self._wake(now, tmux={}))   # SID not in the live set → not a live CLI
-        self.assertEqual(self.fb.sent, [], "a dormant session's dispatched work is gone, not asleep")
+        (km.jd.STATE / "states").mkdir(parents=True, exist_ok=True)
+        (km.jd.STATE / "states" / (SID + ".jsonl")).write_text(
+            json.dumps({"state": "idle", "t": now - 6 * 3600}) + "\n")
+        self.assertTrue(self._wake(now, tmux={}), "the conversion fired (the tick pushes once)")
+        self.assertEqual(self.fb.sent, [], "no wake message: nothing that could answer is running")
+        nd = km.jd.load_goals(SID)["nodes"][self.gid]
+        self.assertTrue(nd.get("blocked"), "the card lands in Blocked, the ladder's promised terminal")
+        self.assertTrue(str(nd.get("blockWhy") or "").startswith(km.jd.DEAD_WAIT_WHY_PREFIX))
 
     def test_wake_that_judges_resolved_mid_tick_stands_down(self):
         now = 1_000_000
@@ -660,12 +722,15 @@ class AwaitingWakeOutcomeSweep(unittest.TestCase):
                         "wake still surfaces")
         self.assertEqual(store["nodes"][self.gid].get("blockWhy"), km.jd.WAKE_BLOCK_WHY)
 
-    def test_sweep_leaves_a_fresh_wake_to_the_walk(self):
+    def test_sweep_leaves_a_walked_ungated_wake_to_the_walk(self):
+        # ownership is the JOURNALED gate + the walked roster now, never age (the user 2026-08-24,
+        # W1b): the walk visited this session and stood down on no gate, so the record is the
+        # walk's — at ANY age (the retired 6h clock is not resurrected by this sweep)
         now = 1_000_000
         self._seed_goal(at=now - 20 * 3600)
         self._seed_rec({"wake": True, "anchor": now - 20 * 3600, "count": 1, "lastTurnId": "t1",
                         "armAtoms": 0, "at": now - 3600})
-        self.assertFalse(km._awaiting_wake_outcomes(now))
+        self.assertFalse(km._awaiting_wake_outcomes(now, walked={SID}))
         self.assertFalse(km.jd.load_goals(SID)["nodes"][self.gid]["blocked"])
 
     def test_sweep_ignores_a_goal_the_world_moved_past(self):

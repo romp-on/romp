@@ -245,7 +245,17 @@ export function previewFull(path: string, sid?: string | null, verified = false,
     // a chip can't self-verify like an <img> — HEAD-probe (headers only, no body — never a download)
     // so a missing PDF never shows a dead card. A kernel-VERIFIED card skips the probe: the kernel
     // said the file exists, and a transient probe failure must not erase the card.
-    if (!verified) fetch(fileUrl(path, sid), { method: "HEAD" }).then((r) => { if (!r.ok) box.remove(); }).catch(() => box.remove());
+    // an UNVERIFIED card's failed probe HIDES the card and keeps it registered for the heal
+    // events — never removed from the DOM: one transient failure (a kernel-restart window, a tunnel blip)
+    // used to erase the figure until a send's re-render minted a fresh box (the user 2026-08-24).
+    // The hidden sentinel keeps the spot healable with zero visual noise when the mention really
+    // is dead; a probe that later succeeds unhides the card in place.
+    if (!verified) {
+      const probe = () => fetch(fileUrl(path, sid), { method: "HEAD" })
+        .then((r) => { if (r.ok) { box.style.display = ""; } else { box.style.display = "none"; failedPreviews.set(box, probe); } })
+        .catch(() => { box.style.display = "none"; failedPreviews.set(box, probe); });
+      probe();
+    }
   } else {
     // `pin` freezes this MESSAGE's embed to its mention-time bytes (kernel _pin_mention): the sid
     // rides too (the pin store lives on the owning kernel; the relay forwards the query untouched),
@@ -334,6 +344,12 @@ export function previewFull(path: string, sid?: string | null, verified = false,
       if (lastErr !== chipHealedErr) {
         failedPreviews.set(box, () => { chipHealedErr = lastErr; autoRetries = 1; build(true); });
       }
+      // …and a RECONNECT-class event (romp:wsup / hostUp) heals a settled chip REGARDLESS of the
+      // error text (the user 2026-08-24): a byte-identical 404 while the file was still being
+      // written — or a constant connection-refused — parked the chip inert forever, though the
+      // link coming back is new information even when the words didn't change. The budget refills
+      // exactly like a send's fresh box; reconnects are rare, so this can't hammer.
+      settledPreviews.set(box, () => { chipHealedErr = lastErr; autoRetries = 3; build(true); });
       if (fails > 1) {
         chip.classList.add("path-retry-flash");
         chip.addEventListener("animationend", () => chip.classList.remove("path-retry-flash"), { once: true });
@@ -407,6 +423,7 @@ export function previewFull(path: string, sid?: string | null, verified = false,
     const build = (bust: boolean) => {
       const done = resolvedUrls.get(url);
       if (done) {                                    // already fully fetched this page-life → instant
+        box.style.display = "";                      // a hidden unverified sentinel that healed comes back
         box.textContent = "";
         box.appendChild(mkImg(done));
         return;
@@ -415,7 +432,10 @@ export function previewFull(path: string, sid?: string | null, verified = false,
         box.textContent = "";
         const img = mkImg(url);
         img.onerror = () => {
-          if (!verified) { box.remove(); return; }
+          // unverified → the SAME retry machinery as verified, just invisible while failed (see
+          // the probe note above): the box hides instead of wearing the chip, and a later success
+          // unhides it — never self-removed, which erased the spot until a send re-rendered
+          if (!verified) box.style.display = "none";
           failAfterBeat(0);                          // no beat on the first attempt — the cue was already up
         };
         withLoadCue(box, img, url);   // mini swirl holds the spot until the load event (memo on the un-busted url)
@@ -440,13 +460,14 @@ export function previewFull(path: string, sid?: string | null, verified = false,
         rememberResolved(url, objUrl);
         loadedOnce.add(url);                         // re-renders skip the cue — the bytes are in hand
         if (!box.isConnected) return;
+        box.style.display = "";                      // a hidden unverified sentinel that healed comes back
         box.textContent = "";
         box.appendChild(mkImg(objUrl));
       }).catch((e: unknown) => {
         fetching = false;
         lastErr = String((e as Error)?.message || "");
         if (lastErr.startsWith("cut at ")) lastErr = "";   // a mid-stream cut narrates via got/fmtBytes
-        if (!verified) { box.remove(); return; }
+        if (!verified) box.style.display = "none";         // hidden while failed, healable — never removed
         failAfterBeat(started);
       });
     };
@@ -466,4 +487,41 @@ export function retryFailedPreviews(): void {
     failedPreviews.delete(box);                      // one attempt per registration; re-registers on error
     if (box.isConnected) rebuild();                  // a re-rendered turn made a fresh box — let the old go
   }
+}
+
+// Settled chips (auto-retry budget spent) awaiting a RECONNECT-class heal — romp:wsup (this page's
+// kernel socket came back) or hostUp (a federated tunnel recovered). Drained only by these events,
+// never by the per-message heal above, so a dead figure costs one fetch per reconnect, not per push.
+const settledPreviews = new Map<HTMLElement, () => void>();
+export function refreshSettledPreviews(): void {
+  if (!settledPreviews.size) return;
+  for (const [box, rebuild] of Array.from(settledPreviews.entries())) {
+    settledPreviews.delete(box);                     // one attempt per registration; re-registers on error
+    if (box.isConnected) rebuild();
+  }
+}
+
+// Markdown-inline <img> (a figure pasted as markdown in a message body) had NO failure handling at
+// all: DOMPurify strips inline handlers (correctly — untrusted transcript HTML) and nothing
+// re-attached one, so a load that failed once sat as a dead element in the cached DOM until a send
+// re-rendered the turn (the user 2026-08-24). Error events don't bubble but DO capture: one
+// document-level capture listener covers every md() img on the page — no per-render wiring — and
+// registers the element in the same failedPreviews machinery, so every kernel message re-attempts
+// it. Previews' own <img>s are skipped: their machinery (budgets, resume, chips) owns those.
+let mdImgHealOn = false;
+export function installMdImgHeal(): void {
+  if (mdImgHealOn) return;                           // ensure-once (the click-safety installation rule)
+  mdImgHealOn = true;
+  document.addEventListener("error", (e) => {
+    const img = e.target as HTMLImageElement | null;
+    if (!img || img.tagName !== "IMG") return;
+    const src = img.src || "";
+    if (!src || src.startsWith("data:")) return;     // a broken data: URI has no server to heal
+    if (img.onerror || img.closest(".path-full")) return;   // the preview machinery retries its own
+    failedPreviews.set(img, () => {
+      const u = img.src;
+      img.removeAttribute("src");
+      img.src = u;                                   // a fresh attempt; a repeat error re-registers here
+    });
+  }, true);
 }

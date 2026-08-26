@@ -1,0 +1,30 @@
+<!-- SYNTHETIC example fixture (the notes-api demo domain: web/api/tests — never real session data).
+     The feed footer + a card, the shape most layout checks want: run
+       tools/ui-verify/shot.sh --css ui/webview/feed.css --body tools/ui-verify/fixtures/feed-footer.html \
+           --out /tmp/feed-footer.png --extra-css '#feed-list { min-height: 260px; }'
+     Copy this file next to your change and edit the markup to mirror what your TS emits — the value
+     of the check is that the fixture's DOM matches the builder's output, class for class. -->
+<div id="feed-head"></div>
+<div id="feed-list">
+  <div class="feed-cols">
+    <div class="feed-col col-asks">
+      <div class="feed-col-head"><span class="feed-col-name fcol-chip fcol-chip-working">Working</span><span class="feed-col-count">1</span></div>
+      <div class="feed-col-list">
+        <div class="fitem ask" style="background:#26262e;border-color:rgba(224,176,32,.5)"><div class="fitem-main">
+          <div class="fask-row1"><div class="fcard-title nav">ship the notes-api exporter</div><span class="ftime">2m ago</span></div>
+          <div class="fask-row2"><div class="fask-id"><a class="fname" style="color:#E0A030">api</a></div></div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="feed-foot">
+  <button id="feed-viewbtn" class="fdismiss ffollow feed-modetoggle">View ▴</button>
+  <span id="feed-search" class="open">
+    <button id="feed-search-btn" class="fdismiss ffollow feed-modetoggle on">Sessions ▴</button>
+    <input id="feed-search-input" type="search" placeholder="session or host…" value="">
+    <button id="feed-search-clear" type="button" hidden>×</button>
+  </span>
+  <button id="feed-clearall" class="fdismiss">Clear all</button>
+  <button id="feed-undoclear" class="fdismiss ffollow">Undo</button>
+</div>

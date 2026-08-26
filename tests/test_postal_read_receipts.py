@@ -252,10 +252,21 @@ class FormatHonesty(_Base):
         self.assertIn("not read yet", txt)
         txt = ps.format_receipts([self._row(parked="boxalias")])
         self.assertIn("parked for boxalias", txt)
+        self.assertNotIn("unreachable", txt, "an old bus omits the link bit — claim nothing about it")
         txt = ps.format_receipts([self._row(bounced=7)])
         self.assertIn("bounced", txt)
         txt = ps.format_receipts([self._row()])
         self.assertIn("pending (not read yet)", txt)
+
+    def test_parked_labels_follow_the_link_state(self):
+        # "(unreachable)" ONLY on an actual dial failure (the user 2026-08-24): a message queued
+        # ahead of the next exchange on a HEALTHY link is normal transit, and labeling it
+        # unreachable cried wolf on every ordinary cross-host send
+        txt = ps.format_receipts([self._row(parked="boxalias", parkedUp=True)])
+        self.assertIn("queued for relay to boxalias", txt)
+        self.assertNotIn("unreachable", txt)
+        txt = ps.format_receipts([self._row(parked="boxalias", parkedUp=False)])
+        self.assertIn("parked for boxalias (unreachable) — delivers on reconnect", txt)
 
 
 if __name__ == "__main__":

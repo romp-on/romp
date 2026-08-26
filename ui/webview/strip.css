@@ -34,7 +34,7 @@
    their own class so the tiers never hide them on a key-billed machine: tier 2 folds the token halves,
    tier 3 folds the labels like every other row, the value stays at every tier. */
 .ru-w.ru-api { gap: 6px; }
-.ru-apiv { font: 600 10px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #cfe6ff;
+.ru-apiv { font: 600 10px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #cfe6ff;
   font-variant-numeric: tabular-nums; white-space: nowrap; }
 #romp-strip[data-tier="2"] .ru-apitok, #romp-strip[data-tier="3"] .ru-apitok { display: none; }
 #strip-gear { flex: 0 0 auto; background: transparent; border: 1px solid transparent; border-radius: 5px;
@@ -43,7 +43,7 @@
 #strip-gear:hover { opacity: 1; background: rgba(255, 255, 255, 0.08); color: var(--vscode-foreground, #ccc); }
 .ru-w { display: flex; flex-direction: row; align-items: center; gap: 7px; cursor: default;
   flex: 0 1 auto; min-width: 0; }
-.ru-name { font: 600 10px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #9aa4ad;
+.ru-name { font: 600 10px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #9aa4ad;
   letter-spacing: .02em; white-space: nowrap; }
 /* fluid: 54px with room, compressing continuously to an 18px floor without one.
    width (not flex-basis) on purpose: the tracks are empty spans, so a bare basis
@@ -58,14 +58,14 @@
 /* UNKNOWN (the user 2026-08-13; supersedes the 2026-07-31 '?' slot): a window whose reading no longer
    describes the present is not drawn at all — the bar shows only what we know, and the last-known
    number rides the usage wrap's hover title, labelled as such. */
-.ru-pct { font: 600 10px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #cfe6ff;
+.ru-pct { font: 600 10px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #cfe6ff;
   font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* pane quick-opens: text labels for the panes NOT currently on screen */
 #strip-panes { flex: 0 0 auto; display: flex; flex-direction: row; align-items: center; gap: 6px; }
 .strip-pane { background: rgba(255, 255, 255, 0.06); color: var(--vscode-foreground, #ccc);
   border: 1px solid var(--vscode-editorHoverWidget-border, rgba(255, 255, 255, 0.14)); border-radius: 5px;
-  cursor: pointer; font: 600 10.5px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 2px 8px;
+  cursor: pointer; font: 600 10.5px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; padding: 2px 8px;
   white-space: nowrap; }
 .strip-pane:hover { background: rgba(255, 255, 255, 0.12); }
 /* refresh + network buttons share the gear's quiet chrome */
@@ -77,18 +77,18 @@
 #strip-refresh:disabled { opacity: .35; cursor: default; }
 #strip-net.on { color: var(--accent, #9cd2ff); opacity: 1; }
 /* the popover-open acknowledgment: the button reacts the instant it's clicked */
-#strip-net.open { color: var(--accent, #9cd2ff); opacity: 1; background: rgba(156, 210, 255, 0.12); }
+#strip-net.open { color: var(--accent, #9cd2ff); opacity: 1; background: var(--accent-wash, rgba(156, 210, 255, 0.12)); }
 /* the remotes popover, anchored above the strip */
 #strip-net-pop { position: fixed; right: 8px; bottom: 34px; z-index: 80; width: min(340px, 92vw);
   background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 8px; padding: 8px;
-  box-shadow: 0 10px 30px #000000aa; font: 12px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  box-shadow: 0 10px 30px #000000aa; font: 12px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color: #ccc; }
 #strip-net-pop[hidden] { display: none; }
 #strip-net-pop .sn-attach { display: flex; gap: 6px; margin-bottom: 8px; }
-#strip-net-pop select { flex: 1 1 auto; min-width: 0; background: #2a2a2b; color: #ccc;
+#strip-net-pop select { flex: 1 1 auto; min-width: 0; background: #2a2a2a; color: #ccc;
   border: 1px solid #3a3a3a; border-radius: 5px; padding: 3px 4px; }
-#strip-net-pop button { background: #2a2a2b; border: 1px solid #3a3a3a; border-radius: 5px; color: #cdd3da;
-  font: 600 11px -apple-system, sans-serif; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
+#strip-net-pop button { background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 5px; color: #cdd3da;
+  font: 600 11px system-ui, -apple-system, sans-serif; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
 #strip-net-pop button:hover { background: #333; color: #fff; }
 #strip-net-pop button:disabled { opacity: .5; cursor: default; }
 .sn-row { display: flex; align-items: center; gap: 7px; padding: 3px 0; }
@@ -104,7 +104,7 @@
 .sn-pend { color: var(--accent, #9cd2ff); font-size: 11px; flex: 0 0 auto; }
 /* "Previously attached": a quiet header + dimmed rows, so remembered hosts read as history you can act
    on and never as something currently connected. Hover restores full opacity (they're interactive). */
-.sn-khead { color: #6e7681; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+.sn-khead { color: #6e7681; font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
   margin: 10px 0 2px; padding-top: 8px; border-top: 1px solid var(--vscode-widget-border, #2a2a2a); }
 .sn-known { opacity: 0.62; }
 .sn-known:hover { opacity: 1; }

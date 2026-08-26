@@ -426,3 +426,23 @@ class RecallAndReceipts(unittest.TestCase):
         row = pm._sent_receipts("sid-a")[-1]
         self.assertEqual(row["parked"], None)
         self.assertTrue(row["relayed"], "delivery confirmation replaces parked")
+
+    def test_a_parked_receipt_carries_the_link_state(self):
+        # outbox residency alone is not unreachability (the user 2026-08-24): the receipt row now
+        # rides the authoritative dial state the send path already branches on, so the client can
+        # say "queued for relay" on a healthy link and "unreachable" only on a real dial failure
+        self.addCleanup(lambda: pm.PEERS.pop("srv", None))   # a mid-test failure must not leak link state
+        pm.outbox_put("srv", {"mid": "q9", "to": "beta", "frm": "alpha", "frm_id": "sid-a",
+                              "body": "hi", "kind": "", "t": 1})
+        pm._tl_append("messages.jsonl", {"t": 10, "ev": "sent", "id": "q9", "from": "alpha",
+                                         "from_id": "sid-a", "to_id": "peer:srv",
+                                         "toName": "srv:beta", "body": "hi", "kind": ""})
+        pm.PEERS["srv"] = {"up": True}
+        self.assertTrue(pm._sent_receipts("sid-a")[-1]["parkedUp"], "healthy link -> queued, not lost")
+        pm.PEERS["srv"] = {"up": False}
+        self.assertFalse(pm._sent_receipts("sid-a")[-1]["parkedUp"], "down link -> honestly unreachable")
+        pm.PEERS.pop("srv", None)
+        self.assertFalse(pm._sent_receipts("sid-a")[-1]["parkedUp"],
+                         "no tunnel record at all reads down, matching the send path's branch")
+        row = pm._sent_receipts("sid-a")[-1]
+        self.assertEqual(row["parked"], "srv", "the parked key keeps its host-string shape")

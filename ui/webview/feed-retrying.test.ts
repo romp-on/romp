@@ -15,7 +15,7 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "bin", "romp-ke
 
 test("the retrying badge is built once and rides the session-state row beside the API-error badge", () => {
   assert.match(FEED, /const retryBadge = el\("span", "fask-retrying"\)/);
-  assert.match(FEED, /idwrap\.append\(retryBadge, apiBadge, jauthBadge, blkBadge\)/,
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge,/,
     "session-STATE badges ride the name row, off the action row");
   assert.match(FEED, /a\._retryBadge = retryBadge;/);
 });

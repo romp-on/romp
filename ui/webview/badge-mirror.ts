@@ -24,7 +24,7 @@ export interface BadgeItem {
   nudgeFailed?: boolean;
   retrying?: { since?: number | null; count?: number; max?: number | null; status?: number | string | null; networkDown?: boolean | null; rateLimitType?: string | null } | null;
   warns?: { kind: string; t: number; msg: string }[] | null;
-  blocked?: { state: string; status?: number; text?: string; tooLong?: boolean; spendLimit?: boolean; modelLimit?: boolean } | null;
+  blocked?: { state: string; status?: number; text?: string; tooLong?: boolean; spendLimit?: boolean; modelLimit?: boolean; refusal?: boolean } | null;
 }
 // sid + itemId ride along so a bell entry can JUMP back to the card it was minted from (the user
 // 2026-07-28): the shell posts them back as {romp:'revealCard'} and the feed scrolls + pulses the card.
@@ -58,11 +58,13 @@ export function badgeNotices(items: BadgeItem[], seen: Set<string>): { notices: 
     // only the API-error block is an ERROR; a permission ask / picker is ordinary Needs-you traffic
     if (it.blocked && it.blocked.state === "apiError") {
       const b = it.blocked;
-      // spendLimit / tooLong / modelLimit already read as plain words; apiErrorReason covers them too, so the
-      // whole verdict comes from one place and the bell can't describe a failure differently than the chat does.
-      const onYou = b.spendLimit || b.tooLong || b.modelLimit;
+      // spendLimit / tooLong / modelLimit / refusal already read as plain words; apiErrorReason covers them too,
+      // so the whole verdict comes from one place and the bell can't describe a failure differently than the chat
+      // does. The signature's class slot keeps each on-you class a distinct EPISODE from a plain error on the
+      // same card (a refusal often replaces a transient error mid-storm and must still mint its own entry).
+      const onYou = b.spendLimit || b.tooLong || b.modelLimit || b.refusal;
       const what = apiErrorReason(b) || "API error" + (b.status ? " " + b.status : "");
-      add("e|" + it.itemId + "|" + (b.status || "") + "|" + (b.spendLimit ? "sl" : b.tooLong ? "tl" : b.modelLimit ? "ml" : ""),
+      add("e|" + it.itemId + "|" + (b.status || "") + "|" + (b.spendLimit ? "sl" : b.tooLong ? "tl" : b.modelLimit ? "ml" : b.refusal ? "rf" : ""),
         "apierror", it.name + " — " + (b.status && !onYou ? "API error " + b.status + ": " : "") + what);
     }
   }
@@ -73,7 +75,7 @@ export function badgeNotices(items: BadgeItem[], seen: Set<string>): { notices: 
 // episodes log's own settle record). Same episode-identity contract as the badges above: one bell
 // entry per boundary (sid + its t), so a clear that silently dropped cards is always findable in
 // the bell after the fact (the user 2026-07-27). The entry names the dropped cards and the way back
-// (Undo clear restores the batch).
+// (Undo restores the batch).
 export interface ClearNoticeRow { sid: string; name: string; t: number; titles: string[]; ended?: boolean; }   // ended: a session death finalized these cards (2026-08-13), not a /clear
 
 export function clearBoundaryNotices(rows: ClearNoticeRow[], seen: Set<string>): { notices: BadgeNotice[]; active: Set<string> } {
@@ -85,14 +87,14 @@ export function clearBoundaryNotices(rows: ClearNoticeRow[], seen: Set<string>):
     if (seen.has(sig)) continue;
     const n = r.titles.length;
     // an ENDED row is a session death that finalized open cards (2026-08-13) — same channel as the
-    // /clear drop, its own phrasing: nothing here is restorable by Undo clear, the session is gone
+    // /clear drop, its own phrasing: nothing here is restorable by Undo, the session is gone
     notices.push(r.ended
       ? { kind: "ended", sig, sid: r.sid, itemId: "",
           text: r.name + " ended with " + n + " open card" + (n === 1 ? "" : "s") + ": "
             + cap(r.titles.join(", "), 120) }
       : { kind: "cleared", sig, sid: r.sid, itemId: "",   // no single card — the jump opens the session
           text: r.name + " — /clear dropped " + n + " open card" + (n === 1 ? "" : "s") + ": "
-            + cap(r.titles.join(", "), 120) + " (Undo clear on the feed restores them)" });
+            + cap(r.titles.join(", "), 120) + " (Undo on the feed restores them)" });
   }
   return { notices, active };
 }

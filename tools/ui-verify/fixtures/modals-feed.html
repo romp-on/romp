@@ -1,0 +1,24 @@
+<!-- SYNTHETIC fixture: the feed pane's dialog/modal card family side by side — resume dialog,
+     confirm box, the card modal's shell, the file viewer's shell — for eyeballing the ONE
+     centered-modal card (--radius-modal, --shadow-modal, --overlay-dim). Invented content
+     (notes-api demo domain). The wrappers are fixed inset-0 backdrops in real life — the runner
+     statically places the CARDS only:
+       tools/ui-verify/shot.sh --css ui/webview/feed.css --body tools/ui-verify/fixtures/modals-feed.html \
+           --out /tmp/modals-feed.png --size 1000x330 \
+           --extra-css '.pickdlg-box,.fconfirm-box,.feed-modal-inner,.fileview{position:static;width:220px;height:auto;min-height:120px} body{background:#1e1e1e;padding:30px;display:flex;flex-direction:row;align-items:flex-start;gap:30px}'
+-->
+<div class="pickdlg-box">
+  <div class="pickdlg-title">Resume “web”?</div>
+  <div>Pick where to continue from.</div>
+</div>
+<div class="fconfirm-box">
+  <div class="fconfirm-msg">Revive “tests” and re-run the failing suite?</div>
+  <div class="fconfirm-btns"><button class="fconfirm-btn">Cancel</button><button class="fconfirm-btn primary">Revive</button></div>
+</div>
+<div class="feed-modal-inner">
+  <div class="feed-modal-head"><span class="feed-modal-title">ship the notes-api exporter</span></div>
+</div>
+<div class="fileview">
+  <div class="fileview-bar"><span class="fileview-name"><span class="fileview-dir">src/</span><span class="fileview-base">exporter.ts</span></span><span class="fileview-acts"><button class="fileview-btn">Raw</button></span></div>
+  <div class="fileview-body"></div>
+</div>

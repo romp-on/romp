@@ -21,12 +21,12 @@ test("the swirl element is built in the body, right after the distiller line, an
 });
 
 test("the swirl is driven by spinFor's caption — shown when there is one, else hidden", () => {
-  assert.match(FEED, /import \{ spinFor, KIND_WORD \} from "\.\/spin-caption";/);
+  assert.match(FEED, /import \{ spinFor, KIND_WORD, waitedSuffix \} from "\.\/spin-caption";/);
   assert.match(FEED, /const spin = spinFor\(it, distillPending\(dCompleted, dBlocked, it\.summary, it\.blockSummary, !!it\.blocked\),/);
   assert.match(FEED, /const spinCaption = spin\.caption, spinTip = spin\.tip, awaitingBg = spin\.awaitingBg;/);
   assert.match(FEED, /import \{ distillText, distillInputs, applyDistillLine, distillPending, distillStaleNote \} from "\.\/distiller-line";/);
   assert.match(FEED, /a\._awaitSpin\.style\.display = spinCaption \? "" : "none";/);
-  assert.match(FEED, /a\._awaitWhy\.textContent = spinCaption; a\._awaitSpin\.title = spinTip \|\| spinCaption;/);
+  assert.match(FEED, /\} else a\._awaitWhy\.textContent = spinCaption;\n\s*a\._awaitSpin\.title = spinTip \|\| spinCaption;/);
 });
 
 test("a bg-task wait wears the compact 'Awaiting task' pill that expands the task list (the user 2026-07-13)", () => {
@@ -35,8 +35,10 @@ test("a bg-task wait wears the compact 'Awaiting task' pill that expands the tas
   assert.match(FEED, /"bg" \| "summary" \| "subgoals" \| "tasks" \| "stall" \| "none"/);
   // "Awaiting task", never "Waiting on task": one word per state across every surface — the chat chip
   // and timeline badge already say Awaiting for this exact state (the user 2026-08-13)
-  assert.match(FEED, /taskList\.length === 1 \? "Awaiting " \+ one : "Awaiting " \+ taskList\.length \+ " "/);
+  assert.match(FEED, /taskList\.length === 1 \? "Awaiting " \+ one\s*\n?\s*: "Awaiting " \+ taskList\.length \+ " "/);
   assert.doesNotMatch(FEED, /"Waiting on task"/);
+  // the pill carries the wait's elapsed time, same readout as the awaiting box (the user 2026-08-23)
+  assert.match(FEED, /\+ pillWaited;/);
   assert.match(FEED, /taskBtn\.onclick = pick\("tasks"\);/);
   // expanded rows render in the checklist spot, same view as Sub-goals, the swirl as each row's mark
   assert.match(FEED, /if \(choice === "tasks"\) \{[\s\S]*?el\("div", "fcheck ftask"\)[\s\S]*?ftask-swirl/);
@@ -78,4 +80,21 @@ test("the swirl uses the shared glyph, spins SLOWER (calmer) + reverse like the 
   assert.match(CSS, /animation: fask-swirl-spin 2\.4s linear infinite;/);   // slowed from 1.4s (the user 2026-06-29)
   assert.match(CSS, /@keyframes fask-swirl-spin \{ to \{ transform: rotate\(-360deg\); \} \}/);   // reverse, like rl-spin
   assert.match(CSS, /@media \(prefers-reduced-motion: reduce\) \{ \.fask-awaiting-swirl \{ animation: none; \} \}/);
+});
+
+test("a DELEGATION wait names its peers like the ↪ from line — identity colour, quiet host: prefix (the user 2026-08-23)", () => {
+  // the kernel ships structured identities on the delegation arm (awaiting.peers); the box renders
+  // them with hostPartsNodes + the peer's identity colour instead of a colourless "Awaiting peer"
+  assert.match(FEED, /const awPeers = \(awaitingBg && it\.awaiting && it\.awaiting\.peers\) \|\| \[\];/);
+  assert.match(FEED, /nm\.replaceChildren\(\.\.\.hostPartsNodes\(p\.host, p\.name\)\);/);
+  assert.match(FEED, /if \(p\.color && p\.color\.bg\) nm\.style\.color = p\.color\.bg;/);
+  // the elapsed readout survives the structured path (the pill/box parity rule of 2026-08-23)
+  assert.match(FEED, /a\._awaitWhy\.append\(waitedSuffix\(it\.awaiting && it\.awaiting\.since, Date\.now\(\) \/ 1000\)\);/);
+  // older kernels ship no peers → the ladder's plain caption is the fallback
+  assert.match(FEED, /\} else a\._awaitWhy\.textContent = spinCaption;/);
+  // federation attributes a kernel-local peer to that kernel and prefixes its sid, exactly as it
+  // does for origin.peerSid — a merged card's peer name keeps its host and its click routes home
+  const FED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");
+  assert.match(FED, /if \(out\.awaiting && typeof out\.awaiting === "object" && Array\.isArray\(out\.awaiting\.peers\)\)/);
+  assert.match(FED, /\? \{ \.\.\.p, host, sid: prefixId\(host, p\.sid\) \} : p\) \};/);
 });

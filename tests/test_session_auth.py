@@ -52,6 +52,10 @@ class _Keyed(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
         self._env_before = os.environ.pop("ANTHROPIC_API_KEY", None)
+        # These classes pin the UNDECLARED launch-intent comparison: a box-wide declaration in the
+        # runner's shell (a deployed box exports it, and kernel-spawned sessions inherit it) must
+        # not flip the mismatch pins.
+        self._exp_auth_before = os.environ.pop("ROMP_EXPECTED_AUTH", None)
         self._stash_before = sb._WORK_KEY
         sb._WORK_KEY = None                       # force a fresh claim from the env
         # the key-account fast-mode probe is a real HTTPS GET — never from a test. Cases that
@@ -70,6 +74,9 @@ class _Keyed(unittest.TestCase):
         os.environ.pop("ANTHROPIC_API_KEY", None)
         if self._env_before is not None:
             os.environ["ANTHROPIC_API_KEY"] = self._env_before
+        os.environ.pop("ROMP_EXPECTED_AUTH", None)
+        if self._exp_auth_before is not None:
+            os.environ["ROMP_EXPECTED_AUTH"] = self._exp_auth_before
 
     def _sess(self, n=1, **reg):
         return sb.SdkSession(self.be, {"sid": "11111111-2222-3333-4444-%012d" % n,
@@ -395,7 +402,7 @@ class AuthErrorClass(unittest.TestCase):
         self.assertIn('"authErr": _is_auth_error(text)', inspect.getsource(km._api_error))
         self.assertIn('"apiAuthErr": bool(aerr and aerr.get("authErr"))', inspect.getsource(km.build_session))
         feed = inspect.getsource(km.build_feed)
-        self.assertIn('aerr.get("authErr"))))', feed, "the card floors to needs-you")
+        self.assertIn('aerr.get("authErr") or aerr.get("refusal"))))', feed, "the card floors to needs-you")
         self.assertIn("sign-in or API key isn't working", feed, "the card names the real remedy")
 
 

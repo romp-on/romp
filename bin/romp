@@ -656,8 +656,12 @@ EOF
     _romp_cmd "romp url"                   -            "Print ONLY the tokened dashboard URL (for scripts; humans just run \`romp\`)"
     _romp_cmd "romp sessions [--json]"     -            "List the fleet with each session's state, colours and backend"
     _romp_cmd "romp fork <parent> <name>"  -            "Branch a session into a new parallel one (parent untouched; --at <uuid> picks the cut)"
+    _romp_cmd "romp rename <session> <name>" -          "Rename a session (uuid-keyed: mailboxes, goals and history all follow)"
+    _romp_cmd "romp color <session> [<#hex|1-9>]" -     "Recolor a session's identity swatch (palette hex or slot 1-9; no color arg reads bg/fg)"
+    _romp_cmd "romp tag [<name>] [--add ...]" -         "Session tags: bare lists them; <name> with --add/--remove/--color/--delete merges one (a tagged session leaves the no-tags view); --host <kernel> edits an attached kernel's tag; --rename renames"
+    _romp_cmd "romp watch-pr <n> [--repo o/r]" -        "One mail here when the PR lands or fails — the kernel owns the watch, so it survives restarts (replaces the mortal shell loop)"
     _romp_cmd "romp mail ..."              romp-postal-service  "Romp Postal Service: send <to> <text> | inbox | agents | remote"
-    _romp_cmd "romp send <session> <text>" -            "Hand a session a message (kernel API, either backend)"
+    _romp_cmd "romp send <session> [--tag <label>] <text>" - "Hand a session a message; scripts/cron SHOULD pass --tag so it renders machine-sent, not as your typed words"
     _romp_cmd "romp interrupt <session>"   -            "Interrupt a session's current turn"
     _romp_cmd "romp end <session>"         -            "End a session"
     _romp_cmd "romp checkin <host>"        -            "Publish this machine to an attached hub (romp checkout withdraws)"
@@ -833,6 +837,332 @@ if [[ "${1:-}" == "fork" ]]; then
     fi
     _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
     echo "romp fork: refused — $_err" >&2
+    exit 1
+fi
+
+# Rename a session (the user 2026-08-23, via the SynthProbe fleet restructuring): the kernel's
+# POST /rename, the exact sibling of `romp fork` — sessions are uuid-keyed with the name as a
+# label, so a rename never breaks mailboxes, goals, or history; every surface resyncs.
+if [[ "${1:-}" == "rename" ]]; then
+    shift
+    _rn_usage="usage: romp rename <session> <new-name>"
+    if [[ $# -ne 2 || "$1" == -* || "$2" == -* ]]; then echo "$_rn_usage" >&2; exit 2; fi
+    _tok="$(_romp_token)"
+    _kport="${ROMP_KERNEL_PORT:-29855}"
+    if [[ -z "$_tok" ]]; then
+        echo "romp rename: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
+        exit 1
+    fi
+    _payload="$(python3 -c 'import json,sys; print(json.dumps({"target": sys.argv[1], "name": sys.argv[2]}))' "$1" "$2")"
+    _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/rename" \
+                  -H 'Content-Type: application/json' -d "$_payload")" \
+        || { echo "romp rename: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+        echo "romp rename: \"$1\" is now \"$2\""
+        exit 0
+    fi
+    _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+    echo "romp rename: refused — $_err" >&2
+    exit 1
+fi
+
+# Recolor a session's identity color (the user 2026-08-23, via the manager/worker session workflow:
+# a manager keeps its worker roster as a session group, all one identity color): the kernel's
+# POST /color, the exact sibling of `romp rename` — a names-registry write, so a dormant session
+# recolors by sid. With no color argument it READS: the session's current bg and fg off
+# GET /sessions, tab-separated, for scripts. A slot digit 1-9 resolves HERE against the
+# STATE/palette-colors mirror the kernel rewrites at boot — the same file the launcher assigns
+# from, so "slot 3" is the same hex at recolor time as at launch time; a missing mirror is a loud
+# error, never a silent fall-back to the hardcoded default set the gear may have switched away
+# from. TRAP: the kernel accepts only swatches of KNOWN palettes (the swatch's palette supplies
+# the fg word), so an arbitrary hex is refused loudly with the pointer to GET /palette — never
+# stored half-styled.
+if [[ "${1:-}" == "color" ]]; then
+    shift
+    _cl_usage="usage: romp color <session> [<#hex|1-9>]"
+    if [[ $# -lt 1 || $# -gt 2 || "$1" == -* || ( $# -eq 2 && -z "$2" ) ]]; then echo "$_cl_usage" >&2; exit 2; fi
+    _tok="$(_romp_token)"
+    _kport="${ROMP_KERNEL_PORT:-29855}"
+    if [[ -z "$_tok" ]]; then
+        echo "romp color: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
+        exit 1
+    fi
+    if [[ $# -eq 1 ]]; then
+        _resp="$(_romp_token_cfg | curl -sf -m 10 --config - "http://127.0.0.1:$_kport/sessions")" \
+            || { echo "romp color: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+        _pair="$(printf '%s' "$_resp" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+rows = rows.get("sessions", rows) if isinstance(rows, dict) else rows
+for r in rows:
+    if isinstance(r, dict) and (r.get("name") == sys.argv[1] or r.get("id") == sys.argv[1]):
+        print("%s\t%s" % (r.get("bg") or "", r.get("fg") or ""))
+        break
+' "$1")"
+        if [[ -z "$_pair" ]]; then
+            echo "romp color: no session named \"$1\" (see: romp sessions)" >&2
+            exit 1
+        fi
+        printf '%s\n' "$_pair"
+        exit 0
+    fi
+    _cl_bg="$2"
+    if [[ "$_cl_bg" =~ ^[1-9]$ ]]; then
+        _palfile="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/palette-colors"
+        if [[ ! -r "$_palfile" ]]; then
+            echo "romp color: no palette mirror at $_palfile — the kernel writes it at boot (is romp running?)" >&2
+            exit 1
+        fi
+        _cl_slot="$_cl_bg"
+        _cl_bg="$(awk -F'\t' -v n="$_cl_slot" 'NR == n { print $1 }' "$_palfile")"
+        if [[ -z "$_cl_bg" ]]; then
+            echo "romp color: the active palette has no slot $_cl_slot (see $_palfile)" >&2
+            exit 1
+        fi
+    fi
+    _payload="$(python3 -c 'import json,sys; print(json.dumps({"target": sys.argv[1], "bg": sys.argv[2]}))' "$1" "$_cl_bg")"
+    _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/color" \
+                  -H 'Content-Type: application/json' -d "$_payload")" \
+        || { echo "romp color: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+        echo "romp color: \"$1\" is now $_cl_bg"
+        exit 0
+    fi
+    _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+    echo "romp color: refused — $_err" >&2
+    exit 1
+fi
+
+# Session tags from the CLI (the user 2026-08-23; renamed from "group" the same day: a tag marks a
+# SPECIALIZED session, excluded from the untagged view and shown under its tag — the accurate name.
+# The manager/worker workflow keeps its worker roster as a tag, all one identity color, and an agent
+# can mint/color/fill a tag programmatically, sessions it just spawned included). Bare / --json READS
+# GET /views; bare maps member sids to live names via GET /sessions and prints an unmappable id
+# RAW — a dead member is information, not noise. Everything else is POST /tag, the kernel's
+# targeted per-tag merge — deliberately NOT the dashboard's setTimelineViews op, which replaces
+# the whole blob and would let a stale read clobber the active view and every tag this command
+# never looked at (the kernel's _edit_tag comment has the full story). TRAPS: --add/--remove eat
+# every following arg up to the next flag, so flag order carries the grouping; members go up as
+# live names or raw sids (a dead session rides by sid) and the kernel refuses an unknown name
+# loudly rather than minting a member nothing will ever match; "color" and "delete" ride the
+# payload only when given — an absent color means keep, "" would mean clear. A bare NAME with no
+# edit flag READS that one tag (exit 1 when absent) — creating on a read-shaped call minted
+# phantoms from typos. "group" is the pre-rename alias, accepted quietly.
+# PR-landing watch (the user 2026-08-24, both teams' surveys): register kernel-owned interest in a
+# PR and get ONE [romp] mail when it reaches a terminal state (merged, closed, or a failed check) —
+# replacing the mortal `while :; gh pr view; sleep 30` loop that died with every kernel restart.
+# The SESSION defaults to the caller (ROMP_SID, spawn-frozen in SDK sessions; --session overrides);
+# the REPO defaults to the caller's checkout (gh resolves it from cwd; --repo overrides). Both
+# resolve CLIENT-side so the kernel route stays explicit.
+if [[ "${1:-}" == "watch-pr" ]]; then
+    shift
+    _wp_usage="usage: romp watch-pr <number> [--repo <owner/name>] [--session <name>]"
+    _wp_pr=""; _wp_repo=""; _wp_sess=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo)    shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_wp_usage" >&2; exit 2; }
+                       _wp_repo="$1"; shift ;;
+            --session) shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_wp_usage" >&2; exit 2; }
+                       _wp_sess="$1"; shift ;;
+            -*)        echo "$_wp_usage" >&2; exit 2 ;;
+            *)         [[ -n "$_wp_pr" ]] && { echo "$_wp_usage" >&2; exit 2; }
+                       _wp_pr="$1"; shift ;;
+        esac
+    done
+    if [[ -z "$_wp_pr" || ! "$_wp_pr" =~ ^[0-9]+$ ]]; then echo "$_wp_usage" >&2; exit 2; fi
+    if [[ -z "$_wp_repo" ]]; then
+        _wp_repo="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+        if [[ -z "$_wp_repo" ]]; then
+            echo "romp watch-pr: no --repo given and the current directory has no gh-resolvable repo" >&2
+            exit 1
+        fi
+    fi
+    _wp_who="$_wp_sess"
+    if [[ -z "$_wp_who" ]]; then
+        if [[ -z "${ROMP_SID:-}" ]]; then
+            echo "romp watch-pr: --session <name> required outside a romp SDK session (ROMP_SID is not set)" >&2
+            exit 2
+        fi
+        _wp_who="$ROMP_SID"
+    fi
+    _tok="$(_romp_token)"
+    _kport="${ROMP_KERNEL_PORT:-29855}"
+    if [[ -z "$_tok" ]]; then
+        echo "romp watch-pr: the kernel isn't running (no serve token). Start romp first." >&2
+        exit 1
+    fi
+    _wp_key="id"; [[ -n "$_wp_sess" ]] && _wp_key="name"
+    _payload="$(python3 -c 'import json,sys; print(json.dumps({"pr": int(sys.argv[1]), "repo": sys.argv[2], sys.argv[3]: sys.argv[4]}))' \
+        "$_wp_pr" "$_wp_repo" "$_wp_key" "$_wp_who")"
+    _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/watch-pr" \
+                  -H 'Content-Type: application/json' -d "$_payload")" \
+        || { echo "romp watch-pr: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+        echo "romp watch-pr: watching $_wp_repo#$_wp_pr — one mail here when it lands or fails"
+        exit 0
+    fi
+    _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+    echo "romp watch-pr: refused — $_err" >&2
+    exit 1
+fi
+
+if [[ "${1:-}" == "tag" || "${1:-}" == "group" ]]; then
+    shift
+    _gr_usage="usage: romp tag [--json]
+       romp tag <name> [--host <kernel>] [--add <session>...] [--remove <session>...] [--color <#hex>] [--rename <new>] [--delete]"
+    _gr_name=""; _gr_json=false; _gr_color=""; _gr_cset=0; _gr_del=0; _gr_host=""; _gr_rename=""
+    _gr_add=(); _gr_remove=(); _gr_mode=""; _gr_add_seen=0; _gr_rm_seen=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)   _gr_json=true; _gr_mode=""; shift ;;
+            --add)    _gr_add_seen=1; _gr_mode="add"; shift ;;
+            --remove) _gr_rm_seen=1; _gr_mode="remove"; shift ;;
+            --color)  shift
+                      if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then echo "$_gr_usage" >&2; exit 2; fi
+                      _gr_color="$1"; _gr_cset=1; _gr_mode=""; shift ;;
+            --rename) shift
+                      if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then echo "$_gr_usage" >&2; exit 2; fi
+                      _gr_rename="$1"; _gr_mode=""; shift ;;
+            --host)   shift
+                      if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then echo "$_gr_usage" >&2; exit 2; fi
+                      _gr_host="$1"; _gr_mode=""; shift ;;
+            --delete) _gr_del=1; _gr_mode=""; shift ;;
+            -*)       echo "$_gr_usage" >&2; exit 2 ;;
+            *)        case "$_gr_mode" in
+                          add)    _gr_add+=("$1") ;;
+                          remove) _gr_remove+=("$1") ;;
+                          *)      if [[ -n "$_gr_name" ]]; then echo "$_gr_usage" >&2; exit 2; fi
+                                  _gr_name="$1" ;;
+                      esac
+                      shift ;;
+        esac
+    done
+    if $_gr_json && [[ -n "$_gr_name" || $_gr_add_seen -eq 1 || $_gr_rm_seen -eq 1 || $_gr_cset -eq 1 || $_gr_del -eq 1 ]]; then
+        echo "$_gr_usage" >&2; exit 2
+    fi
+    if [[ -z "$_gr_name" && ( $_gr_add_seen -eq 1 || $_gr_rm_seen -eq 1 || $_gr_cset -eq 1 || $_gr_del -eq 1 || -n "$_gr_rename" ) ]]; then
+        echo "$_gr_usage" >&2; exit 2
+    fi
+    if [[ -n "$_gr_host" && $_gr_add_seen -eq 0 && $_gr_rm_seen -eq 0 && $_gr_cset -eq 0 && $_gr_del -eq 0 && -z "$_gr_rename" ]]; then
+        # v0: --host modifies an EDIT (the target kernel's store, through the tunnel). Reads stay
+        # local — the dashboard's view menu already shows the union.
+        echo "romp tag: --host goes with an edit (--add/--remove/--color/--delete)" >&2; exit 2
+    fi
+    if [[ ( $_gr_add_seen -eq 1 && ${#_gr_add[@]} -eq 0 ) || ( $_gr_rm_seen -eq 1 && ${#_gr_remove[@]} -eq 0 ) ]]; then
+        echo "$_gr_usage" >&2; exit 2
+    fi
+    _tok="$(_romp_token)"
+    _kport="${ROMP_KERNEL_PORT:-29855}"
+    if [[ -z "$_tok" ]]; then
+        echo "romp tag: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
+        exit 1
+    fi
+    if [[ -z "$_gr_name" ]]; then
+        _resp="$(_romp_token_cfg | curl -sf -m 10 --config - "http://127.0.0.1:$_kport/views")" \
+            || { echo "romp tag: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+        if $_gr_json; then
+            printf '%s\n' "$_resp"
+            exit 0
+        fi
+        _rows="$(_romp_token_cfg | curl -sf -m 10 --config - "http://127.0.0.1:$_kport/sessions" 2>/dev/null)" || _rows='[]'
+        python3 -c '
+import json, sys
+v = json.loads(sys.argv[1])
+if not isinstance(v, dict):
+    v = {}
+rows = json.loads(sys.argv[2])
+rows = rows.get("sessions", rows) if isinstance(rows, dict) else rows
+names = {r.get("id"): r.get("name") for r in rows if isinstance(r, dict)}
+def spell(x):
+    # canonical (host, sid) pair from a federated kernel, or the legacy plain string
+    if isinstance(x, dict):
+        h, s = x.get("host") or "", x.get("sid") or ""
+        return (h + ":" + s) if h else s
+    return x
+groups = v.get("tags") or v.get("groups") or []   # older kernel: pre-rename key
+act = v.get("active") or "all"
+act = {"all": "All", "untagged": "no tags"}.get(act) \
+    or next((g.get("name") for g in groups if g.get("id") == act), act)
+print("active view: %s" % act)
+for g in groups:
+    m = [names.get(spell(x)) or spell(x) for x in (g.get("members") or [])]
+    print("%s  %s  %d member%s%s" % (g.get("name"), g.get("color") or "(no color)",
+                                     len(m), "" if len(m) == 1 else "s",
+                                     (": " + ", ".join(m)) if m else ""))
+' "$_resp" "$_rows"
+        exit 0
+    fi
+    if [[ $_gr_add_seen -eq 0 && $_gr_rm_seen -eq 0 && $_gr_cset -eq 0 && $_gr_del -eq 0 && -z "$_gr_rename" ]]; then
+        # a bare name is a READ of that one group, never a write — POSTing here would CREATE a
+        # missing group, so a typo'd "view" would mint a phantom and burn one of the 32 slots
+        _resp="$(_romp_token_cfg | curl -sf -m 10 --config - "http://127.0.0.1:$_kport/views")" \
+            || { echo "romp tag: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+        _rows="$(_romp_token_cfg | curl -sf -m 10 --config - "http://127.0.0.1:$_kport/sessions" 2>/dev/null)" || _rows='[]'
+        if ! python3 -c '
+import json, sys
+v = json.loads(sys.argv[1])
+rows = json.loads(sys.argv[2])
+rows = rows.get("sessions", rows) if isinstance(rows, dict) else rows
+names = {r.get("id"): r.get("name") for r in rows if isinstance(r, dict)}
+def spell(x):
+    if isinstance(x, dict):
+        h, s = x.get("host") or "", x.get("sid") or ""
+        return (h + ":" + s) if h else s
+    return x
+g = next((g for g in (v.get("tags") or v.get("groups") or []) if isinstance(v, dict) and g.get("name") == sys.argv[3]), None)
+if g is None:
+    sys.exit(3)
+m = [names.get(spell(x)) or spell(x) for x in (g.get("members") or [])]
+print("%s  %s  %d member%s%s" % (g.get("name"), g.get("color") or "(no color)",
+                                 len(m), "" if len(m) == 1 else "s",
+                                 (": " + ", ".join(m)) if m else ""))
+' "$_resp" "$_rows" "$_gr_name"; then
+            echo "romp tag: no tag named \"$_gr_name\" (see: romp tag)" >&2
+            exit 1
+        fi
+        exit 0
+    fi
+    _payload="$(python3 -c '
+import json, sys
+n = int(sys.argv[7])
+body = {"name": sys.argv[1], "add": sys.argv[8:8 + n], "remove": sys.argv[8 + n:]}
+if sys.argv[2] == "1":
+    body["color"] = sys.argv[3]
+if sys.argv[4] == "1":
+    body["delete"] = True
+if sys.argv[5]:
+    body["host"] = sys.argv[5]
+if sys.argv[6]:
+    body["rename"] = sys.argv[6]
+print(json.dumps(body))
+' "$_gr_name" "$_gr_cset" "$_gr_color" "$_gr_del" "$_gr_host" "$_gr_rename" "${#_gr_add[@]}" \
+        "${_gr_add[@]+"${_gr_add[@]}"}" "${_gr_remove[@]+"${_gr_remove[@]}"}")"
+    _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/tag" \
+                  -H 'Content-Type: application/json' -d "$_payload")" \
+        || { echo "romp tag: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+        _rows="$(_romp_token_cfg | curl -sf -m 10 --config - "http://127.0.0.1:$_kport/sessions" 2>/dev/null)" || _rows='[]'
+        python3 -c '
+import json, sys
+resp = json.loads(sys.argv[1])
+rows = json.loads(sys.argv[2])
+rows = rows.get("sessions", rows) if isinstance(rows, dict) else rows
+names = {r.get("id"): r.get("name") for r in rows if isinstance(r, dict)}
+if resp.get("deleted"):
+    print("romp tag: \"%s\" deleted" % (resp.get("name") or sys.argv[3]))
+else:
+    g = resp.get("tag") or resp.get("group") or {}   # older kernel: pre-rename key
+    m = [names.get(x) or x for x in (g.get("members") or [])]
+    nm = g.get("name") or sys.argv[3]
+    if m:
+        print("romp tag: \"%s\" now: %s" % (nm, ", ".join(m)))
+    else:
+        print("romp tag: \"%s\" is empty" % nm)
+' "$_resp" "$_rows" "$_gr_name"
+        exit 0
+    fi
+    _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+    echo "romp tag: refused — $_err" >&2
     exit 1
 fi
 

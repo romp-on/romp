@@ -163,6 +163,8 @@ class ExactSnapshotRefresh(unittest.TestCase):
 
     def _session(self, scheduled, **kw):
         kw.setdefault("api_key_auth", False)   # per-session auth (2026-08-08): a keyed one is no candidate
+        kw.setdefault("auth_live", "login")    # …whose init CONFIRMED the login (the all-keyed one-shot
+        #   re-arms only on that; "" would model a pre-init unknown — see test_expected_auth.py)
         s = SimpleNamespace(client=object(), loop=object(), ended=False, **kw)
         s.refresh_usage = lambda: scheduled
         return s

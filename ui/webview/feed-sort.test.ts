@@ -1,6 +1,7 @@
 // Feed card sort order: oldest-at-top by DEFAULT (the user 2026-06-27) — the newest work sits at the BOTTOM
-// of each column, and new/moved cards stack onto the bottom. A footer "Newest first" toggle (default OFF,
-// the user 2026-07-07) reverses each column. The old ⛭ "Oldest first" gear checkbox stays gone. Source-pins.
+// of each column, and new/moved cards stack onto the bottom. The view menu's "Sort by most recent ↓/↑" row
+// (the footer "Newest first"/"Modified" button before 2026-08-24, default OFF since the user 2026-07-07)
+// reverses each column. The old ⛭ "Oldest first" gear checkbox stays gone. Source-pins.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -9,14 +10,17 @@ import * as path from "node:path";
 const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "bin", "romp-kernel"), "utf8");
 
-test("each column sorts by modified time; the footer 'Modified ↑/↓' control reverses the direction", () => {
+test("each column sorts by modified time; the view menu's 'Sort by most recent ↓/↑' row reverses the direction", () => {
   assert.match(FEED, /const newestFirst = feedPrefs\(\)\.newestFirst;/);
   assert.match(FEED, /buckets\[k\]\.sort\(\(x, y\) => newestFirst \? y\.t - x\.t : x\.t - y\.t\)/);
-  // renamed from the "Newest first" on/off toggle (the user 2026-08-18): the arrow IS the state —
-  // ↓ newest at the top, ↑ oldest at the top — so the button drops the pressed accent
-  assert.match(FEED, /ensureFeedToggle\("feed-newestfirst", "Modified", \(\) => feedPrefs\(\)\.newestFirst, "newestFirst"/);
-  assert.match(FEED, /b\.textContent = "Modified " \+ \(feedPrefs\(\)\.newestFirst \? "\\u2193" : "\\u2191"\);/);
-  assert.match(FEED, /b\.classList\.remove\("on"\);/);
+  // folded into the footer VIEW MENU (the user 2026-08-24), keeping the Modified button's rule (the
+  // user 2026-08-18): the arrow IS the state — ↓ newest at the top, ↑ oldest at the top — a DIRECTION
+  // row, so it is a plain menuitem that never wears the ✓-current mark
+  assert.match(FEED, /"Sort by most recent " \+ \(p\.newestFirst \? "\\u2193" : "\\u2191"\)/);
+  // the click reads the prefs AS OF the click (feedPrefs() inside the handler), never a paint-time capture
+  assert.match(FEED, /mk\(false, \(\) => setViewPref\("newestFirst", !feedPrefs\(\)\.newestFirst\)\)/);
+  assert.match(FEED, /set\(0, "Sort by most recent[\s\S]{0,160}?current: false/,
+    "the direction row never wears the ✓-current mark — both directions are valid sorts");
   assert.doesNotMatch(FEED, /oldestFirst/, "no oldestFirst pref — the natural order is oldest-first");
 });
 

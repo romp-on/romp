@@ -36,7 +36,14 @@ test("on a phone (coarse pointer) Enter is a newline, not send — the Send butt
   // the resting placeholder drops every hint on mobile (⏎/⇧⏎ is wrong there, and even the "/" hint
   // wrapped and clipped the one-line pill)
   assert.match(RENDER, /function composerRestingPlaceholder\(\)/);
-  assert.match(RENDER, /isCoarsePointer\(\)\s*\?\s*"Message this session…"/);
+  assert.match(RENDER, /if \(isCoarsePointer\(\)\) return "Message this session…";/);
+  // …and on a NARROW desktop pane (the user 2026-08-26: the full hint wrapped onto a clipped second
+  // line) the resting hint adapts to the box's width: under 620px it keeps only the core prompt +
+  // the one undiscoverable key. Re-fitted event-based on resize, and ONLY while a resting form is
+  // showing — a picker's "add your own answer…" or the closed-session notice is never clobbered.
+  assert.match(RENDER, /if \(ta && ta\.clientWidth > 0 && ta\.clientWidth < 620\) return "Message this session…  \(\/ for commands\)";/);
+  assert.match(RENDER, /if \(ta\.placeholder\.startsWith\("Message this session…"\)\) ta\.placeholder = composerRestingPlaceholder\(\);/);
+  assert.match(RENDER, /\}\)\.observe\(ta\);/, "the re-fit is a ResizeObserver, not a poll");
 });
 
 test("on a phone the resting box is ONE line — the Signal-style pill — with a placeholder that fits it (the user 2026-07-30)", () => {

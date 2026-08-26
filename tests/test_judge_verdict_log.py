@@ -196,16 +196,16 @@ class DualWriteThroughTheSites(unittest.TestCase):
         self.td = tempfile.mkdtemp()
         jd._rebind_state(Path(self.td))
 
-    def test_planner_done_records_event_and_e6_sample(self):
+    def test_planner_done_records_event_and_writes_no_sampler_file(self):
         store = {"rompUuid": SID, "nodes": {G1: node()}, "placements": {}, "status": {}, "lastNode": G1}
         menu = [{"id": G1, "text": "Ship it"}]
         jd.apply_plan(store, "seg-x", T, [{"do": "done", "goal": 1, "why": "shipped"}], menu, place_key="seg-x")
         log = store["nodes"][G1]["log"]
         self.assertEqual([(e["src"], e["kind"]) for e in log], [("planner", "done")])
         self.assertEqual(log[0]["seg"], "seg-x")
-        samples = [json.loads(l) for l in (jd.STATE / "eager-done-samples.jsonl").read_text().splitlines()]
-        self.assertEqual(len(samples), 1)
-        self.assertTrue(samples[0]["focusHeld"], "G1 was the focus top at verdict time")
+        # the E6 sampler retired 2026-08-23 (P4 closed without consolidation: 597 samples, 75%
+        # focus-held) — a planner done writes NO side file anymore
+        self.assertFalse((jd.STATE / "eager-done-samples.jsonl").exists())
 
     def test_followup_reopen_records_a_user_reopen(self):
         # (user_move was removed 2026-07-25; the card reply is the surviving user-reopen producer)

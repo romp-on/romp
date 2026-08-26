@@ -2,10 +2,10 @@
    that hosts the modal can link it: the kernel's /feed page, and the VS Code feed AND chat
    panels (the modal opens over whichever pane the strip's gear was clicked in,
    the user 2026-07-13). */
-#rgear { position: fixed; top: 6px; right: 8px; z-index: 60; background: #2a2a2b; border: 1px solid #3a3a3a;
+#rgear { position: fixed; top: 6px; right: 8px; z-index: 60; background: #2a2a2a; border: 1px solid #3a3a3a;
   border-radius: 6px; color: #9aa0a6; font-size: 15px; cursor: pointer; opacity: .7; line-height: 1; padding: 3px 6px; }
 #rgear:hover { opacity: 1; background: #333; }
-#rrefresh { position: fixed; top: 6px; right: 42px; z-index: 60; background: #2a2a2b; border: 1px solid #3a3a3a;
+#rrefresh { position: fixed; top: 6px; right: 42px; z-index: 60; background: #2a2a2a; border: 1px solid #3a3a3a;
   border-radius: 6px; color: #9aa0a6; font-size: 14px; cursor: pointer; opacity: .7; line-height: 1; padding: 3px 6px; }
 #rrefresh:hover { opacity: 1; background: #333; color: #fff; }
 #rrefresh:disabled { opacity: .4; cursor: default; }
@@ -56,7 +56,7 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
    floats below the row on hover (absolute → no layout shift). */
 #rsettings .rs-sub { display: none; }
 #rsettings .rs-row:hover .rs-sub { display: block; position: absolute; left: 0; right: 0; top: 100%; z-index: 10;
-  margin-top: 2px; color: #cdd3da; font-size: .92em; line-height: 1.35; background: #1b1b1c; border: 1px solid #3a3a3a;
+  margin-top: 2px; color: #cdd3da; font-size: 0.92em; line-height: 1.35; background: #1b1b1c; border: 1px solid #3a3a3a;
   border-radius: 6px; padding: 6px 9px; box-shadow: 0 4px 14px #000000aa; pointer-events: none; }
 #rsettings .rs-sub code { background: #0d0d0d; border-radius: 3px; padding: 0 3px; }
 /* A setting whose value differs between the connected machines: the checkbox goes tri-state, and this
@@ -72,24 +72,24 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 #rs-cmap { position: relative; margin-top: 5px; }
 #rs-cmap-btn { width: 100%; height: 20px; border-radius: 5px; border: 1px solid #3a3a3a; cursor: pointer; padding: 0; display: block; }
 #rs-cmap-list { position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px; z-index: 20; background: #1e1e1e;
-  border: 1px solid #3a3a3a; border-radius: 6px; padding: 5px; box-shadow: 0 8px 24px #000000aa; }
+  border: 1px solid #3a3a3a; border-radius: 6px; padding: 4px; box-shadow: 0 8px 24px #000000aa; }
 #rs-cmap-list[hidden] { display: none; }
 .rs-cmap-opt { height: 18px; border-radius: 4px; border: 1px solid #3a3a3a; cursor: pointer; margin: 4px 0; }
 .rs-cmap-opt:first-child { margin-top: 0; }
 .rs-cmap-opt:last-child { margin-bottom: 0; }
-.rs-cmap-opt.sel { outline: 2px solid #9cd2ff; outline-offset: 1px; border-color: transparent; }
+.rs-cmap-opt.sel { outline: 2px solid var(--accent, #9cd2ff); outline-offset: 1px; border-color: transparent; }
 /* Session-colors picker (the user 2026-07-12): same dropdown mechanics, options = 9 identity dots + name. */
 #rs-pal { position: relative; margin-top: 5px; }
 #rs-pal-btn { width: 100%; border: 1px solid #3a3a3a; border-radius: 5px; cursor: pointer; background: #1e1e1e;
   display: flex; gap: 5px; align-items: center; padding: 4px 7px; min-height: 20px; }
 #rs-pal-list { position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px; z-index: 20; background: #1e1e1e;
-  border: 1px solid #3a3a3a; border-radius: 6px; padding: 4px; box-shadow: 0 8px 24px #00000088; }
+  border: 1px solid #3a3a3a; border-radius: 6px; padding: 4px; box-shadow: 0 8px 24px #000000aa; }
 #rs-pal-list[hidden] { display: none; }
 .rs-pal-opt { display: flex; gap: 5px; align-items: center; border: 1px solid #3a3a3a; border-radius: 4px;
   cursor: pointer; margin: 4px 0; padding: 4px 7px; }
 .rs-pal-opt:first-child { margin-top: 0; }
 .rs-pal-opt:last-child { margin-bottom: 0; }
-.rs-pal-opt.sel { outline: 2px solid #9cd2ff; outline-offset: 1px; border-color: transparent; }
+.rs-pal-opt.sel { outline: 2px solid var(--accent, #9cd2ff); outline-offset: 1px; border-color: transparent; }
 .rs-pal-dot { width: 11px; height: 11px; border-radius: 50%; flex: 0 0 auto; }
 .rs-pal-name { color: #9aa0a6; font-size: 11px; margin-left: auto; padding-left: 8px; white-space: nowrap; }
 #rsettings .rs-sep { border-top: 1px solid #3a3a3a; margin-top: 6px; padding-top: 8px; }
@@ -106,23 +106,23 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
   border-radius: 4px; padding: 1px 6px; font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #e6e6e6; }
 /* token-usage analytics: a button in the gear panel opens a centered modal with the chart. */
 .ra-openbtn { margin-top: 8px; width: 100%; background: #2d2d2f; border: 1px solid #3a3a3a; border-radius: 6px;
-  color: #cdd3da; font: 600 12px/1.4 -apple-system, sans-serif; padding: 7px; cursor: pointer; }
+  color: #cdd3da; font: 600 12px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif; padding: 7px; cursor: pointer; }
 .ra-openbtn:hover { background: #343436; color: #fff; }
-#ranalytics-back { position: fixed; inset: 0; z-index: 70; background: #000000bb; display: flex;
+#ranalytics-back { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, 0.55); display: flex;
   align-items: center; justify-content: center; }
 /* an explicit display rule beats the UA [hidden]{display:none}; restore hiding at higher
    specificity so the close / backdrop-click / Esc (which set .hidden) actually dismiss the modal */
 #ranalytics-back[hidden] { display: none; }
 #ranalytics { width: min(520px, 94vw); max-height: 90vh; overflow: auto; background: #252526;
-  border: 1px solid #3a3a3a; border-radius: 10px; padding: 14px 16px; box-shadow: 0 12px 40px #000000aa;
-  font: 12px/1.5 -apple-system, sans-serif; color: #ccc; }
+  border: 1px solid #3a3a3a; border-radius: 10px; padding: 14px 16px; box-shadow: 0 12px 36px #000000aa;
+  font: 12px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif; color: #ccc; }
 #ranalytics .ra-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 #ranalytics .ra-title { font-weight: 600; font-size: 14px; color: #e8eaed; }
 #ra-close { background: none; border: none; color: #9aa0a6; font-size: 16px; cursor: pointer; line-height: 1; }
 #ra-close:hover { color: #fff; }
 .ra-periods, .ra-group, .ra-metric { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
-.ra-periods button, .ra-group button, .ra-metric button { background: #2a2a2b; border: 1px solid #3a3a3a;
-  border-radius: 5px; color: #9aa0a6; font: 12px/1 -apple-system, sans-serif; padding: 5px 9px; cursor: pointer; }
+.ra-periods button, .ra-group button, .ra-metric button { background: #2a2a2a; border: 1px solid #3a3a3a;
+  border-radius: 5px; color: #9aa0a6; font: 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif; padding: 5px 9px; cursor: pointer; }
 .ra-periods button:hover, .ra-group button:hover, .ra-metric button:hover { background: #333; color: #ddd; }
 .ra-periods button.on, .ra-group button.on, .ra-metric button.on { background: #0e639c; border-color: #1177bb; color: #fff; }
 .ra-chart { margin: 6px 0 10px; min-height: 120px; }

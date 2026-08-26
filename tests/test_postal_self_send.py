@@ -38,7 +38,7 @@ class ResolverBase(unittest.TestCase):
                        ("all_agents", "self_host", "peers_on", "_postal_off")}
         self._agents = []
         self._isolated = set()
-        pm.all_agents = lambda: list(self._agents)
+        pm.all_agents = lambda threads=False: list(self._agents)
         pm.self_host = lambda: "TESTHOST"
         pm.peers_on = lambda: True
         pm._postal_off = lambda sid: sid in self._isolated
@@ -266,3 +266,38 @@ class DeliveredMeansDelivered(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UuidRecipients(unittest.TestCase):
+    """A uuid-shaped `to` addresses the STABLE session id (the user 2026-08-23): names are labels
+    renames retire; the sid survives them. Unique by construction, so no ambiguity arm; the
+    self-send refusal still applies to your own sid."""
+    A = "11111111-2222-3333-4444-555555555555"
+    B = "66666666-7777-8888-9999-000000000000"
+
+    def setUp(self):
+        self._agents = [{"name": "web", "id": self.A, "remote": False},
+                        {"name": "web", "id": self.B, "remote": False}]   # a shared NAME, distinct ids
+        self._saved = (pm.all_agents, pm.peers_on, pm._postal_off)
+        pm.all_agents = lambda threads=False: list(self._agents)
+        pm.peers_on = lambda: False
+        pm._postal_off = lambda sid: False
+
+    def tearDown(self):
+        pm.all_agents, pm.peers_on, pm._postal_off = self._saved
+
+    def test_an_id_resolves_where_the_shared_name_is_ambiguous(self):
+        res = pm.resolve_recipient(self.B, frm_id=self.A)
+        self.assertEqual(res["kind"], "direct")
+        self.assertEqual(res["agent"]["id"], self.B, "the sid picks exactly one session")
+        by_name = pm.resolve_recipient("web", frm_id="")
+        self.assertEqual(by_name["kind"], "error", "…where the name alone is refused as ambiguous")
+
+    def test_your_own_id_is_still_a_self_send(self):
+        res = pm.resolve_recipient(self.A, frm_id=self.A)
+        self.assertEqual(res["kind"], "error")
+        self.assertEqual(res["status"], 409, "mailing your own sid is the same loopback")
+
+    def test_an_unknown_id_errors_live_only(self):
+        res = pm.resolve_recipient("99999999-8888-7777-6666-555544443333", frm_id=self.A)
+        self.assertEqual(res["kind"], "error")

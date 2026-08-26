@@ -74,10 +74,10 @@ class EffortReconnect(unittest.TestCase):
         # whose ultracode sessions seemed to downgrade at random). The whole setter family goes
         # through _update_reg now.
         for pin in ('self._update_reg(sid, effort=value, effortPending=True)',
-                    'self._update_reg(sid, auth=value, authPending=True)',
+                    'self._update_reg(sid, auth=value, authPending=True, apiKeyAuth=None)',
                     'self._update_reg(sid, mode=mode)',
                     'self._update_reg(sid, fast=(value == "on"), liveFast=value)',
-                    'self._update_reg(sid, name=new_name)',
+                    'self._update_reg(sid, name=new_name,',   # + the rename ping rides the same locked RMW when owed (2026-08-24/25)
                     'self._update_reg(sid, model=value, modelPending=bool(s._model_pending))',
                     'self._update_reg(sid, model=value, liveModel=_alias_label(value), modelPending=False)'):
             self.assertIn(pin, BACKEND_SRC)

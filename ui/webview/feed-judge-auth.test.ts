@@ -18,7 +18,7 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "bin", "romp-ke
 
 test("the judge-auth chip is built once, rides the session-state row, and keys on blocked.state", () => {
   assert.match(FEED, /const jauthBadge = el\("span", "fask-jauth"\)/);
-  assert.match(FEED, /idwrap\.append\(retryBadge, apiBadge, jauthBadge, blkBadge\)/,
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge,/,
     "the chip rides the name row with its api-trouble siblings");
   assert.match(FEED, /a\._jauthBadge = jauthBadge;/);
   assert.match(FEED, /const isJudgeAuth = it\.blocked\?\.state === "judgeAuth"/);

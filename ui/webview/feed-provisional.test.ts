@@ -38,7 +38,7 @@ test("every interaction on a placeholder routes to opening the session (no modal
   // body click → open the session, not the modal
   assert.match(FEED, /if \(it\.provisional\) \{ openOrReviveSession\(it\.sid, it\.live, it\.name\); return; \}\s+\/\/ placeholder → open the session/);
   // title click → open the session, not a timeline deep-link
-  assert.match(FEED, /if \(it\.provisional\) \{ openOrReviveSession\(it\.sid, it\.live, it\.name\); return; \} vscodeApi\?\.postMessage\(\{ type: "showOnTimeline"/);
+  assert.match(FEED, /if \(it\.provisional\) \{ openOrReviveSession\(it\.sid, it\.live, it\.name\); return; \} focusEcho\(it\.sid\); vscodeApi\?\.postMessage\(\{ type: "showOnTimeline"/);
   // dblclick can't pin a node-less placeholder
   assert.match(FEED, /if \(it\.provisional\) return;\s+\/\/ a placeholder can't be pinned/);
   // hover path: a placeholder has no timeline journey to preview

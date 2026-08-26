@@ -90,6 +90,26 @@ class DeriveJudging(unittest.TestCase):
         self.assertNotIn("umbrella", planner_texts)
         self.assertNotIn("handoff goal", planner_texts)
 
+    def test_grouper_housekeeping_marks_key_on_the_groupOp_stamp(self):
+        # T103: the surviving grouper ops (merge/split/retitle) append no diary events by design,
+        # so the lane keys on apply_group's structure stamp — additive beside the node's own
+        # mint/plant mark, while an ARCHIVED pre-T101 container still shows its old group mark
+        nodes = {
+            "m": {"id": "m", "parentId": None, "t": NOW - 200, "text": "merged survivor",
+                  "groupOp": {"kind": "merge", "t": NOW - 50}},
+            "r": {"id": "r", "parentId": None, "t": NOW - 5000, "text": "retitled card",
+                  "groupOp": {"kind": "retitle", "t": NOW - 40}},
+            "old": {"id": "old", "parentId": None, "t": NOW - 300, "text": "stale stamp",
+                    "groupOp": {"kind": "split", "t": NOW - 99999}},
+        }
+        out = marks({}, nodes)
+        g = {(m["text"], m["kind"]) for m in out if m["judge"] == "grouper"}
+        self.assertIn(("merged survivor", "merge"), g)
+        self.assertIn(("retitled card", "retitle"), g, "an old node's FRESH housekeeping still marks")
+        self.assertNotIn(("stale stamp", "split"), g, "stamps outside the window stay dark")
+        # the merged survivor ALSO keeps its own planner mint mark — the stamps are additive
+        self.assertIn("merged survivor", {m["text"] for m in out if m["judge"] == "planner"})
+
     def test_the_diary_src_is_the_provenance(self):
         # one done, two ways: the closer swept it → its mark is the closer's, never the planner's
         nodes = {"c": {"id": "c", "parentId": "x", "t": NOW - 300, "text": "swept",

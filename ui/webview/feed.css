@@ -8,12 +8,25 @@
   --green: #74c991;
   --err: #c0392b;   /* the block-red — mirrors styles.css; feed.css has its OWN :root, so the ⏸ block marks
                        (and the modal's red ⏸-ring) need it defined HERE or var(--err) falls back to gray */
+  --warn: #d7a23a;  /* the heads-up amber — mirrors styles.css; ONE amber for "attention, not an error":
+                       the toast's left rule, the judge-warnings head (two near-twin hexes before 2026-08-26) */
   --box-border: rgba(255, 255, 255, 0.12);  /* mirrors styles.css — same trap as --err: an undefined var()
                        in a border SHORTHAND voids the whole declaration, so the section-toggle circles and
                        the await-paused outline rendered with NO border at all (the user 2026-07-02) */
   --accent: #9cd2ff;  /* the romp accent (CLAUDE.md Design) — feed.css has its OWN :root, so selected-state
                        chrome here needs it defined locally or var(--accent) silently falls back */
   --accent-fg: #0c1a2e;  /* dark text ON the accent (CLAUDE.md) — for the reverse-highlight on a selected toggle */
+  --accent-wash: rgba(156, 210, 255, 0.12);  /* THE faint accent wash — mirrors styles.css; one alpha
+                       behind every selected/hovered accent chrome */
+  --radius-menu: 6px;  /* the menu vocabulary (CLAUDE.md) — mirrors styles.css */
+  --shadow-menu: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --surface-raised: #252526;  /* the transient-notice vocabulary — mirrors styles.css */
+  --radius-toast: 8px;
+  --shadow-toast: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --radius-modal: 10px;  /* the centered-modal vocabulary (CLAUDE.md) — mirrors styles.css */
+  --shadow-modal: 0 12px 36px #000000aa;
+  --overlay-dim: rgba(0, 0, 0, 0.55);
+  --radius-pill: 999px;  /* the true-pill radius — mirrors styles.css */
   --st-working-bg: #e0b020; --st-working-fg: #332600;  /* the WORKING yellow — mirrors styles.css, same trap
                        as --err: .fask-stallbtn and .fask-interrupting referenced these while they lived only
                        in styles.css, so the "filled yellow so the stall is noticed" chip rendered as a quiet
@@ -112,6 +125,18 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    paints behind EVERY column's cards (true back layer, any direction) yet above the feed background. */
 .feed-cols { display: flex; align-items: flex-start; gap: 12px; position: relative; z-index: 0; }
 .feed-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
+/* ONE dragged order, two renderings (the user 2026-08-24): a custom --col-order (set inline by
+   applyColStack once the user drags, either layout) re-sequences the columns HERE too; without it
+   the build order stands (Working → Blocked → Completed). The stacked container query's own rules
+   below override these fallbacks with its Completed-first default — same var, later in the file. */
+.feed-col.col-asks       { order: var(--col-order, 1); }
+.feed-col.col-needsInput { order: var(--col-order, 2); }
+.feed-col.col-completed  { order: var(--col-order, 3); }
+/* the chip drags in BOTH layouts (the user 2026-08-24, reversing the 2026-08-16 stacked-only
+   exclusion): grab cursor as the affordance, the section lifted over its siblings while it follows. */
+.feed-col-head .fcol-chip { cursor: grab; touch-action: none; user-select: none; }
+.feed-col.col-dragging { position: relative; z-index: 5; opacity: 0.9; }
+.feed-col.col-dragging .fcol-chip { cursor: grabbing; }
 .feed-col-head {
   position: sticky; top: -12px; z-index: 3;
   display: flex; align-items: baseline; gap: 7px;
@@ -122,6 +147,24 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   color: var(--dim); background: var(--bg);
 }
 .feed-col-count { font-weight: 600; opacity: 0.7; }
+/* HOVER-FREEZE badges (the user 2026-08-24): while the pointer holds a card still, the deferred
+   adds/removes hint beside the column pill and (grouped mode) the session header — +N in the romp
+   accent, -N in the block red (--err, the board's existing red), at the count's own scale and
+   weight (no new font sizes; the badge inherits the head's size like .feed-col-count does).
+   A hint, not a shout: same 0.7 opacity as the counts. */
+.freeze-badge { font-weight: 600; opacity: 0.7; margin-left: 6px; white-space: nowrap; }
+.freeze-badge i { font-style: normal; }
+.freeze-badge .fz-add { color: var(--accent); }
+.freeze-badge .fz-del { color: var(--err); }
+/* the explicit reading (the user 2026-08-25): the parenthetical wears the accent — the blue they
+   asked for — at the badge's own scale and normal weight so the +N/−N stays the loudest part */
+.freeze-badge .fz-note { color: var(--accent); font-weight: 400; }
+/* the hovered card's OWN pending update: a floating pointer-inert accent line pinned inside the
+   frozen card's lower edge (the rect is stable — that is the freeze's contract). Page-bg pill so
+   it reads over card content; 10.5px is the footer's existing scale, no new sizes. */
+#freeze-selfnote { position: fixed; z-index: 6; pointer-events: none; color: var(--accent);
+  font-size: 10.5px; font-weight: 600; background: rgba(30, 30, 30, 0.85);
+  border-radius: 4px; padding: 1px 6px; }
 /* margin-top, NOT header padding: the liveness rings are outlines drawn ~2.5px
    OUTSIDE the first card's top edge, and the sticky header paints its padding as
    opaque background over them — only unpainted margin space lets them show */
@@ -135,7 +178,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    webview, no shared :root). The neutral count sits dim beside the chip. */
 .fcol-chip {
   display: inline-flex; align-items: center;
-  padding: 2px 9px; border-radius: 11px;
+  padding: 3px 10px; border-radius: 11px;
   font-weight: 700; letter-spacing: 0.07em;
 }
 .fcol-chip-working   { background: #e0b020; color: #332600; }
@@ -151,7 +194,11 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .fcol-fold { display: none; }
 
 @container (max-width: 540px) or style(--romp-stack: on) {
-  .feed-cols { flex-direction: column; }
+  /* stretch, explicitly: the row layout's align-items: flex-start rides in from the base rule, and in
+     COLUMN direction that same declaration content-sizes each section horizontally — a section was
+     only as wide as its widest card's text, so a long Completed card spanned the pane while short
+     Working cards hugged their titles (the user 2026-08-24, second width-inconsistency report). */
+  .feed-cols { flex-direction: column; align-items: stretch; }
   /* Folding exists ONLY here, so the fold BITING lives here too (the user 2026-08-18): this rule used
      to sit outside the query, so a section collapsed while stacked stayed hidden after the feed
      widened to side-by-side — an empty column with no caret to reopen it (the caret is stacked-only).
@@ -161,12 +208,12 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   /* stacked, the columns read TOP-DOWN as Completed → Blocked (needs you) → Working by default (the
      user 2026-07-30, moving Completed up from the middle; supersedes the 2026-07-08 Blocked-first
      order): what finished first, then what needs you, then what's still running. DOM order stays
-     Working/Blocked/Completed (unchanged for the side-by-side layout); `order` only re-sequences the
-     stacked case — and a dragged section (feed.ts applyColStack) overrides via --stack-order, so the
-     user's arrangement wins and survives reloads with the rest of the view state. */
-  .feed-col.col-completed  { order: var(--stack-order, 1); }
-  .feed-col.col-needsInput { order: var(--stack-order, 2); }
-  .feed-col.col-asks       { order: var(--stack-order, 3); }
+     Working/Blocked/Completed; these rules override the base layout's fallbacks for the stacked
+     case — and a dragged order (feed.ts applyColStack, EITHER layout since 2026-08-24) overrides
+     both via --col-order, so the user's arrangement wins everywhere and survives reloads. */
+  .feed-col.col-completed  { order: var(--col-order, 1); }
+  .feed-col.col-needsInput { order: var(--col-order, 2); }
+  .feed-col.col-asks       { order: var(--col-order, 3); }
   /* the SAME caret the session headers wear (.feed-sess-fold): same glyphs, same side (right of
      the label), same rendered size — the header's 0.72em is compensated explicitly so the glyph
      paints at the feed's base size instead of shrinking with the label (the user 2026-08-16) */
@@ -174,9 +221,6 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
     background: transparent; border: 0; font: inherit; font-size: 1.389em; font-weight: 400;
     line-height: 1; cursor: pointer; transition: color 0.12s ease; }
   .fcol-fold:hover, .fcol-fold:focus-visible { color: var(--fg); }
-  .feed-col-head .fcol-chip { cursor: grab; touch-action: none; user-select: none; }
-  .feed-col.col-dragging { position: relative; z-index: 5; opacity: 0.9; }   /* lifted over its siblings while it follows the pointer */
-  .feed-col.col-dragging .fcol-chip { cursor: grabbing; }
 }
 
 /* ---------- ask card (the inbox unit): three rows (the user 2026-06-14) ---------- */
@@ -292,7 +336,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    line; the "✓ Done — I did it" button greens on hover (it's a check-off). */
 .fq-send { flex: 0 0 auto; font: inherit; font-size: 0.85em; cursor: pointer; color: var(--fg);
   background: rgba(255, 255, 255, 0.08); border: 1px solid var(--card-border); border-radius: 6px; padding: 5px 12px; }
-.fq-send:hover { border-color: var(--accent); color: var(--accent); background: rgba(156, 210, 255, 0.12); }
+.fq-send:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
 /* "didn't need me" — the false-awaiting teaching dismissal */
 
 /* drop-point lines on an asks-column card: where the work is currently parked */
@@ -338,7 +382,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    selected-state language across the whole app; gray = off, accent blue = on). Same wash alpha as the
    rail's .rail-btn.on. */
 .fask-secbtn.on { color: var(--accent); border-color: var(--accent);
-  background: rgba(156, 210, 255, 0.10); font-weight: 600; }
+  background: var(--accent-wash); font-weight: 600; }
 /* STALLED — the one toggle that keeps its OWN colour in every state. The others turn accent-blue when
    selected, which is the app's "this is the one you picked" language; a stall is not a preference, it
    is something wrong. It wears the PROBLEM-CHIP outline the card's other trouble chips wear (yellow
@@ -393,45 +437,51 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 
 /* "Followed up" — optimistic reopen pending the judge's re-file (judges delegation, 2026-06-17); blue pill */
 .fask-followedup { flex: 0 0 auto; font-size: 0.64em; font-weight: 700; letter-spacing: 0.04em;
-  padding: 1px 6px; border-radius: 999px; line-height: 1.4;
+  padding: 1px 6px; border-radius: var(--radius-pill); line-height: 1.4;
   color: #5aa2ff; border: 1px solid rgba(90, 162, 255, 0.6); }
 /* "done, confirming" — the done verdict is in, only the settle event is pending (the user 2026-07-24):
    a steady cue on the Working card, never an early column move (that flicker is what the settle gate
    prevents). Outline pill in the done-check blue (--check-bg), the same family as the ✓ it will wear. */
 .fask-doneconfirming { flex: 0 0 auto; font-size: 0.64em; font-weight: 700; letter-spacing: 0.04em;
-  padding: 1px 6px; border-radius: 999px; line-height: 1.4;
+  padding: 1px 6px; border-radius: var(--radius-pill); line-height: 1.4;
   color: var(--check-bg); border: 1px solid rgba(30, 161, 235, 0.55); }
 /* "nudge failed" — the one auto-nudge didn't resolve the stall and is never re-asked (design/
    stalled-open-todos-nudge.md); red pill: this thread is waiting on the human now */
 .fask-nudgefailed { flex: 0 0 auto; font-size: 0.64em; font-weight: 700; letter-spacing: 0.04em;
-  padding: 1px 6px; border-radius: 999px; line-height: 1.4;
+  padding: 1px 6px; border-radius: var(--radius-pill); line-height: 1.4;
   color: #ff6a6a; border: 1px solid rgba(255, 106, 106, 0.6); }
 /* "interrupted" — the user stopped this session mid-turn and hasn't re-engaged; auto-nudge holds
    off until their next message. WARNING yellow (the user 2026-07-06, was neutral gray and too easy
    to miss): the pause is user-chosen but the thread IS dangling — same yellow as the warn chip,
    one warning treatment across the card (see .fask-warnchip) */
 .fask-interrupted { flex: 0 0 auto; font-size: 0.64em; font-weight: 700; letter-spacing: 0.04em;
-  padding: 1px 6px; border-radius: 999px; line-height: 1.4;
+  padding: 1px 6px; border-radius: var(--radius-pill); line-height: 1.4;
   color: #ffd166; border: 1px solid rgba(255, 209, 102, 0.6); }
 /* "interrupting…" — a stop is IN FLIGHT (the user 2026-07-07): the turn is still winding down, so this
    wears the WORKING treatment (filled yellow, faded) exactly like the chat chip's .chip-interrupting —
    an active state, visually distinct from the interrupted OUTLINE badge (paused/done). It holds steady
    from the click until the interrupt settles, then yields to .fask-interrupted. */
 .fask-interrupting { flex: 0 0 auto; font-size: 0.64em; font-weight: 700; letter-spacing: 0.04em;
-  padding: 1px 6px; border-radius: 999px; line-height: 1.4;
+  padding: 1px 6px; border-radius: var(--radius-pill); line-height: 1.4;
   background: var(--st-working-bg); color: var(--st-working-fg); opacity: 0.75; }
 /* "warning" — a judge stamped an anomaly on this goal (judge _node_warn; the user 2026-07-02): yellow
    pill, a BUTTON — click opens the warn-detail overlay (what happened + why it's unexpected) */
 .fask-warnchip { flex: 0 0 auto; font-size: 0.64em; font-weight: 700; letter-spacing: 0.04em;
-  padding: 1px 6px; border-radius: 999px; line-height: 1.4; font-family: inherit;
+  padding: 1px 6px; border-radius: var(--radius-pill); line-height: 1.4; font-family: inherit;
   color: #ffd166; border: 1px solid rgba(255, 209, 102, 0.6); background: transparent; cursor: pointer; }
 .fask-warnchip:hover { background: rgba(255, 209, 102, 0.14); }
 /* "waiting on <peer>" — an unanswered message out to a live peer; held in Working, not stalled (the user
    2026-06-22); teal pill, red for a mutual-wait deadlock cycle */
 .fask-waiton { flex: 0 0 auto; font-size: 0.64em; font-weight: 700; letter-spacing: 0.04em;
-  padding: 1px 6px; border-radius: 999px; line-height: 1.4;
+  padding: 1px 6px; border-radius: var(--radius-pill); line-height: 1.4;
   color: #4ec9b0; border: 1px solid rgba(78, 201, 176, 0.6); }
 .fask-waiton-cycle { color: #ff6a6a; border-color: rgba(255, 106, 106, 0.7); }
+/* the chip's elapsed readout (" · 42m") — same size as the chip text, dimmed like a sub-line so the
+   peer name stays the loudest word (the user 2026-08-23) */
+.fask-waiton-dur { opacity: 0.6; font-weight: 400; }
+/* the sub-goals button's dim " · N parked" suffix (the user 2026-08-24) — same quiet sub-line
+   treatment as the waiting-chip's elapsed readout; the loud word stays the sub-goal count */
+.fask-subparked { opacity: 0.6; font-weight: 400; }
 
 /* ---- ask DAG tree (expanded body) — nodes only; click a node for its history ---- */
 /* width:fit-content hugs the widest row so the right-aligned "(Xm ago)" node times sit just past the
@@ -526,7 +576,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .ftree-act-done:hover,
 .ftree-act-status:hover,
 .ftree-act-fup:hover,
-.ftree-act-drop:hover { border-color: var(--accent); color: var(--accent); background: rgba(156, 210, 255, 0.12); }
+.ftree-act-drop:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
 .ftree-act-btn:disabled { opacity: 0.55; cursor: default; }
 /* On a phone the modal row is too narrow to hold the reply text AND the nowrap Done/Drop/Check-status/
    Follow-up group on one line: .ftree-node has no flex-wrap, so the buttons kept their full width and the
@@ -544,6 +594,11 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    unexplained machinery) — dim, outside the strikethrough, same small-tag size as .ftree-who */
 .fcleared-tag { flex: 0 0 auto; font-size: 0.92em; color: var(--dim);
   border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 4px; padding: 0 5px; line-height: 1.5; }
+/* the one-word "parked" hint on a leapfrogged open row (the user 2026-08-24: a queued ask sat
+   silently while newer siblings were dispatched past it) — the cleared tag's exact metrics, dim by
+   design: a hint to glance at, never the trouble-chip family's yellow/red */
+.fparked-tag { flex: 0 0 auto; font-size: 0.92em; color: var(--dim);
+  border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 4px; padding: 0 5px; line-height: 1.5; }
 .ftree-node.st-cleared .ftree-text { text-decoration: line-through; text-decoration-color: var(--dim); }
 .ftree-node.st-cleared .ftree-mark { color: var(--dim); }
 .fcheck.cleared { opacity: 0.55; }
@@ -560,7 +615,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .ftree-log-when { flex: 0 0 auto; color: var(--dim); white-space: nowrap; }
 .ftree-log-what { overflow-wrap: anywhere; }
 .ftree-followedup { flex: 0 0 auto; margin-left: 8px; font-size: 0.68em; font-weight: 700; letter-spacing: 0.03em;
-  padding: 0 6px; border-radius: 999px; line-height: 1.6; color: #5aa2ff; border: 1px solid rgba(90, 162, 255, 0.6); white-space: nowrap; }
+  padding: 0 6px; border-radius: var(--radius-pill); line-height: 1.6; color: #5aa2ff; border: 1px solid rgba(90, 162, 255, 0.6); white-space: nowrap; }
 .ftree-node.repeat { opacity: 0.5; }
 
 /* grouped sibling-asks card: a member line per sub-ask under the title, each with
@@ -600,10 +655,10 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 /* ⛶ full-screen tree modal (deep hierarchies) */
 /* feedConfirm() overlay — a small yes/no (e.g. revive a closed session). Above
    #feed-modal so it can sit over an open card modal. */
-.fconfirm-back { position: fixed; inset: 0; z-index: 200; background: rgba(0, 0, 0, 0.55);
+.fconfirm-back { position: fixed; inset: 0; z-index: 200; background: var(--overlay-dim);
   display: flex; align-items: center; justify-content: center; padding: 4vh 4vw; }
 .fconfirm-box { background: var(--bg); border: 1px solid var(--card-border, rgba(255, 255, 255, 0.18));
-  border-radius: 10px; padding: 18px 20px; max-width: 380px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); }
+  border-radius: var(--radius-modal); padding: 18px 20px; max-width: 380px; box-shadow: var(--shadow-modal); }
 .fconfirm-msg { color: var(--fg); line-height: 1.45; margin-bottom: 14px; overflow-wrap: anywhere; }
 .fconfirm-btns { display: flex; justify-content: flex-end; gap: 8px; }
 .fconfirm-btn { font: inherit; padding: 5px 13px; border-radius: 6px; cursor: pointer;
@@ -622,10 +677,10 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .fwarn-meta { color: var(--dim); font-size: 0.78em; letter-spacing: 0.04em; margin-bottom: 6px; }
 .fwarn-detail { color: var(--fg); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.92em; }
 
-#feed-modal { position: fixed; inset: 0; z-index: 100; background: rgba(0, 0, 0, 0.55);
+#feed-modal { position: fixed; inset: 0; z-index: 100; background: var(--overlay-dim);
   display: flex; align-items: center; justify-content: center; padding: 4vh 4vw; }
 .feed-modal-inner { display: flex; flex-direction: column; width: 100%; max-width: 1280px; max-height: 92vh;
-  background: var(--bg); border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); }
+  background: var(--bg); border: 1px solid var(--card-border); border-radius: var(--radius-modal); overflow: hidden; box-shadow: var(--shadow-modal); }
 .feed-modal-head { display: flex; align-items: baseline; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--card-border); }
 .feed-modal-title { flex: 1 1 auto; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
 /* the modal title is a locate link, same affordance as the card title */
@@ -665,6 +720,16 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 }
 /* hover lightens via an inset overlay + lifts — never touches the inline tint */
 .fitem:hover { box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.07), 0 2px 7px rgba(0, 0, 0, 0.30); }
+/* the grouped session header leaves as ONE MOTION with its run's last card (the user 2026-08-24,
+   whose recording showed the header popping out a frame after the card): the card-dismiss family —
+   fade + slight shrink + height collapse so the reflow glides. fill-mode holds the end state until
+   the animationend removal lands (feed.ts startSessHeadExit — event-keyed, backstopped). */
+.feed-sess-head.sess-exit { animation: sess-exit 0.18s ease forwards; overflow: hidden; pointer-events: none; }
+@keyframes sess-exit {
+  from { opacity: 1; transform: scale(1); max-height: 60px; }
+  to   { opacity: 0; transform: scale(0.9); max-height: 0; margin: 0; padding: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .feed-sess-head.sess-exit { animation: none; opacity: 0; } }
 /* a cleared/dismissed card CONTRACTS in on itself — scales down + fades while its height collapses so the
    neighbours slide up to close the gap — instead of sliding off to one side (the user 2026-06-18). */
 .fitem.dismissing { animation: fask-dismiss 0.18s ease forwards; overflow: hidden; pointer-events: none; transform-origin: center; }
@@ -693,11 +758,13 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    permission prompt / picker for THIS card's work; click opens the session.
    Same red as the BLOCKED column header. */
 .fask-blocked {
-  flex: 0 0 auto; font-size: 0.72em; font-weight: 700; letter-spacing: 0.03em;
+  flex: 0 0 auto; font-size: 0.7em; font-weight: 800; letter-spacing: 0.03em;
   color: #c0392b; cursor: pointer; white-space: nowrap;
-  /* a rounded-rect outline in the badge's own red, mirroring the Clear button's chrome (.fdismiss)
-     so the permission/picker block reads as a contained pill, not loose text (the user 2026-06-16) */
-  border: 1px solid #c0392b; border-radius: 6px; padding: 1px 8px;
+  /* a rounded-rect outline in the badge's own red so the permission/picker block reads as a
+     contained pill, not loose text (the user 2026-06-16) — wearing the SAME metric set as its
+     same-row api-trouble siblings (.fask-apierror/.fask-retrying/.fask-jauth: same information
+     type, same size; it alone wore 0.72em/700/6px/1px 8px until 2026-08-26) */
+  border: 1px solid #c0392b; border-radius: 5px; padding: 1px 6px;
 }
 .fask-blocked:hover { color: #fff; background: #c0392b; border-color: #c0392b; }
 
@@ -823,13 +890,13 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 /* the expand toggle is a compact square showing "+" (collapsed) / "−" (open) */
 .fdismiss { padding: 2px 10px; }
 /* One accent hover for every action button (the user 2026-07-21): Clear, Move to Working, Follow up,
-   Clear all, UndoClear all share it — no red on any action, only on error/blocked STATUS. */
-.fdismiss:hover { border-color: var(--accent); color: var(--accent); background: rgba(156, 210, 255, 0.12); }
-/* UndoClear — restorative, so it hovers BLUE like Follow up, not Clear's red. */
+   Clear all, Undo all share it — no red on any action, only on error/blocked STATUS. */
+.fdismiss:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
+/* Undo — restorative, so it hovers BLUE like Follow up, not Clear's red. */
 /* The feed's DOCKED control bar (the user 2026-06-29): its own dedicated rectangle in normal flow at the
    bottom of the pane, NOT a floating overlay. The body is a column flex, so #feed-list flexes to fill above
-   it and the bar sits below without overlapping a card. Layout (the user 2026-07-13): the VIEW toggles
-   (Newest first · Collapsed · Group) sit left; the ACTIONS (Clear all, then Undo clear) dock right — flex
+   it and the bar sits below without overlapping a card. Layout (the user 2026-07-13): the VIEW controls
+   (the view-menu icon · Session ▴ · Search) sit left; the ACTIONS (Clear all, then Undo) dock right — flex
    `order` + margin-left:auto, so the split holds whatever order the ensure* calls appended the buttons in. */
 #feed-foot { flex: 0 0 auto; z-index: 5;
   display: flex; align-items: center; gap: 8px; padding: 6px 12px;
@@ -840,7 +907,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 #feed-undoclear { order: 11; }                     /* restorative — far right */
 #feed-foot .fdismiss { font-size: 10.5px; padding: 1px 9px; opacity: 0.95; }
 
-/* Undo clear, WORKING (the user 2026-07-31): when the cleared batch isn't in this page's cache the
+/* Undo, WORKING (the user 2026-07-31): when the cleared batch isn't in this page's cache the
    restore is a full kernel round-trip and the button read dead for a beat. Accent border + three
    pulsing accent dots say "on it" — WITHOUT disabling: each further click keeps popping older
    batches. Cleared by the next feed payload (feed.ts clearUndoBusy — event-based, timeout backstop). */
@@ -852,25 +919,81 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 #feed-undoclear .undo-dots i:nth-child(3) { animation-delay: 0.36s; }
 @keyframes undo-dot { 0%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { #feed-undoclear .undo-dots i { animation: none; opacity: 0.8; } }
-/* the "Newest first" / "Collapsed" MODE toggles: pressed (.on) wears the accent language (blue text + border
-   + faint wash), the same selected-state look the card section toggles use (the user 2026-07-07) */
+/* The tag lens's disclosure line (the user 2026-08-25, T70; lineage: the 665 outside-view whisper
+   + promoted banner, revived under the user's OWN lens): dim one-liner after the columns; when the
+   lens hides MORE than the board shows, the judge-limit banner's card chrome + the lens named.
+   Neutral chrome — a narrowed board is a choice, not an error. */
+/* the tag-glyph button sits flush with its word-button siblings: same .fdismiss dress (the shared
+   component's inline style is stripped at mount — the user 2026-08-25, whose resting button wore an
+   accent outline and an off-black All state); only the svg centering is its own. */
+#feed-taglens { display: inline-flex; align-items: center; }
+#feed-taglens svg { display: block; }
+#feed-lensmore { padding: 4px 14px 10px; color: var(--dim); font-size: 0.82em; cursor: pointer; }
+#feed-lensmore:hover { color: var(--accent); text-decoration: underline; }
+#feed-lensmore.prominent { margin: 6px 8px 2px; padding: 10px 14px; background: #252526;
+  border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 6px;
+  color: var(--fg); font-size: 0.9em; }
+#feed-lensmore.prominent:hover { color: var(--fg); text-decoration: none; border-color: var(--accent); }
+/* The per-host loading strip (the user 2026-08-25; round two same day): an attached host's sessions
+   are on the tabs but its cards haven't merged yet — one quiet line per pending host, the SHARED
+   reverse-spin swirl glyph (.fask-awaiting-swirl, the user's pick over the dots) LEFT of the text,
+   dim at the footer's own scale. Never a takeover, and never hidden while the wait is real: the 45s
+   mark escalates the copy, a dead link names itself, and only the payload/detach events remove. */
+#feed-hostload { display: flex; flex-direction: column; gap: 4px; padding: 8px 14px; }
+.hostload-line { display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 0.82em; }
+/* the footer MODE button (the session combobox's "Sessions ▴"): active (.on) wears the accent language
+   (blue text + border + faint wash), the same selected-state look the card section toggles use (the
+   user 2026-07-07) */
 #feed-foot .feed-modetoggle.on { color: var(--accent); border-color: var(--accent);
-  background: rgba(156, 210, 255, 0.12); opacity: 1; }
-/* the SESSION FILTER (the user 2026-08-08): the footer button quotes the picked session; its menu
-   opens UPWARD (position from the button rect, feed.ts), one row per tab-order session written the
-   way the tabs and session headers write it — .fsm-name is BOLD in the session's identity colour
-   (inline, from the payload), host: prefix quiet (.host-prefix, shared), and the shared .fwork-dot
-   status dot in front. Selection is the accent wash, so the identity colours stay untouched. */
-#feed-sessfilter { display: inline-flex; align-items: center; gap: 5px; }
+  background: var(--accent-wash); opacity: 1; }
+/* the SESSION list + chip identity treatment (the user 2026-08-08, now the combobox's list): one row
+   per tab-order session written the way the tabs and session headers write it — .fsm-name BOLD in the
+   session's identity colour (inline, from the payload), host: prefix quiet (.host-prefix, shared), the
+   shared .fwork-dot status dot in front. Selection is the accent wash, so identity colours stay
+   untouched. The list opens UPWARD from the bar (position from the wrap rect, feed.ts). */
 .fsm-name { font-weight: 600; }
 .feed-sessmenu { position: fixed; z-index: 60; min-width: 150px; max-height: 60vh; overflow-y: auto;
-  padding: 4px; border: 1px solid var(--card-border); border-radius: 6px;
+  padding: 4px; border: 1px solid var(--card-border); border-radius: var(--radius-menu);
   background: var(--vscode-editorWidget-background, #252526);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45); }
+  box-shadow: var(--shadow-menu); }
 .feed-sessmenu .fsm-row { display: flex; align-items: center; gap: 7px; padding: 4px 9px;
   border-radius: 4px; cursor: pointer; font-size: 11.5px; white-space: nowrap; }
 .feed-sessmenu .fsm-row:hover { background: rgba(255, 255, 255, 0.07); }
-.feed-sessmenu .fsm-row.on { background: rgba(156, 210, 255, 0.12); }
+.feed-sessmenu .fsm-row.on { background: var(--accent-wash); }
+/* TAG CHIPS on the combobox's session rows (the user 2026-08-25 — the smaller unification variant):
+   the dialog's own outline-pill vocabulary at the row's scale, NON-interactive (grouping made
+   visible; the controls stay separate). The strip ellipsizes in the row's leftover space — names
+   stay primary and rows never wrap. */
+.fsm-chips { flex: 1 1 auto; min-width: 0; margin-left: 8px; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+.fsm-chip-tag { display: inline-block; font-style: normal; padding: 0 6px; margin-left: 4px;
+  border: 1px solid var(--dim); border-radius: 9px; font-size: 0.82em; color: var(--dim); }
+/* the VIEW MENU (the user 2026-08-24): the sort + layout controls live behind one monochrome ordering
+   glyph now (NOT a gear — the strip's ⛭ sits right below this footer on the kernel page). The popup
+   wears the shared .ctx-menu vocabulary (chrome defined with the card menus below); these rules add
+   the ✓-in-circle current mark every romp menu uses (ported from styles.css — the feed page loads
+   only this sheet) and the forced row's inert fade. */
+/* ("View ▴" is a word-button since 2026-08-24 round two — the shared #feed-foot .fdismiss metrics
+   cover it, so the old icon-button's bespoke two-id padding rule went with the icon.) */
+.feed-viewmenu { min-width: 178px; }
+/* rows are real <button>s (keyboard operability) — strip the UA chrome and re-inherit the menu's
+   font/colour (a button that doesn't inherit is exactly how a menu drifts onto the host font, the
+   2026-08-09 timeline-gear bug). Same (0,2,0) specificity as .ctx-item:hover, which sits LATER in
+   this file — so the hover wash still wins the background tie on hover, by order, deliberately. */
+.feed-viewmenu .ctx-item { position: relative; padding-right: 30px; display: block; width: 100%;
+  text-align: left; background: none; border: 0; font: inherit; color: inherit; }
+.feed-viewmenu .ctx-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.feed-viewmenu .ctx-item.current::after {
+  content: "✓"; position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  background: var(--check-bg); color: #fff; border-radius: 50%;
+  width: 13px; height: 13px; font-size: 9px; font-weight: 900;
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1;
+}
+/* the Single-column row while the narrow container query FORCES stacking (2026-08-19): stacking IS on,
+   so the row keeps its ✓ — faded and inert, never stripped of its checked state (the user 2026-08-19,
+   who wanted the then-button grayed but still blue). No hover promise on an inert row. */
+.feed-viewmenu .ctx-item.forced { opacity: 0.55; cursor: default; }
+.feed-viewmenu .ctx-item.forced:hover { background: transparent; color: inherit; }   /* .ctx-item:hover also recolours */
 /* downstream sessions an ask is waiting on (drop points) — experiment
    2026-06-10; live working dot + age per session, newest first */
 /* active downstream sessions (the user's handoff spec, 2026-06-10): one line per
@@ -1005,7 +1128,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 /* ---- in-page resume-picker dialog (answerPicker without a native QuickPick) ---- */
 .pickdlg-overlay {
   position: fixed; inset: 0; z-index: 1200;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--overlay-dim);
   display: flex; align-items: center; justify-content: center; padding: 16px;
 }
 .pickdlg-box {
@@ -1013,8 +1136,8 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   display: flex; flex-direction: column; gap: 8px;
   background: var(--vscode-editorWidget-background, #252526);
   border: 1px solid var(--vscode-widget-border, #303031);
-  border-radius: 8px; padding: 16px 18px;
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+  border-radius: var(--radius-modal); padding: 16px 18px;
+  box-shadow: var(--shadow-modal);
 }
 .pickdlg-title { font-weight: 700; color: var(--vscode-foreground, #ccc); margin-bottom: 4px; }
 /* the quarantine dialog's title IS the card's route line, so opening a held message never re-words who
@@ -1039,9 +1162,9 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .feed-toast {
   position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%) translateY(8px);
   z-index: 200; max-width: min(440px, 90vw); padding: 9px 13px;
-  background: var(--vscode-menu-background, #26262a); color: var(--fg);
-  border: 1px solid rgba(255, 255, 255, 0.12); border-left: 3px solid #e0a020; border-radius: 7px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45); font-size: 0.86em; line-height: 1.35;
+  background: var(--vscode-menu-background, var(--surface-raised)); color: var(--fg);
+  border: 1px solid rgba(255, 255, 255, 0.12); border-left: 3px solid var(--warn); border-radius: var(--radius-toast);
+  box-shadow: var(--shadow-toast); font-size: 0.86em; line-height: 1.35;
   opacity: 0; transition: opacity 0.18s ease, transform 0.18s ease; pointer-events: none;
 }
 .feed-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -1067,7 +1190,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 /* debug-mode judge warnings (the user 2026-07-09): the card modal's failure-inspection section.
    Sizes reuse the artifact strip's (labels match labels): 0.72em heads, 0.82em body rows. */
 .fmodal-warns { margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
-.fmodal-warns-head { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; color: #e0b341; margin-bottom: 6px; }
+.fmodal-warns-head { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; color: var(--warn); margin-bottom: 6px; }
 .fmodal-warn-row { margin-bottom: 6px; }
 .fmodal-warn-line { font-size: 0.82em; color: var(--fg); overflow-wrap: anywhere; }
 .fmodal-warn-det { margin: 2px 0 0 14px; }
@@ -1103,7 +1226,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   display: flex; align-items: center; justify-content: center; }
 .romp-lightbox-inner { display: flex; flex-direction: column; gap: 8px; max-width: 92vw; max-height: 90vh; }
 .romp-lightbox-img { max-width: 92vw; max-height: 82vh; object-fit: contain; border-radius: 8px;
-  box-shadow: 0 12px 44px rgba(0, 0, 0, 0.6); }
+  box-shadow: var(--shadow-modal); }
 .romp-lightbox-inner.pdf { width: 88vw; height: 88vh; }
 .romp-lightbox-frame { flex: 1 1 auto; width: 100%; border: 0; border-radius: 8px; background: #fff; }
 .romp-lightbox-bar { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -1113,6 +1236,148 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   padding: 2px 9px; border-radius: 6px; background: rgba(255, 255, 255, 0.1); color: var(--fg);
   border: 1px solid rgba(255, 255, 255, 0.18); }
 .romp-lightbox-close:hover { border-color: var(--accent); }
+
+/* ── file viewer (file-view.ts) ────────────────────────────────────────────────────────────────────
+   The viewer is a MODAL over whatever document opened it (the user 2026-08-15) — here the feed, whose
+   file BROWSER (file-browse.ts) opens files through the same module. One treatment, two sheets: the
+   ~95% card and dimmed backdrop mirror styles.css exactly (the panels treatment: the listing behind
+   stays visible, never hidden). `body.fileview-open` stops the cards underneath scrolling behind it. */
+#romp-fileview { position: fixed; inset: 0; z-index: 1200; background: var(--overlay-dim);
+  display: flex; align-items: center; justify-content: center; }
+.fileview { width: 95%; height: 95%; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: var(--radius-modal);
+  box-shadow: var(--shadow-modal); }
+body.fileview-open { overflow: hidden; }
+.fileview-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 7px 10px; border-bottom: 1px solid var(--box-border); }
+/* Only the DIRECTORY may be truncated: the filename identifies the file, so it holds its width however
+   deep the path is, and the dimmed directory in front of it gives up room first. */
+.fileview-name { flex: 1 1 auto; min-width: 0; font-size: 0.86em; color: var(--fg);
+  display: flex; align-items: baseline; white-space: nowrap; }
+.fileview-dir { flex: 0 1 auto; min-width: 0; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; }
+.fileview-base { flex: 0 0 auto; }
+.fileview-acts { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.fileview-btn { font: inherit; font-size: 0.82em; cursor: pointer; flex: 0 0 auto;
+  padding: 3px 9px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--fg);
+  border: 1px solid var(--box-border); }
+.fileview-btn:hover { border-color: var(--accent); }
+/* the GitHub link wears the button treatment but IS an anchor — the browser owns the new tab */
+a.fileview-btn { text-decoration: none; display: inline-flex; align-items: center; }
+/* an author `display` beats the UA's [hidden] rule — without this the anchor shows hrefless
+   before the kernel ever answers */
+a.fileview-btn[hidden] { display: none; }
+.fileview-body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+/* gutter + code as two columns of ONE scroller: the numbers stay put horizontally against long lines,
+   and because they are a sibling element a selection of the code copies without dragging them along */
+.fileview-code { display: flex; align-items: flex-start; min-height: 100%; }
+.fileview-gutter { flex: 0 0 auto; position: sticky; left: 0; z-index: 1;
+  padding: 10px 8px 10px 10px; text-align: right; user-select: none;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  color: var(--dim); opacity: 0.55; background: var(--bg, #1e1e1e);
+  border-right: 1px solid var(--box-border); white-space: pre; }
+.fileview-pre { flex: 1 1 auto; margin: 0; padding: 10px 12px;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  white-space: pre; tab-size: 4; }
+.fileview-pre code { background: none; padding: 0; font: inherit; }
+/* a refusal explains itself in place, in the kernel's own words (too large — with the size and the
+   cap; not a text file; not found) over the path it was asked for. Never a blank pane. */
+.fileview-err { padding: 18px 14px; font-size: 0.86em; color: #e0a030; }
+.fileview-err-hint { margin-top: 6px; color: var(--dim); font-size: 0.92em;
+  font-family: var(--mono, ui-monospace, monospace); word-break: break-all; }
+/* the way out of a refusal: when the file exists but cannot render (413/415), the kernel's words are
+   followed by the Download the view could not be — same button treatment as the title bar's */
+.fileview-err-dl { display: block; margin-top: 10px; }
+/* the romp loader, per the loading-state rule: swirl + wordmark + three pulsing accent dots */
+.fileview-load { display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 30px 0; color: var(--dim); font-size: 0.86em; }
+.fileview-load img { width: 17px; height: 17px; animation: fileview-spin 1.6s linear infinite reverse; }
+.fileview-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--accent);
+  animation: fileview-pulse 1.1s ease-in-out infinite; }
+.fileview-dot:nth-of-type(2) { animation-delay: 0.18s; }
+.fileview-dot:nth-of-type(3) { animation-delay: 0.36s; }
+@keyframes fileview-spin { to { transform: rotate(360deg); } }
+@keyframes fileview-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+/* A pressed viewer toggle (Rendered/Raw, Wrap) wears the app-wide selected language — accent text +
+   border + faint wash, gray = off (the .fask-secbtn.on / .feed-modetoggle.on treatment) — with the same
+   reverse-highlight hover so a selected toggle never reads as dead. */
+.fileview-btn.on { color: var(--accent); border-color: var(--accent);
+  background: var(--accent-wash); font-weight: 600; }
+.fileview-btn.on:hover { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+
+/* Wrap mode (the Wrap toggle, persisted per browser): long lines soft-wrap instead of scrolling
+   sideways. The flat sibling gutter cannot survive that — one logical line becomes several visual lines
+   and every number below it drifts — so wrap mode restructures: each logical line is a flex row (.fv-cl)
+   numbered by a CSS counter in its ::before (the chat's .cl/.ct treatment in styles.css). The number is
+   ::before content and user-select: none, so a selection still copies clean, same as the gutter it
+   replaces. */
+.fileview-pre.fileview-wrap { white-space: pre-wrap; overflow-wrap: anywhere;
+  counter-reset: fvln; padding-left: 0; }
+.fileview-wrap .fv-cl { display: flex; align-items: baseline; }
+.fileview-wrap .fv-cl::before {
+  counter-increment: fvln; content: counter(fvln);
+  flex: 0 0 3.5em; padding-right: 10px; text-align: right;
+  color: var(--dim); opacity: 0.55; user-select: none;
+}
+.fileview-wrap .fv-ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Rendered markdown (the Raw ⇄ Rendered toggle; Rendered is the default — the user 2026-08-09).
+   Typography mirrors the chat's .md block in styles.css, the reference aesthetic (one treatment, two
+   sheets — the .romp-acted precedent); font sizes reuse what this surface already wears (the page base,
+   12px mono, the err-hint's 0.92em). Vars the feed sheet does not define carry the chat's literals as
+   fallbacks (feed-css-vars.test.ts holds that line). */
+.fileview-md { padding: 14px 18px; max-width: 860px; overflow-wrap: anywhere; }
+.fileview-md > :first-child { margin-top: 0; }
+.fileview-md > :last-child { margin-bottom: 0; }
+.fileview-md p { margin: 0.5em 0; }
+.fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4 {
+  font-weight: 600; color: var(--fg); margin: 1em 0 0.4em; line-height: 1.3; }
+.fileview-md h1 { font-size: 1.3em; } .fileview-md h2 { font-size: 1.15em; } .fileview-md h3 { font-size: 1.05em; }
+.fileview-md ul, .fileview-md ol { margin: 0.4em 0; padding-left: 1.4em; }
+.fileview-md li { margin: 0.2em 0; }
+.fileview-md strong { color: var(--fg); font-weight: 600; }
+.fileview-md em { font-style: italic; }
+.fileview-md a { color: var(--vscode-textLink-foreground, #4daafc); text-decoration: none; }
+.fileview-md a:hover { text-decoration: underline; }
+.fileview-md blockquote { margin: 0.5em 0; padding-left: 12px;
+  border-left: 2px solid var(--box-border); color: var(--dim); }
+.fileview-md hr { border: none; border-top: 1px solid var(--box-border); margin: 1em 0; }
+.fileview-md :not(pre) > code {
+  font-family: var(--mono, ui-monospace, monospace); font-size: 0.92em;
+  color: var(--code-fg, #e1c08d); background: var(--code-bg, rgba(217, 119, 87, 0.10));
+  padding: 0.12em 0.4em; border-radius: 4px;
+}
+.fileview-md pre {
+  background: var(--box-bg, rgba(255, 255, 255, 0.03)); border: 1px solid var(--box-border);
+  border-radius: 6px; padding: 11px 14px; margin: 0.6em 0; overflow-x: auto;
+}
+.fileview-md pre code {
+  background: none; padding: 0; display: block;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  color: var(--code-fg, #e1c08d); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.fileview-md table { border-collapse: collapse; margin: 0.6em 0; }
+.fileview-md th, .fileview-md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
+.fileview-md th { background: rgba(255, 255, 255, 0.03); }
+.fileview-md img { max-width: 100%; }
+
+/* ---------- syntax highlighting (warm, restrained) ----------
+   The hljs token palette, mirrored from styles.css (one treatment, two sheets — the .romp-acted
+   precedent: each page loads only its own sheet). The viewer wraps every token in .hljs-* spans, and
+   until this block landed the feed sheet had NO rules for them, so highlighting rendered colorless. */
+.hljs { color: #d8c6a8; background: transparent; }
+.hljs-keyword, .hljs-built_in, .hljs-literal, .hljs-type { color: #c98a6a; }
+.hljs-string, .hljs-attr, .hljs-regexp { color: #9fb878; }
+.hljs-number { color: #d4a36a; }
+.hljs-comment, .hljs-quote { color: #6f6a5f; font-style: italic; }
+.hljs-title, .hljs-title.function_, .hljs-section { color: #e1c08d; }
+.hljs-name, .hljs-tag { color: #c98a6a; }
+.hljs-params, .hljs-variable, .hljs-property { color: #d8c6a8; }
+.hljs-meta { color: #9a8f7a; }
+.hljs-attribute { color: #cdaf7e; }
+.hljs-addition { color: #9fb878; }
+.hljs-deletion { color: var(--err); }
 
 /* the "host:" prefix on a federated session's name — see styles.css (one treatment, two sheets) */
 .host-prefix { color: var(--dim); font-weight: 400; font-style: italic; font-size: 0.88em; }
@@ -1138,9 +1403,9 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    marks) is its own section under a hairline. pointer-events:none — it can never eat a click. */
 #age-tip {
   position: fixed; z-index: 210; display: none; max-width: min(440px, 92vw);
-  background: var(--vscode-menu-background, #26262a); color: var(--fg);
-  border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 7px; padding: 7px 10px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45); font-size: 0.86em; line-height: 1.45;
+  background: var(--vscode-menu-background, var(--surface-raised)); color: var(--fg);
+  border: 1px solid rgba(255, 255, 255, 0.12); border-radius: var(--radius-toast); padding: 7px 10px;
+  box-shadow: var(--shadow-toast); font-size: 0.86em; line-height: 1.45;
   pointer-events: none;
 }
 .age-tip-row { display: flex; column-gap: 10px; align-items: baseline; }
@@ -1168,8 +1433,8 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   position: fixed; z-index: 100; min-width: 110px; padding: 4px;
   background: var(--vscode-menu-background, #252526);
   color: var(--vscode-menu-foreground, var(--fg));
-  border: 1px solid var(--box-border); border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--box-border); border-radius: var(--radius-menu);
+  box-shadow: var(--shadow-menu);
   font-size: 0.92em;
 }
 .ctx-item { padding: 4px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
@@ -1203,6 +1468,63 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .fitem.ask .fask-bellbtn:hover { opacity: 1; background: rgba(255, 255, 255, 0.10); }
 .fask-bellbtn.on { visibility: visible; opacity: 0.85; color: var(--accent); }
 
+/* ── the file BROWSER (file-browse.ts) ── the viewer's sibling overlay, one z layer BENEATH it
+   so a file opened from a listing overlays the listing and closing the file returns to it. Same
+   pane-takeover reasoning as .fileview; body.filebrowse-open stops the cards scrolling behind it. */
+.filebrowse { position: fixed; inset: 0; z-index: 890; display: flex; flex-direction: column;
+  background: var(--bg, #1e1e1e); }
+body.filebrowse-open { overflow: hidden; }
+.fb-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 7px 10px; border-bottom: 1px solid var(--box-border); }
+/* the breadcrumb is the up affordance: every ancestor is a click, and it survives a listing error so
+   there is never a dead end */
+.fb-crumbs { flex: 1 1 auto; min-width: 0; font-size: 0.86em; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.fb-crumbs > * { direction: ltr; unicode-bidi: isolate; }
+.fb-crumb { cursor: pointer; }
+.fb-crumb:hover { color: var(--accent); text-decoration: underline; }
+.fb-crumb:last-child { color: var(--fg); }
+.fb-crumb-sep { margin: 0 3px; opacity: 0.6; }
+.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
+/* compact one-line rows (progressive disclosure): marker + name, size right-aligned on files; mtime
+   and the full path live in the row's hover title */
+.fb-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; cursor: pointer;
+  font-size: 0.86em; }
+.fb-row:hover, .fb-row.active { background: rgba(255, 255, 255, 0.07); }
+.fb-row.active { outline: 1px solid rgba(156, 210, 255, 0.35); outline-offset: -1px; }
+.fb-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: var(--mono, ui-monospace, monospace); }
+.fb-dir .fb-name { color: var(--accent); }
+.fb-size { flex: 0 0 auto; margin-left: auto; color: var(--dim); font-size: 0.92em; }
+/* download-only rows are dimmed and say so up front (server-side `viewable`) — honest, not dead */
+.fb-dlonly .fb-name { color: var(--dim); }
+.fb-more { padding: 6px 14px; color: var(--dim); font-size: 0.82em; }
+/* the viewer's directory half is the click into the BROWSER — the discoverability path */
+.fileview-dir-link { cursor: pointer; }
+.fileview-dir-link:hover { color: var(--accent); text-decoration: underline; }
+/* the row menu must sit above the browser overlay at 890 (base .ctx-menu z is for card menus
+   over the feed; the viewer's #romp-fileview backdrop sits higher at 1200, but opening the
+   browser closes the viewer and a row click dismisses this menu, so they never stack) */
+#fb-ctx { z-index: 950; }
+/* the way above a "~"-rooted trail: the kernel-sent parent, worn as a dim leading crumb */
+.fb-crumb-up { opacity: 0.65; }
+/* the raw-mode editor: a plain textarea wearing the code view's own metrics — an editor component
+   is a different project; a textarea that keeps your changes beats a half-editor.
+   height: 100% (not flex): .fileview-body is a plain overflow block, not a flex container, so a
+   flex basis on its child is inert — the textarea sat at the UA's default rows (the user 2026-08-17,
+   whose edit window was a few lines tall). The percentage resolves because the body's own height is
+   fixed by the pane's flex layout. */
+/* the CodeMirror host (the user 2026-08-22): the chunk styles the editor itself; the host just
+   fills the body the way the fallback textarea does */
+.fileview-cm { height: 100%; width: 100%; box-sizing: border-box; overflow: hidden; }
+.fileview-cm .cm-editor { height: 100%; }
+.fileview-editor { display: block; height: 100%; width: 100%; box-sizing: border-box;
+  margin: 0; padding: 10px 12px; border: none; outline: none; resize: none;
+  background: var(--bg, #1e1e1e); color: var(--fg);
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  white-space: pre; tab-size: 4; }
+.fileview-editor:focus { box-shadow: inset 0 0 0 1px rgba(156, 210, 255, 0.35); }
+
 /* usage-limit banner (2026-08-18): analysis paused on a usage limit says so above the columns —
    loud but compact, one line + (Fable only) the switch-to-Opus action. Neutral card chrome, never
    the accent (this is status, not highlight); red would overstate it — the pause is expected and
@@ -1216,15 +1538,45 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .judge-limit-banner .jl-switch:hover { background: #3c3c3c; }
 .judge-limit-banner .jl-switch:disabled { opacity: 0.6; cursor: default; }
 
-/* the Stack toggle while the narrow container query FORCES stacking (2026-08-19): stacking IS on,
-   so the button keeps the pressed accent — grayed by opacity, never stripped of its on-state (the
-   user 2026-08-19, who wanted it grayed but still blue). Hover stays responsive (a gentle brighten,
-   not the action-blue that promises a click); the tooltip names the way out. The selector MUST tie
-   the .on rule's (1,2,0) specificity and sit LATER in this file: the first two cuts keyed the
-   rule on the button id alone at (1,1,0), so `.on { opacity: 1 }` silently won the cascade and the
-   fade never painted while the button was pressed — which forced stacking always implies (the user's
-   third report, 2026-08-19). */
-#feed-foot .feed-modetoggle.forced { opacity: 0.5; cursor: default;
-  color: var(--accent); border-color: var(--accent); }
-#feed-foot .feed-modetoggle.forced:hover { opacity: 0.75;
-  background: rgba(156, 210, 255, 0.12); }   /* keep the pressed wash — never the action hover's promise */
+/* The footer SEARCH box (the user 2026-08-23; restyled 2026-08-24): a "Search" word-button expanding
+   to an inline input that live-filters the board by session name, host prefix included. The expanded
+   bar wears the TOP search bar's look (the outline pane's "Search sessions and tasks…" input: rounded,
+   input-background field, inner ✕ clear) scaled to the footer's 10.5px rhythm — never its 12.5px verbatim —
+   and FLEXES into the row's spare space with a floor instead of a fixed width; a too-narrow row wraps
+   it whole (the footer wraps) rather than overflowing. Expansion animates max-width, so it still
+   "grows" out of the button instead of popping. Active (a live query) keeps the button accented like
+   every .on toggle. */
+#feed-search { display: inline-flex; align-items: center; gap: 5px; position: relative; }
+#feed-search.open { flex: 1 1 150px; min-width: 110px; max-width: 340px; }
+#feed-search input { flex: 1 1 auto; min-width: 0; max-width: 0; padding: 0; border: 0; opacity: 0;
+  transition: max-width 0.15s ease, opacity 0.15s ease;
+  font-size: 10.5px; font-family: inherit; color: var(--vscode-input-foreground, var(--fg, #ccc));
+  background: var(--vscode-input-background, #3c3c3c);
+  border-radius: 6px; outline: none; }
+#feed-search.open input { max-width: 340px; padding: 2px 22px 2px 8px; opacity: 1;
+  border: 1px solid var(--vscode-input-border, var(--card-border)); }
+#feed-search.open input:focus { border-color: var(--accent); }
+#feed-search input::placeholder { color: var(--vscode-descriptionForeground, #9a9a9a); }
+#feed-search input::-webkit-search-cancel-button { -webkit-appearance: none; }   /* we draw our own ✕ */
+/* the inner ✕ (the top bar's clear button, footer-scaled): shown only with text to clear; clearing
+   REFOCUSES the input — the user is mid-search, never fold under them */
+#feed-search-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: center; width: 15px; height: 15px; padding: 0;
+  border: 0; border-radius: 50%; background: transparent;
+  color: var(--vscode-descriptionForeground, #9a9a9a); font-size: 13px; line-height: 1; cursor: pointer; }
+#feed-search-clear:hover { color: var(--fg); background: rgba(255, 255, 255, 0.10); }
+#feed-search-clear[hidden] { display: none; }
+#feed-search:not(.open) #feed-search-clear { display: none; }   /* the ✕ exists only on an open box — a folded control can never wear a stray × */
+/* the combobox CHIP (the user 2026-08-24): a picked session quoted IN the bar — identity-coloured
+   name + working dot + ✕ back to typing. The accent-wash pill the .on state already wears
+   everywhere; the footer's own 10.5px, no new sizes. */
+#feed-sess-chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 4px 1px 7px;
+  border: 1px solid var(--accent); border-radius: 6px; background: var(--accent-wash);
+  font-size: 10.5px; white-space: nowrap; }
+#feed-sess-chip[hidden] { display: none; }
+#feed-search:not(.open) #feed-sess-chip { display: none; }   /* same backstop as the ✕: chips live on an open bar */
+.fsm-chipx { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px;
+  padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--dim);
+  font-size: 12px; line-height: 1; cursor: pointer; }
+.fsm-chipx:hover { color: var(--fg); background: rgba(255, 255, 255, 0.10); }
+@media (prefers-reduced-motion: reduce) { #feed-search input { transition: none; } }

@@ -207,7 +207,7 @@ class RemotesPanelRender(unittest.TestCase):
     def test_a_disconnected_row_marks_its_drift_as_remembered_not_live(self):
         out = self._run(tunnels=self._drifted(status="down", stale=True, last_ok=1785272930))
         html = out.get("html", "")
-        self.assertIn("disconnected", html, "the row still reports its live state")
+        self.assertIn("reconnecting", html, "the row still reports its live state — and says romp is on it (the 2026-08-24 auto-reconnect wording: a row's existence IS standing intent)")
         self.assertIn("last known: v0.1.3 abc1234 (behind 2)", html,
                       "a drift count from an unreachable host must read as memory, not as a finding")
         self.assertIn("rnet-stale", html, "and must carry the muted cue that overrides the accent")

@@ -50,11 +50,10 @@ Sort events by evidence time (`ev_t`; arrival `at` breaks ties) and replay:
   cleared completed card comes back completed, never "open". A msg-reopen
   (the optimistic flip when you reply to a card) snapshots too, and a
   planner `dismiss` (the pivot verdict: that reply started its own thread)
-  restores the original state and settle stamp. The pivot's new goal still
-  stays with the card it replied to (the follow-up tie): it
-  groups under the cited card's umbrella, or a fresh one wearing its title —
-  the judge picks the form of follow-up work, never whether it stays
-  together.
+  restores the original state and settle stamp. The pivot's new goal is its
+  own card carrying `pivotFrom` provenance (T101, 2026-08-26: the structural
+  umbrella tie retired with containers — display layers may group on the
+  provenance, the store never does).
 - **Settle is an event** (the moment the card entered the Completed
   column). `settledAt`, `settledDone`, and `deltaSince` derive from it:
   the newest un-reopened settle is the column-entry stamp, and the settle
@@ -95,7 +94,7 @@ the card's whole subtree (you reply to the card, never to its blocked
 sub-goals) · Continue (a needs-you card's one-click canned reply, 2026-08-08:
 "nothing needed from me, keep going" — the same reply path end to end, so it
 inherits the optimistic reopen and the judges' reassert; never a bare column
-move) · Clear / Undo clear · Resolve · the agent checking off its to-dos ·
+move) · Clear / Undo · Resolve · the agent checking off its to-dos ·
 a peer completing delegated work (courier link-back) · a failed auto-nudge
 (records a block) · the settle moment · the live floors below.
 
@@ -142,8 +141,9 @@ Chips on cards:
 - **Followed up** (modal tree, per sub-node): that sub was optimistically
   reopened by a per-sub follow-up.
 - **Group cards**: sibling goals minted by one typed turn fold into one
-  card (worst member's column); umbrellas nest related tops
-  (grouper/consolidator; reorganization only, never status).
+  card (worst member's column). (Container "umbrella" goals retired
+  2026-08-26, T101: every top is its own card; archived history may still
+  hold pre-T101 containers, which render structurally.)
 
 Optimistic predictions are client-side and kernel-reconciled: a
 follow-up/move flips the card instantly; if the kernel doesn't confirm

@@ -14,7 +14,7 @@ export interface MarkerLabel {
                 // sticky rail stamp can name the time at the top of the view.
   date: string; // the date word ("Yesterday" / "Mon" / "Jun 3") on a day marker, else "".
                 // Split out from `text` because the renderer puts it on a full-width DAY DIVIDER
-                // rather than in the rail (dayDividerFor in render.ts): the gutter is 47px wide
+                // rather than in the rail (dayDividerFor in render.ts): the gutter is 59px wide
                 // and "Yesterday" measures 52.6px, so in the rail its leading "Y" was clipped.
 }
 

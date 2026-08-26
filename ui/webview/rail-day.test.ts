@@ -47,11 +47,11 @@ test("the label rides ABOVE the stamp and never clips at the pane's left edge", 
   // ABOVE (the user 2026-08-18, with a video): below the stamp, the next incoming stamp scrolled
   // straight through the label's spot and the label leapt over it at every handoff. Above it,
   // nothing crosses the label's path — and the clamp keeps it off the tab bar in every case.
-  assert.match(RENDER, /day\.style\.top = Math\.max\(cTop \+ 1, slotTop - dayH - 1\) \+ "px";/);
+  assert.match(RENDER, /day\.style\.top = Math\.max\(cTop \+ 1, slotTop - dayH - 4\) \+ "px";/);
   // Natural width, right edge on the gutter's right edge, left edge never past the pane's:
   // "2 days ago" at 0.68em is wider than the 47px gutter, and the old box pinned to the gutter's
   // left/width clipped its leading digit at the pane edge (the user 2026-08-18, with a screenshot).
-  assert.match(RENDER, /day\.style\.left = Math\.max\(2, gRect!\.right - dayW\) \+ "px";/);
+  assert.match(RENDER, /day\.style\.left = Math\.max\(3, gRect!\.right - dayW \+ 1\) \+ "px";/);
   assert.doesNotMatch(RENDER, /day\.style\.width/, "no width pin — the box shrinkwraps its text");
 });
 
@@ -63,8 +63,9 @@ test("the label is passive fixed chrome, smaller and dimmer than the stamp", () 
 
 // ── executed replica of the placement decision ───────────────────────────────────────────────────
 // Faithful to paintRailSticky's day pass (pinned above): slotLine = line + dayH + 1 when a label
-// shows; the label rides at slotTop - dayH - 1 (clamped to cTop + 1), its left edge at
-// max(2, gutterRight - labelWidth); an anchor below the pane paints nothing. Same style as
+// shows; the label rides at slotTop - dayH - 4 (clamped to cTop + 1; nudged 1px right / 3px up for
+// breathing room, the user 2026-08-22), its left edge at max(3, gutterRight - labelWidth + 1); an
+// anchor below the pane paints nothing. Same style as
 // rail-sticky-stamp.test.ts's decideSticky: the pure math, executed.
 const BUFFER = 6;
 function placeDay(o: { label: string; dayW: number; dayH: number; slotTop: number;
@@ -75,27 +76,36 @@ function placeDay(o: { label: string; dayW: number; dayH: number; slotTop: numbe
   if (!o.label) return { show: false, slotLine };
   if (o.slotTop > o.cBottom) return { show: false, slotLine };
   return { show: true, slotLine,
-    left: Math.max(2, o.gutterRight - o.dayW),
-    top: Math.max(o.cTop + 1, o.slotTop - o.dayH - 1) };
+    left: Math.max(3, o.gutterRight - o.dayW + 1),
+    top: Math.max(o.cTop + 1, o.slotTop - o.dayH - 4) };
 }
-const G = { cTop: 100, cBottom: 700, gutterRight: 47, dayH: 9 };   // gutter per .thread's 44px pad + marker right at +3
+const G = { cTop: 100, cBottom: 700, gutterRight: 59, dayH: 9 };   // gutter per .thread's 56px pad + marker right at +3
 const LINE = G.cTop + BUFFER;
 
-test("executed: a label wider than the gutter slides right to stay whole — never past the pane's left edge", () => {
-  const r = placeDay({ ...G, label: "2 days ago", dayW: 52, slotTop: 300 });
-  assert.equal(r.left, 2, "left edge clamps at 2px, so no character is ever cut off");
+test("executed: the 56px gutter fits every real label clear of the rail dots; the clamp survives as a backstop", () => {
+  // the whole point of the 2026-08-22 widening: at the old 44px gutter the widest forms clamped left
+  // and their tails ran into the rail dots as turns scrolled past. Dot column starts at
+  // gutterRight + 3 (dot left = turn + 6, marker right = turn + 3).
+  const dotLeft = G.gutterRight + 3;
+  for (const [label, w] of [["2 days ago", 52], ["2 weeks ago", 57], ["Yesterday", 47]] as const) {
+    const r = placeDay({ ...G, label, dayW: w, slotTop: 300 });
+    assert.ok(r.left! >= 3, label + " never leaves the pane");
+    assert.ok(r.left! + w <= dotLeft - 1, label + " stays clear of the dot column");
+  }
+  const extreme = placeDay({ ...G, label: "impossibly wide", dayW: 70, slotTop: 300 });
+  assert.equal(extreme.left, 3, "the left clamp survives as the backstop for absurd widths");
 });
 
 test("executed: a label that fits keeps its right edge on the gutter's right edge, like the stamp's", () => {
   const r = placeDay({ ...G, label: "Last week", dayW: 40, slotTop: 300 });
-  assert.equal(r.left! + 40, G.gutterRight, "right edges align when there is room");
+  assert.equal(r.left! + 40, G.gutterRight + 1, "right edge sits 1px past the stamp's — the breathing-room nudge");
 });
 
 test("executed: above the stamp, and above the STICKY it stays inside the pane — no tab-bar bleed", () => {
   const marker = placeDay({ ...G, label: "Yesterday", dayW: 45, slotTop: 300 });
-  assert.equal(marker.top, 300 - G.dayH - 1, "riding a real stamp: label bottom 1px above the stamp");
+  assert.equal(marker.top, 300 - G.dayH - 4, "riding a real stamp: label bottom 4px above the stamp");
   const sticky = placeDay({ ...G, label: "Yesterday", dayW: 45, slotTop: LINE + G.dayH + 1 });
-  assert.equal(sticky.top, LINE, "riding the sticky at the slot line: label top is the buffer line itself");
+  assert.equal(sticky.top, LINE - 3, "riding the sticky at the slot line: 3px above the buffer line (the nudge)");
   assert.ok(sticky.top! >= G.cTop, "inside the pane — the slot shift is exactly the room the label needs");
 });
 

@@ -217,12 +217,14 @@ class InjectedTurnDeadlockEndToEnd(unittest.TestCase):
                          "the hold is RECORDED — the silent drop is what made the deadlock unreadable")
         self.assertEqual(rec["sid"], SID)
 
-    def test_a_wedged_hold_still_fires_on_the_backstop(self):
+    def test_a_wedged_hold_still_fires_on_the_owning_pass(self):
         self.turns[-1]["ended"] = False
         self._tick()
         self.assertEqual(self.sent, [])
-        later = NOW + km.NUDGE_DEFER_BACKSTOP_SECS + 60
-        self.assertTrue(self._tick(now=later), "a hold that never clears is a missing event, not a veto")
+        # W2c: the wedge event is the owning tier completing a pass over this fsid with the hold
+        # still standing — never a clock (the retired 6h bound)
+        km.jd.pass_done("close", SID)
+        self.assertTrue(self._tick(now=NOW + 120), "a hold the pass did not retire is wedged, not a veto")
         self.assertEqual(len(self.sent), 1)
 
     def test_a_resolved_card_is_never_nudged_either_way(self):

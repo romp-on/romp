@@ -15,7 +15,7 @@ test("the warning chip is a button built once, riding the wrapping chip row", ()
   assert.match(FEED, /const warnChip = el\("button", "fask-warnchip"\)/,
     "a BUTTON (focusable), not a span — it has a click action");
   assert.match(FEED, /warnChip\.textContent = "warning"/, "plain text label, no emoji/glyph");
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
   assert.match(FEED, /a\._warnChip = warnChip;/);
 });
 

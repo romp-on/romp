@@ -42,6 +42,7 @@ export function dispatchFrame(panel: any, m: any): boolean {
   // `focus` path: focusEvent also drives openChat, and the click came FROM the chat, so that would be a
   // round trip back into the pane the user is already looking at. revealEvent pans + pulses only.
   if (m.type === "revealEvent" && panel.revealEvent) { panel.revealEvent(m.sid, m.t, m.id); return true; }
+  if (m.type === "tagEditFailed" && panel.tagEditFailed) { panel.tagEditFailed(m); return true; }
   return false;
 }
 
@@ -83,6 +84,7 @@ export function bridgeFunctions(post: Post): Record<string, (...a: any[]) => voi
     __rompTimelineSendCommand: (name: string, cmd: string) => post({ type: "sendCommand", name, cmd }),
     __rompTimelineSetFlag: (id: string, flag: string, value: unknown) => post({ type: "setSessionFlag", id, flag, value: !!value }),
     __rompTimelineSetViews: (views: unknown) => post({ type: "setTimelineViews", views }),
+    __rompTimelineEditTag: (edit: unknown) => post({ type: "editTag", edit }),
     __rompTimelineDismiss: (id: string) => post({ type: "dismissLane", id }),
     __rompTimelineHover: (sid?: string, segIds?: unknown[], t0?: number, t1?: number) =>
       post(sid ? { type: "timelineHover", sid, segIds: segIds || [], t0, t1 } : { type: "timelineHover", off: true }),

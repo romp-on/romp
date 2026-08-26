@@ -15,7 +15,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("the badge is built once and rides the wrapping chip row", () => {
   assert.match(FEED, /const dcBadge = el\("span", "fask-doneconfirming"\)/);
   assert.match(FEED, /dcBadge\.textContent = "done, confirming"/, "text label, no emoji/glyph");
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
   assert.match(FEED, /a\._doneConfirming = dcBadge;/);
 });
 
@@ -38,5 +38,5 @@ test("the tooltip explains what happens next in the user's terms", () => {
 test("the pill wears the done-check blue family, same shape as its sibling pills", () => {
   assert.match(CSS, /\.fask-doneconfirming \{[^}]*color: var\(--check-bg\)/, "the ✓ family's blue, no new color");
   assert.match(CSS, /\.fask-doneconfirming \{[^}]*font-size: 0\.64em/, "same size as its sibling pills");
-  assert.match(CSS, /\.fask-doneconfirming \{[^}]*border-radius: 999px/);
+  assert.match(CSS, /\.fask-doneconfirming \{[^}]*border-radius: var\(--radius-pill\)/);
 });

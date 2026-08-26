@@ -1,0 +1,11 @@
+<!-- SYNTHETIC fixture: the chat pane's transient-notice family side by side — locate-toast,
+     seek-note, warn-toast — for eyeballing the ONE toast vocabulary (--surface-raised,
+     --radius-toast, --shadow-toast; semantic border colors stay per notice). Invented content
+     (notes-api demo domain). All are position:fixed in real life — the runner statically places
+     them (body re-flexed to a row: the chat sheet's body is a flex column):
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/toasts-chat.html \
+           --out /tmp/toasts-chat.png --size 940x180 --extra-css '.locate-toast,.warn-toast,#seek-note{position:static;transform:none} body{background:#1e1e1e;padding:24px;display:flex;flex-direction:row;align-items:flex-start;gap:28px}'
+-->
+<div class="locate-toast">showing the last session before the filter</div>
+<div id="seek-note"><span class="seek-note-label">jumped to</span> the exporter question <span class="seek-note-x">✕</span></div>
+<div class="warn-toast">could not revive “tests” — the worktree is gone <span class="warn-toast-x">✕</span></div>

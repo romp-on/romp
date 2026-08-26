@@ -32,6 +32,15 @@ test("a spent MODEL allowance names the fix, not a wait (the user 2026-08-01)", 
   assert.doesNotMatch(s, /rate limited/i);
 });
 
+test("a safeguards refusal names the real fix, and outranks the status code (the user 2026-08-15)", () => {
+  // a refusal is deterministic on the same input — by status alone a 400 would read as an ordinary
+  // rejection, sending the user to retry the one class that can never succeed on a retry
+  const s = apiErrorReason({ status: 400, refusal: true });
+  assert.match(s, /safeguards refused this prompt/);
+  assert.match(s, /rewrite it or drop this thread/);
+  assert.equal(apiErrorReason({ refusal: true }), s, "with or without a status, the same words");
+});
+
 test("a dead network and a busy API are told apart", () => {
   assert.match(apiErrorReason({ status: 529, networkDown: true }), /offline/i);
   assert.doesNotMatch(apiErrorReason({ status: 529, networkDown: true }), /overloaded/i);

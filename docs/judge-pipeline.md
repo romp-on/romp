@@ -64,9 +64,8 @@ goals the whole turn touched.
 
 There is no clock and no concurrency between these judges: one triage pass
 runs them in strict order — planner, closer, unblocker, courier, propagate,
-grouper, consolidator, then distiller + briefer — so an umbrella the
-consolidator mints is distilled by the same pass, never left half-made
-across passes. The feed renders from a snapshot taken at pass start, so
+grouper, consolidator, then distiller + briefer — so a card a judge touches
+is distilled by the same pass, never left half-made across passes. The feed renders from a snapshot taken at pass start, so
 mid-pass intermediate states never flicker through. Your own actions are
 the one write the pass cannot order: they land the moment you click,
 journaled as events (cleared.jsonl, overrides/) and replayed at load, so a
@@ -96,7 +95,7 @@ The board judges, with what each one reads and the ops it may emit:
 | closer | the turn ends | the goals this turn touched | `done`, `block`, omit (when in doubt, omit) |
 | unblocker | an open blocked goal has ended turns or done filings newer than its block (or its last check of each) | the goal's question + the conversation since + the goals completed since | `lift`, `hold` (when unsure, hold) |
 | courier | a peer message arrives | the message + both sessions' trees | plant a goal + tracking node, or nothing |
-| grouper | the set of open cards changed | open top cards | nest a card, mint an umbrella, nothing |
+| grouper | the set of open cards changed | open top cards | merge twins, split a tangent, retitle, nothing |
 | consolidator | the set of completed cards changed | completed top cards | the same ops, done column |
 | distiller | a card completed and settled | the card's whole work (or the delta since a reopen) | background + takeaway |
 | briefer | a card blocked | the blocking stretch | the decision brief |

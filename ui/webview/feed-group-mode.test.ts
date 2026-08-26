@@ -13,10 +13,12 @@ const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", 
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.css"), "utf8");
 const FED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");
 
-test("the footer Group toggle persists `grouped` in romp:settings; grouping is the DEFAULT (the user 2026-07-13)", () => {
-  assert.match(FEED, /grouped: s\.grouped !== false/);   // default ON — the toggle opts OUT
-  assert.match(FEED, /ensureFeedToggle\("feed-grouped", "Group", \(\) => feedPrefs\(\)\.grouped, "grouped",/);
-  assert.match(FEED, /ensureGroupToggle\(\)\.style\.display = showCA \? "" : "none";/);
+test("the view menu's Group-by-session row persists `grouped` in romp:settings; grouping is the DEFAULT (the user 2026-07-13)", () => {
+  assert.match(FEED, /grouped: s\.grouped !== false/);   // default ON — the row opts OUT
+  // the footer "Group" word-button folded into the view menu (the user 2026-08-24) — same pref, same default
+  assert.match(FEED, /set\(2, "Group by session", \{/);
+  assert.match(FEED, /current: p\.grouped,/, "the ✓ reads the same !== false default — a missing key stays checked");
+  assert.match(FEED, /mk\(true, \(\) => setViewPref\("grouped", !feedPrefs\(\)\.grouped\)\)/);
 });
 
 test("session rank = the kernel's session-order list (tab/lane order); unknown sids keep time order after it", () => {
@@ -42,7 +44,7 @@ test("a name+dot header entry opens each session's run; only runs that exist get
   assert.match(FEED, /setWorkDot\(nm, dotFor\(e\.name\)\);/);   // work OR awaiting dot — await-green when idle-but-awaiting (the user 2026-07-13)
   // headers aren't cards — but a FOLDED one stands in for its run, so the chip counts what it hides;
   // the column must report the board, not what the reader happens to have open (2026-07-31)
-  assert.match(FEED, /const nCards = \(es: Entry\[\]\) => es\.reduce\(\(n, e\) => n \+ \(e\.kind === "sess" \? e\.folded : 1\), 0\);/);
+  assert.match(FEED, /const nCards = \(es: Entry\[\]\) => es\.reduce\(\(n, e\) => n \+ entryCards\(e\), 0\);/);
   // flex-wrap: the header hosts the background-process chip's expandable list on its own full-width
   // line (feed-bg-service-chip.test.ts, the user 2026-07-24)
   assert.match(CSS, /\.feed-sess-head \{ display: flex; flex-wrap: wrap; align-items: center;/);

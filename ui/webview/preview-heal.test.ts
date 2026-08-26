@@ -36,3 +36,52 @@ test("every tap acknowledges, even mid-attempt when build() no-ops on its fetchi
   assert.equal((PREVIEW.match(/ackTap\(ev\); build\(true\)/g) || []).length, 2,
     "both the retrying note and the settled chip acknowledge");
 });
+
+// ── the three no-retry dead-ends (the user 2026-08-24: figures stayed blank until a new message
+// forced a re-render — the send's registerOptimistic full-window rebuild minted fresh boxes, which
+// is why "sending anything fixes them") ─────────────────────────────────────────────────────────
+
+test("an UNVERIFIED failure never self-removes — it hides, registers, and unhides on a later success", () => {
+  // box.remove() erased the figure's spot permanently: no failedPreviews registration, nothing for
+  // the push-heal to retry. Every file:// mention and every no-pathLinks payload is unverified, so
+  // ONE transient failure in a kernel-restart window meant a blank figure until the next send.
+  // Scoped to the MANAGED machinery (previewFull and below). previewThumb came back with the feed's
+  // artifact strips, and a thumb is not healable — a missing file costs its strip slot nothing, so it
+  // still self-removes on error. The ban is about figures that must survive a transient failure.
+  assert.doesNotMatch(PREVIEW.slice(PREVIEW.indexOf("export function previewFull")), /box\.remove\(\)/,
+    "the self-remove is gone from every healable failure path");
+  // the happy-path onerror and the managed catch both hide instead (same retry machinery as verified)
+  assert.match(PREVIEW, /if \(!verified\) box\.style\.display = "none";\s*\n\s*failAfterBeat\(0\);/);
+  assert.match(PREVIEW, /if \(!verified\) box\.style\.display = "none";\s*\/\/ hidden while failed, healable — never removed\s*\n\s*failAfterBeat\(started\);/);
+  // …and both success paths unhide the healed sentinel in place
+  assert.equal((PREVIEW.match(/box\.style\.display = "";\s+\/\/ a hidden unverified sentinel that healed comes back/g) || []).length, 2,
+    "the resolved-url fast path AND the managed success both unhide");
+  // the PDF card's HEAD probe re-registers itself for the heal on every failure, and unhides on ok
+  assert.match(PREVIEW, /const probe = \(\) => fetch\(fileUrl\(path, sid\), \{ method: "HEAD" \}\)/);
+  assert.match(PREVIEW, /box\.style\.display = "none"; failedPreviews\.set\(box, probe\);/);
+});
+
+test("a settled chip re-registers for RECONNECT-class heals regardless of error text", () => {
+  // the push-heal stays new-evidence-gated (the pin above), but a byte-identical 404 while the file
+  // was still being written — or a constant connection-refused — parked the chip inert forever. The
+  // link coming back (romp:wsup / hostUp) is new information even when the words didn't change; the
+  // budget refills exactly like a send's fresh box (autoRetries = 3, not the push-heal's 1).
+  assert.match(PREVIEW, /settledPreviews\.set\(box, \(\) => \{ chipHealedErr = lastErr; autoRetries = 3; build\(true\); \}\);/);
+  assert.match(PREVIEW, /const settledPreviews = new Map<HTMLElement, \(\) => void>\(\);/);
+  assert.match(PREVIEW, /export function refreshSettledPreviews\(\): void \{/);
+  assert.match(PREVIEW, /settledPreviews\.delete\(box\);\s*\/\/ one attempt per registration; re-registers on error/);
+});
+
+test("markdown-inline <img> failures register through ONE capture-phase listener", () => {
+  // DOMPurify strips inline handlers (correctly) and md() returns a string, so per-site onerror
+  // wiring is impossible — a failed md img sat as a dead element in the cached DOM forever. Error
+  // events don't bubble but DO capture: one document-level listener covers every md img, skips the
+  // preview machinery's own imgs (they run budgets/resume/chips), and rides failedPreviews so every
+  // kernel message re-attempts.
+  assert.match(PREVIEW, /export function installMdImgHeal\(\): void \{/);
+  assert.match(PREVIEW, /document\.addEventListener\("error", \(e\) => \{/);
+  assert.match(PREVIEW, /\}, true\);\s*\n\}/, "capture phase — error events do not bubble");
+  assert.match(PREVIEW, /if \(!src \|\| src\.startsWith\("data:"\)\) return;/, "a broken data: URI has no server to heal");
+  assert.match(PREVIEW, /if \(img\.onerror \|\| img\.closest\("\.path-full"\)\) return;/, "previews own their own retries");
+  assert.match(PREVIEW, /if \(mdImgHealOn\) return;/, "ensure-once");
+});

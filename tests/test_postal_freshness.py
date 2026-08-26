@@ -61,7 +61,7 @@ class WorkingNoteFreshness(unittest.TestCase):
         # state / working / dir carry straight into the agent row used for working-note freshness.
         saved = pm._kernel_sessions
         try:
-            pm._kernel_sessions = lambda: [
+            pm._kernel_sessions = lambda threads=False: [
                 {"id": "sid-1", "name": "bugs", "state": "working", "dir": "/dir", "working": "feed.ts", "backend": "tmux"},
                 {"id": "sid-2", "name": "ui", "state": "idle", "dir": "/dir", "working": "render.ts", "backend": "sdk"}]
             agents = {a["name"]: a for a in pm.local_agents()}

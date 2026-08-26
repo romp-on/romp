@@ -25,9 +25,9 @@ const RENDER = fs.readFileSync(
 test("the plain send registers an optimistic bubble; follow-up/quote sends keep their own kernel echo", () => {
   // only the PLAIN sendMessage branch registers — a citation follow-up/quote has its own kernel-side
   // echo (the branch lives in routeUserMessage since the staged flush, 2026-08-15)
-  assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text \}\); registerOptimistic\(sid, text\); \}/);
+  assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
   // registerOptimistic shows it NOW (before any push) via reconcile + appendActive
-  assert.match(RENDER, /function registerOptimistic\(id: string, text: string\): void/);
+  assert.match(RENDER, /function registerOptimistic\(id: string, text: string, imgPaths\?: string\[\]\): void/);   // + the dragged-image paths → echo thumbnails (2026-08-25)
   assert.match(RENDER, /if \(v\) v\.stale = true;\s*\n\s*if \(id === activeId\) \{\s*\n\s*appendActive\(\);/);
 });
 
@@ -65,7 +65,7 @@ test("every push entry point re-asserts (or retires) the optimistic tail", () =>
 
 test("retire needs a NEW landed atom (base count); kernel provisionals only suppress", () => {
   // base is stamped on the first reconcile after the send: pre-existing matches are background
-  assert.match(RENDER, /arr\.push\(\{ text, ts: Date\.now\(\), base: -1 \}\);/);
+  assert.match(RENDER, /arr\.push\(\{ text, ts: Date\.now\(\), base: -1, imgPaths \}\);/);
   assert.match(RENDER, /for \(const p of list\) if \(p\.base < 0\) p\.base = landedCount\(p\.text\);/);
   // a landed atom is a user event WITHOUT the backend's "echo:" uuid prefix
   assert.match(RENDER, /&& !String\(\(e as any\)\.uuid \|\| ""\)\.startsWith\("echo:"\)\)\.length;/);
@@ -81,7 +81,7 @@ test("retire needs a NEW landed atom (base count); kernel provisionals only supp
 test("an optimistic echo is a tail-appended, kernel-invisible QUEUED event — never a solid user bubble", () => {
   const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
   assert.match(RENDER, /const OPT_PREFIX = "optimistic:";/);
-  assert.match(RENDER, /const mk = \(p: \{ text: string \}\) => \(\{ md: p\.text, optimistic: true, cancelable: false \}\);/);
+  assert.match(RENDER, /const mk = \(p: \{ text: string; imgPaths\?: string\[\] \}\) => \(\{ md: p\.text, optimistic: true, cancelable: false, imgPaths: p\.imgPaths \}\);/);   // the echo carries its dragged-image paths (2026-08-25)
   // stale ones pop cheaply off the end (always tail-appended)
   assert.match(RENDER, /while \(s\.events\.length && isOptimistic\(s\.events\[s\.events\.length - 1\]\)\) s\.events\.pop\(\);/);
   // the abandoned dim/pending idiom is FULLY gone: render, guard fields, and stylesheet — the last
@@ -174,4 +174,31 @@ test("reconcile: inject on nothing, suppress on kernel provisionals, retire only
   // TTL backstop: nothing ever surfaced, but past the window we stop asserting a possibly-dropped send
   r = reconcile([{ kind: "assistant", md: "…" }], fresh(), T0 + OPT_TTL_MS + 1);
   assert.equal(r.keep.length, 0);
+});
+
+test("the echo renders dragged-image THUMBNAILS — composer → provisional → landed, one continuum", () => {
+  // the user 2026-08-25: the composer showed the thumbnail, the provisional dropped to path-only
+  // text, the landing brought the thumbnail back — a flash in the middle. The echo now carries the
+  // send's image paths and renders them through the LANDED form's own component (userImage with the
+  // exact "path:" shape), so buildPathImg's (sid,path)-keyed cache serves the landed bubble the same
+  // bytes and the reconcile swap never re-fetches or flickers.
+  assert.match(RENDER, /if \(t\.imgPaths && t\.imgPaths\.length\) \{\s*\n\s*for \(const ip of t\.imgPaths\) bubble\.appendChild\(userImage\(\{ src: "path:" \+ ip, path: ip \}, true\)\);/);
+  // the paths ride the send at every register site (deliver, staged flush, the provisional hold)
+  assert.match(RENDER, /routeUserMessage\(activeId, text, cites, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/);
+  // …and ONLY image-kind attachments mint thumbs — a dropped .csv stays the path text it always was
+  assert.doesNotMatch(RENDER, /registerOptimistic\(sid, text, attached\)/);
+});
+
+test("the landing SWAP repaints even when it replaces the echo 1:1 — no lingering dashed bubble", () => {
+  // upsert hands reconcileOptimistic a FRESH events array, and a landing frame that nets zero count
+  // change (its user atom in, our bubble out) left syncView's rendered===len fast path skipping the
+  // swap — the dashed echo lingered past its own landing until some later push (the 2026-08-25
+  // continuity harness caught it). The per-sid signature survives the frame and marks the view stale
+  // exactly when the visible echo set changes; the pop-and-reinject-same pass stays a no-op.
+  assert.match(RENDER, /const echoShownSig = new Map<string, string>\(\);/);
+  assert.match(RENDER, /if \(\(echoShownSig\.get\(s\.id\) \|\| ""\) !== sig\) \{/);
+  assert.match(RENDER, /if \(sig\) echoShownSig\.set\(s\.id, sig\); else echoShownSig\.delete\(s\.id\);/);
+  const fn = RENDER.split("function reconcileOptimistic(")[1].split("\nfunction ")[0];
+  const settles = (fn.match(/settle\(/g) || []).length;
+  assert.ok(settles >= 3, "every exit settles the signature (early returns included), got " + settles);
 });

@@ -43,6 +43,7 @@ class _FakeBackend:
         self.retired = 0
     def retire_live_work(self, sid): self.retired += 1
     def _poke(self): pass
+    def _deliver_rename_ping(self, s): return False   # settle hook (2026-08-25); no ping in these worlds
     def _update_reg(self, *a, **k): pass
     def _mark_dropped_echoes(self, sid, surviving): self.dropped_calls.append((sid, list(surviving)))
     # the ResultMessage settle's other hooks (mirrors test_sdk_compacting_signal's fake)

@@ -191,7 +191,7 @@ test("settings lift does the same via rs-lifted / rs-pane-gone", () => {
 });
 
 test("overlay dims are the one standard 0.55", () => {
-  assert.match(CSS, /\.picker-overlay \{[\s\S]*?background: rgba\(0, 0, 0, 0\.55\);/);
+  assert.match(CSS, /\.picker-overlay \{[\s\S]*?background: var\(--overlay-dim\);/);
   assert.match(GEAR_CSS, /#rsettings \{ position: fixed; inset: 0; z-index: 60; background: rgba\(0, 0, 0, 0\.55\);/);
 });
 

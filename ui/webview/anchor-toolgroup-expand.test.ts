@@ -17,8 +17,8 @@ const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview"
 
 test("scrollToAnchor's recovery lookup matches resultUuid (the answered-ask anchor) too", () => {
   assert.match(RENDER,
-    /findIndex\(\(e\) => e\.uuid === uuid \|\| \(e as \{ mid\?: string \}\)\.mid === uuid\s*\|\| \(e as \{ resultUuid\?: string \}\)\.resultUuid === uuid\)/,
-    "the events lookup must resolve every uuid renderEvent can stamp as data-uuid");
+    /findIndex\(\(e\) => e\.uuid === uuid \|\| \(e as \{ mid\?: string \}\)\.mid === uuid\s*\|\| \(e as \{ resultUuid\?: string \}\)\.resultUuid === uuid\s*\|\| \(\(\(e as \{ settleUuids\?: string\[\] \}\)\.settleUuids \|\| \[\]\)\.includes\(uuid\)\)\)/,
+    "the events lookup must resolve every uuid renderEvent can stamp as data-uuid or data-uuids");
 });
 
 test("an anchor inside a collapsed tool run expands the run before the window re-render", () => {

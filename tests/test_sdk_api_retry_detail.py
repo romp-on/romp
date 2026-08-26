@@ -61,6 +61,9 @@ class _Backend:
     def __init__(self):
         self.forwarded = []
 
+    def _deliver_rename_ping(self, s):
+        return False   # settle hook (2026-08-25); no ping in these worlds
+
     def _poke(self):
         pass
 

@@ -29,10 +29,12 @@ class ApiErrorWorking(unittest.TestCase):
     def test_only_on_you_errors_floor_the_card_to_needs_input(self):
         src = inspect.getsource(km.build_feed)
         # api_block fires for an ON-YOU api_top — "prompt too long" (compact), a monthly spend cap (raise
-        # it, the user 2026-07-14), a spent model allowance, or a dead credential (per-session auth, the
-        # user 2026-08-08); a transient error does NOT move the card (it auto-retries in Working).
+        # it, the user 2026-07-14), a spent model allowance, a dead credential (per-session auth, the
+        # user 2026-08-08), or a safeguards refusal (the user 2026-08-15); a transient error does NOT
+        # move the card (it auto-retries in Working).
         self.assertIn('api_block = (nid == api_top and bool(aerr and (aerr.get("tooLong") or aerr.get("spendLimit")', src)
-        self.assertIn('or aerr.get("modelLimit") or aerr.get("authErr"))))', src)
+        self.assertIn('or aerr.get("modelLimit")', src)
+        self.assertIn('or aerr.get("authErr") or aerr.get("refusal"))))', src)
         self.assertIn('column = ("needs_input" if (api_block or nid == jauth_top or nid == perm_top', src)   # stalled_floor retired 2026-07-07; jauth_top = the judge-auth floor (2026-08-12)
         self.assertIn('or (col == "blocked" and not recheck and not rejudging))', src)
 

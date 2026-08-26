@@ -351,10 +351,29 @@ def msg_to_atom(msg, sid, fsid, t, skill_tool_ids=()):
                     "skillMd": text[:_SKILL_MD_CAP] + ("\n\n…(skill content truncated)"
                                                        if len(text) > _SKILL_MD_CAP else ""),
                     "message": {"role": "assistant", "content": [], "stop_reason": None}}
-        return {"type": "user", "uuid": u, "session_id": sid, "t": t, "fsid": fsid, "parentUuid": None,
+        atom = {"type": "user", "uuid": u, "session_id": sid, "t": t, "fsid": fsid, "parentUuid": None,
                 "message": {"role": "user", "content": content}}
+        # The record-level STRUCTURED result rides the stream too: the CLI emits the transcript
+        # record's toolUseResult on the wire as `tool_use_result`, and the SDK parser maps it onto
+        # UserMessage.tool_use_result (verified in claude-agent-sdk 0.2.132 / CLI 2.1.224). Carry it
+        # onto the live atom under the SAME key and gates as the file adapter (a tool_result-bearing
+        # atom, dict form only — a dismissed picker records a plain string no consumer reads), or the
+        # live-tail window structurally bypasses the authoritative consumers: a JUST-answered
+        # AskUserQuestion rendered via the lossy regex scrape until the disk record was parsed, and
+        # Edit's diffRows lagged a parse behind the stream.
+        tur = getattr(msg, "tool_use_result", None)
+        if has_tool_result and isinstance(tur, dict) and (set(tur) & TUR_CONSUMED_KEYS):
+            # same consumed-keys gate as the file adapter: a Read result's dict holds the whole
+            # file — carrying shapes nothing reads only bloats the live tail
+            atom["toolUseResult"] = tur
+        return atom
     return None
 
+
+# The toolUseResult keys a consumer actually reads — MIRRORS event_model.TUR_CONSUMED_KEYS (this
+# module loads standalone, so it cannot import the event model; a drift pin in test_sdk_backend.py
+# holds the two sets equal). Widen both together when a new consumer appears; never carry-all.
+TUR_CONSUMED_KEYS = frozenset(("answers", "structuredPatch"))
 
 TYPE_SOMETHING = "Type something"   # meta-option label the webview turns into the inline "add your own" field
 
@@ -841,6 +860,15 @@ BOOT_RESUME_CONCURRENCY = max(1, int(os.environ.get("ROMP_BOOT_RESUME_CONCURRENC
 # forever and trap the whole sweep — after this long the sweep proceeds anyway, loudly.
 BOOT_RESUME_SLOT_S = float(os.environ.get("ROMP_BOOT_RESUME_SLOT_S", "180"))
 
+# The rename ping (the user 2026-08-24): a renamed session hears its OWN new name — one line ahead
+# of whatever next enters it (send() below), never a wake of its own. Same [romp] mechanics-notice
+# family as the restart notices above (the housekeeping note in the session prompt gives the prefix
+# meaning), but MARKER-FREE: this line joins an EXISTING message, and the romp-injected marker
+# would re-author the host message's echo and transcript atom.
+RENAME_NUDGE = "[romp] This session was renamed: it is now '%s'. A note for your own records — carry on."
+# the dressed ping's detectable head — the drain's feed-hold keys on it (see _deliver_rename_ping)
+RENAME_PING_HEAD = "<!-- romp-injected --><!-- romp-system -->[romp] This session was renamed"
+
 # Same recovery, different death: the session's OWN claude process died mid-turn (killed or crashed)
 # while the kernel stayed up, so the kernel itself resumes it (_heal_cut_session) instead of waiting
 # for the next boot's reconcile.
@@ -1185,6 +1213,43 @@ def work_api_key() -> str:
     return _WORK_KEY
 
 
+def _expected_auth() -> str:
+    """The box-wide INTENDED auth, declared in the manager's environment (service.env):
+    ROMP_EXPECTED_AUTH=key|login; unset or any other value declares nothing. On a machine whose
+    sessions authenticate through Claude Code's apiKeyHelper the key never rides service.env, so
+    _launched_keyed reads "login" for every session while key auth IS the box's design — and the
+    per-init apiKeySource mismatch line was a permanent false alarm (the user 2026-08-15). Under a
+    declaration _note_auth_source compares the landing against the DECLARED side instead: the
+    intended landing is quiet, the contradicting one is flagged — the never-silent property inverts
+    rather than disappears. Read fresh per call (the cost is a dict lookup, and a cached read would
+    outlive a test's env change); never popped — unlike ANTHROPIC_API_KEY it is not a secret and
+    nothing downstream misreads it."""
+    v = (os.environ.get("ROMP_EXPECTED_AUTH") or "").strip().lower()
+    return v if v in ("key", "login") else ""
+
+
+def _declared_auth(state_dir) -> tuple:
+    """The EFFECTIVE box-wide auth expectation and where it came from: ("key"|"login"|"", "pick"|"env"|"").
+    One explicit gear Billing pick makes ROMP_EXPECTED_AUTH INERT (Q3, 2026-08-26): set_auth is the
+    ONLY writer of the remembered auth default, so that entry existing IS "the user has picked
+    billing by hand at least once" — from then on the remembered pick is the box's expectation and
+    the env declaration stops speaking (it described the box's unpicked design; once billing is
+    hand-managed it is stale doctrine, and its per-init alarms fought the user's own choice on
+    every re-seeded spawn). A SPAWN re-seeding reg.auth from the remembered default never counts
+    as explicit — inertness keys on the PICK EVENT's durable trace (the defaults entry), never on
+    any session's seeded state; hand-editing sdk-defaults.json stays the sanctioned escape hatch
+    (the mode precedent)."""
+    try:
+        d = read_sdk_defaults(Path(state_dir))
+    except Exception:
+        d = {}
+    a = d.get("auth")
+    if a in ("key", "login"):
+        return a, "pick"
+    v = _expected_auth()
+    return v, ("env" if v else "")
+
+
 # ---------------------------------------------------------------------------
 # Fast-mode permission for key-billed sessions — ask the account that PAYS.
 # ---------------------------------------------------------------------------
@@ -1255,6 +1320,29 @@ def key_fast_org_env(key: str, log) -> dict[str, str]:
 
 class _AskCancelled(Exception):
     pass
+
+
+
+_MODEL_TIERS = ("haiku", "sonnet", "opus", "fable", "mythos")   # rank = index; fable/mythos share the top in
+#                                                                 practice but a swap between them is lateral,
+#                                                                 not a fallback, so distinct ranks are fine
+
+
+def _model_rank(name):
+    """The model FAMILY rank of a model id/display name, or None when no family matches — substring
+    match, so 'claude-sonnet-5', 'Sonnet 5' and 'us.anthropic.claude-sonnet-…' all rank the same."""
+    low = str(name or "").lower()
+    for i, fam in enumerate(_MODEL_TIERS):
+        if fam in low:
+            return i
+    return None
+
+
+def _model_downgrade(frm, to):
+    """True only for a KNOWN down-tier transition — the shape of an API capacity fallback. Unknown
+    names never qualify: a mint on a user's own exotic pick is worse than a missed exotic fallback."""
+    a, b = _model_rank(frm), _model_rank(to)
+    return a is not None and b is not None and b < a
 
 
 class SdkSession:
@@ -1379,10 +1467,17 @@ class SdkSession:
         #   the NEXT turn's init (the badge reads off for a whole turn right after the CLI acknowledged
         #   the toggle). The init re-sync lets that single stale word yield to this; the next init wins
         #   unconditionally.
-        self.api_key_auth = False   # THIS session's init said it authenticates with an API key — a
+        _aka = reg.get("apiKeyAuth")   # the persisted CLI truth (written by _note_auth_source on flip)
+        self.api_key_auth = bool(_aka)   # THIS session's init said it authenticates with an API key — a
         #   PER-SESSION fact (the user 2026-08-08: one keyed session must not speak for the login's
         #   windows). Gates this session's get_usage polls + its RateLimitEvent records; set by
-        #   _note_auth_source on every init.
+        #   _note_auth_source on every init, PERSISTED (reg apiKeyAuth) and restored here — as a
+        #   runtime-only default-False flag, a keyed session's rate-limit events landed in the login's
+        #   usage.json between a kernel restart and its next init (the max-merge contamination the
+        #   gate exists to prevent).
+        self.auth_live = ("key" if _aka else "login") if isinstance(_aka, bool) else ""   # what the
+        #   CLI's init actually reported ("" until one ever lands) → snapshot()'s authLive, the
+        #   Billing row's live truth; restored with the flag so the hover stays honest across restarts
         self.auth = reg.get("auth") if reg.get("auth") in ("login", "key") else ""   # the user's
         #   per-session auth pick (the user 2026-08-08: some sessions on the personal login, some on
         #   the work key). "" = no explicit pick → effective_auth() preserves the pre-selector world.
@@ -1427,6 +1522,10 @@ class SdkSession:
         # so a kernel death can DELAY queued messages but never lose them; the boot reconcile
         # resumes any session with a non-empty persisted queue and this seed delivers it.
         self._pending: list[str] = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
+        self._ping_feeding = False   # a rename ping was fed and its turn hasn't streamed yet: hold the
+        #                              queue so no message can share its pre-turn window (the CLI batches
+        #                              everything pre-start into ONE record — the 2026-08-25 fold); cleared
+        #                              by the turn's first streamed message, an exact event, or a reconnect
         # A RESTORED /compact must light the compacting bracket too (the user 2026-07-22). send() sets
         # _compacting when it enqueues a compact command, but a persisted queue lands here INSTEAD of
         # going through send() — any /compact still queued when the kernel died arrives this way. Without
@@ -1967,6 +2066,7 @@ class SdkSession:
                     # up (_rewind_armed, set by _options) — feeding the edit turn to the CURRENT client
                     # would land it on the un-rewound branch (the exact wrong-branch delivery this guards)
                     blocked = blocked or bool(self._rewind_to and not self._rewind_armed)
+                    blocked = blocked or self._ping_feeding   # the ping's record must not share its window
                     item = self._pending.pop(0) if (self._pending and not blocked) else None
                     fresh = item is not None and self.inflight == 0     # starting from idle, not mid-turn
                 if item is None:
@@ -1979,6 +2079,8 @@ class SdkSession:
                     self._intr_level = 0             #   ...and its escalation episode (a new stop starts polite)
                 self.inflight += 1
                 self._inflight_texts.append(item)   # the fed-turn twin — see its init comment
+                if item.startswith(RENAME_PING_HEAD):
+                    self._ping_feeding = True       # hold feeds until this turn's first streamed message
                 self._mark("working")
                 self.backend._poke()
                 yield {"type": "user",
@@ -2002,6 +2104,7 @@ class SdkSession:
         while not self.ended:
             self._wake.clear()
             self._reconnect = False
+            self._ping_feeding = False   # a reconnect restarts the feed — a stale hold must not wedge it
             # settle + recover anything the abandoned client stranded — see _reconcile_stranded
             self._reconcile_stranded()
             opts = self.backend._options(self, ClaudeAgentOptions)
@@ -2135,6 +2238,8 @@ class SdkSession:
                  % ((": " + dropped) if dropped else ""))})
         except Exception as e:
             self.backend._log("rewind (%s): could not tell the chat the rewind failed: %s" % (self.name, e))
+        # the conversation is unchanged → the kernel RESTORES the cards its gesture-time hold hid
+        self.backend._rewind_resolved(self.sid, "failed")
         self.backend._poke()
 
     def _learn_model(self, pm):
@@ -2153,6 +2258,22 @@ class SdkSession:
             if cleared:
                 self.backend._poke()
             return
+        if self.model and not self._model_pending and not cleared \
+                and _model_downgrade(self.model, pm):
+            # A DOWN-TIER transition nobody asked for (no /model pick pending): the API fell back
+            # mid-turn. Surface it as a completed card via the kernel-wired hook (the user
+            # 2026-08-23) — never silently (the swap was invisible before this). DOWNGRADES ONLY
+            # (the user 2026-08-23, from a card reading "fallback" on their own upgrade): romp only
+            # sees ITS OWN picks pending — a /model typed inside the CLI, or any user-side switch,
+            # arrives here as an unrequested transition too, and a capacity fallback never moves a
+            # session UP-tier. An up-tier, lateral, or unknown-name change is treated as the user's
+            # doing and just updates the badge, exactly as before the card existed.
+            fb = getattr(type(self.backend), "on_model_fallback", None)
+            if fb:
+                try:
+                    fb(self.sid, self.model, pm)
+                except Exception as e:
+                    self.backend._log("model-fallback card (%s): %s" % (self.name, e), problem=True)
         self.model = pm
         try:
             self.backend._update_reg(self.sid, liveModel=pm, modelPending=bool(self._model_pending))
@@ -2214,6 +2335,13 @@ class SdkSession:
         append_state(self.backend.state_dir, self.sid, state)
 
     def _on_message(self, msg, AssistantMessage, ResultMessage, SystemMessage):
+        if getattr(self, "_ping_feeding", False):   # getattr: __new__-built test doubles skip __init__
+            # the ping's turn is streaming — the CLI demonstrably started it, so a message fed from
+            # here on lands MID-TURN as its own record (the CLI's designed forward behavior); the
+            # queue can flow again
+            self._ping_feeding = False
+            if self._input_wake is not None:
+                self._input_wake.set()   # same-loop thread — the settle path sets it the same way
         if isinstance(msg, SystemMessage) and msg.subtype == "init":
             self._fire_boot_settled()   # the CLI is up and streaming — its transcript catch-up burst
             #                             is over, so the boot-stagger slot (if any) frees NOW
@@ -2371,6 +2499,16 @@ class SdkSession:
             self.retry_count = 0
             self.retry_info = None
             m = getattr(msg, "model", None)
+            # SIDECHAIN turns never teach the session its model (the user 2026-08-24): a Task/Agent
+            # subagent streams its OWN AssistantMessages tagged parent_tool_use_id, routinely on a
+            # LOWER tier than the parent — learning one filed a false "Model changed automatically"
+            # downgrade card (the subagent's model read as a capacity fallback) and wrote the
+            # subagent's model over the registry's liveModel, which the statusline badge reads,
+            # until _do_refresh_context healed it after the turn. The same drop the chat-atom path
+            # applies to sidechain traffic (msg_to_atom) — the parent stream teaches only the
+            # parent's own turns.
+            if getattr(msg, "parent_tool_use_id", None):
+                m = None
             # Only adopt a REAL model id. Injected / synthetic assistant turns carry model="<synthetic>" (and
             # the CLI writes it to the transcript too); pretty_model passes unrecognised ids through verbatim,
             # so an unguarded assign would CORRUPT the model badge to "<synthetic>". A real id always contains
@@ -2397,7 +2535,7 @@ class SdkSession:
                     last = self._last_usage_totals.get(k, 0)
                     turn_u[k] = v - last if v >= last else v
                     self._last_usage_totals[k] = v
-                self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth)   # the rail's spend
+                self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth, sid=self.sid)   # the rail's spend
                 #   + token readout; keyed = THIS session's init-reported auth, so the API sum stays
                 #   honest on a mixed host (see _record_spend)
             self.retrying = False
@@ -2430,6 +2568,9 @@ class SdkSession:
                     self.backend._update_reg(self.sid, rewindTo="", rewindLeaf="", rewindBare=False)
                 except Exception as e:
                     self.backend._log("rewind (%s): registry clear failed after the turn landed: %s" % (self.name, e))
+                # the BRANCH-TAKE event: the settled turn is the new branch's first landed record —
+                # the kernel's held goal cleanup archives on exactly this (two-phase rewind timing)
+                self.backend._rewind_resolved(self.sid, "taken")
             self.backend._turn_completed(self.sid)   # a landed result re-arms the crash-resume budget
             self._mark("waiting")
             self.backend.retire_live_work(self.sid)   # turn over → a work atom that never landed never will
@@ -2439,6 +2580,9 @@ class SdkSession:
             self.backend._poke()
             if self._input_wake is not None:   # turn done → release the next queued turn, if any
                 self._input_wake.set()
+            # a pending rename ping delivers HERE, as its own turn (the user answered first; the
+            # empty-queue guard + the feed-hold make its record unfoldable — see _deliver_rename_ping)
+            self.backend._deliver_rename_ping(self)
             if self._reconnect_when_idle and not self.ended:   # an effort change waited for this turn to end
                 self._reconnect_when_idle = False
                 self._reconnect = True
@@ -2787,6 +2931,9 @@ class SdkSession:
                 "modelPending": bool(self._model_pending),   # a /model switch resolving → the badge shows switching-dots
                 "effortPending": bool(self._effort_pending),   # an /effort switch reconnecting → effort-badge dots + "Reloading session…"
                 "auth": self.effective_auth(),   # which account this session bills ('login'|'key') → gear badge
+                "authLive": self.auth_live,   # what the CLI's init actually reported ("" until one
+                #   lands) — the Billing row says so when it disagrees with the launch intent above
+                #   (a key found via apiKeyHelper bills the key while `auth` still reads login)
                 "authPending": bool(self._auth_pending),   # an /auth switch reconnecting → badge dots
                 "mode": self.perm_mode, "ctx": self._ctx_pct(), "summary": "",
                 "connected": bool(self.client),   # the SDK handshake is up (set at connect, cleared at
@@ -2883,6 +3030,10 @@ class SdkBackend:
         self._pending_ask: dict[str, bool] = {}   # sid -> has an ask awaiting answer
         self._live: dict[str, dict] = {}          # sid -> {key -> atom}: the in-memory LIVE TAIL (ahead of disk)
         self._rl_lock = threading.Lock()          # serializes usage.json read-merge-write (_record_rate_limit)
+        self._usage_all_keyed = False             # refresh_usage's one-shot: the last refresh found only
+        #                                           keyed candidates (already logged); reset when a
+        #                                           pollable session exists again, so the 60s rail timer
+        #                                           logs the condition once per episode, not per call
         self._fork_children_memo = None           # (sdk/ dir mtime_ns, {parent sid: [child lineage]}) — fork_children()
         self.work_key = work_api_key()            # the manager env's API key, claimed out of os.environ
         #   ("" = none): per-session auth injects it via _options; its presence is the "key" half of
@@ -2902,6 +3053,20 @@ class SdkBackend:
         self._heal_attempts: dict[str, int] = {}  # sid -> crash-resume attempts since its last COMPLETED turn
         #                                           (bounds _heal_cut_session to one resume per cut; a completed
         #                                           turn resets it, so a crash LOOP can't respawn forever)
+        self._drive_marks: dict[str, tuple] = {}  # sid -> (path, pos, ts) of the last idle-queue drive's newest
+        #                                           DRIVEN wrapper — the in-memory face of the reg's driveMark
+        #                                           (the per-watermark latch; see drive_idle_queue)
+        self._drive_inflight: set[str] = set()    # sids a drive worker currently carries: acceptance stands
+        #                                           down on these WITHOUT latching, so two workers can never
+        #                                           overlap on one sid — an overlap let a stand-down's mark
+        #                                           restore clobber the newer worker's watermark and the model
+        #                                           heard the same notifications twice (2026-08-18 review)
+        self._spawn_sem = threading.Semaphore(BOOT_RESUME_CONCURRENCY)   # the ONE machine-wide spawn-stagger
+        #                                           budget: boot reconcile's resume sweep AND the idle-queue
+        #                                           drive's dormant spawns draw slots from this same semaphore
+        #                                           (as two same-sized budgets they burst to 2x the cap after
+        #                                           a restart — 2026-08-18 review); a spawn holds its slot
+        #                                           until the CLI proves up or its thread dies
         # Kernel-restart heal: nothing is running yet, so any alive session still reading awaiting:true is stale
         # — its background tasks (and the Stop hook that clears the overlay) died with the previous kernel. Left
         # uncleared it reads working/awaiting forever, climbing a ghost work-timer (reorder_bug 2026-06-24).
@@ -3049,9 +3214,13 @@ class SdkBackend:
                 self._poke()
             # STAGGERED spawn (see BOOT_RESUME_CONCURRENCY): every reg above is already fixed —
             # queues persisted, heals applied — so even a death mid-stagger loses nothing (the next
-            # boot's sweep picks the rest up). Spawns hold a semaphore slot until the session's CLI
-            # is past its catch-up burst (init message) or its thread dies (_fire_boot_settled);
-            # the acquire timeout is a loud BACKSTOP for a pre-init wedge, never the pacing itself.
+            # boot's sweep picks the rest up). Spawns hold a slot on the backend-wide _spawn_sem —
+            # SHARED with the idle-queue drive, whose first ticks run inside this very stagger
+            # window, so the two together never exceed the one machine-wide budget — until the
+            # session's CLI is past its catch-up burst (init message) or its thread dies
+            # (_fire_boot_settled); the acquire timeout is a loud BACKSTOP for a pre-init wedge,
+            # never the pacing itself (and an expired backstop holds NO slot, so nothing releases —
+            # a stray release would permanently inflate the process-lifetime budget).
             # NO resume gate (the user 2026-07-22). The high-context hold used to divert these sessions
             # behind a Proceed / Compact on resume / Skip card; that card is cut. It went stale the moment
             # anything else resumed the session (nothing ever retired it), and its premise did not hold
@@ -3059,19 +3228,196 @@ class SdkBackend:
             # Compact each paid in full the reload the gate existed to avoid, leaving Skip as the only
             # option that did what the card said. Context is managed by hand for now. Every cut/queued
             # session resumes here, exactly as it did before the gate.
-            sem = threading.Semaphore(BOOT_RESUME_CONCURRENCY)
             for sid in to_start:
-                if not sem.acquire(timeout=BOOT_RESUME_SLOT_S):
+                slot = self._spawn_sem.acquire(timeout=BOOT_RESUME_SLOT_S)
+                if not slot:
                     self._log("boot reconcile: resume slot backstop expired (a CLI is wedged "
                               "pre-init?) — continuing the sweep anyway")
                 try:   # same per-session isolation as above: one bad spawn must not strand the rest
-                    self._ensure(sid, on_boot_settled=sem.release)
+                    self._ensure(sid, on_boot_settled=(self._spawn_sem.release if slot else None))
                 except Exception:
-                    sem.release()   # the parked release never got attached — free the slot here
+                    if slot:
+                        self._spawn_sem.release()   # the parked release never got attached — free the slot here
                     self._log("boot reconcile: spawn %s failed (sweep continues): %s"
                               % (sid, traceback.format_exc()))
         except Exception:
             self._log("boot reconcile failed: %s" % traceback.format_exc())
+
+    def drive_idle_queue(self, cands, wait: bool = False) -> None:
+        """Deliver wake signals stuck in a STUCK-regime session's CLI queue (the user 2026-08-18; the
+        two-regime story — in MOST sessions the CLI delivers this class itself from idle, and the
+        kernel tick's age floor keeps those out of here — lives on kernel._undelivered_wake_tail's
+        comment block). Each candidate is {sid, path, entries, mark} from the kernel's tick: the
+        transcript's still-pending enqueues and the newest one's (pos, ts) watermark. The same
+        recovery boot reconcile performs for romp's persisted queues, for the queue that lives in the
+        CLI: reconnect if dormant, then deliver — via enqueue(), the exact channel restored queues
+        ride, carrying the CLI's OWN queued texts verbatim (joined in queue order), never a synthetic
+        prompt. Gates, each an exact event, checked at acceptance AND re-checked at the send moment
+        in _drive_deliver (acceptance alone was a TOCTOU hole — a turn could open while earlier
+        candidates in the batch spawned their CLIs):
+          * an OPEN turn / compaction / clearing / a pending rewind stands down WITHOUT latching —
+            the next parse re-checks once the operation settles. Mid-turn arrivals SURVIVE the parse
+            (a turn's records clear only the entries whose text they carry — see
+            _undelivered_wake_tail) and drive once the turn settles;
+          * an ENDED session (reg alive=False) never revives for housekeeping, and a CUT turn (any
+            machine-active state tail — 'working'/'retrying'/'compacting', boot reconcile's own cut
+            discriminator) belongs to the boot/crash resume machinery;
+          * a recorded launchError stands down (the usage-limit queue hold owns that session until a
+            connect proves the CLI up again);
+          * ONE DRIVE PER WATERMARK: the newest driven wrapper's (path, pos, ts) — the tick marks
+            the aged subset it hands over, so a still-young entry stays past the mark and drives
+            once aged — is latched IN MEMORY the moment a drive is accepted — that alone stops the
+            next tick's re-parse re-firing while the worker is in flight — and persisted to the reg
+            (driveMark) only AFTER the enqueue lands, in _drive_deliver: a kernel death between
+            acceptance and delivery leaves the reg unlatched, so the next boot's tick re-produces
+            the candidate and drives it, instead of a persisted-at-acceptance mark silently
+            discarding the never-delivered backlog forever. Only a NEWER enqueue re-arms, and a
+            re-armed drive delivers only the entries past the previous mark. A drive that fails
+            AFTER the enqueue stays latched on purpose — the failure is problem-ring loud, and a
+            recurring signal's next enqueue re-arms — never a silent retry storm.
+          * ONE WORKER PER SID (_drive_inflight): while a worker carries a sid, acceptance stands
+            down WITHOUT latching even for a strictly newer enqueue — the next parse re-checks,
+            like every other gate. Overlapping workers double-delivered: the first one's send-moment
+            stand-down restored its pre-acceptance mark over the second's newer latch, the restored
+            mark re-drove the whole backlog, and the second worker then delivered its slice again.
+            Acceptance runs only on the pusher tick thread, so check-then-add cannot race another
+            acceptor; a worker's discard racing the check at worst defers one tick.
+        Delivery runs on a worker thread (`wait=True` runs it inline, the test seam); see
+        _drive_deliver for the send-moment re-resolve/re-check and the spawn stagger, which draws on
+        the SAME _spawn_sem budget as boot reconcile — one machine-wide BOOT_RESUME_CONCURRENCY cap,
+        not two."""
+        todo = []
+        for c in cands:
+            sid = str(c.get("sid") or "")
+            try:
+                if sid in self._drive_inflight:
+                    continue               # a worker already carries this sid — stand down WITHOUT
+                #                            latching (even for a newer enqueue); the next parse
+                #                            re-checks, and overlap is double delivery (docstring)
+                path = str(c.get("path") or "")
+                pos, ts = c["mark"]
+                prev = self._drive_marks.get(sid)
+                if prev is None:
+                    pm = (read_reg(self.state_dir, sid) or {}).get("driveMark")
+                    prev = ((str(pm.get("path") or ""), pm.get("pos", -1), str(pm.get("ts") or ""))
+                            if isinstance(pm, dict) else ("", -1, ""))
+                    self._drive_marks[sid] = prev
+                fresh = prev[0] != path or pos > prev[1] or ts > prev[2]
+                if not fresh:
+                    continue                       # this backlog was already driven; a newer enqueue re-arms
+                with self._lock:
+                    s = self.sessions.get(sid)
+                s = s if (s and s.thread.is_alive()) else None
+                if s is not None:
+                    if s.ended or s.inflight > 0 or s._compacting or s._clearing \
+                            or (s._rewind_to and not s._rewind_armed):
+                        continue                   # mid-operation → stand down, no latch: re-check next parse
+                else:
+                    reg = read_reg(self.state_dir, sid)
+                    if not reg or not reg.get("alive"):
+                        continue                   # the user ended this session — never revive it for housekeeping
+                    if reg.get("launchError"):
+                        continue                   # can't even start (usage limit etc.) — that hold owns it
+                    if last_state_value(self.state_dir, sid) in ("working", "retrying", "compacting"):
+                        continue                   # a CUT turn — any MACHINE-ACTIVE last state, the same
+                    #                                discriminator boot reconcile uses (a restart mid-retry or
+                    #                                mid-compact cuts the turn exactly as a working cut does) —
+                    #                                is the boot/crash resume machinery's recovery, not the drive's
+                texts = [e["text"] for e in c["entries"]
+                         if e.get("wrapper") and e.get("text")
+                         and (prev[0] != path or e["pos"] > prev[1] or e["ts"] > prev[2])]
+                if not texts:
+                    continue                       # every wake signal here was already driven
+                others = sum(1 for e in c["entries"] if e.get("text") and not e.get("wrapper"))
+                # LATCH in memory only: one drive per watermark within this process. The reg's
+                # driveMark is written by _drive_deliver AFTER the enqueue lands — persisting here
+                # made a kernel death in the latch→delivery window (seconds to minutes behind the
+                # spawn stagger) discard the backlog forever, silently (2026-08-18 review).
+                self._drive_marks[sid] = (path, pos, ts)
+                self._drive_inflight.add(sid)     # released in _drive_deliver's finally, whatever path
+                todo.append((sid, texts, others, (path, pos, ts), prev))
+            except Exception:
+                self._log("idle-queue drive (%s): %s" % (sid[:8] or "?", traceback.format_exc()))
+        if not todo:
+            return
+        if wait:
+            self._drive_deliver(todo)
+        else:
+            threading.Thread(target=self._drive_deliver, args=(todo,),
+                             name="sdk-idle-queue-drive", daemon=True).start()
+
+    def _drive_deliver(self, todo) -> None:
+        """The idle-queue drive's delivery half (worker thread): re-resolve each session and re-check
+        the stand-down gates at the SEND moment, reconnect dormant candidates under the shared spawn
+        stagger, then enqueue each backlog as one turn and persist its watermark. Loud both ways:
+        every drive logs one kernel-log line naming the session and the queued count (normal
+        operation, not a problem); every failure — a refused reconnect, a failed send — lands in the
+        problem ring, never silent."""
+        for sid, texts, others, mark, prev in todo:
+            try:
+                # Re-resolve at the send moment, never the acceptance-time snapshot: earlier
+                # candidates' spawns can hold this delivery back for minutes, and a session that died
+                # and respawned in that window must get its LIVE object — enqueueing into the stale
+                # one mirrored the dead queue over reg['queue'] and the texts evaporated with the
+                # object, latched against any re-drive (2026-08-18 review, repro-verified).
+                with self._lock:
+                    s = self.sessions.get(sid)
+                s = s if (s and s.thread.is_alive()) else None
+                if s is not None:
+                    if s.ended or s.inflight > 0 or s._compacting or s._clearing \
+                            or (s._rewind_to and not s._rewind_armed):
+                        # The acceptance gates, re-checked at the send moment: a turn that opened
+                        # while earlier candidates spawned must not have stale pings injected into
+                        # it. Stand down WITHOUT latching — restore the pre-acceptance mark (the reg
+                        # was never written); the next parse re-checks once the operation settles,
+                        # and the surviving tail re-drives then. Unconditional restore is safe ONLY
+                        # because _drive_inflight bars a second worker for this sid: with overlap,
+                        # this write clobbered a newer drive's watermark and double-delivered.
+                        self._drive_marks[sid] = prev
+                        self._log("idle-queue drive (%s): a turn opened between acceptance and "
+                                  "delivery — standing down; the next parse re-checks" % sid[:8])
+                        continue
+                else:
+                    slot = self._spawn_sem.acquire(timeout=BOOT_RESUME_SLOT_S)
+                    if not slot:
+                        self._log("idle-queue drive: stagger slot backstop expired (a CLI is wedged "
+                                  "pre-init?) — driving %s anyway" % sid[:8], problem=True)
+                    try:
+                        s = self._ensure(sid, on_boot_settled=(self._spawn_sem.release if slot else None))
+                    except Exception:
+                        if slot:
+                            self._spawn_sem.release()   # the parked release never got attached (or can
+                            #                             never fire: an unstarted thread runs no finally)
+                            #                             — free the slot, then fail loud below
+                        raise
+                    if s is None:
+                        self._log("idle-queue drive (%s): the session could not be started (reconnect "
+                                  "refused) — %d queued notification(s) stay undelivered"
+                                  % (sid[:8], len(texts)), problem=True)
+                        continue
+                    # No gate re-check on this arm: a just-spawned session's only possible open turn
+                    # is its persisted-queue seed, and riding behind that in queue order IS correct
+                    # delivery — standing down here would strand the backlog instead.
+                s.enqueue("\n\n".join(texts))
+                try:
+                    # Persist the watermark only now the texts are in the queue (and its reg mirror,
+                    # via enqueue's _persist_queue): a death BEFORE this line re-drives on the next
+                    # boot; a death after enqueue but before this write means at worst one re-drive —
+                    # the same degraded semantics the except below already accepts.
+                    self._update_reg(sid, driveMark={"path": mark[0], "pos": mark[1], "ts": mark[2]})
+                except Exception:
+                    self._log("idle-queue drive (%s): drive mark not persisted (a kernel restart may "
+                              "re-drive this backlog once): %s" % (sid[:8], traceback.format_exc()))
+                self._log("idle-queue drive (%s): waking the session for %d queued notification(s)%s"
+                          % (s.name, len(texts),
+                             " (+%d other queued item(s))" % others if others else ""))
+                self._poke()
+            except Exception:
+                self._log("idle-queue drive (%s): delivery failed: %s" % (sid[:8], traceback.format_exc()))
+            finally:
+                self._drive_inflight.discard(sid)   # every exit — delivery, stand-down, refused
+                #                                     reconnect, raise — frees the sid for the next
+                #                                     parse's acceptance
 
     def drain(self, timeout: float = 2.0, kill=os.kill) -> dict:
         """Graceful-shutdown drain (the kernel's SIGTERM handler): stop every running session cleanly
@@ -3161,18 +3507,40 @@ class SdkBackend:
         whose loop has gone away is enough to make a click do nothing at all, and the rail then shows a
         stale reading with no sign that the refresh never happened. Says so in the log when none can be
         asked, rather than returning quietly. API-keyed sessions are not candidates (per-session auth,
-        the user 2026-08-08): their get_usage only times out, and the windows belong to the login."""
+        the user 2026-08-08): their get_usage only times out, and the windows belong to the login. A box
+        where EVERY live session is keyed says so too (the all-keyed branch) instead of clicking into
+        silence — once per episode, not per call: both standing callers repeat (the rail's 60s timer and
+        the kernel's 15-minute usage poll, _usage_poll_tick), so the one-shot is load-bearing."""
         with self._lock:
             sessions = list(self.sessions.values())
-        live = [s for s in sessions if s.client and s.loop and not s.ended and not s.api_key_auth]
+        connected = [s for s in sessions if s.client and s.loop and not s.ended]
+        live = [s for s in connected if not s.api_key_auth]
+        if not live:
+            # Every live session bills an API key (distinct from "no live sessions at all", which the
+            # per-turn refreshes make unremarkable): nobody can poll the subscription windows, and the
+            # log line below sat inside `if live:`, so the condition was COMPLETELY silent (the user
+            # 2026-08-15). Under a ROMP_EXPECTED_AUTH=key declaration this is the box working as
+            # designed — an info line; anything else rings: undeclared (the surprising case), and a
+            # declared-LOGIN box gone all-keyed, which CONTRADICTS its own declaration — `not
+            # _expected_auth()` read that contradiction as quiet, muting the exact state the
+            # declaration exists to flag.
+            if connected and not self._usage_all_keyed:
+                self._usage_all_keyed = True
+                self._log("usage refresh: %d live session(s), all billing API keys — no session can "
+                          "poll the subscription windows, so rate-limit telemetry is unavailable"
+                          % len(connected), problem=_declared_auth(self.state_dir)[0] != "key")
+            return
+        if any(s.auth_live == "login" for s in live):
+            # Re-armed only by an init that CONFIRMED a login — a fresh spawn's default-False flag
+            # means "unknown", not "login", and re-arming on it re-rang once per session creation.
+            self._usage_all_keyed = False
         for s in live:
             if s.refresh_usage():
                 return
-        if live:
-            self._log("usage refresh: %d live session(s), none with a loop to run it on — the rail bars "
-                      "keep their last reading" % len(live), problem=True)
+        self._log("usage refresh: %d live session(s), none with a loop to run it on — the rail bars "
+                  "keep their last reading" % len(live), problem=True)
 
-    def _record_spend(self, cost, usage=None, keyed=False) -> None:
+    def _record_spend(self, cost, usage=None, keyed=False, sid=None) -> None:
         """Accumulate a turn's total_cost_usd AND its token counts into spend.json, keyed by LOCAL date —
         the rail's spend readout where the subscription bars sat, under API-key auth (the user
         2026-08-04; tokens added the same day, who wanted them beside the dollars). Recorded on every
@@ -3183,7 +3551,14 @@ class SdkBackend:
         rail's API readout must sum ONLY the key's turns — a login turn's computed cost there would be
         dollars nobody is billed (the user 2026-08-08). Token fields mirror the ResultMessage usage
         dict: input/output plus the two cache flavors, kept separately so the tooltip can break them
-        down. Pruned to the last 90 days; atomic."""
+        down. Pruned to the last 90 days; atomic.
+        PER-SESSION ATTRIBUTION (T100, the nightly optimizer's accepted ask 2026-08-24: key-billed
+        cost per session — 63%% of a day was untraceable): each bucket carries a `bySid` sub-map,
+        {sid: {usd, turns, tok, key:{usd,turns,tok}}} — SID-keyed (rename-proof; names flap), the
+        keyed split carried PER SID because that split is the point. Living inside the buckets, the
+        maps inherit the prune and the atomic write; rows without bySid stay readable (lossless
+        legacy, the T18 discipline). Inherited edge, unrecoverable here: a restart-killed turn
+        never emits its ResultMessage, so its cost is missing from every dimension alike."""
         if not isinstance(cost, (int, float)) or cost <= 0:
             return
         u = usage if isinstance(usage, dict) else {}
@@ -3210,12 +3585,26 @@ class SdkBackend:
                      "tokCacheR": int(e.get("tokCacheR") or 0) + _tok("cache_read_input_tokens"),
                      "tokCacheW": int(e.get("tokCacheW") or 0) + _tok("cache_creation_input_tokens")}
                 ke = e.get("key") if isinstance(e.get("key"), dict) else {}
+                tok_total = sum(_tok(k) for k in ("input_tokens", "output_tokens",
+                                                  "cache_read_input_tokens", "cache_creation_input_tokens"))
                 if keyed or ke:   # carry an existing key split forward even on a login turn
                     n["key"] = {"usd": round(float(ke.get("usd") or 0) + (float(cost) if keyed else 0), 6),
                                 "turns": int(ke.get("turns") or 0) + (1 if keyed else 0),
-                                "tok": int(ke.get("tok") or 0) + (sum(_tok(k) for k in (
-                                    "input_tokens", "output_tokens", "cache_read_input_tokens",
-                                    "cache_creation_input_tokens")) if keyed else 0)}
+                                "tok": int(ke.get("tok") or 0) + (tok_total if keyed else 0)}
+                by = e.get("bySid") if isinstance(e.get("bySid"), dict) else {}
+                if sid:
+                    se = by.get(sid) if isinstance(by.get(sid), dict) else {}
+                    sn = {"usd": round(float(se.get("usd") or 0) + float(cost), 6),
+                          "turns": int(se.get("turns") or 0) + 1,
+                          "tok": int(se.get("tok") or 0) + tok_total}
+                    ske = se.get("key") if isinstance(se.get("key"), dict) else {}
+                    if keyed or ske:   # the keyed split rides each sid too — carried forward on login turns
+                        sn["key"] = {"usd": round(float(ske.get("usd") or 0) + (float(cost) if keyed else 0), 6),
+                                     "turns": int(ske.get("turns") or 0) + (1 if keyed else 0),
+                                     "tok": int(ske.get("tok") or 0) + (tok_total if keyed else 0)}
+                    by[sid] = sn
+                if by:   # a sid-less fold (a non-rail caller) must not drop the attribution already there
+                    n["bySid"] = by
                 buckets[key] = n
                 for k in sorted(buckets)[:-keep]:
                     buckets.pop(k, None)
@@ -3245,21 +3634,46 @@ class SdkBackend:
         A subscription login answers with the ABSENCE of an API key, and the CLI has said that two
         ways: the field simply absent (verified live 2026-08-04), and — since about CLI 2.1.222 — the
         literal string 'none' (two hosts' journals, 2026-08-08). Logged once per per-session change,
-        so every host's kernel log still self-documents who authenticates how."""
+        so every host's kernel log still self-documents who authenticates how.
+
+        The mismatch check compares against ROMP_EXPECTED_AUTH when the box declares one
+        (_expected_auth) and the session carries no explicit per-session pick — a pick outranks
+        the declaration — else against _launched_keyed as before; see the comment at the check."""
         keyed = bool(source) and str(source).strip().lower() != "none"
-        # The CLI landed on a DIFFERENT auth than _options launched it with (a key found some other
-        # way — apiKeyHelper, a project setting — or a login where the key was expected): that is a
-        # session billing the wrong account, the one failure this feature must never let pass
-        # silently (the user 2026-08-08). Flagged on every init that disagrees, not just flips, and
-        # into the problems ring so the Log panel shows it.
-        if keyed != sess._launched_keyed:
-            self._log("auth (%s): launched for %s but the CLI reports apiKeySource=%r — this session "
-                      "is billing the %s. Check the login (claude /login) and service.env."
-                      % (sess.name, "the API key" if sess._launched_keyed else "the login", source,
-                         "API key" if keyed else "login"), problem=True)
+        # The CLI landed on a DIFFERENT auth than EXPECTED — the expected side is the box-wide
+        # ROMP_EXPECTED_AUTH declaration when one is set (an apiKeyHelper box injects no key at
+        # launch, so _launched_keyed said "login" while key auth was the design and every init rang
+        # a false alarm — the user 2026-08-15), else what _options actually launched with (a key
+        # found some other way — apiKeyHelper, a project setting — or a login where the key was
+        # expected). Either way the unexpected landing is a session billing the wrong account, the
+        # one failure this feature must never let pass silently (the user 2026-08-08). Flagged on
+        # every init that disagrees, not just flips, and into the problems ring so the Log panel
+        # shows it; a landing that MATCHES the declaration is the intended, quiet state.
+        # An EXPLICIT per-session Billing pick outranks the declaration: the declaration describes
+        # the box's UNPICKED design, while set_auth's contract is that the next init confirms the
+        # PICK — judged (and worded) against what the pick launched, so a landing honoring the pick
+        # stays quiet whatever the box declares, and one contradicting it still rings.
+        exp, exp_src = ("", "") if sess.auth in ("login", "key") else _declared_auth(self.state_dir)
+        if keyed != ((exp == "key") if exp else sess._launched_keyed):
+            if exp:
+                what = ("ROMP_EXPECTED_AUTH=%s" % exp) if exp_src == "env" \
+                    else ("the remembered Billing pick is %s" % exp)
+                self._log("auth (%s): %s but the CLI reports apiKeySource=%r — this "
+                          "session is billing the %s. Check the helper and service.env."
+                          % (sess.name, what, source, "API key" if keyed else "login"), problem=True)
+            else:
+                self._log("auth (%s): launched for %s but the CLI reports apiKeySource=%r — this session "
+                          "is billing the %s. Check the login (claude /login) and service.env."
+                          % (sess.name, "the API key" if sess._launched_keyed else "the login", source,
+                             "API key" if keyed else "login"), problem=True)
+        sess.auth_live = "key" if keyed else "login"   # the CLI's own report, for the Billing row
         if keyed == sess.api_key_auth:
             return
         sess.api_key_auth = keyed
+        # Persisted with the flip: runtime-only, a kernel restart reset a keyed session to False and
+        # its rate-limit events landed in the login's usage.json until the next init corrected it —
+        # exactly the max-merge contamination the per-session gate exists to prevent.
+        self._update_reg(sess.sid, apiKeyAuth=keyed)
         self._log("auth (%s): apiKeySource=%r — %s" % (sess.name, source,
                   "this session bills an API key: its usage polls and rate-limit events are ignored"
                   if keyed else "subscription auth: this session's usage polls resume"))
@@ -3589,6 +4003,10 @@ class SdkBackend:
                 self._log("rewind (%s): registry clear failed: %s" % (sess.name, e))
             self._log("rewind (%s): conversation moved since the request — flag spent, resuming plainly"
                       % sess.name)
+            # ambiguous consumption: the leaf moved either because the take landed pre-crash or
+            # because the old branch grew — the kernel discriminates by the recorded leaf's chain
+            # membership and archives or restores the held cards accordingly
+            self._rewind_resolved(sess.sid, "spent")
         if self.mcp_config:
             kw["mcp_servers"] = self.mcp_config
         # The flag-settings layer carries the two keys the SDK has no typed field for — ultracode
@@ -3690,6 +4108,11 @@ class SdkBackend:
             reg["threadOf"] = thread_of
         if parent.get("model") and parent["model"] != "default":
             reg["model"] = parent["model"]
+        if parent.get("fast"):
+            # fast rides the fork like model/effort do (the user 2026-08-25: a comment made from an
+            # Opus-high-FAST session came up slow) — the reg's `fast` is the persisted ask fast_opt
+            # reads at connect, so the thread's first frame already reports it
+            reg["fast"] = True
         # Per-fork model/effort OVERRIDES (the user 2026-08-17: a comment thread on a different model
         # or effort, without touching the parent). Applied HERE, in the reg the first connect reads —
         # never via set_model, whose write_sdk_default side effect would make a thread's pick the seed
@@ -3973,12 +4396,70 @@ class SdkBackend:
                  and a["_echo_text"] not in qs]
         if not newly:
             return
+        # RE-DELIVER, don't just flag (the user 2026-08-23, their strongest point in the restart
+        # audit: "it would be very, very bad if we ever lost stuff because of restarts" — a typed
+        # prompt queued at 11:20 was silently discarded by the 11:25 restart). A HUMAN send whose
+        # loss is proven — and whose text a direct transcript scan confirms never landed as a user
+        # record (the flag path self-corrects on a wrong guess; a re-delivery would DUPLICATE, so it
+        # verifies first) — goes back into the persisted queue in send order: the next spawn feeds
+        # it to the fresh CLI exactly like the surviving queue, recreating the pre-restart state.
+        # romp-authored echoes (nudges) keep the flag path: re-delivering one could double-nudge,
+        # and its content is regenerable machinery, not the user's words.
+        redeliver = []
+        for a in sorted(newly, key=lambda x: x.get("t") or 0):
+            if a.get("author") == "human" and not self._text_landed(sid, a["_echo_text"]):
+                redeliver.append(a)
+        if redeliver:
+            with self._reg_lock:
+                reg = read_reg(self.state_dir, sid)
+                if reg is not None:
+                    have = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
+                    add = [a["_echo_text"] for a in redeliver if a["_echo_text"] not in have]
+                    if add:
+                        reg["queue"] = have + add          # behind the surviving queue: original send order
+                        write_reg(self.state_dir, sid, reg)
+                        for a in redeliver:
+                            self._log("%s: re-delivering a typed send the dead CLI was holding: %.80r"
+                                      % (sid[:8], a["_echo_text"]))
+        rekeyed = {a["_echo_text"] for a in redeliver}
         for a in newly:
+            if a["_echo_text"] in rekeyed:
+                continue                                   # now in the queue → renders as queued, prunes on landing
             a["dropped"] = True
             self._log("%s: a send never reached its CLI (the process died holding it) — kept in the chat "
                       "as never-delivered: %.80r" % (sid[:8], a["_echo_text"]), problem=True)
         self._persist_echoes(sid)
         self._wake_push()
+
+    def _text_landed(self, sid: str, text: str) -> bool:
+        """Did `text` land as a USER record in the sid's transcript? The re-delivery guard: the echo
+        prune is lazy (a landed echo may still be un-pruned at boot), so a queue re-add without this
+        scan would duplicate a delivered message. Reads the transcript TAIL (the loss window is recent
+        by construction — the send predates the death that orphaned it); unreadable → True, the safe
+        side: never re-deliver on doubt, the flag path still surfaces the loss for a human call."""
+        try:
+            reg = read_reg(self.state_dir, sid) or {}
+            path = transcript_path(reg.get("cwd") or "", reg.get("lastSid") or sid)
+            want = " ".join(text.split())
+            with open(path, "rb") as f:
+                f.seek(max(0, os.path.getsize(path) - 2_000_000))
+                for line in f.read().decode(errors="replace").splitlines():
+                    if '"user"' not in line or want[:60] not in " ".join(line.split()):
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("type") != "user":
+                        continue
+                    c = ((rec.get("message") or {}).get("content"))
+                    txt = c if isinstance(c, str) else " ".join(
+                        b.get("text", "") for b in c if isinstance(b, dict)) if isinstance(c, list) else ""
+                    if want in " ".join(txt.split()):
+                        return True
+            return False
+        except Exception:
+            return True
 
     def dismiss_echo(self, sid: str, uuid: str | None = None, t: int | None = None) -> str | None:
         """✕ on a never-delivered bubble: retire a DROPPED echo the user has acknowledged. Matched by the
@@ -4043,6 +4524,54 @@ class SdkBackend:
         s.request_reconnect()   # idle → reconnects now; a fresh thread's FIRST connect applies the flag
         self._poke()
         return True, ""
+
+    def rewind_flags(self, sid: str) -> "tuple[str, str, bool]":
+        """The session's armed rewind flags (rewindTo, rewindLeaf, rewindBare) — live session first,
+        registry fallback (a kernel restart mid-window). ("", "", False) when nothing is armed. The
+        kernel's two-phase goal cleanup reads the recorded LEAF here at gesture time: it is the graph
+        anchor its spent-flag discriminator later checks chain membership of."""
+        s = self.sessions.get(sid)
+        if s is not None and not s.ended:
+            return (s._rewind_to or "", s._rewind_leaf or "", bool(getattr(s, "_rewind_bare", False)))
+        reg = read_reg(self.state_dir, sid)
+        if not reg:
+            return ("", "", False)
+        return (reg.get("rewindTo") or "", reg.get("rewindLeaf") or "", bool(reg.get("rewindBare")))
+
+    def rewind_pending(self, sid: str) -> bool:
+        """A rewind flag still APPLICABLE — leaf-verified like the connect path (rewind_disposition
+        against the transcript's CURRENT leaf), never raw flag presence. The kernel's boot pass
+        latches a hold only on this: a flag the transcript already moved past is spent, and its
+        consumption event may never fire (an out-of-band CLI-native continuation while no kernel
+        was up leaves the reg armed indefinitely) — raw presence kept those cards hidden with no
+        resolving event while the leaf-verified pending_cut let the chat render the full tail."""
+        s = self.sessions.get(sid)
+        if s is not None and not s.ended:
+            to, leaf = s._rewind_to or "", s._rewind_leaf or ""
+            cwd, fsid = s.cwd, s.resume_sid or s.sid
+        else:
+            reg = read_reg(self.state_dir, sid)
+            if not reg:
+                return False
+            to, leaf = reg.get("rewindTo") or "", reg.get("rewindLeaf") or ""
+            cwd, fsid = reg.get("cwd") or "~", reg.get("lastSid") or sid
+        if not to:
+            return False
+        return rewind_disposition(to, leaf, last_record_uuid(transcript_path(cwd, fsid))) == "apply"
+
+    def _rewind_resolved(self, sid: str, outcome: str):
+        """Tell the kernel a pending rewind RESOLVED (outcome: "taken" — the branch took; "failed" —
+        the CLI refused, conversation intact; "spent" — the flag was dropped at connect because the
+        leaf moved, ambiguous between a crash-heal take and a dissolved rollback). These are the
+        exact flag-consumption events the kernel's two-phase goal cleanup keys its archive/restore
+        on (rewind-holds); no callback wired (tests, standalone) → no-op."""
+        cb = getattr(self, "rewind_resolved_cb", None)
+        if not cb:
+            return
+        try:
+            cb(sid, outcome)
+        except Exception as e:
+            self._log("rewind (%s): resolve callback failed: %s" % (sid, e))
 
     def pending_cut(self, sid: str) -> str:
         """The uuid a PENDING bare rollback (rollback(), no replacement turn) truncates the conversation
@@ -4136,6 +4665,22 @@ class SdkBackend:
         self._poke()
         return True
 
+    def thread_sessions(self) -> dict[str, dict]:
+        """{sid: {state, threadOf}} for every alive COMMENT-THREAD session — exactly the rows
+        live_sessions deliberately hides (a thread's surface is the parent chat's comment UI, never a
+        tab). Served only to callers that ask (kernel /sessions?threads=1 → the postal bus), so a
+        thread can mail its PARENT under its own name (the user 2026-08-22) without ever gaining a
+        tab, a lane, or a feed card."""
+        out = {}
+        for reg in list_regs(self.state_dir):
+            if not reg.get("alive") or not reg.get("threadOf"):
+                continue
+            sid = reg["sid"]
+            s = self.sessions.get(sid)
+            st = (s.snapshot() if s and s.thread.is_alive() else {"state": "waiting", "backend": "sdk"})
+            out[sid] = {"state": st.get("state", "waiting"), "threadOf": str(reg.get("threadOf") or "")}
+        return out
+
     def fork_children(self) -> dict:
         """{parent sid: [{sid, name, cut, t}, …]} for every session carrying a durable forkedFrom —
         the parent chat's branch chips. Comment threads are skipped (their anchor is the comment
@@ -4175,11 +4720,49 @@ class SdkBackend:
                 return ""
         return ""
 
+    def session_since(self, sid: str) -> int:
+        """Epoch seconds the sid's current state began (0 unknown) — session_state's twin, read by
+        the comments frame so the popover's working chip can carry the chat's counting timer."""
+        with self._lock:
+            s = self.sessions.get(sid)
+        if s and s.thread.is_alive():
+            try:
+                return int(float(s.snapshot().get("since") or 0))
+            except Exception:
+                return 0
+        return 0
+
+    def session_meta(self, sid: str) -> dict:
+        """{'mode','fast'} from the live snapshot ({} unknown) — the comments frame's statusline
+        parity: the popover shows the chat statusline's FULL element set (the user 2026-08-25)."""
+        with self._lock:
+            s = self.sessions.get(sid)
+        if s and s.thread.is_alive():
+            try:
+                snap = s.snapshot()
+                return {"mode": str(snap.get("mode") or ""), "fast": str(snap.get("fast") or "")}
+            except Exception:
+                return {}
+        return {}
+
     def rename(self, sid: str, new_name: str) -> bool:
         reg = read_reg(self.state_dir, sid)
         if not reg:
             return False
-        self._update_reg(sid, name=new_name)   # locked RMW — see set_effort's race note
+        # renameNote: the one-line "you were renamed" ping, delivered by send() as its OWN
+        # machine-dressed record ahead of whatever NEXT enters the session (the user 2026-08-24: a
+        # renamed worker learned its own new name only by inference from a peer's prose).
+        # Reg-persisted so it survives restarts; never a wake of its own — the queue wakes
+        # sessions, this rides a send that already happens. ONLY when prior turns exist under the
+        # old name (the transcript is the record of prior turns): a rename before the first turn
+        # has no stale self-knowledge to correct — the fresh session learns its name the normal
+        # way, and pinging it put bookkeeping ahead of the user's very first words (the user
+        # 2026-08-25).
+        _ls = reg.get("lastSid")
+        _tp = Path(transcript_path(reg.get("cwd") or "", _ls)) if _ls else None
+        _has_history = bool(_tp) and _tp.exists() and _tp.stat().st_size > 0
+        self._update_reg(sid, name=new_name,
+                         **({"renameNote": new_name} if _has_history else {}))   # locked RMW — see set_effort's race note
         # keep the shared names/ identity file in sync (preserve colours)
         try:
             parts = (Path(self.state_dir) / "names" / sid).read_text().rstrip("\n").split("\t")
@@ -4380,12 +4963,17 @@ class SdkBackend:
         if not read_reg(self.state_dir, sid):
             return False
         # authPending: the applying reconnect hasn't completed → badge dots. Locked RMW — see set_effort.
-        self._update_reg(sid, auth=value, authPending=True)
+        # apiKeyAuth=None: the persisted CLI report described the process this reconnect replaces,
+        # so a restart must restore "no init has landed yet", never the old side (both readers guard
+        # with isinstance(..., bool), so None reads as absent).
+        self._update_reg(sid, auth=value, authPending=True, apiKeyAuth=None)
         write_sdk_default(self.state_dir, auth=value)   # the seed for the NEXT new session, like model/effort
         s = self.sessions.get(sid)
         if s:
             s.auth = value
             s._auth_pending = value
+            s.auth_live = ""   # the last init's report predates this switch — the Billing row shows
+            #   the plain intent (no "CLI reports" parenthetical) until the next init re-confirms
             s.request_reconnect()
             # Acknowledge the pick in the chat exactly as set_effort does: the reconnect writes no
             # transcript record, so without a synthesized chip an idle session's auth change shows
@@ -4448,6 +5036,10 @@ class SdkBackend:
                             "effortPending": bool(reg.get("effortPending")),
                             "effort": reg.get("effort", ""),
                             "auth": self.default_auth(reg),
+                            # the persisted CLI truth (apiKeyAuth, the liveModel pattern) so a dormant
+                            # session's Billing row keeps telling it; absent = no init ever landed
+                            "authLive": ("key" if reg.get("apiKeyAuth") else "login")
+                                        if isinstance(reg.get("apiKeyAuth"), bool) else "",
                             "authPending": bool(reg.get("authPending")),
                             "mode": reg.get("mode", ""),
                             # last persisted fast state (liveFast, like liveCtx above) → the badge
@@ -4604,7 +5196,17 @@ class SdkBackend:
                     # /clear streams one) — nothing the user watched, nothing to salvage. Persisted, it
                     # resurfaced as a worked reply on the bare command turn (the user 2026-07-27); the
                     # parse-side guard in synthesize_orphans covers markers already written.
-                    if txt.strip() and txt.strip() != "(no content)":
+                    # VERIFIED AT THE WRITE MOMENT (the user 2026-08-26): a marker claims "this reply
+                    # is on disk nowhere", and the claim's precondition — prune_live retired every
+                    # landed atom — holds only for sessions the chat BUILDS. A comment thread is never
+                    # built (hidden by design), so its landed replies were still live at settle and
+                    # EVERY thread reply minted a spurious marker: states/ litter, and the judge's
+                    # per-push marker scan grows with it. One tail read of the sid's own transcript
+                    # per would-be marker (settles are rare; healthy sessions already pruned) keeps
+                    # the salvage honest for every hidden-session shape, threads and future ones. A
+                    # genuinely-lost reply (the API-error discard) is on disk nowhere and still mints.
+                    if txt.strip() and txt.strip() != "(no content)" \
+                            and not self._reply_on_disk(sid, a.get("uuid") or ""):
                         try:
                             append_orphan_reply(self.state_dir, sid, a.get("uuid") or "", txt, t=a.get("t"))
                         except Exception:
@@ -4612,6 +5214,24 @@ class SdkBackend:
                 del d[k]
         if not d:
             self._live.pop(sid, None)
+
+    def _reply_on_disk(self, sid: str, uuid: str) -> bool:
+        """Does the sid's transcript already hold this uuid? The orphan salvage's own precondition,
+        checked against the file it makes claims about (see retire_live_work). Tail-windowed: the
+        settle runs moments after the write, so a landed reply sits near the end; a discarded one's
+        uuid appears nowhere at any offset that matters."""
+        if not uuid:
+            return False
+        try:
+            reg = read_reg(self.state_dir, sid) or {}
+            p = transcript_path(reg.get("cwd") or "", reg.get("lastSid") or sid)
+            size = os.path.getsize(p)
+            with open(p, "rb") as f:
+                if size > 4_000_000:
+                    f.seek(size - 4_000_000)
+                return uuid.encode() in f.read()
+        except OSError:
+            return False
 
     def live_atom_kinds(self, sid: str) -> list:
         """Read-only DEBUG summary of the sid's live-tail atoms: uuid/type + the flags that decide their
@@ -4629,6 +5249,32 @@ class SdkBackend:
                         "echo": bool(a.get("_echo_text")), "command": bool(a.get("command")),
                         "apiError": bool(a.get("isApiError")), "hasText": bool(_atom_text(a).strip())})
         return out
+
+    def _deliver_rename_ping(self, s) -> bool:
+        """Deliver a pending rename ping (reg renameNote) as its OWN turn, at a turn's SETTLE — the
+        only window where its record cannot fold into anyone else's (the user 2026-08-25: the
+        enqueue-AHEAD form fed the ping and the user's message back-to-back, and the CLI batches
+        every message that arrives before a turn starts into ONE user record — the user's own words
+        rendered inside the ping's machine bubble, worse than the bug it replaced). Three gates make
+        the fold unreachable: delivery only at settle (the user is answered first), only when the
+        queue is EMPTY (a queued message would share the pre-turn window), and the drain's feed-hold
+        (RENAME_PING_HEAD) keeps the next item back until the ping's turn demonstrably starts — its
+        first streamed message, an exact event — after which a racing send lands mid-turn as its own
+        record by the CLI's own design. A held note simply waits for a later settle; it survives
+        restarts in the reg."""
+        try:
+            reg = read_reg(self.state_dir, s.sid) or {}
+        except Exception:
+            return False
+        note = reg.get("renameNote")
+        if not note:
+            return False
+        with s._lock:
+            if s._pending:
+                return False               # a queued turn would share the pre-turn window — hold the note
+        self._update_reg(s.sid, renameNote=None)
+        s.enqueue("<!-- romp-injected --><!-- romp-system -->" + RENAME_NUDGE % note)
+        return True
 
     def _update_reg(self, sid: str, **fields):
         with self._reg_lock:                       # kernel + loop threads both write (queue mirror);

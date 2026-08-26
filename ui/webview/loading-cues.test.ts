@@ -54,5 +54,6 @@ test("undo clear: accent dots + accent border, reduced-motion safe (feed.css —
   assert.match(FEED_CSS, /#feed-undoclear\.undo-busy \{ border-color: var\(--accent\); \}/);
   assert.match(FEED_CSS, /#feed-undoclear \.undo-dots i \{ width: 4px; height: 4px; border-radius: 50%; background: var\(--accent\);/);
   assert.match(FEED_CSS, /@keyframes undo-dot \{ 0%, 100% \{ opacity: 0\.25; \} 40% \{ opacity: 1; \} \}/);
-  assert.match(FEED_CSS, /prefers-reduced-motion: reduce\) \{ #feed-undoclear \.undo-dots i \{ animation: none; opacity: 0\.8; \} \}/);
+  assert.match(FEED_CSS, /prefers-reduced-motion: reduce\) \{ #feed-undoclear \.undo-dots i \{ animation: none; opacity: 0\.8; \} \}/,
+    "the host-load strip wears the shared swirl now (its own reduced-motion rule) — the undo dots stand alone again");
 });

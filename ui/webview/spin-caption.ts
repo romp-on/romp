@@ -11,14 +11,20 @@
 // aimed at came from keying the LINE on `column`, and distillState already fixed that. Both show now.
 //
 // THE CONTRACT (spin-caption.test.ts executes every branch, in order):
-//   1. AWAITING      — held in Working on dispatched/delegated work (no peer chip, no bg-task pill)
+//   1. AWAITING      — held in Working on dispatched/delegated work (no peer chip). With tracked
+//                      tasks there is NO caption at all (2026-08-23): the "Awaiting task" pill and
+//                      its open-by-default list are the one awaiting read, and the quiet/unknown
+//                      floors stand down under them (branch 8) — a caption here said the same wait
+//                      a third time. A wait on PEERS renders their names in identity colour
+//                      (feed.ts reads awaiting.peers; the caption is the colourless fallback).
 //   2. PROVISIONAL   — a dashed live-prompt placeholder the planner hasn't classified yet
 //   3. RE-CHECK      — a soft-block answered with a TARGETED follow-up, pending re-judge
 //   4. RE-JUDGING    — a soft-block + a PLAIN thread reply, with the reply in flight
 //   5. SETTLE GAP    — the turn finished, the closer's verdict hasn't landed
 //   6. DISTILLING    — a resolved card whose takeaway/brief hasn't been written yet
 //   7. NARRATION     — the ordinary working card with its turn open: live tool count + duration
-//   8. THE FLOOR     — any OTHER working-column card, by sessState: "open" (turn running, narration
+//   8. THE FLOOR     — any OTHER working-column card, by sessState — except quiet/unknown under an
+//                      Awaiting-task pill, which return NO caption (see 1): "open" (turn running, narration
 //                      not reported — an older/disconnected kernel) spins a plain Working…; "quiet"
 //                      (between turns) and "unknown" (no signal at all) render a STILLED glyph + a
 //                      line saying exactly that. Total: a working-column card can never be mute
@@ -31,7 +37,7 @@
 
 /** The card fields the ladder reads. Structural, so the test can pass plain objects. */
 export interface SpinItem {
-  awaiting?: { why?: string | null; kind?: string | null; tasks?: unknown[] | null } | null;
+  awaiting?: { why?: string | null; kind?: string | null; since?: number | null; tasks?: unknown[] | null } | null;   // since = the wait's own event time (kernel or-chain / _session_awaiting; the user 2026-08-23)
   waitingOn?: unknown;
   provisional?: boolean;
   column?: string;
@@ -63,10 +69,18 @@ export const KIND_WORD: Record<string, string> = {
 /** dCompleted/dBlocked come from distillInputs(distillState, column) — the GENUINE resolution state, not
  *  the transient column. distillPending is passed in (rather than recomputed) so the two modules keep one
  *  owner for the "is the distiller still working" rule. */
-/** Compact duration for the working narration: minutes under an hour, then h+m. */
-function workingFor(secs: number): string {
+/** Compact duration for the working narration AND the awaiting box: minutes under an hour, then h+m. */
+export function workingFor(secs: number): string {
   const m = Math.max(0, Math.floor(secs / 60));
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** " · 42m" for a wait with a known start, "" otherwise — the awaiting counterpart of the working
+ *  narration's duration (the user 2026-08-23: Working says how long it's been running, the awaiting
+ *  states said nothing, so a wait stuck for hours read the same as one seconds old). Kernel-supplied
+ *  event time only — no since, no duration, never a guess. */
+export function waitedSuffix(since: number | null | undefined, nowS: number | undefined): string {
+  return nowS && since && since > 0 ? " · " + workingFor(nowS - since) : "";
 }
 
 
@@ -75,6 +89,12 @@ export function spinFor(it: SpinItem, distillPending: boolean, dCompleted: boole
   // a bg-TASK wait no longer boxes its why here (the user 2026-07-13): the compact "Awaiting task" pill
   // on the toggles row carries it (with the task list one click away, like Sub-goals) — see applySections
   const awTasks = ((aw && aw.tasks) || []).filter(Boolean);
+  // A bg-TASK wait says it ONCE (the user 2026-08-23, second screenshot of the day): the "Awaiting
+  // task" pill + its open-by-default list are the whole read. The first cut of today's fix named the
+  // first task in a caption here — and with the list now open by default, one card said the same
+  // wait three times (pill, caption, list row). No caption, then; the floor guards below keep the
+  // quiet/unknown lines from contradicting the pill instead (that contradiction is what the caption
+  // was for).
   if (aw && !it.waitingOn && !awTasks.length) {
     // AWAITING — the session is held, waiting on work it dispatched. It keeps its own read: a boxed
     // "Awaiting <kind-word>" label, the kind carried as DATA from the kernel (the user 2026-08-15) so
@@ -85,9 +105,12 @@ export function spinFor(it: SpinItem, distillPending: boolean, dCompleted: boole
     // "waiting on" is shown verbatim (capitalized); the kind word is the fallback frame.
     const why = aw.why || "";
     const word = KIND_WORD[aw.kind || ""] || "agents";   // kindless = the box's historic default
+    // how long the wait has held, from the kernel's event time — the same live readout the working
+    // narration wears, so a stuck wait is visible at a glance (the user 2026-08-23)
+    const waited = waitedSuffix(aw.since, nowS);
     return {
-      caption: /^waiting on/i.test(why) ? why.charAt(0).toUpperCase() + why.slice(1)
-                                        : "Awaiting " + word,
+      caption: (/^waiting on/i.test(why) ? why.charAt(0).toUpperCase() + why.slice(1)
+                                         : "Awaiting " + word) + waited,
       tip: why ? why + ". Not on you; paused until the background work lands."
                : "Paused, waiting on background work it dispatched (not on you). Clears when the result lands.",
       awaitingBg: true,
@@ -181,6 +204,11 @@ export function spinFor(it: SpinItem, distillPending: boolean, dCompleted: boole
     // kernel, a cold parse cache), rendered a MUTE card. Every working-column card now says its
     // state; when nothing is in motion the glyph STILLS (`still`) — a spinning swirl on a quiet
     // card would claim work that isn't happening.
+    // …except under an Awaiting-task pill (the user 2026-08-23): the pill + its open list already
+    // say what this card is doing, and the quiet/unknown lines below would either contradict them
+    // ("Paused — nothing is in motion" under in-flight tasks — the morning's screenshot) or repeat
+    // them. An OPEN turn still narrates: the session working WHILE tasks run is new information.
+    if (awTasks.length && it.sessState !== "open") return NONE;
     if (it.sessState === "open") {
       return {
         caption: "Working…",
@@ -191,9 +219,12 @@ export function spinFor(it: SpinItem, distillPending: boolean, dCompleted: boole
     }
     if (it.sessState === "quiet") {
       return {
-        caption: "Paused — resumes on the session's next turn",
+        // plain truth (the user 2026-08-24): the old line promised the session's NEXT turn, but the
+        // next turn may work another thread entirely — this goal resumes when its own wait ends
+        caption: "Paused — resumes when its wait ends",
         tip: "Nothing is in motion right now: the session is between turns and this goal stays open. "
-           + "It picks back up the next time the session works this thread.",
+           + "It picks back up when the session returns to this thread — not necessarily on its very "
+           + "next turn.",
         awaitingBg: false,
         still: true,
       };

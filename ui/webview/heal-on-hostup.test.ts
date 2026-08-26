@@ -40,3 +40,22 @@ test("render.ts's message listener heals previews unconditionally at the top, so
   assert.ok(heal >= 0 && firstCase >= 0 && heal < firstCase,
     "the heal must run before the type dispatch — moving it under a type check would silently drop hostUp");
 });
+
+// ── RECONNECT-class heals go further than the per-message retry (the user 2026-08-24) ───────────
+test("hostUp also drains the settled chips and un-parks the path-image chips", () => {
+  assert.match(RENDER, /if \(m\.type === "hostUp"\) \{ refreshSettledPreviews\(\); healPathImgs\(\); \}/,
+    "a tunnel recovery re-attempts spent budgets and imgFailed paths — bounded by the event's rarity");
+});
+
+test("the page's own kernel-socket recovery (romp:wsup) heals everything the same way", () => {
+  // kernel.py's ws.onopen fires romp:wsup on a RECONNECT; nothing in render/preview listened until
+  // now, so a single-kernel dashboard had no reconnect-class heal at all (hostUp is federation-only)
+  assert.match(RENDER, /window\.addEventListener\("romp:wsup", \(\) => \{ retryFailedPreviews\(\); refreshSettledPreviews\(\); healPathImgs\(\); \}\);/);
+});
+
+test("imgFailed is no longer forever: a reconnect gives every parked path ONE fresh host round-trip", () => {
+  assert.match(RENDER, /function healPathImgs\(\): void \{/);
+  assert.match(RENDER, /const failed = new Set\(imgFailed\);\s*\n\s*imgFailed\.clear\(\);/);
+  assert.match(RENDER, /if \(!imgRequested\.has\(k\)\) \{/, "in-flight asks still dedup — per (sid, path) key");
+  assert.match(RENDER, /installMdImgHeal\(\);/, "the md-img capture heal is installed once at boot");
+});

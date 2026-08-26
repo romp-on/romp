@@ -50,6 +50,12 @@ class PaletteShapes(unittest.TestCase):
         self.assertEqual(next(iter(pal.PALETTES)), "romp")
         self.assertEqual(pal.PALETTES["romp"]["bg"], ROMP_BG, "the historical set is the default, unchanged")
 
+    def test_pastel_is_the_soft_all_black_text_set(self):
+        # the 2026-08-26 addition: a high-lightness identity set for anyone who finds the saturated
+        # palettes loud across many tabs — soft by construction, so every fg must be black
+        self.assertIn("pastel", pal.PALETTES)
+        self.assertEqual(pal.PALETTES["pastel"]["fg"], ["black"] * 9)
+
     def test_crameri_and_cmocean_sets_are_curated_mid_tone(self):
         # The raw Crameri "S" orderings include near-black (#011959) and near-white entries — built for
         # white paper, unusable as identity chrome on the dark UI. Every shipped color must be mid-tone.

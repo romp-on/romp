@@ -203,6 +203,23 @@ class ThreadForkInvisibility(unittest.TestCase):
         self.assertEqual(reg.get("forkOf"), PARENT)
         self.assertEqual(reg.get("forkAt"), "a1")
 
+    def test_fast_mode_rides_the_fork_like_model_and_effort(self):
+        # the user 2026-08-25: a comment made from an Opus-high-FAST session came up slow — the fork
+        # reg seeded mode/effort/model from the parent but never fast; fast_opt reads reg["fast"] at
+        # connect, so inheriting it here makes the thread fast from its first frame
+        preg_path = Path(self.td) / "sdk" / (PARENT + ".json")
+        preg = json.loads(preg_path.read_text())
+        preg["fast"] = True
+        preg_path.write_text(json.dumps(preg))
+        self.be.fork("thread-x", PARENT, "a1", sid=THREAD, thread_of=PARENT)
+        reg = json.loads((Path(self.td) / "sdk" / (THREAD + ".json")).read_text())
+        self.assertTrue(reg.get("fast"), "a fast parent's new thread is fast")
+
+    def test_a_slow_parent_stays_slow(self):
+        self.be.fork("thread-x", PARENT, "a1", sid=THREAD, thread_of=PARENT)
+        reg = json.loads((Path(self.td) / "sdk" / (THREAD + ".json")).read_text())
+        self.assertNotIn("fast", reg, "no inherited fast key when the parent never asked for it")
+
     def test_a_plain_fork_still_writes_its_names_entry(self):
         self.be.fork("fork-x", PARENT, "a1", sid=THREAD)
         self.assertTrue((Path(self.td) / "names" / THREAD).exists())
@@ -684,6 +701,29 @@ class CommentOps(CommentBase):
         for op in ("commentCreate", "commentReply", "commentResolve", "commentDelete",
                    "commentSeen", "commentPromote"):
             self.assertIn('"%s"' % op, src)
+
+
+class ExchangeLatchReplacedThePushCount(unittest.TestCase):
+    """T102 (the user 2026-08-26): the push-count settle (settledPushes / _comment_settle_step) is
+    RETIRED — it was a proxy for the real ending event, and it broke both ends: the fork-birth
+    frames read all-quiet so the create-window pulse died until the CLI booted, and any stall in
+    the 0→1→2 stepping parked the pulse green forever. The client's pulse is exchange-scoped now —
+    latched at the send gesture, cleared by the agent's reply RECORD arriving in msgs — so the
+    frame carries the exchange's records (msgs) and no per-push counter."""
+
+    def test_the_push_count_is_gone_root_and_branch(self):
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
+        self.assertNotIn("settledPushes", src.replace("settledPushes — is RETIRED", ""),
+                         "no counter rides the frame (the tombstone comment is the one mention)")
+        self.assertNotIn("_comment_settle_step", src)
+        ui = open(os.path.join(os.path.dirname(HERE), "ui", "webview", "comments.ts")).read()
+        self.assertNotIn("settledPushes", ui)
+        self.assertNotIn("SETTLE_CONFIRM_PUSHES", ui)
+
+    def test_the_frame_still_carries_the_exchange_records_and_epoch(self):
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
+        self.assertIn('"sinceEpoch": since_ms,', src)
+        self.assertIn('"msgs": msgs, "events": events', src)
 
 
 if __name__ == "__main__":

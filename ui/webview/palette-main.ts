@@ -11,8 +11,15 @@ import { initPalette, PickItem } from "./palette";
 import { initShortcutsModal } from "./shortcuts-modal";
 import { chordMap, chordOf, dispatchable, displayChord, effectiveChord, keyHint, loadOverrides, titleWithKey, KEYS_EVENT } from "./keybindings";
 import { hostPrefix } from "./host-prefix";   // pure display helper — safe here (never federation.ts, which boots a manager on import)
+import { installMenuEcho } from "./tag-menu";   // model deps only (tag-lens/session-views) — no manager, no DOM cost
 
 type SessionRow = { id: string; name: string; dir: string; bg: string };
+
+// The SHELL document must broadcast the menu echo too: it mounts no tag menu, but a click on its
+// chrome (statusline, pane rail, the palette/log/remote backdrops) has to dismiss a menu open
+// inside any pane. Module-level and before boot()'s in-iframe early return — the writer is
+// per-document plumbing, not palette behavior. Idempotent (the module guard already ran it).
+installMenuEcho();
 
 (function boot() {
   // The shell page only, never inside a pane: the pane documents get the KEY wiring below

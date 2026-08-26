@@ -1,7 +1,7 @@
 """The Settings gear groups its rows into labelled SUBSECTIONS (the user 2026-06-24), re-cut
 2026-07-12 (the user): the knobs that steer the fleet lead — Sessions (default directory, Auto
 Nudge, backend), the judge model tiers, keyboard shortcuts — the day-to-day view prefs sit in the
-middle (Chat, Timeline), and the cosmetic color pickers + the debug-only judge-visibility toggles
+middle (Chat, Sessions pane), and the cosmetic color pickers + the debug-only judge-visibility toggles
 sink to the bottom, with the version footer last. (The Feed section is gone — its only row, the
 global Colormap, lives under Colors now.)
 """
@@ -25,12 +25,12 @@ class SettingsSectionsTest(unittest.TestCase):
     def test_the_subsection_headers_are_present_in_order(self):
         h = _gear_src()
         self.assertIn("<div class='rs-sec rs-sec-first'>Sessions</div>", h)
-        for sec in ("Judges", "Keyboard shortcuts", "Chat", "Feed", "Timeline", "Colors", "Debug"):
+        for sec in ("Judges", "Keyboard shortcuts", "Chat", "Feed", "Sessions pane", "Colors", "Debug"):
             self.assertIn("<div class=rs-sec>%s</div>" % sec, h)
         # (The 2026-07-12 "Feed dissolved into Colors" rule ended 2026-08-18: the Feed section is back,
         # carrying the collapse-by-default checkbox moved off the feed footer.)
         order = [">Sessions<", ">Judges<", ">Keyboard shortcuts<", ">Chat<",
-                 ">Feed<", ">Timeline<", ">Colors<", ">Debug<", ">romp · version<"]
+                 ">Feed<", ">Sessions pane<", ">Colors<", ">Debug<", ">romp · version<"]
         idx = [h.index(t) for t in order]
         self.assertEqual(idx, sorted(idx), "sections in the 2026-07-12 order, version last")
 
@@ -43,11 +43,11 @@ class SettingsSectionsTest(unittest.TestCase):
         # Judges (top): the four model/effort dropdowns — the SHOW toggles are NOT here anymore
         self.assertTrue(h.index(">Judges<") < h.index("id=rs-judgemodel") < h.index(">Keyboard shortcuts<"))
         self.assertTrue(h.index(">Judges<") < h.index("id=rs-indexeffort") < h.index(">Keyboard shortcuts<"))
-        # Chat (middle): compact + branch between Chat and Timeline
-        self.assertTrue(h.index(">Chat<") < h.index("id=rs-compact") < h.index(">Timeline<"))
-        self.assertTrue(h.index(">Chat<") < h.index("id=rs-branch") < h.index(">Timeline<"))
-        # Timeline (middle towards the bottom): collapse idle gaps before the Colors header
-        self.assertTrue(h.index(">Timeline<") < h.index("id=rs-collapsegaps") < h.index(">Colors<"))
+        # Chat (middle): compact + branch between Chat and the Sessions-pane section
+        self.assertTrue(h.index(">Chat<") < h.index("id=rs-compact") < h.index(">Sessions pane<"))
+        self.assertTrue(h.index(">Chat<") < h.index("id=rs-branch") < h.index(">Sessions pane<"))
+        # Sessions pane (middle towards the bottom): collapse idle gaps before the Colors header
+        self.assertTrue(h.index(">Sessions pane<") < h.index("id=rs-collapsegaps") < h.index(">Colors<"))
         # Colors (bottom): the global colormap + the session palette between Colors and Debug
         self.assertTrue(h.index(">Colors<") < h.index("id=rs-cmap") < h.index(">Debug<"))
         self.assertTrue(h.index(">Colors<") < h.index("id=rs-pal") < h.index(">Debug<"))

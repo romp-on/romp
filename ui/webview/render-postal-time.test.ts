@@ -17,5 +17,5 @@ test("postal cards no longer render an in-card time", () => {
 
 test("the rail time-marker is applied to postal turns too (the postal exclusion is gone)", () => {
   assert.doesNotMatch(RENDER, /kind !== "postal-service"/, "the rail marker must not exclude postal cards");
-  assert.match(RENDER, /if \(epoch != null && turn\.querySelector\(".dot"\)\) turn\.insertBefore\(timeMarker/);
+  assert.match(RENDER, /if \(epoch != null && !renderingIntoThread && turn\.querySelector\(".dot"\)\) turn\.insertBefore\(timeMarker/);
 });

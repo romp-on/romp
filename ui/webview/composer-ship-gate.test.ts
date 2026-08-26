@@ -51,6 +51,20 @@ test("the OPEN gate dialog resolves itself on the last ack: closes and sends, no
   assert.match(RENDER, /if \(gateWasOpen\) \{ shipGateSid = null; closeConfirm\(null\); \}/);
 });
 
+test("a held send LOOKS staged: the files strip wears the staged head with a live count and a Cancel", () => {
+  // the user 2026-08-22: after "Wait for the upload" the only cue was the dimmed send button, which
+  // read as nothing happening. The head rides renderComposerFiles — the renderer that already runs
+  // on the wait click, every ack, and every tab switch, so the line tracks exactly those events.
+  assert.match(RENDER, /if \(id && sendOnShip\.has\(id\)\) \{\s*\n\s*const head = el\("div", "staged-head held-head"\);/);
+  assert.match(RENDER, /"staged — sends when the upload finishes"/);
+  assert.match(RENDER, /pending\.length > 1 \? " \(" \+ pending\.length \+ " still uploading\)" : ""/,
+    "the live count rides each ack's re-render");
+  assert.match(RENDER, /cancel\.addEventListener\("click", \(\) => \{ sendOnShip\.delete\(id\); renderComposerFiles\(id\); \}\);/,
+    "Cancel un-holds — message and attachments stay, nothing sends");
+  const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
+  assert.match(CSS, /\.held-head \{ flex: 1 1 100%; \}/, "full-width: it owns the strip's top line");
+});
+
 test("any successful send supersedes a hold, so a spent hold can never double-send", () => {
   const hits = RENDER.match(/sendOnShip\.delete\(sid\);\s+\/\/ a send happened — any held one is superseded/g) || [];
   assert.equal(hits.length, 2, "both delivery paths (provisional queue and live route) clear it");

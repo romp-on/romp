@@ -15,6 +15,7 @@ export interface ApiErrorFacts {
   spendLimit?: boolean | null;
   tooLong?: boolean | null;
   modelLimit?: boolean | null;
+  refusal?: boolean | null;
 }
 
 // The plain-words reason, or "" when the facts don't identify one (callers then fall back to the bare
@@ -29,6 +30,10 @@ export function apiErrorReason(f: ApiErrorFacts): string {
   // A MODEL's own allowance, not the account's: "rate limited" would send the user off to wait when the
   // fix is one model switch away (the user 2026-08-01).
   if (f.modelLimit) return "this model is out of allowance — switch model or add credits";
+  // A safeguards refusal is deterministic on the same input — no retry or wait fixes it, only the prompt
+  // does (the user 2026-08-15). Same words as the chat card's remedy line, so the surfaces can't diverge.
+  // It outranks the status ladder: a refusal riding a 4xx would otherwise read as a plain rejection.
+  if (f.refusal) return "the model's safeguards refused this prompt — rewrite it or drop this thread";
   if (f.networkDown) return "this machine is offline";
   if (f.rateLimitType) return `rate limited (${f.rateLimitType})`;
   const s = Number(f.status);

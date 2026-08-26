@@ -66,6 +66,28 @@ test("spend-limit and prompt-too-long blocks say what they are", () => {
   assert.match(tl.text, /prompt too long/);
 });
 
+test("a refusal block names the refusal and the remedy — never a bare \"API error\"", () => {
+  // the fifth on-you class (the user 2026-08-15): a refusal ships state:"apiError" + refusal:true with
+  // no status, which fell through to the generic label while the card itself said "Safeguards refused"
+  const rf = badgeNotices([base({ blocked: { state: "apiError", refusal: true } })], new Set()).notices[0];
+  assert.equal(rf.kind, "apierror");
+  assert.match(rf.text, /safeguards refused this prompt — rewrite it or drop this thread/);
+  assert.doesNotMatch(rf.text, /API error/);
+  // a refusal that rides a 4xx must still read as the refusal, not "the request itself was rejected"
+  const rf400 = badgeNotices([base({ blocked: { state: "apiError", status: 400, refusal: true } })], new Set()).notices[0];
+  assert.match(rf400.text, /safeguards refused/);
+  assert.doesNotMatch(rf400.text, /API error 400/);
+});
+
+test("a refusal after a plain error on the same card is a NEW episode — its own bell entry", () => {
+  // the signature's class slot must discriminate the refusal, or a refusal arriving while a status-less
+  // transient episode is still in the seen set (error → auto-retry → refusal) mints no entry at all
+  const plain = badgeNotices([base({ blocked: { state: "apiError" } })], new Set());
+  const after = badgeNotices([base({ blocked: { state: "apiError", refusal: true } })], new Set(plain.active));
+  assert.equal(after.notices.length, 1, "the refusal logs afresh under its own signature");
+  assert.match(after.notices[0].text, /safeguards refused/);
+});
+
 test("a /clear boundary that dropped cards logs once, naming them and the way back", () => {
   // the user 2026-07-27: the boundary settle was fully silent — cards left the board with one
   // stderr line. The bell entry is the durable "you saw it happen" record.
@@ -75,7 +97,7 @@ test("a /clear boundary that dropped cards logs once, naming them and the way ba
   assert.equal(first.notices.length, 1);
   assert.equal(first.notices[0].kind, "cleared");
   assert.match(first.notices[0].text, /^web — \/clear dropped 2 open cards: ship the notes-api, tune the rate limits/);
-  assert.match(first.notices[0].text, /Undo clear/, "the way back is in the entry itself");
+  assert.match(first.notices[0].text, /Undo on the feed/, "the way back is in the entry itself");
   const again = clearBoundaryNotices(rows, new Set(first.active));
   assert.equal(again.notices.length, 0, "the same boundary never re-logs across pushes/reloads");
 });

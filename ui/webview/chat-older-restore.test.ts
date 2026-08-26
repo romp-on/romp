@@ -79,8 +79,9 @@ test("scrollToAnchor restores a keep-offset instead of landing on it", () => {
 
 test("a keep-offset restore that misses does not toast the reader 'couldn't locate'", () => {
   // Nobody asked to locate anything — they scrolled. The audit row still records it.
-  assert.match(RENDER, /if \(!scrolled && !anchorPendingOlder && !att\.keep\) \{/,
-    "the couldn't-locate toast + error-center entry are for user navigations only");
+  assert.match(RENDER, /if \(!scrolled && !anchorPendingOlder && !att\.keep && !\(seek && att\.anchor === seek\.uuid\)\) \{/,
+    "the couldn't-locate toast + error-center entry are for user navigations only — and a live SEEK "
+    + "keeps working instead (its backstop owns the failure; see seek-indicator.test.ts)");
   assert.match(RENDER, /keep: att\.keep \|\| undefined,/, "…but the audit row still carries the flag");
 });
 

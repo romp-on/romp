@@ -16,7 +16,7 @@ test("the manual Nudge button is gone (Auto Nudge replaces it)", () => {
   assert.doesNotMatch(FEED, /nudge\.onclick/);
   assert.doesNotMatch(FEED, /a\._nudge[^A-Za-z]/);
   // the action row is buttons only (the state badges moved up to the name row, 2026-06-19); no Nudge now
-  assert.match(FEED, /actions\.append\(apiRetry, revive,/);
+  assert.match(FEED, /actions\.append\(revive,/);
 });
 
 test("the modal footer is age · Follow up · Check status · Continue · Clear", () => {

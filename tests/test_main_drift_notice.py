@@ -112,3 +112,77 @@ class DriftWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UiOnlyConverge(unittest.TestCase):
+    """A drift whose commits touch nothing the running process executes converges by rebuilding dist
+    in place — kernel left up, zero cut turns (the user 2026-08-23: most changes are UI-only, and
+    every restart cuts every in-flight turn). Kernel-code drift keeps the restart path unchanged."""
+
+    def setUp(self):
+        self._saved = {n: getattr(km, n) for n in
+                       ("_main_drift_verdict", "_kernel_code_changed", "_rebuild_dist",
+                        "_sync_notice", "_update_mode", "_send_to_app", "_kernel_sha")}
+        km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
+        km._REBUILT_FOR[0] = ""
+        self.notices, self.banners, self.rebuilds = [], [], []
+        km._sync_notice = lambda msg, ok=True: self.notices.append((msg, ok))
+        km._send_to_app = lambda app, payload: self.banners.append(payload)
+        km._update_mode = lambda: "ask"
+        km._kernel_sha = lambda: "cur-sha"
+
+    def tearDown(self):
+        for n, f in self._saved.items():
+            setattr(km, n, f)
+        km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
+        km._REBUILT_FOR[0] = ""
+
+    def test_ui_only_restart_drift_rebuilds_in_place_and_latches(self):
+        km._main_drift_verdict = lambda o, c, k: ("restart", "tgt-ui")
+        km._kernel_code_changed = lambda a, b: False
+        km._rebuild_dist = lambda: (self.rebuilds.append(1), (True, ""))[1]
+        km._main_drift_check()
+        self.assertEqual(len(self.rebuilds), 1)
+        self.assertEqual(km._REBUILT_FOR[0], "tgt-ui", "the converge latches on the target sha")
+        self.assertEqual(self.banners, [], "no restart banner for a rebuild that cuts nothing")
+        self.assertTrue(any("no restart" in m for m, _ in self.notices))
+        km._main_drift_check()   # same target again: already converged, no second build
+        self.assertEqual(len(self.rebuilds), 1)
+
+    def test_a_failed_build_falls_through_to_the_restart_path_loudly(self):
+        km._main_drift_verdict = lambda o, c, k: ("restart", "tgt-ui")
+        km._kernel_code_changed = lambda a, b: False
+        km._rebuild_dist = lambda: (False, "esbuild boom")
+        km._main_drift_check()
+        self.assertEqual(km._REBUILT_FOR[0], "", "a failed build never latches")
+        self.assertTrue(any(not ok and "esbuild boom" in m for m, ok in self.notices))
+        self.assertEqual([b.get("drift") for b in self.banners], ["restart"],
+                         "the normal restart offer still fires")
+
+    def test_kernel_code_drift_keeps_the_restart_path(self):
+        km._main_drift_verdict = lambda o, c, k: ("restart", "tgt-kern")
+        km._kernel_code_changed = lambda a, b: True
+        km._rebuild_dist = lambda: self.fail("a kernel-code drift must never rebuild in place")
+        km._main_drift_check()
+        self.assertEqual([b.get("drift") for b in self.banners], ["restart"])
+
+    def test_the_classifier_reads_the_touched_paths(self):
+        import subprocess as sp
+        from unittest.mock import patch
+
+        class R:
+            def __init__(self, out, rc=0):
+                self.stdout, self.returncode = out, rc
+        with patch.object(km.subprocess, "run", return_value=R("ui/webview/feed.ts\ndocs/a.md\n")):
+            self.assertFalse(km._kernel_code_changed("a1", "b2"), "UI + docs only: rebuild in place")
+        with patch.object(km.subprocess, "run", return_value=R("ui/webview/feed.ts\nkernel/kernel.py\n")):
+            self.assertTrue(km._kernel_code_changed("a1", "b2"))
+        with patch.object(km.subprocess, "run", return_value=R("", rc=128)):
+            self.assertTrue(km._kernel_code_changed("a1", "b2"), "git failure: the restart is the safe converge")
+        self.assertTrue(km._kernel_code_changed("", "b2"), "unknown shas: the restart is the safe converge")
+
+    def test_the_pull_path_carries_the_same_in_place_converge(self):
+        src = inspect.getsource(km._run_main_update)
+        self.assertIn('if kind == "pull" and not _kernel_code_changed(_kernel_sha(), _checkout_sha()):', src)
+        self.assertIn("_rebuild_dist()", src)
+        self.assertIn("_REBUILT_FOR[0] = _checkout_sha()", src)

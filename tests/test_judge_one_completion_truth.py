@@ -65,7 +65,9 @@ class DuplicateKeyHeals(unittest.TestCase):
     """The live g17 shape: umbrella + open twin shadowing a completed item, healed with no surgery."""
 
     def _incident_store(self):
-        top = _node(SID + ":g1", umbrella=True, nodeComplete=True)
+        # T101 note: containers dissolve in rollup now, so the shape uses a PLAIN parent — the
+        # subject here (duplicate to-do keys healing) never depended on the umbrella tag
+        top = _node(SID + ":g1", nodeComplete=True)
         done_twin = _node(SID + ":g2", parentId=SID + ":g1",
                           agentTask={"key": "5", "status": "done", "raw": "completed"},
                           agentBornOpen=True, agentDone=True, nodeComplete=True)

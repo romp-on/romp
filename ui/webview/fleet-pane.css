@@ -7,8 +7,8 @@ html,body{margin:0;height:100%;background:var(--vscode-editor-background,#1e1e1e
 color:var(--vscode-foreground,#cccccc);font-family:var(--vscode-font-family,system-ui,-apple-system,'Segoe UI',sans-serif);
 font-size:13px;display:flex;flex-direction:column;overflow:hidden}
 /* docked search bar at the TOP (the user 2026-06-29): filter the fleet to sessions whose NAME matches. */
-#fleet-search-bar{flex:0 0 auto;padding:8px 12px;border-bottom:1px solid var(--vscode-editorHoverWidget-border,rgba(255,255,255,0.12))}
-#fleet-search-wrap{position:relative}
+#fleet-search-bar{flex:0 0 auto;display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:8px 12px;border-bottom:1px solid var(--vscode-editorHoverWidget-border,rgba(255,255,255,0.12))}
+#fleet-search-wrap{position:relative;flex:1 1 140px;min-width:140px}
 #fleet-search{width:100%;box-sizing:border-box;background:var(--vscode-input-background,#3c3c3c);
 color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#3c3c3c);
 border-radius:6px;padding:5px 28px 5px 10px;font:inherit;font-size:12.5px;outline:none}
@@ -78,7 +78,7 @@ color:var(--vscode-descriptionForeground,#9a9a9a);font-size:12px;user-select:non
 .fl-hover-state{color:var(--vscode-descriptionForeground,#9a9a9a);margin-bottom:3px}
 .fl-hover-title{font-weight:600;margin-bottom:2px;white-space:normal}
 .fl-hover-sec{margin-top:7px}
-.fl-hover-lab{font-size:10.5px;text-transform:uppercase;letter-spacing:0.4px;
+.fl-hover-lab{font-size:10.5px;text-transform:uppercase;letter-spacing:0.04em;
   color:var(--vscode-descriptionForeground,#9a9a9a);margin-bottom:2px}
 .fl-hover-body{white-space:pre-wrap}
 .fl-hover-sub{display:flex;gap:6px;align-items:baseline;margin-top:1px}

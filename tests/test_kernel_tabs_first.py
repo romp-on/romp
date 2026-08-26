@@ -25,12 +25,12 @@ class TabsFirst(unittest.TestCase):
         src = inspect.getsource(km._push)
         self.assertIn('tab_meta = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])}', src,
                       "the periodic push builds a name+color list per tab")
-        self.assertIn('{"type": "tabOrder", "order": tab_order, "tabs": tab_meta, "views": _timeline_views()}', src,
+        self.assertIn('{"type": "tabOrder", "order": tab_order, "tabs": tab_meta, "views": _views_client()}', src,
                       "and ships it as the tabs field alongside the sid order")
 
     def test_connect_ready_handler_also_sends_tabs(self):
         text = open(KPATH).read()
-        self.assertIn('{"type": "tabOrder", "order": _o, "tabs": _tabs, "views": _timeline_views()}', text,
+        self.assertIn('{"type": "tabOrder", "order": _o, "tabs": _tabs, "views": _views_client()}', text,
                       "the WS 'ready' connect push also carries name+color tabs")
         self.assertIn('_tabs = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])}', text)
 

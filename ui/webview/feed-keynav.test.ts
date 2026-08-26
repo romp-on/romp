@@ -24,7 +24,9 @@ test("the card cursor reuses the mouse-hover highlight path (applyFocus + showAs
 });
 
 test("Enter descends into a card; arrows step its elements; Enter activates via a real click", () => {
-  assert.match(FEED, /const KB_EL_SEL = "\.fcard-title\.nav,\.fask-distill-link,\.fname,\.fask-apiRetry,\.fask-revive,\.fdismiss,\.fcheck \.lz-nav,\.fask-delegation";/);
+  // section pills + the bell joined the set with the Tab scope (the user 2026-08-24) — every
+  // visible control on a card cycles
+  assert.match(FEED, /const KB_EL_SEL = "\.fcard-title\.nav,\.fask-distill-link,\.fname,\.fask-apiRetry,\.fask-revive,\.fdismiss,\.fask-secbtn,\.fask-bellbtn,\.fcheck \.lz-nav,\.fask-delegation";/);
   assert.match(FEED, /function kbEnterCard\(\): void \{/);
   // element highlight dispatches the element's OWN hover event (zone .lz-hl + timeline), not a reimplementation
   assert.match(FEED, /el\.dispatchEvent\(new MouseEvent\("mouseenter"\)\);/);

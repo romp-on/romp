@@ -35,7 +35,7 @@ test("the chat has NO gear of its own — it only consumes the shared setting (g
   assert.doesNotMatch(RENDER, /chat-settings-gear/, "the gear was moved to the timeline");
   // renderTabs rides the change too: the tab strip reads settings (the context gauge toggle,
   // the user 2026-08-08) and rerenderAll only rebuilds the transcript views.
-  assert.match(RENDER, /onExternalSettingsChange\(\(s\) => \{ settings = s; renderTabs\(\); rerenderAll\(\); \}\)/);
+  assert.match(RENDER, /onExternalSettingsChange\(\(s\) => \{ settings = s; applyChatScheme\(s\); renderTabs\(\); rerenderAll\(\); refillOpenCommentPop\(\); \}\)/);
 });
 
 test("the + New session button sends the picker's backend toggle, defaulting to the gear's (the user 2026-06-23)", () => {

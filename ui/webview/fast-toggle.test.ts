@@ -23,7 +23,7 @@ test("the fast badge appears only when the session reports a state AND the model
   assert.match(RENDER, /fast\?: string;/);                                   // status carries it
   assert.match(RENDER, /type MetaKind = "mode" \| "model" \| "effort" \| "fast";/);   // billing moved to the tab menu (2026-08-09)
   assert.match(RENDER, /st\.fast && fastAvailable\(st\) \? st\.fast : ""/);  // no state / unsupported model → no badge
-  assert.match(RENDER, /meta\.appendChild\(metaButton\("fast", prettyFast\(fast\)\)\)/);
+  assert.match(RENDER, /meta\.appendChild\(metaButton\("fast", prettyFast\(fast\), forSid\)\)/);   // sid-scoped: the popover statusline shares this builder (2026-08-25)
   // the availability gate: opus-family (or unknown/default — the account default may be Opus)
   const gate = RENDER.match(/function fastAvailable\(st: Status\): boolean \{[\s\S]*?\n\}/)?.[0] || "";
   assert.match(gate, /!m \|\| m === "default" \|\| m\.includes\("opus"\)/);

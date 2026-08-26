@@ -34,7 +34,7 @@ test("a band shorter than the menu clamps the top on-screen instead of vanishing
 test("both the lane gear menu and the model/effort menu place through menuTop", () => {
   // the fix must cover BOTH fixed-position drop-downs; a bare `r.bottom + 4` is the bug's signature
   const opens = SRC.match(/menu\.style\.top = Math\.round\(menuTop\(h\.rect, menu\.offsetHeight \|\| 0, h\.win\.innerHeight \|\| 9999\)\)/g) || [];
-  assert.equal(opens.length, 3, "expected _openMetaMenu, _openLaneMenu and _openViewsMenu to all use menuTop");
+  assert.equal(opens.length, 4, "expected _openMetaMenu, _openLaneMenu, _openViewsMenu and _openDisplayMenu to all use menuTop");
   assert.doesNotMatch(SRC, /menu\.style\.top = Math\.round\(r\.bottom \+ 4\)/);
 });
 
@@ -58,7 +58,7 @@ test("offsetRect translates a pane-local anchor by each intervening frame's offs
 
 test("both menus append into the host document and read the host viewport", () => {
   const appends = SRC.match(/h\.doc\.body\.appendChild\(menu\)/g) || [];
-  assert.equal(appends.length, 3, "expected _openMetaMenu, _openLaneMenu and _openViewsMenu to adopt into the host doc");
+  assert.equal(appends.length, 4, "expected _openMetaMenu, _openLaneMenu, _openViewsMenu and _openDisplayMenu to adopt into the host doc");
   assert.match(SRC, /_menuHost\(anchorRect\)[\s\S]*?offsetRect\(anchorRect, frames\)/);
   // the host page shows the menu now, so its clicks/Escape must close it (with pagehide cleanup)
   assert.match(SRC, /tipDoc\.addEventListener\('click', this\._onDocClick\)/);

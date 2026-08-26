@@ -39,6 +39,7 @@ class _FakeBackend:
     def _turn_completed(self, sid): pass
     def retire_live_work(self, sid): pass
     def _poke(self): pass
+    def _deliver_rename_ping(self, s): return False   # settle hook (2026-08-25); no ping in these worlds
     def _record_spend(self, cost, usage=None): pass   # the settle folds cost+tokens into spend.json; irrelevant here
     def _update_reg(self, *a, **k): pass
     def _forward(self, s, msg): pass

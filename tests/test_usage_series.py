@@ -142,6 +142,42 @@ class ApiKeyHostReportsSpend(unittest.TestCase):
     def test_nothing_recorded_still_answers_none(self):
         self.assertIsNone(km._usage(), "a fresh box with neither login nor spend has nothing to show")
 
+    def test_spend_carries_its_own_freshness_stamp(self):
+        # the user 2026-08-24: the windows' "updated 9h 38m ago" (usage.json's t — which nothing
+        # writes under key auth) sat directly above the spend section and read as the spend's age.
+        # The payload now stamps the spend's OWN last-record moment: spend.json's mtime, an event
+        # time (the recorder writes per turn result), so the hover can say when the last charge
+        # actually landed — and a frozen number visibly ages instead of hiding behind the windows.
+        hour_key = time.strftime("%Y-%m-%dT%H")
+        p = jd.STATE / "spend.json"
+        p.write_text(json.dumps({"hours": {hour_key: {"usd": 1.0, "turns": 1, "tok": 5}},
+                                 "days": {time.strftime("%Y-%m-%d"): {"usd": 1.0, "turns": 1, "tok": 5}}}))
+        os.utime(p, (1000000000, 1000000000))
+        u = km._usage()
+        self.assertEqual(u.get("spendAt"), 1000000000, "the stamp is the record file's own mtime")
+
+    def test_view_and_tag_state_never_filters_the_spend_aggregation(self):
+        # the user 2026-08-24 asked whether hidden/tagged sessions count toward the spend. They MUST:
+        # the series is machine-level API-key billing, recorded per turn result before any view
+        # exists, and read straight from spend.json's buckets. This pins that a views blob hiding
+        # and tagging everything changes NOTHING about the sums — if a view/tag filter ever leaks
+        # into the aggregation, this breaks.
+        hour_key = time.strftime("%Y-%m-%dT%H")
+        (jd.STATE / "spend.json").write_text(json.dumps({
+            "hours": {hour_key: {"usd": 7.5, "turns": 3, "tok": 30}},
+            "days": {time.strftime("%Y-%m-%d"): {"usd": 7.5, "turns": 3, "tok": 30}}}))
+        before = km._usage()
+        (jd.STATE / "timeline-views.json").write_text(json.dumps({
+            "active": "g1", "hidden": ["11111111-2222-3333-4444-555555555555"],
+            "tags": [{"id": "g1", "name": "workers", "color": "#DD42FF",
+                      "members": ["22222222-3333-4444-5555-666666666666"]}]}))
+        km._flags_cache.clear()
+        after = km._usage()
+        self.assertEqual(after["spend"], before["spend"],
+                         "hiding/tagging sessions must never change the billed sums")
+        self.assertEqual(after["spendSeries"], before["spendSeries"],
+                         "…or the $/h series behind the graph")
+
 
 class RemoteUsageStaleness(unittest.TestCase):
     def test_an_answered_empty_payload_clears_instead_of_freezing(self):

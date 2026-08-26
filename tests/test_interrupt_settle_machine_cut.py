@@ -78,6 +78,23 @@ class InterruptSettleOnMachineCut(unittest.TestCase):
         self.assertTrue(any(e.get("md") == "draft the migration plan" for e in evs), "real turns survive")
         self.assertFalse(any("_dropSettle" in e for e in evs), "the scratch flag never reaches the client")
 
+    def test_a_machine_cut_aliases_the_dropped_settle_uuid_onto_the_marker(self):
+        # The dropped settle atom is the cut turn's LAST assistant atom — exactly where verdicts and
+        # cards get anchored — so its uuid must still land somewhere real: the marker carries it
+        # (settleUuids) and the chat's seam answers to it (the user 2026-08-25, a card click that
+        # honest-failed "couldn't locate" on a dozens-of-restarts session).
+        evs = seam("[romp] The romp kernel " + km.INTR_RESTART_SIG + " this session's in-flight turn.")
+        km._stamp_interrupt_causes(evs)
+        marker = next(e for e in evs if e.get("interruptMarker"))
+        self.assertEqual(marker.get("settleUuids"), [U3], "the seam answers to the dropped settle's uuid")
+
+    def test_a_user_stop_keeps_the_settle_and_mints_no_alias(self):
+        evs = seam(None)
+        km._stamp_interrupt_causes(evs)
+        self.assertEqual(len(self._settles(evs)), 1, "a genuine user stop keeps its settle line")
+        marker = next(e for e in evs if e.get("interruptMarker"))
+        self.assertNotIn("settleUuids", marker, "no alias when nothing was dropped")
+
     def test_the_client_still_renders_the_line_for_user_stops(self):
         # the renderer keeps its seam branch — this change is server-side only
         r = open(os.path.join(os.path.dirname(HERE), "ui", "webview", "render.ts")).read()

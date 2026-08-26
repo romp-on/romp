@@ -1,0 +1,16 @@
+<!-- SYNTHETIC fixture: the romp loader anatomy exactly as rompLoaderInner (render.ts) builds it —
+     the revive loader's DOM on the VS Code chat surface, which loads styles.css ALONE. Run:
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/loader.html \
+           --out /tmp/loader.png --size 500x300
+     shot.sh copies only the stylesheet into its temp page, so the swirl <img> 404s here and falls
+     back to its alt "o", and the RompAnta @font-face falls back to var(--sans) — geometry and the
+     dots' pulse are what this fixture verifies. To see the real glyph, copy this file to /tmp and
+     point src at an absolute file:// path of vscode-extension/media/romp-swirl-o.svg (never commit
+     that copy). Caption text is invented (notes-api demo domain). -->
+<div id="revive-loader" style="left: 10px; top: 10px; width: 480px; height: 280px;">
+  <div class="rl-in">
+    <div class="rl-word"><span style="color:#1EA1EB">R</span><img class="rl-o" src="romp-swirl-o.svg" alt="o"><span style="color:#54B204">m</span><span style="color:#4EA8A9">p</span></div>
+    <div class="rl-dots"><i></i><i></i><i></i></div>
+    <div class="revive-cap">reviving “web”…</div>
+  </div>
+</div>

@@ -12,7 +12,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 
 test("a waiting-on chip is built and rides the wrapping chip row (its own line when it doesn't fit)", () => {
   assert.match(FEED, /const waitOnBadge = el\("span", "fask-waiton"\)/);
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
   assert.match(FEED, /a\._waitOn = waitOnBadge;/);
 });
 

@@ -34,7 +34,7 @@ test("a zero-event session never shows the 'Loading transcript…' hint", () => 
   // loading-hint block — it renders the placeholder synchronously via syncView.
   assert.match(RENDER, /const heavy = s\.events\.length > 0 && \(/);
   // the loading hint is still the text shown for a genuinely heavy (non-empty, first-visit) build
-  assert.match(RENDER, /ld\.textContent = "Loading transcript…"/);
+  assert.match(RENDER, /truly empty → the ROMP LOADER holds the spot/);   // the bare text hint became the standing loader treatment (2026-08-24)
 });
 
 test(".tx-empty is styled (dim, centered) like the loading hint it replaces", () => {

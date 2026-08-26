@@ -111,6 +111,19 @@ Every bug fix or feature change must land with a test that covers it (user rule,
 surfaces. Reproduce the bug in a failing test first when practical; fixtures
 live in `tests/fixtures/`.
 
+### Goal-store fixtures use a PRIVATE synthetic sid (2026-08-24)
+An instance of the standing synthetic-fixtures rule with a mechanism behind it:
+any Python test that MINTS GOALS under the shared `11111111-2222-…` placeholder
+sid can be silently re-flagged by OTHER test modules' journaled user overrides —
+`load_goals` replays the per-sid override journal (`STATE/overrides/<sid>.jsonl`)
+on every load, and node ids collide across tests (every fresh store mints `g1`),
+so a resolve another module journaled against the shared sid lands on YOUR node
+mid-test. The failure is ordering-dependent: green alone, red only under the full
+suite. Tests that mint goals therefore use a private synthetic sid of their own
+(any invented uuid; still synthetic, never real) and clean their sid's journal in
+tearDown. Precedent + worked diagnosis: the model-fallback dedupe tests' class
+docstring (`tests/test_model_fallback_card.py`, DedupeBackstop).
+
 ## Authoritative sources — fail loudly, don't degrade silently (user rule, 2026-07-03)
 Read state from its AUTHORITATIVE source — a designed API, or the live store that
 owns the data — never a lossy reconstruction (scraping a transcript, a heuristic

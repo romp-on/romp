@@ -10,7 +10,7 @@ flowchart LR
     X ~~~ TODO[("the agent's<br/>to-do list")]:::data --> SYNC["plan-sync:<br/>mirror each item as a card;<br/>open items pin theirs to Working"]:::det
     CO ~~~ YOU["you:<br/>clear, resolve,<br/>move, reply"]:::user
     PP & PL & CL & CO & SYNC & YOU --> OG{"the set of open<br/>cards changed?"}:::det
-    OG -.-> GR["grouper:<br/>nest related<br/>open cards"]:::llm
+    OG -.-> GR["grouper:<br/>merge / split /<br/>retitle cards"]:::llm
     PL & CL & YOU --> CG{"the set of completed<br/>cards changed?"}:::det
     CG -.-> CN["consolidator:<br/>the same,<br/>done column"]:::llm
     PL & CL & YOU --> DG{"a card completed<br/>and settled?"}:::det

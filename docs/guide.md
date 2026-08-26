@@ -21,15 +21,14 @@ complementary views of what the agents are doing:
 
 ![Tool calls fold into runs; each expands to one line per call](assets/guide/chat-detail.png){ width="100%" }
 
-**Reviewing a document.** The file viewer takes comments. Select any passage,
-right-click, and say what should change; keep reading and they stack up, each one
-remembering the passage it belongs to and where in the file that passage lives.
-**Submit** turns the whole set into a single message in the composer, listing every
-comment with its quote and line number, for you to glance over and send. The session
-applies the lot in one pass, and you never copy a line out of the document by hand.
-Comments persist per file until you submit them, so a long review can be picked up later,
-and if the file changes while you are reading it the message says so rather than carrying
-line numbers that have quietly moved.
+**Reviewing a document.** Select any passage in the file viewer and it lands in the
+composer as a quote chip, labeled with the file and the line the passage lives on. Type
+what should change and press **⌘⏎** to set the note aside; keep reading, select the next
+passage, and repeat — each staged note remembers its quote and its place. **⏎** sends
+everything you staged along with whatever is in the box, so the session applies the lot
+in one pass, and you never copy a line out of the document by hand. The line in each
+label is checked against the file at the moment you select, so numbers that moved under
+you are caught rather than quietly carried.
 
 ### The feed
 

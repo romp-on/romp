@@ -48,6 +48,9 @@ const webview = {
     "../ui/webview/federation.ts",   // multi-kernel manager: loaded after the shim on chat/feed/fleet pages
     "../ui/webview/age-color-global.ts",   // window.__rompAgeColor for the kernel's inline shell scripts (bell panel)
     "../ui/webview/palette-main.ts",   // command palette + Cmd/Ctrl+O/P hotkeys for the kernel's shell page
+    "../ui/webview/editor-chunk.ts",   // CodeMirror editing substrate — ON-DEMAND (file-view loads it by
+                                       // script tag on first edit); nothing else may import it, so the
+                                       // main bundles stay byte-stable for people who never edit
   ],
   nodePaths: [path.join(__dirname, "node_modules")],
   bundle: true,

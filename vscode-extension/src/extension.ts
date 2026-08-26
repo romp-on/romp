@@ -61,6 +61,26 @@ function serveToken(): string {
 declare const __ROMP_BUILD__: number;
 const BUILD_STAMP: number = typeof __ROMP_BUILD__ === "number" ? __ROMP_BUILD__ : 0;
 let buildNotified = false;
+// The drift TOAST is native VS Code chrome — it can't be dragged out of the way, and dismissing it
+// used to lose the update affordance entirely (the user 2026-08-18: "I need to access something
+// behind it while I'm waiting"). So the toast is only the one-time attention grab; a status-bar item
+// carries the same action persistently until the update succeeds, making the toast safe to dismiss.
+let driftStatusItem: vscode.StatusBarItem | null = null;
+function showDriftStatusItem(hasTarget: boolean): void {
+  if (driftStatusItem) return;
+  driftStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
+  driftStatusItem.text = "$(sync) romp update";
+  driftStatusItem.tooltip = hasTarget
+    ? "A newer romp build is available — click to rebuild and reinstall the extension."
+    : "A newer romp build is available — click to copy the install command (this VSIX can't rebuild itself).";
+  driftStatusItem.command = hasTarget ? "rompChat.updateExtension" : "rompChat.copyInstallCommand";
+  driftStatusItem.show();
+}
+function clearDriftStatusItem(): void {
+  if (!driftStatusItem) return;
+  driftStatusItem.dispose();
+  driftStatusItem = null;
+}
 function maybeBuildNotice(dv: unknown): void {
   if (buildNotified || !BUILD_STAMP || typeof dv !== "number" || dv <= BUILD_STAMP) return;
   buildNotified = true;
@@ -71,7 +91,9 @@ function maybeBuildNotice(dv: unknown): void {
   // button that could only end in an error toast (driftNotice). updateExtension RE-RESOLVES at click
   // time, deliberately — the filesystem can change under a toast still on screen, and only the click may
   // shell out.
-  const notice = driftNotice(resolveInstallScript(ctx?.extensionPath || "", process.env.ROMP_DIR, (p) => fs.existsSync(p)));
+  const target = resolveInstallScript(ctx?.extensionPath || "", process.env.ROMP_DIR, (p) => fs.existsSync(p));
+  const notice = driftNotice(target);
+  showDriftStatusItem(!!target);
   void vscode.window.showInformationMessage(notice.message, ...notice.actions).then((choice) => {
     if (choice === UPDATE_ACTION) void updateExtension();
     else if (choice === COPY_ACTION) void vscode.env.clipboard.writeText(INSTALL_COMMAND);
@@ -105,14 +127,18 @@ async function updateExtension(): Promise<void> {
   const script = target.script;
   updating = true;
   try {
+    // ProgressLocation.Window = a status-bar spinner: the minute-long rebuild+reinstall covers
+    // NOTHING while the user waits (a Notification-located progress toast sits over the editor and
+    // cannot be moved — native chrome; the user 2026-08-18).
     const out = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: "romp: updating the extension…", cancellable: false },
+      { location: vscode.ProgressLocation.Window, title: "romp: updating the extension…", cancellable: false },
       () => runInstall(script, extDir));
     // install.sh exits 0 even when it SKIPS (no node / no editor CLI found) — so a clean exit is NOT
     // proof it worked. The real success markers are that it packaged the VSIX AND installed into a CLI.
     // Anything else is a failure we surface loudly with the manual remedy (fail loudly, don't degrade).
     const ok = out.code === 0 && /packaged romp-chat-view\.vsix/.test(out.text) && /install into:/.test(out.text);
     if (ok) {
+      clearDriftStatusItem();
       void vscode.window.showInformationMessage(
         "romp extension updated — reload this window to apply.", "Reload window").then((choice) => {
           if (choice === "Reload window") void vscode.commands.executeCommand("workbench.action.reloadWindow");
@@ -221,6 +247,8 @@ export function activate(context: vscode.ExtensionContext) {
     // Rebuild + reinstall the VSIX from source, then offer a reload — the clickable form of the
     // drift toast's remedy, always reachable (a faded toast leaves nothing to click). See updateExtension.
     vscode.commands.registerCommand("rompChat.updateExtension", updateExtension),
+    vscode.commands.registerCommand("rompChat.copyInstallCommand",
+      () => vscode.env.clipboard.writeText(INSTALL_COMMAND)),
     // The webviews scale to the editor font (uiZoom) — re-render them when it changes.
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("editor.fontSize")) refreshWebviewHtml();

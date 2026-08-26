@@ -81,8 +81,12 @@ test("a down row says romp is still dialing, when next, and offers to try now", 
   }
   assert.match(KERNEL, /next try in /, "the row counts down to the next dial");
   assert.match(KERNEL, /romp keeps dialing '\+t\.host\+' on its own/, "and says it is unconditional");
-  assert.match(KERNEL, /data-ra=\\"'\+t\.host\+'\\" title=\\"Dial /, "the web row offers Try now");
-  assert.match(KERNEL, /Try now<\/button>/, "named for what it does");
+  assert.match(KERNEL, /data-ra=\\"'\+t\.host\+'\\" title=/, "the web row offers the re-dial action");
+  // per-state name (the user 2026-08-23): beside the countdown it reads as skip-the-wait (Try now);
+  // on a no-kernel row there is no countdown and it sat beside Start as a lookalike — there it is
+  // named for what it does (Re-dial). Same button, same action, one wording rule.
+  assert.match(KERNEL, /\(wedged\?'Re-dial':'Try now'\)\+'<\/button>'/, "named for what it does, per state");
+  assert.match(KERNEL, /var wedged=\(t\.status==='no-kernel'\);/);
   assert.match(KERNEL, /s!=='no-kernel';/, "web busyStatus no longer knows the state");
   assert.match(STRIP, /s !== "no-kernel";/, "strip busy() no longer knows it");
   assert.match(KERNEL, /t\.status==='down'\)\?'background:#8a8a8a'/, "web dot is gray");

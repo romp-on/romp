@@ -244,6 +244,65 @@ class RollbackAndPendingCut(unittest.TestCase):
             be = _StubBackend(os.path.join(tmp, "sdk"))
             self.assertEqual(sb.SdkBackend.pending_cut(be, SID), "")
 
+    # ── rewind_pending, EXECUTED (same stub world) ────────────────────────────────────────────
+    # The boot pass keeps a hold latched only on this probe (D8: raw flag presence latched holds
+    # forever after an out-of-band continuation), but the kernel-side tests stub the backend —
+    # nothing ran the real leaf-verified join, so a regression here (a wrong fsid for a
+    # resume-forked transcript, say) would silently re-open the forever-latched-hold hole with
+    # every kernel test still green.
+
+    def test_rewind_pending_while_the_leaf_is_unmoved(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            be = self._fixture(tmp)
+            self.assertTrue(sb.SdkBackend.rewind_pending(be, SID),
+                            "an unconsumed rewind against an unmoved leaf is still applicable")
+
+    def test_rewind_pending_goes_false_once_the_transcript_moves(self):
+        # THE regression test for the D8 fix: raw flag presence would return True here — the flag
+        # is still armed in the session — but the leaf moved, so the rewind is spent and a boot
+        # hold keyed on it must resolve instead of latching forever
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            be = self._fixture(tmp, leaf_moved=True)
+            self.assertFalse(sb.SdkBackend.rewind_pending(be, SID))
+
+    def test_rewind_pending_reads_the_reg_for_a_dead_session(self):
+        # kernel restart mid-pending: no live SdkSession, the reg carries the flag + cwd/lastSid
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            be = self._fixture(tmp)
+            reg = {"cwd": be.sessions[SID].cwd, "lastSid": "", "rewindTo": "t1",
+                   "rewindLeaf": "l1", "rewindBare": True}
+            del be.sessions[SID]
+            sb.write_reg(be.state_dir, SID, reg)
+            self.assertTrue(sb.SdkBackend.rewind_pending(be, SID))
+
+    def test_rewind_pending_follows_a_resume_fork(self):
+        # pins the fsid = resume_sid-or-sid join: the forked session's CURRENT transcript is the
+        # fork file, and it moved past the recorded leaf — reading the pre-fork file instead
+        # would call the rewind still pending and re-latch a spent hold
+        from unittest import mock
+        fork = "22222222-3333-4444-5555-666666666666"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            be = self._fixture(tmp)                    # SID's own transcript leaf is UNMOVED
+            fp = sb.transcript_path(be.sessions[SID].cwd, fork)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            with open(fp, "w") as f:
+                f.write(json.dumps({"type": "user", "uuid": "l1"}) + "\n")
+                f.write(json.dumps({"type": "assistant", "uuid": "l2"}) + "\n")
+            be.sessions[SID].resume_sid = fork
+            self.assertFalse(sb.SdkBackend.rewind_pending(be, SID),
+                             "the fork transcript moved past the leaf — spent, not pending")
+
+    def test_rewind_pending_is_bare_agnostic(self):
+        # unlike pending_cut (bare-only by design), the probe answers for EDIT rewinds too — a
+        # boot hold from an edit gesture must stay latched while its rewind is genuinely pending
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            be = self._fixture(tmp, bare=False)
+            self.assertTrue(sb.SdkBackend.rewind_pending(be, SID))
+
 
 if __name__ == "__main__":
     unittest.main()

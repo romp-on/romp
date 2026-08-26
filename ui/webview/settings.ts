@@ -17,6 +17,14 @@ export interface RompSettings {
   defaultDir: string;        // default working directory PREFILLED in the new-session field (the user 2026-06-22). A session's dir is fixed at creation. Empty → the kernel's serve dir. ~ / $VAR expanded server-side.
   showBranch: boolean;       // chat bottom-bar: show the session's git branch (if any) beside the dir (the user 2026-06-23). OFF by default (the user 2026-08-10, trimming the statusline for narrow panes; an explicit stored true keeps showing it).
   tabCtx: TabCtxMode;        // chat tabs: WHEN the context gauge shows beside each session name (the user 2026-08-08) — "over50" (default: only once half full, so quiet tabs stay clean), "always", or "never".
+  chatScheme: ChatScheme;    // chat TEXT scheme (the user 2026-08-24): raises body-text contrast without collapsing the tool-dimmer-than-prose hierarchy. A scheme = a text-tier variable set (styles.css body.scheme-*); "default" applies nothing — today's values exactly.
+}
+// Solarized LIGHT is deliberately absent (the user allowed skipping it): its text tiers are designed
+// for a paper-light ground and invert into mud on romp's dark canvas — an unreadable preset is worse
+// than none.
+export type ChatScheme = "default" | "high-contrast" | "solarized-dark";
+export function chatScheme(v: unknown): ChatScheme {
+  return v === "high-contrast" || v === "solarized-dark" ? v : "default";
 }
 // When the tab strip's context gauge shows. "over50" is the default (the user 2026-08-08): a gauge
 // on every tab is clutter while nothing is filling up — it should appear only when it has news.
@@ -32,7 +40,7 @@ export function tabCtxMode(v: unknown): TabCtxMode {
 // hand-written "why" as their line; they show the distiller's summary instead (the why demotes to a hover).
 // compact defaults ON (the user 2026-07-14): a fresh install reads the tidy transcript
 // (thinking hidden, tool runs folded); the gear opts back into the full stream.
-export const DEFAULT_SETTINGS: RompSettings = { compact: true, colormap: "aurora", subgoals: true, showIndexJudges: false, showTriageJudges: false, backend: "sdk", defaultDir: "", showBranch: false, tabCtx: "over50" };
+export const DEFAULT_SETTINGS: RompSettings = { compact: true, colormap: "aurora", subgoals: true, showIndexJudges: false, showTriageJudges: false, backend: "sdk", defaultDir: "", showBranch: false, tabCtx: "over50", chatScheme: "default" };
 const KEY = "romp:settings";
 
 export function loadSettings(): RompSettings {
@@ -41,6 +49,7 @@ export function loadSettings(): RompSettings {
     if (raw) {
       const s = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
       s.tabCtx = tabCtxMode(s.tabCtx);   // a store written by the boolean-era gear holds true/false
+      s.chatScheme = chatScheme(s.chatScheme);   // unknown/legacy values normalize to "default"
       return s;
     }
   } catch { /* corrupt / unavailable → defaults */ }

@@ -162,8 +162,6 @@ class MergeOp(unittest.TestCase):
         self.assertIn("true twins", jd.GROUP_SYS)
         self.assertIn("never merge two lines that are both from the agent's own to-do list",
                       jd.GROUP_SYS.replace("\n", " "))
-        self.assertIn("**top-level** (flush-left) lines", jd.GROUP_SYS,
-                      "group is told it moves tops only, now that steps are numbered too")
 
     # ── apply ──
     def test_merge_folds_the_mirror_into_the_users_step(self):
@@ -223,16 +221,16 @@ class MergeOp(unittest.TestCase):
         self.assertEqual(s["nodes"][gid(3)]["parentId"], gid(2), "siblings moved under the survivor")
         self.assertEqual(jd._top_ancestor(s["nodes"], gid(3)), gid(2), "no cycle: the walk terminates")
 
-    def test_group_skips_a_step_child_and_walks_a_step_parent_up(self):
+    def test_group_ops_apply_nothing_anywhere(self):
+        # T101: the group op is retired outright — steps stay put and tops stay tops
         s = audit_store()
         menu = jd._group_menu(s, jd._group_tops(s))            # [card, wide(step), tall(step), mirror(top)]
         n = jd.apply_group(s, menu, [{"do": "group", "why": "x", "goal": 2, "under": 4}], T0 + 50)
-        self.assertEqual(n, 0, "a placed step is never relinked by the grouper")
+        self.assertEqual(n, 0)
         self.assertEqual(s["nodes"][gid(2)]["parentId"], gid(1), "the step stayed put")
         n = jd.apply_group(s, menu, [{"do": "group", "why": "x", "goal": 4, "under": 3}], T0 + 60)
-        self.assertEqual(n, 1, "a step parent walks up to its card")
-        self.assertEqual(s["nodes"][gid(4)]["parentId"], gid(1),
-                         "nesting 'under the step' lands under the step's card")
+        self.assertEqual(n, 0, "no walk-up either — nothing nests")
+        self.assertIsNone(s["nodes"][gid(4)].get("parentId"), "the mirror top stays its own card")
 
     def test_group_op_on_a_merged_away_target_is_skipped(self):
         s = audit_store()

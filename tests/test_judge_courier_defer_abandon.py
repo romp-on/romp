@@ -55,6 +55,12 @@ def aline(t, text, uuid, parent):
 
 class CourierDeferAbandon(unittest.TestCase):
     def setUp(self):
+        # chain-rooted minting (2026-08-25) gates recipient tops on a user-rooted sender chain —
+        # ORTHOGONAL to this file's subject, so the gate is held open here; its own truth table
+        # lives in tests/test_chain_rooted_minting.py
+        self._rooted_saved = jd._delegate_user_rooted
+        jd._delegate_user_rooted = lambda *a, **k: True
+        self.addCleanup(lambda: setattr(jd, "_delegate_user_rooted", self._rooted_saved))
         self.td = tempfile.TemporaryDirectory()
         td = Path(self.td.name)
         cdir = td / "launchdir"; cdir.mkdir()

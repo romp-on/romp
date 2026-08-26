@@ -45,7 +45,7 @@ test("a narrow card WRAPS the '↪ from' provenance under the name instead of ov
   // chip. Fix: row2 wraps, and origin is a direct row2 child (sibling of the chips) so it drops to a
   // second line rather than overlapping when name + provenance + chips don't all fit.
   assert.match(CSS, /\.fask-row2 \{[^}]*flex-wrap: wrap/, "the name row wraps so trailing items never overlap");
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/, "origin is a row2 sibling of the chips");
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/, "origin is a row2 sibling of the chips");
   assert.doesNotMatch(FEED, /idwrap\.append\(name, origin\)/, "origin is no longer nested in the shrinking idwrap");
   // the old overflow mechanism is gone — flex-grow on idwrap right-aligns it instead of an auto margin
   assert.doesNotMatch(CSS, /\.fask-origin \{[^}]*margin-left: auto/);

@@ -10,8 +10,9 @@ import * as path from "node:path";
 
 const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
 
-test("the ask card's Clear flushes the hover highlight, right before pendingCleared", () => {
-  assert.match(FEED, /card\.dispatchEvent\(new MouseEvent\("mouseleave"\)\);\s*\n\s*pendingCleared\.add\(it\.itemId\);/);
+test("the ask card's Clear flushes the hover highlight, right before the header conjunction + pendingCleared", () => {
+  // the one-motion header exit (2026-08-24) rides between the flush and the suppression — same click
+  assert.match(FEED, /card\.dispatchEvent\(new MouseEvent\("mouseleave"\)\);\s*\n\s*dressHeaderIfLast\(card, it\.sid\);[^\n]*\n\s*pendingCleared\.add\(it\.itemId\);/);
 });
 
 test("the group card's Clear flushes the hover highlight too", () => {

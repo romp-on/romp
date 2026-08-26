@@ -16,7 +16,7 @@ test("the follow-up-failed chip is built once and rides the wrapping chip row", 
   assert.match(FEED, /const nfBadge = el\("span", "fask-nudgefailed"\)/);
   assert.match(FEED, /nfBadge\.textContent = "follow-up failed"/,
     "the label is 'follow-up failed' (the user 2026-07-23) — 'stalled' is the yellow section's word; no emoji/glyph");
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
   assert.match(FEED, /a\._nudgeFailed = nfBadge;/);
 });
 

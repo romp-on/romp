@@ -60,12 +60,14 @@ const OBJ_ID = ["tabs"]; //                       an array of objects keyed by `
 // that misses the change keeps handling new releases under the old policy (ask/auto/off). The distilling
 // pair rides like the other judge tiers (the user 2026-08-14: everything kernel-side stays in sync; the
 // gear's mixed marks surface any machine that disagrees rather than overwriting it silently). Broadcast in
-// routeOutbound rather than routed. Deliberately NOT here: setDefaultDir (a path on one machine,
-// meaningless on another) and setColormap/setPalette (the viewer's display prefs, which the local kernel
-// persists for this browser).
+// routeOutbound rather than routed. setFileEditing is the viewer's edit opt-in (the user 2026-08-22:
+// one consent popup answers for the mesh — every kernel's save route gates on its own copy, so the
+// broadcast is what makes the one yes reach them all). Deliberately NOT here: setDefaultDir (a path on
+// one machine, meaningless on another) and setColormap/setPalette (the viewer's display prefs, which the
+// local kernel persists for this browser).
 const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel",
                                 "setJudgeEffort", "setIndexEffort", "setUpdateMode",
-                                "setDistillModel", "setDistillEffort"]);
+                                "setDistillModel", "setDistillEffort", "setFileEditing"]);
 
 /** Return a COPY of an inbound message with every session-id field prefixed by `host`. The local host
  *  ("") is the identity transform, so local messages are untouched. Unknown fields pass through. */
@@ -132,6 +134,13 @@ function _prefixIdBearing(host: string, o: any, idKey: string): any {
   // and keep peerSid bare — the viewer may be that very host, where the bare uuid opens directly.
   if (out.origin && typeof out.origin === "object" && typeof out.origin.peerSid === "string" && !out.origin.peerHost)
     out.origin = { ...out.origin, peerHost: host, peerSid: prefixId(host, out.origin.peerSid) };
+  // The awaiting box's delegation peers (asks[].awaiting.peers) — same rule as origin: a peer the
+  // card's own kernel resolved (host "") is LOCAL TO THAT KERNEL, so attribute it here and prefix
+  // its sid for routing; an already-hosted peer passes through untouched (the user 2026-08-23).
+  if (out.awaiting && typeof out.awaiting === "object" && Array.isArray(out.awaiting.peers))
+    out.awaiting = { ...out.awaiting, peers: out.awaiting.peers.map((p: Record<string, unknown>) =>
+      p && typeof p === "object" && typeof p.sid === "string" && !p.host
+        ? { ...p, host, sid: prefixId(host, p.sid) } : p) };
   // a timeline lane's fork parent (sessions[].branch.fromId): the view looks it up against PREFIXED
   // lane ids (vidx), so an unprefixed remote parent silently missed and the branch connector never
   // drew for remote lanes (found 2026-08-17 auditing the merge)
@@ -306,7 +315,7 @@ export function mergeHostOrder(perHost: Record<string, readonly string[]>, hostS
  *  (local first); keep the scalar chrome fields (now, dismissedCount, flags) from the LOCAL host, since the
  *  dashboard's own controls are local-authoritative. Ids are already prefixed by prefixInbound. */
 export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly string[],
-                               view: readonly string[] = []): any {
+                               view: readonly string[] = [], deadHosts: readonly string[] = []): any {
   const local = perHost[LOCAL] || {};
   const merged: any = { ...local, type: "feed", items: [], asks: [], working: [], awaiting: [], stateUnknown: [], order: [], sessions: [] };
   // `ledgers` drives the FLEET pane (it rides the same feed message). Only include it once at least one host
@@ -363,6 +372,17 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
   if (syncs.length) merged.syncNotices = syncs;
   else delete merged.syncNotices;
   merged.buildIds = buildIds;
+  // Hosts ATTACHED but yet to contribute a feed payload (the user 2026-08-25: after attaching, the
+  // sessions land via the faster tabOrder/timeline channels while the cards trail with no cue) —
+  // the sessions-shown/cards-pending window, named per host so the board can say cards are coming.
+  // Presence in perHost is the event: an EMPTY contribution is a valid arrival (the host had nothing
+  // to send) and retires the hint; a detach deletes the entry (dropHost), so a reattach re-pends and
+  // the hint re-arms identically — no timers anywhere in this signal. The local kernel never pends.
+  merged.pendingHosts = hostSeq.filter((h) => h !== LOCAL && !(h in perHost));
+  // …and which of those waits are on a DEAD link (the caller knows its sockets): the board says
+  // THAT instead of an open-ended wait — the fail-loudly rule; still retired only by the real
+  // events (a payload arriving, or the detach dropping the host from hostSeq).
+  merged.pendingDead = merged.pendingHosts.filter((h: string) => deadHosts.includes(h));
   return merged;
 }
 
@@ -653,7 +673,12 @@ export class FederationManager {
       this.lastFeedCounts = sig;
       this.diag("feedmerge", { counts });
     }
-    window.dispatchEvent(new MessageEvent("message", { data: mergeHostFeeds(this.perHostFeed, this.hostSeq, this.view()) }));
+    const dead = this.hostSeq.filter((h) => {
+      if (h === LOCAL) return false;
+      const c = this.conns.get(h);
+      return !c || !c.ws || c.ws.readyState === 3;   // no socket / closed = a dead link right now
+    });
+    window.dispatchEvent(new MessageEvent("message", { data: mergeHostFeeds(this.perHostFeed, this.hostSeq, this.view(), dead) }));
   }
 
   private emitMergedTimeline(bars: boolean): void {

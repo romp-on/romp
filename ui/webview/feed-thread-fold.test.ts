@@ -28,14 +28,14 @@ test("it is a caret, and it says which way it will go", () => {
 
 test("folding hides that thread's cards and counts them onto the header", () => {
   // the header stands in for the run: entries are counted, not rendered
-  assert.match(FEED, /if \(collapsedThreads\.has\(s\)\) \{ if \(head\) head\.folded\+\+; continue; \}/);
-  assert.match(FEED, /foldn\.textContent = e\.folded === 1 \? "1 card" : e\.folded \+ " cards";/);
+  assert.match(FEED, /if \(collapsedThreads\.has\(s\)\) \{ if \(head\) head\.folded \+= entryCards\(e\); continue; \}/);
+  assert.match(FEED, /foldn\.textContent = String\(e\.folded\);/, "bare number (the user 2026-08-26) — words on hover only");
   assert.match(FEED, /foldn\.style\.display = shut && e\.folded \? "" : "none";/);
 });
 
 test("the column count reports the BOARD, not what you have open", () => {
   // folding a thread must not read as its work having left the column
-  assert.match(FEED, /const nCards = \(es: Entry\[\]\) => es\.reduce\(\(n, e\) => n \+ \(e\.kind === "sess" \? e\.folded : 1\), 0\);/);
+  assert.match(FEED, /const nCards = \(es: Entry\[\]\) => es\.reduce\(\(n, e\) => n \+ entryCards\(e\), 0\);/);
 });
 
 test("the fold is per-SESSION, so a card that does not exist yet inherits it", () => {

@@ -1,6 +1,7 @@
-// The feed's Clear-all / Undo-clear controls sit in a small bordered sub-pane in the BOTTOM-RIGHT of
-// the feed, not a full-width footer bar, and the button label is two words "Undo clear" (the user
-// 2026-06-16). The chat renderer has no jsdom harness, so — like the ledger tests — pin at the source.
+// The feed's Clear-all / Undo controls sit in a small bordered sub-pane in the BOTTOM-RIGHT of
+// the feed, not a full-width footer bar, and the restore button reads one word "Undo" (the user
+// 2026-08-24, dropping 2026-06-16's "Undo clear" — it sits right beside Clear all, context enough).
+// The chat renderer has no jsdom harness, so — like the ledger tests — pin at the source.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -9,8 +10,9 @@ import * as path from "node:path";
 const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.css"), "utf8");
 
-test("the Undo-clear button label is two words", () => {
-  assert.match(FEED, /b\.textContent = "Undo clear"/);
+test("the restore button label is the one word Undo", () => {
+  assert.match(FEED, /b\.textContent = "Undo";/);
+  assert.doesNotMatch(FEED, /textContent = "Undo clear"/);
   assert.doesNotMatch(FEED, /"UndoClear"/);
 });
 
@@ -35,9 +37,9 @@ test("when the feed stacks (narrow), the columns read Completed → Blocked → 
   // the side-by-side DOM order stays Working/Blocked/Completed; a container query stacks them and `order`
   // re-sequences ONLY the stacked case: done first (moved up from the middle, superseding the 2026-07-08
   // Blocked-first order), then needs-you, then still-running.
-  assert.match(CSS, /@container \(max-width: 540px\) or style\(--romp-stack: on\) \{[\s\S]*?\.feed-cols \{ flex-direction: column; \}/);
-  assert.match(CSS, /\.feed-col\.col-completed\s+\{ order: var\(--stack-order, 1\); \}/);   // the DEFAULT — a
-  // dragged section overrides via --stack-order (feed-col-fold.test.ts owns that rule)
-  assert.match(CSS, /\.feed-col\.col-needsInput \{ order: var\(--stack-order, 2\); \}/);
-  assert.match(CSS, /\.feed-col\.col-asks\s+\{ order: var\(--stack-order, 3\); \}/);
+  assert.match(CSS, /@container \(max-width: 540px\) or style\(--romp-stack: on\) \{[\s\S]*?\.feed-cols \{ flex-direction: column; align-items: stretch; \}/);
+  assert.match(CSS, /\.feed-col\.col-completed\s+\{ order: var\(--col-order, 1\); \}/);   // the DEFAULT — a
+  // dragged section overrides via --col-order (feed-col-fold.test.ts owns that rule)
+  assert.match(CSS, /\.feed-col\.col-needsInput \{ order: var\(--col-order, 2\); \}/);
+  assert.match(CSS, /\.feed-col\.col-asks\s+\{ order: var\(--col-order, 3\); \}/);
 });

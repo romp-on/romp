@@ -82,6 +82,45 @@ iso() { mkdir -p "$XDG_STATE_HOME/romp"; printf '{"%s":{"postalServiceOff":true}
     [ "$status" -eq 0 ]
     [[ "$output" == *"alpha (you)"* ]]
     [[ "$output" == *"beta"* ]]
+    # every row carries its short stable id (2026-08-24): the rename-proof address, and what a
+    # duplicate-name refusal's candidates can be matched against
+    [[ "$output" == *"alpha (you) · uuid-a"* ]]
+    [[ "$output" == *"beta · uuid-b"* ]]
+}
+
+# ── comment threads (the user 2026-08-22): a thread is a real forked session hidden until promotion;
+# it mails its PARENT under its own name, is addressable for replies, and stays a marked minor player ──
+addthread() {
+    python3 - "$ROMP_SESSIONS_FILE" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))
+rows.append({"id": "uuid-t", "name": "alpha-comment-1", "state": "working", "dir": "", "working": "",
+             "backend": "sdk", "thread": True, "parent": "uuid-a", "lastSid": "uuid-t"})
+json.dump(rows, open(sys.argv[1], "w"))
+PY
+}
+
+@test "a comment thread mails its parent under its own name; its own name still self-refuses" {
+    addthread
+    CLAUDE_CODE_SESSION_ID=uuid-t run "$POSTAL" send --kind coordinate alpha "the anchor section needs a second pass"
+    [ "$status" -eq 0 ]
+    [ "$(cnt "$(mb uuid-a)/new")" = "1" ]
+    grep -q "From: alpha-comment-1" "$(mb uuid-a)/new/"*
+    # the self-send refusal keys on the THREAD's own identity now, not the parent's
+    CLAUDE_CODE_SESSION_ID=uuid-t run "$POSTAL" send --kind coordinate alpha-comment-1 "note to self"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"own name"* ]]
+}
+
+@test "the parent replies to a thread by name, and agents marks the thread row" {
+    addthread
+    run "$POSTAL" send --kind coordinate alpha-comment-1 "good catch, apply it"
+    [ "$status" -eq 0 ]
+    [ "$(cnt "$(mb uuid-t)/new")" = "1" ]
+    grep -q "From: alpha" "$(mb uuid-t)/new/"*
+    run "$POSTAL" agents
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(thread of alpha)"* ]]
 }
 
 @test "send delivers into the recipient's maildir" {

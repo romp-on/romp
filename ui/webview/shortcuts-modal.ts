@@ -46,9 +46,9 @@ const CSS =
   ".rkeys-row:hover .rkeys-act{visibility:visible}" +
   ".rkeys-act:hover{background:#333;color:#e8eaed}" +
   // recording / conflict states: the accent marks "the dialog is listening", never a status color
-  ".rkeys-row.recording{background:rgba(156,210,255,0.10);outline:1px solid var(--accent,#9cd2ff)}" +
+  ".rkeys-row.recording{background:rgba(156,210,255,0.12);outline:1px solid var(--accent,#9cd2ff)}" +
   ".rkeys-hint{flex:0 0 auto;color:var(--accent,#9cd2ff);font-size:11px}" +
-  ".rkeys-conflict{flex:0 0 auto;color:#d29922;font-size:11px}" +
+  ".rkeys-conflict{flex:0 0 auto;color:var(--warn,#d7a23a);font-size:11px}" +
   "#rkeys-fixed{flex:0 0 auto;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)}" +
   "#rkeys-fixed .rkeys-sec{color:#9aa0a6;font-size:11px;margin-bottom:2px}" +
   "#rkeys-fixed .rkeys-row{padding:2px 8px}" +

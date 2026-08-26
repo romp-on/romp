@@ -16,12 +16,12 @@ test("COMPACTNESS (the user 2026-07-07; action corner 2026-08-08): time trails t
   // the TIME now trails the title on row1 (both cards); row3 holds the Background/Summary/Sub-goals toggles
   assert.match(FEED, /row1\.append\(title, time\)/, "the time trails the title on row1");
   assert.match(FEED, /row3\.append\(bgBtn, takeBtn, stallBtn, subBtn, taskBtn, actions\)/, "ask card: row3 is Background/Summary/Stalled/Sub-goals/Waiting-on-task (+ rare Retry/Revive)");
-  assert.match(FEED, /actions\.append\(apiRetry, revive,/, "…so the action row is Retry/Revive (+ resume-gate) only (Clear + toggles moved up)");
+  assert.match(FEED, /actions\.append\(revive,/, "…so the action row is Retry/Revive (+ resume-gate) only (Clear + toggles moved up)");
   // the action corner (the user 2026-08-08): Continue+Clear ride the END of row1 in every mode; the
   // name row keeps only identity + chips
   assert.match(FEED, /btns\.append\(cont, clr\);/, "ask card: Continue left of Clear in the action corner");
   assert.match(FEED, /row1\.append\(btns\);/, "the corner floats from the END of row1's flow (title+time keep first claim)");
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/, "ask card: the name row is identity + chips only");
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/, "ask card: the name row is identity + chips only");
   // its tooltip is plain-spoken (the user 2026-07-13): "clear this task", not the inbox-zero jargon
   assert.match(FEED, /clr\.title = "clear this task";/);
   assert.match(FEED, /btns\.append\(clr\);\s*\n\s*row1\.append\(btns\);\s*\n\s*row2\.append\(idwrap\);/, "group card: Clear in row1's action corner, name row is the name only");
@@ -60,7 +60,7 @@ test("courier handoff: the '↪ from <sender>' origin marker is wired and styled
   assert.match(FEED, /const origin = el\("a", "fask-origin"\); origin\.style\.display = "none"/);
   // it's a direct child of the wrapping row2 (NOT nested in idwrap) so a narrow card wraps it under the
   // name instead of overlapping the chips (the user 2026-06-20)
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/, "the origin marker rides the name row beside the chips");
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/, "the origin marker rides the name row beside the chips");
   assert.doesNotMatch(FEED, /idwrap\.append\(name, origin\)/, "origin is no longer nested inside idwrap");
   // populated from it.origin in the update path: a dim gray "↪ from" + the peer in the bold session-name
   // style (its own identity colour); click opens the sender (the user 2026-06-16)
@@ -77,7 +77,7 @@ test("courier handoff: the '↪ from <sender>' origin marker is wired and styled
 test("the follow-up badge serves ONLY '↩ re-judging' now — the '↻ Followed up' chip was removed (the user 2026-07-01)", () => {
   assert.match(FEED, /el\("span", "fask-followedup"\); fupBadge\.textContent = "↩ re-judging"/);
   // the badge rides the SESSION-NAME row (right-justified), NOT the bottom action row
-  assert.match(FEED, /row2\.append\(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge\)/);
   // the CARD badge block is now recheck-only: recheck → "↩ re-judging", else hidden. No followupPending branch.
   // (The modal tree's per-node "↻ Followed up" chip, ftree-followedup, is a separate thing and stays.)
   assert.match(FEED, /if \(it\.recheck\) \{\s*\n\s*a\._followedup\.style\.display = "";\s*\n\s*a\._followedup\.textContent = "↩ re-judging";[\s\S]*?\} else \{\s*\n\s*a\._followedup\.style\.display = "none";\s*\n\s*\}/);
@@ -89,10 +89,10 @@ test("session-STATE badges (⏸ approval / ⚠ API error) ride the name row; the
   // the bug: ⏸ approval + buttons + Clear in the SAME footer row shoved them off a narrow card.
   // Fix: the state badges move up beside the session name; the action row holds only the buttons.
   // The ⏳ "awaiting" chip was REMOVED (the user 2026-07-04) — the body "Awaiting background agents" box says it.
-  assert.match(FEED, /idwrap\.append\(retryBadge, apiBadge, jauthBadge, blkBadge\)/,
-    "state badges sit beside the name (no awaiting chip; retrying joined 2026-07-09, judge-auth 2026-08-12)");
+  assert.match(FEED, /idwrap\.append\(name\);/,
+    "idwrap holds ONLY the name now (2026-08-24): grouped mode hides it wholesale, so every state badge moved to row2 direct children where both modes render them");
   assert.doesNotMatch(FEED, /waitBadge/, "the redundant awaiting chip element is gone entirely");
-  assert.match(FEED, /actions\.append\(apiRetry, revive,/, "action row = Retry/Revive (+ resume-gate) only (Clear moved to the name row 2026-07-07)");
+  assert.match(FEED, /actions\.append\(revive,/, "action row = Retry/Revive (+ resume-gate) only (Clear moved to the name row 2026-07-07)");
   assert.match(FEED, /a\._blocked = blkBadge;/);
 });
 
@@ -129,4 +129,19 @@ test("a long no-space token (file/func/type name) WRAPS instead of overflowing t
   // fit — the title used break-word (kept the longest word as min-width) and the summary had NO wrap at all.
   assert.match(CSS, /\.fcard-title \{[^}]*overflow-wrap: anywhere/);
   // (the .fask-blockwhy/.fask-donewhy auto-line was removed 2026-06-27, so its wrap rule is gone too)
+});
+
+// ── grouped-mode cards carry their state badges (2026-08-24, the Retry-fix audit's finding #1):
+// grouped mode hides idwrap wholesale (the name lives on the session header), which silently
+// blanked every badge inside it — ⚠ retrying-since, judge-auth, and the ⏸ approval chip never
+// showed on grouped-mode cards. Every state badge is a DIRECT row2 child now; placement only.
+test("every session-state badge is a direct row2 child — visible in grouped AND flat mode", () => {
+  assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin,/);
+  assert.match(FEED, /idwrap\.append\(name\);/, "idwrap = the name alone; hiding it hides nothing else");
+  assert.doesNotMatch(FEED, /idwrap\.append\([^)]*(retryBadge|apiBadge|jauthBadge|blkBadge)/,
+    "no state badge ever returns to the grouped-mode-hidden wrap");
+  // the grouped-mode liveness check reads DIRECT children, so a visible badge keeps row2 shown
+  assert.match(FEED, /const r2live = \(Array\.from\(r2\.children\) as HTMLElement\[\]\)\.some\(\(c\) => c\.style\.display !== "none"\);/);
+  // …and only idwrap (the name) is what grouped mode drops
+  assert.match(FEED, /\(\(a\._name as HTMLElement\)\.parentElement as HTMLElement\)\.style\.display = gmode \? "none" : "";/);
 });

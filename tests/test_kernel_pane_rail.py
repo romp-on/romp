@@ -34,7 +34,9 @@ class PaneRailTest(unittest.TestCase):
         # the by-session view is labelled "Outline" (the user 2026-06-29); the data-pane KEY stays 'fleet' internally
         self.assertIn("<div class=rail-btn data-pane=fleet>Outline</div>", self.html)
         self.assertIn("<div class=rail-btn data-pane=feed>Feed</div>", self.html)
-        self.assertIn("<div class=rail-btn data-pane=timeline>Timeline</div>", self.html)
+        # the LABEL is Sessions (the user 2026-08-24: the pane outgrew "Timeline" — filter, tags, lane
+        # controls); the data-pane key stays 'timeline', the fleet/Outline precedent
+        self.assertIn("<div class=rail-btn data-pane=timeline>Sessions</div>", self.html)
         # Chat before Timeline before Outline(fleet) before Feed in the rail (fixed user-chosen order)
         idxs = [self.html.index("data-pane=" + k) for k in ("chat", "timeline", "fleet", "feed")]
         self.assertEqual(idxs, sorted(idxs), "rail order must be Chat, Timeline, Outline, Feed")

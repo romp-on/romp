@@ -188,3 +188,18 @@ test("the view exposes revealEvent, and it never drives the chat", () => {
   assert.match(body, /this\._pulseFocus\(/, "...and pulses the glyph there");
   assert.doesNotMatch(body, /openChat/, "but never calls back into the chat the click came from");
 });
+
+test("dispatchFrame routes tagEditFailed to the panel — the LOUD half of remote-tag edits (federation v1)", () => {
+  const got: any[] = [];
+  const panel = { tagEditFailed: (m: any) => got.push(m) };
+  assert.equal(dispatchFrame(panel, { type: "tagEditFailed", host: "TESTHOST-A", name: "team", error: "not reachable" }), true);
+  assert.equal(got[0].error, "not reachable");
+  assert.equal(dispatchFrame({}, { type: "tagEditFailed" }), false, "an older panel is skipped, never thrown at");
+  // …and the kernel's inline boot + the editTag outbound hook stay mirrored (the pinned pair)
+  const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
+  assert.match(KERNEL, /else if\(m\.type==="tagEditFailed"&&panel\.tagEditFailed\)panel\.tagEditFailed\(m\);\nelse if\(m\.type==="openViewsDialog"&&panel\._openViewsDialog\)panel\._openViewsDialog\(null\);\}\);/);
+  assert.match(KERNEL, /window\.__rompTimelineEditTag=function\(edit\)\{post\(\{type:"editTag",edit:edit\}\);\};/);
+  const BOOT = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "timeline-boot.ts"), "utf8");
+  assert.match(BOOT, /__rompTimelineEditTag: \(edit: unknown\) => post\(\{ type: "editTag", edit \}\),/);
+});
+

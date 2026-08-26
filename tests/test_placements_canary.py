@@ -81,27 +81,87 @@ RECORDS = [
      "parentUuid": None, "logicalParentUuid": "a4",
      "compactMetadata": {"trigger": "manual", "preTokens": 90000}},
     aline(T0 + 4020, "Resuming after compaction.", "a5", "cb1"),
+    # a DETACHED live manual /compact (2026-08-19): boundary+summary land as a side branch
+    # (parentUuid null + logicalParentUuid; the conversation chains through the /compact
+    # caveat/wrapper/stdout records) and the adoption repair splices them back in AFTER the
+    # stdout. Pinned here because this class changes BOTH identity dimensions when it drifts:
+    # the splice position decides whether the stdout atom mints a phantom triggerless WORK
+    # unit, and the replay-dedup arming decides whether the user's next typed prompt — u7
+    # deliberately repeats u3's text — survives in the atom set at all.
+    uline(T0 + 5000, "now wire the audit log into the export page", "u6", "a5"),
+    aline(T0 + 5060, "Wired the audit log through.", "a6", "u6"),
+    {"type": "system", "subtype": "compact_boundary", "timestamp": iso(T0 + 5400), "uuid": "cb2",
+     "parentUuid": None, "logicalParentUuid": "a6",
+     "compactMetadata": {"trigger": "manual", "preTokens": 90000, "postTokens": 4000}},
+    {"type": "user", "timestamp": iso(T0 + 5400), "uuid": "cs2", "parentUuid": "cb2",
+     "isCompactSummary": True, "isVisibleInTranscriptOnly": True, "promptId": "pc2",
+     "message": {"role": "user", "content": "synthetic summary of the audit-log work"}},
+    {"type": "user", "timestamp": iso(T0 + 5300), "uuid": "rt2", "parentUuid": "a6",
+     "isMeta": True, "promptId": "pc2", "message": {"role": "user", "content": "/compact"}},
+    {"type": "user", "timestamp": iso(T0 + 5300), "uuid": "cw2", "parentUuid": "rt2", "promptId": "pc2",
+     "message": {"role": "user", "content": "<command-name>/compact</command-name>\n"
+                                            "<command-message>compact</command-message>\n"
+                                            "<command-args></command-args>"}},
+    {"type": "user", "timestamp": iso(T0 + 5400), "uuid": "so2", "parentUuid": "cw2", "promptId": "pc2",
+     "message": {"role": "user", "content": "<local-command-stdout>Compacted "
+                                            "(ctrl+o to see full summary)</local-command-stdout>"}},
+    uline(T0 + 5500, "now rename the exported CSV columns to snake_case", "u7", "so2"),
+    aline(T0 + 5560, "Renamed them again on the new export page.", "a7", "u7"),
 ]
 
 # The pinned derivation, recorded under PLACEMENTS_V = 7 (2026-08-01; the derivation itself is unchanged
-# since v6 — v7 seals for a GROWN atom set, the replay-guard scoping. The LAST id — a text-less segment
-# — moved off the shared sha1('') hash da39a3ee onto its anchor atom's uuid, so text-less seams no longer
-# alias each other; the four text-bearing ids above are unchanged, they still key on content).
+# since v6 — v7 seals for a GROWN atom set, the replay-guard scoping. The LAST id of the first five — a
+# text-less segment — moved off the shared sha1('') hash da39a3ee onto its anchor atom's uuid, so text-less
+# seams no longer alias each other; the four text-bearing ids above it are unchanged, they still key on
+# content). The last four ids pin the detached manual-compact block (2026-08-19, no bump — additions only):
+# u6's ask, the /compact command segment, the adopted boundary's own text-less segment, and u7's
+# repeated-text ask (same text hash as u3's id, its own t — present at all only because the adopted
+# boundary does not arm the replay dedup).
 EXPECTED_SEG_IDS = [
     SID + ":1780000000:ca8d36fd",
     SID + ":1780000120:f03c5f4f",
     SID + ":1780000240:686c9d66",
     SID + ":1780000330:f3320ed1",
     SID + ":1780004000:d780b71b",
+    SID + ":1780005000:d105998b",
+    SID + ":1780005300:9b15c581",
+    SID + ":1780005400:06676388",
+    SID + ":1780005500:686c9d66",
 ]
+
+# Dimension 2 pinned EXPLICITLY (WHICH atoms parse, in rendered order): seg ids alone cannot see an
+# atom that changes segments without changing any id — the detached compact's stdout (so2) belongs to
+# the /compact COMMAND turn (cb2 sorts after it), and u7 must be in the set at all.
+EXPECTED_ATOM_UUIDS = [
+    "u1", "a1", "u2", "a2", "u3", "a3", "att1", "a4", "cb1", "a5",
+    "u6", "a6", "cw2", "so2", "cb2", "u7", "a7",
+]
+
+# The judge-visible units (seg id, kind, human): the /compact command segment and the adopted
+# boundary's work-less segment yield NONE — a drift that mints a unit here replays as a fresh card
+# in every dormant session that ever compacted manually. (cb1's unit is the ATTACHED shape's
+# continuation work — a5 chains through the boundary — and predates this block.)
+EXPECTED_UNITS = [
+    (SID + ":1780000000:ca8d36fd", "work", True),
+    (SID + ":1780000120:f03c5f4f", "nudge", False),
+    (SID + ":1780000240:686c9d66", "work", True),
+    (SID + ":1780000330:f3320ed1", "work", True),
+    (SID + ":1780004000:d780b71b", "work", False),
+    (SID + ":1780005000:d105998b", "work", True),
+    (SID + ":1780005500:686c9d66", "work", True),
+]
+
+
+def _parse_fixture():
+    with tempfile.TemporaryDirectory() as td:
+        tp = Path(td) / (SID + ".jsonl")
+        tp.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+        return jd.parsed_session(SID, [str(tp)], T0 + 4000)
 
 
 class PlacementIdentityCanary(unittest.TestCase):
     def test_seg_id_derivation_is_pinned_to_placements_v(self):
-        with tempfile.TemporaryDirectory() as td:
-            tp = Path(td) / (SID + ".jsonl")
-            tp.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
-            sess = jd.parsed_session(SID, [str(tp)], T0 + 4000)
+        sess = _parse_fixture()
         ids = [seg["id"] for turn in sess["turns"] for seg in em.segments(turn)]
         self.assertEqual(
             ids, EXPECTED_SEG_IDS,
@@ -110,6 +170,23 @@ class PlacementIdentityCanary(unittest.TestCase):
             "\nIn THIS commit: bump jd.PLACEMENTS_V (seals v(n-1) stores' ready-unplaced units at the"
             "\nnext pass) and re-pin EXPECTED_SEG_IDS to the new derivation. Current PLACEMENTS_V=%d."
             % jd.PLACEMENTS_V)
+
+    def test_atom_set_is_pinned(self):
+        # Dimension 2 of placement identity: WHICH atoms parse, and in what order. A change here
+        # without a bump replays dormant history (the 2026-07-10 absorbed-atom incident) or — worse —
+        # silently DROPS a real message (the 2026-08-19 manual-compact replay-dedup incident, which
+        # ate u7's shape while every pinned seg id of the day still matched).
+        sess = _parse_fixture()
+        self.assertEqual([a.get("uuid") for t in sess["turns"] for a in t["atoms"]],
+                         EXPECTED_ATOM_UUIDS)
+
+    def test_plan_units_are_pinned(self):
+        # The judge-visible face of the same identity: a unit minted from a segment that never
+        # yielded one before (the 2026-08-19 phantom "Compacted (ctrl+o…)" WORK unit) files fresh
+        # cards for every manual compact in every existing session at the next kernel restart.
+        sess = _parse_fixture()
+        units = jd.plan_units({"turns": sess["turns"], "rompUuid": sess["rompUuid"]})
+        self.assertEqual([(u[0], u[1], u[4]) for u in units], EXPECTED_UNITS)
 
     def test_placements_v_is_current(self):
         # The pins above were recorded under this version; a bump without re-pinning (or re-pinning

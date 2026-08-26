@@ -72,7 +72,7 @@ class MergeCarriesBgTasks(unittest.TestCase):
             why = km._session_awaiting(SID, "/nonexistent", True)
         finally:
             km._tmux_sessions = saved_sessions
-        self.assertEqual(why, {"kind": "task",
+        self.assertEqual(why, {"kind": "task", "since": 1,   # the dispatch stamp → the chips' elapsed readout (the user 2026-08-23)
                                "why": "waiting on a background task: 20-minute timer for campaign-start check"})
 
 

@@ -150,7 +150,7 @@ def _self_row():
     sid = _self_id()
     if not sid:
         return None
-    agents = local_agents()
+    agents = local_agents(threads=True)   # a comment thread resolves to its OWN row/name (2026-08-22)
     return (next((a for a in agents if a.get("id") == sid), None)
             or next((a for a in agents if a.get("lastSid") == sid), None))
 
@@ -265,7 +265,7 @@ def _tl_append(fname, obj):
         pass
 
 def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
-            relay_mid="", relay_via=""):
+            relay_mid="", relay_via="", tracked=False):
     # park=True marks a HANDOFF parked for a session that's currently dead. The
     # maildir is keyed by the session UUID (which `romp resume` reuses), so the
     # message simply waits on disk until that session is revived — delivered then,
@@ -318,6 +318,10 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         ev["park"] = True
     if kind:
         ev["kind"] = kind                            # additive (consumer contract above)
+    if tracked:
+        ev["tracked"] = True                         # additive (consumer contract above): report-back
+        #                                              delegation — the row is the flag's ONE record;
+        #                                              no header, no prose (the recipient reads nothing)
     if from_host:
         ev["from_host"] = from_host                  # additive (consumer contract above)
     _tl_append("messages.jsonl", ev)
@@ -424,7 +428,10 @@ def _queue_read_receipt(meta, unread=False, dmid=""):
 #   1. The `<!-- romp-msg-id: <id> -->` HTML-comment marker emitted after each
 #      message body by format_inbox + format_push — <id> joins to messages.jsonl.
 #   2. The messages.jsonl "sent" event schema written by deliver():
-#      {ev:"sent", id, from, from_id, to_id, body, t, park?}  (park is additive).
+#      {ev:"sent", id, from, from_id, to_id, body, t, park?, kind?, from_host?, tracked?}
+#      (park/kind/from_host/tracked are all additive; `tracked` marks a report-back delegation —
+#      kind stays "delegate" — whose sender-side view is primary: the kernel courier reads it off
+#      this row, never off the message prose).
 # The HUMAN-FACING prose (banner text, headers, the "⏸ parked" tag, REPLY_HINT) is
 # NOT a contract — consumers must not parse it, so it stays free to change.
 
@@ -465,6 +472,21 @@ def format_agents(agents, me, me_id=""):
         # the reader most needs to know which row is theirs (see resolve_recipient).
         mine = (a.get("id") == me_id) if me_id else (a["name"] == me)
         tag = " (you)" if mine else (" [remote]" if a.get("remote") else "")
+        if a.get("thread") and not mine:
+            # a comment thread of one of these sessions: addressable for replies, but a minor player —
+            # say whose it is so nobody mistakes it for a full peer (the user 2026-08-22)
+            pn = next((x.get("name") for x in agents if x.get("id") == a.get("parent")), "")
+            tag = " (thread of %s)" % (pn or "a session here")
+        # host prefix + short stable id (the user 2026-08-24): a duplicate-name refusal lists its
+        # candidates as host:name, and the uuid is the rename-proof address — without either on the
+        # row, the reader matched an error message by guesswork. Short form: enough to disambiguate
+        # AND to paste as a recipient (resolve_recipient matches an unambiguous id prefix of 8+
+        # chars) — progressive disclosure, not a wall of hex.
+        rid = str(a.get("id") or "")
+        host = rid.split(":", 1)[0] if (a.get("remote") and ":" in rid) else ""
+        disp = ("%s:%s" % (host, a["name"])) if (host and not str(a["name"]).startswith(host + ":")) else a["name"]
+        short = (rid.rsplit(":", 1)[-1] if ":" in rid else rid)[:8]
+        sid_tag = (" · %s" % short) if short else ""
         br = ("  [%s]" % a["branch"]) if a.get("branch") else ""
         wk = ""
         if a.get("working"):
@@ -476,7 +498,7 @@ def format_agents(agents, me, me_id=""):
             st = a.get("state", "")
             stale = "  (idle now — claim may be stale)" if st and st != "working" else ""
             wk = "  — %s%s" % (a["working"], stale)
-        lines.append("  %s%s%s%s" % (a["name"], tag, br, wk))
+        lines.append("  %s%s%s%s%s" % (disp, tag, sid_tag, br, wk))
     return "\n".join(lines)
 
 def _hhmm_epoch(t):
@@ -494,8 +516,15 @@ def format_receipts(recs):
             st = "recalled %s" % _hhmm_epoch(r["recalled"])
         elif r.get("bounced"):
             st = "bounced %s — undeliverable, returned to you" % _hhmm_epoch(r["bounced"])
-        elif r.get("parked"):                  # cross-host, link down: waiting in the outbox
-            st = "parked for %s (unreachable) · id %s" % (r["parked"], r.get("id", "?"))
+        elif r.get("parked"):                  # cross-host, still in the outbox awaiting relay
+            # "(unreachable)" ONLY when the link is actually down (the user 2026-08-24): a healthy
+            # queue is normal transit, not a failure. An older bus omits parkedUp — claim nothing.
+            if r.get("parkedUp"):
+                st = "queued for relay to %s · id %s" % (r["parked"], r.get("id", "?"))
+            elif "parkedUp" in r:
+                st = "parked for %s (unreachable) — delivers on reconnect · id %s" % (r["parked"], r.get("id", "?"))
+            else:
+                st = "parked for %s · id %s" % (r["parked"], r.get("id", "?"))
         elif r.get("relayed"):                 # landed on the peer host; its read receipt hasn't come back
             st = "delivered %s (not read yet) · id %s" % (_hhmm_epoch(r["relayed"]), r.get("id", "?"))
         else:                                  # still unread -> recallable; show the id to target it
@@ -509,7 +538,7 @@ HEARTBEATS = {}        # id -> (name, last_seen_epoch)   (remote presence)
 STREAKS = {}           # id -> (count, last_epoch)        (loop guard)
 _lock = threading.Lock()
 
-def _kernel_sessions():
+def _kernel_sessions(threads=False):
     """LIVE romp sessions (tmux + SDK) from the kernel's unified GET /sessions — the kernel owns the backend
     query (TmuxBackend for tmux liveness + the SDK registry), so the bus enumerates sessions WITHOUT shelling
     tmux and WITHOUT reading the SDK registry directly: ONE source. Loopback, authorized with X-Romp-Token
@@ -523,12 +552,16 @@ def _kernel_sessions():
     if seam:
         try:
             data = json.loads(Path(seam).read_text())
-            return data if isinstance(data, list) else []
+            if not isinstance(data, list):
+                return []
+            # the seam mirrors the route: thread rows ride only when asked (the user 2026-08-22)
+            return data if threads else [r for r in data if not (isinstance(r, dict) and r.get("thread"))]
         except Exception:
             return []
     import urllib.request
     try:
-        req = urllib.request.Request(KERNEL_BASE + "/sessions", headers={"X-Romp-Token": SERVE_TOKEN})
+        req = urllib.request.Request(KERNEL_BASE + "/sessions" + ("?threads=1" if threads else ""),
+                                     headers={"X-Romp-Token": SERVE_TOKEN})
         with urllib.request.urlopen(req, timeout=2) as r:
             data = json.loads(r.read().decode("utf-8"))
         return data if isinstance(data, list) else []
@@ -536,19 +569,29 @@ def _kernel_sessions():
         return []
 
 
-def local_agents():
+def local_agents(threads=False):
     """LIVE local sessions (tmux + SDK) as postal agent rows, read from the kernel's unified GET /sessions.
     The kernel merges both backends, so an SDK session is a live agent here too — a send to an open SDK
-    session delivers instead of parking as dead (the user via ui, 2026-06-26)."""
+    session delivers instead of parking as dead (the user via ui, 2026-06-26).
+
+    `threads` (the user 2026-08-22): also include COMMENT-THREAD sessions — real forked sessions the
+    kernel hides from tabs/lanes/cards until promotion. Opt-in per consumer so the default listing and
+    every other reader stay exactly as they were: self-identity, recipient resolution, and the agents
+    listing pass True (a thread mails its parent under its OWN name and is addressable for replies);
+    everything else never sees them."""
     res = []
-    for s in _kernel_sessions():
+    for s in _kernel_sessions(threads=threads):
         sid = s.get("id")
         if not sid:
             continue
-        res.append({"name": s.get("name") or sid[:8], "id": sid, "remote": False,
-                    "working": s.get("working", ""), "dir": s.get("dir", ""),
-                    "lastSid": s.get("lastSid", ""),   # the session's CURRENT transcript fsid (self-identity join)
-                    "state": s.get("state", "")})   # state: working/idle/waiting/... → working-note freshness
+        row = {"name": s.get("name") or sid[:8], "id": sid, "remote": False,
+               "working": s.get("working", ""), "dir": s.get("dir", ""),
+               "lastSid": s.get("lastSid", ""),   # the session's CURRENT transcript fsid (self-identity join)
+               "state": s.get("state", "")}   # state: working/idle/waiting/... → working-note freshness
+        if s.get("thread"):
+            row["thread"] = True
+            row["parent"] = s.get("parent") or ""
+        res.append(row)
     return res
 
 
@@ -598,8 +641,8 @@ def _publish_working(sid, text):
     so an SDK session can publish a note too."""
     return _kernel_post("/working", {"id": str(sid), "text": text}) is not None if sid else False
 
-def all_agents():
-    agents = local_agents()
+def all_agents(threads=False):
+    agents = local_agents(threads=threads)
     local_ids = {a["id"] for a in agents}
     now = time.time()
     for sid, (name, ts) in list(HEARTBEATS.items()):
@@ -689,8 +732,23 @@ def resolve_recipient(to, frm_id=""):
     here = self_host()
     # Everything this bus can deliver to itself: local sessions plus heartbeating remotes. A
     # host qualifier naming somebody ELSE takes them all out of the running.
+    # a uuid-shaped `to` addresses the STABLE session id (the user 2026-08-23, via the experiment
+    # machinery's cost-out: names are labels that renames retire; the sid survives them). An id is
+    # unique by construction, so the ambiguity arm below never fires for it; the self-send check
+    # still does — mailing your own sid is the same loopback as mailing your own name.
+    by_id = bool(re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", bare))
     direct_all = ([] if (want_host and want_host != here)
-                  else [a for a in all_agents() if a["name"] == bare])
+                  else [a for a in all_agents(threads=True)
+                        if (a.get("id") == bare if by_id else a["name"] == bare)])   # threads addressable for replies
+    if not direct_all and not by_id and not want_host             and re.fullmatch(r"[0-9a-fA-F][0-9a-fA-F-]{7,35}", bare):
+        # a SHORT id — the ` · <8-char>` form every list_agents row now carries (the user
+        # 2026-08-24) — addresses by unambiguous id PREFIX, so the row is enough to act on. An
+        # exact NAME match always wins first (a name may be hex-shaped); at least 8 characters so
+        # a stray word can never catch a session by luck; a remote row's id ("host:uuid") matches
+        # on its uuid part, the part the row shows. TWO prefix hits fall through to the standing
+        # ambiguity refusal below, exactly like a duplicated name.
+        direct_all = [a for a in all_agents(threads=True)
+                      if str(a.get("id") or "").rsplit(":", 1)[-1].startswith(bare)]
 
     if frm_id and any(a["id"] == frm_id for a in direct_all):
         return {"kind": "error", "status": 409,
@@ -834,10 +892,20 @@ def _sent_receipts(mid):
                 return h
         return None
 
-    out = [{"to": e.get("toName") or _name_for_id(e.get("to_id", "")), "id": i, "sent": e["t"],
-            "exec": execs.get(i), "recalled": recalls.get(i),
-            "relayed": relays.get(i), "bounced": bounced.get(i), "parked": _parked(i, e)}
-           for i, e in sent.items()]
+    def _row(i, e):
+        h = _parked(i, e)
+        r = {"to": e.get("toName") or _name_for_id(e.get("to_id", "")), "id": i, "sent": e["t"],
+             "exec": execs.get(i), "recalled": recalls.get(i),
+             "relayed": relays.get(i), "bounced": bounced.get(i), "parked": h}
+        if h:
+            # the LINK state rides along (the user 2026-08-24): outbox residency alone is not
+            # unreachability — a message queued ahead of the next exchange on a healthy link is
+            # just in transit, and labeling it "(unreachable)" cried wolf on every normal relay.
+            # PEERS is the authoritative dial state the send path already branches on.
+            r["parkedUp"] = bool((PEERS.get(h) or {}).get("up"))
+        return r
+
+    out = [_row(i, e) for i, e in sent.items()]
     return sorted(out, key=lambda r: r["sent"])
 
 def _drain(sid):
@@ -921,6 +989,14 @@ def _sweep_orphans():
                     _log("bounce to %s failed: %s" % (s["name"], e))
             try:
                 f.unlink()
+                # the destroy is the message's TERMINAL EVENT — record it on the original mid, the
+                # way _bounce_apply records a peer's refusal (the user 2026-08-24): without this row
+                # the ledger's last word stayed "sent", and the timeline's pending flag had to lean
+                # on an age window / recipient liveness — which a same-sid REVIVAL then flips back
+                # to pending for mail that no longer exists. The ledger is now terminal-complete.
+                _tl_append("messages.jsonl", {"t": int(time.time()), "ev": "bounced", "id": f.name,
+                                              "to": recip or "?",
+                                              "why": "recipient exited; unread mail destroyed by the orphan sweep"})
             except Exception:
                 pass
         _mark_pending(box.name)                         # bounced orphans may have emptied new/
@@ -1134,7 +1210,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(peers_snapshot())
         if u.path == "/agents":
             me = (q.get("me") or [""])[0]
-            agents = [a for a in all_agents() if not _postal_off(a["id"])]   # isolated sessions are invisible to peers
+            agents = [a for a in all_agents(threads=True) if not _postal_off(a["id"])]   # isolated sessions are invisible to peers
             for a in agents:                       # enrich with branch for display only
                 a["branch"] = _git_branch(a.get("dir", ""))
             if peers_on():
@@ -1213,6 +1289,9 @@ class Handler(BaseHTTPRequestHandler):
             kind = str(data.get("kind", "")).strip().lower()
             if kind not in ("delegate", "coordinate", "question"):
                 kind = ""                              # legacy/CLI mail may be undeclared; never invent one
+            tracked = bool(data.get("tracked")) and kind == "delegate"   # report-back delegation
+            #   (the user 2026-08-24): only a delegate can be tracked; wire metadata only — nothing
+            #   about the flag ever appears in message prose (the injected-voice rule)
             if _postal_off(frm_id):                # the sender is in isolation → sending is disabled
                 return self._send({"error": "isolation: YOUR OWN mailbox is OFF. This session is in postal "
                                    "isolation (its mailbox icon is toggled off on its timeline lane), so it "
@@ -1231,6 +1310,13 @@ class Handler(BaseHTTPRequestHandler):
                 # (or the next reconnect) carries it, and a definitive refusal bounces back to the
                 # sender.
                 phost, hit = res["host"], res["agent"]
+                # `tracked` deliberately does NOT ride the relay: the primary view lives on the
+                # SENDER's kernel, which the recipient's courier can never reach across hosts — a
+                # satellite with no primary would hide work, so a cross-host tracked send degrades
+                # to a plain delegate (revisit with federation) — and the NOTE says so: the sender
+                # asked for a report-back and must hear it degraded (fail loudly, 2026-07-03).
+                tnote = (" — report-back tracking does not cross hosts yet; sent as a plain handoff"
+                         if tracked else "")
                 mid = "px-" + _unique()
                 outbox_put(phost, {"mid": mid, "to": hit.get("name") or to, "frm": frm,
                                    "frm_id": frm_id, "body": body, "kind": kind,
@@ -1242,15 +1328,15 @@ class Handler(BaseHTTPRequestHandler):
                                               "body": body, "kind": kind})
                 if PEERS.get(phost, {}).get("up"):
                     return self._send({"ok": True, "id": mid,
-                                       "note": "relaying to '%s' on %s" % (hit.get("name") or to, phost)})
+                                       "note": "relaying to '%s' on %s%s" % (hit.get("name") or to, phost, tnote)})
                 _kernel_post("/redial", {"host": phost})   # parking IS demand: ask the kernel to
                 #                                             re-dial the host's tunnel now instead of
                 #                                             waiting out its backoff (the user 2026-08-16)
                 return self._send({"ok": True, "id": mid, "parked": phost,
-                                   "note": "parked for %s (unreachable) — delivers on reconnect, "
-                                           "or bounces back to you" % phost})
+                                   "note": ("parked for %s (unreachable) — delivers on reconnect, "
+                                            "or bounces back to you" % phost) + tnote})
             a0 = res["agent"]
-            mid = deliver(a0["id"], frm, frm_id, body, kind=kind)
+            mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked)
             if not a0.get("remote", False):
                 # All through the kernel (it owns the tmux status bar + the wake), off-thread so send latency
                 # stays low: paint the recipient's "📬 from X" badge; record correspondence (peer chips) + the
@@ -2524,7 +2610,7 @@ Write so the recipient can act from your first line:
 
 Before editing a shared repo, run list_agents and read peers' branches + working-notes (overlap only collides on the SAME branch), and publish yours with set_working. Resolve ownership by reading that state, never by messaging "do you still own this?": an idle peer's note may be stale, and a peer with no note holds nothing. Declare what you own in your first line. Never wake an idle session just to coordinate.
 
-Addressing is live-only: you can message only currently-live sessions (list_agents). Dead names error, with no parked mail or reviving.
+Addressing is live-only: you can message only currently-live sessions (list_agents). Dead names error, with no parked mail or reviving. A session's stable id (the uuid in list_agents) also works as the recipient — rename-proof, unique by construction.
 
 A name is not guaranteed unique. When more than one live session answers to it the send is refused and the candidates are listed as `host:name`: pick one and resend rather than assuming the first. Your OWN name is refused outright, because a message there lands in your own inbox looking exactly like a reply from someone else. Your row in list_agents is the one marked `(you)`.
 
@@ -2540,7 +2626,9 @@ MCP_TOOLS = [
                      "properties": {"to": {"type": "string", "description": "recipient romp session name"},
                                     "body": {"type": "string", "description": "message text"},
                                     "kind": {"type": "string", "enum": ["delegate", "coordinate", "question"],
-                                             "description": "what this message does: delegate = the recipient owns the work now; coordinate = aligning or a heads-up, reply optional; question = you need an answer"}},
+                                             "description": "what this message does: delegate = the recipient owns the work now; coordinate = aligning or a heads-up, reply optional; question = you need an answer"},
+                                    "tracked": {"type": "boolean",
+                                                "description": "delegate only: a report-back handoff — the work stays tracked under YOU as the one view, with the recipient's live progress; their copy files as its satellite. Omit for a plain handoff the recipient owns outright."}},
                      "required": ["to", "body", "kind"]}},
     {"name": "check_inbox",
      "description": "Read and clear any messages other romp sessions have sent you. Messages are also delivered automatically at the end of each turn, so you rarely need to call this.",
@@ -2579,9 +2667,12 @@ def _mcp_call(name, args):
             return ("Cannot send: this session's own identity did not resolve (no session id), so "
                     "the mail would arrive anonymously and the recipient could not place or answer "
                     "it. This is a session-identity bug worth surfacing to the user.", True)
+        tracked = bool(args.get("tracked")) and kind == "delegate"
         try:
-            resp = _http("POST", "/send", {"to": to, "from": me or "unknown", "from_id": mid, "body": body,
-                                           "kind": kind})
+            payload = {"to": to, "from": me or "unknown", "from_id": mid, "body": body, "kind": kind}
+            if tracked:
+                payload["tracked"] = True
+            resp = _http("POST", "/send", payload)
             # "Delivered" has to MEAN delivered. A cross-host send is only relaying (or parked for
             # an unreachable host, or held for the human on the far side), and the bus says so in
             # `note` — which this dropped on the floor, so every one of those read as delivered and
@@ -2599,6 +2690,10 @@ def _mcp_call(name, args):
                 return ("Delivered to '%s' as a question — you are now recorded as waiting on their "
                         "reply until they answer. If you don't actually need a reply, recall this "
                         "message and resend it as coordinate." % to, False)
+            if kind == "delegate" and tracked:
+                return ("Delivered to '%s' as a tracked handoff — they do the work, and it stays "
+                        "tracked under you as the one view with their live progress. You are NOT "
+                        "recorded as waiting; their completion checks it off." % to, False)
             if kind == "delegate":
                 return ("Delivered to '%s' as a handoff — they own it now; you are NOT recorded as "
                         "waiting (the user 2026-08-15: ownership transferred is not a dependency). "
@@ -2698,8 +2793,12 @@ def mcp():
 
 def cli_send(argv):
     kind = frm_label = ""
-    while argv and argv[0] in ("--kind", "--from"):
-        if argv[0] == "--kind":
+    tracked = False
+    while argv and argv[0] in ("--kind", "--from", "--tracked"):
+        if argv[0] == "--tracked":
+            tracked = True
+            argv = argv[1:]
+        elif argv[0] == "--kind":
             kind = (argv[1].strip().lower() if len(argv) > 1 else "")
             argv = argv[2:]
             if kind not in ("delegate", "coordinate", "question"):
@@ -2713,8 +2812,10 @@ def cli_send(argv):
             argv = argv[2:]
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", frm_label or ""):
                 sys.stderr.write("[romp mail] --from must be one word (letters/digits/dash/underscore, <=32 chars)\n"); return 2
+    if tracked and kind != "delegate":
+        sys.stderr.write("[romp mail] --tracked is for delegations only (add --kind delegate)\n"); return 2
     if len(argv) < 2:
-        sys.stderr.write('usage: romp mail send [--kind delegate|coordinate|question] [--from <label>] <session> <text>\n'); return 2
+        sys.stderr.write('usage: romp mail send [--kind delegate|coordinate|question] [--tracked] [--from <label>] <session> <text>\n'); return 2
     to, body = argv[0], " ".join(argv[1:])
     if not body.strip():
         sys.stderr.write("[romp mail] refusing to send an empty message\n"); return 2
@@ -2733,8 +2834,10 @@ def cli_send(argv):
                          "name.\n")
         return 1
     try:
-        resp = _http("POST", "/send", {"to": to, "from": me or "unknown", "from_id": mid, "body": body,
-                                       "kind": kind})
+        payload = {"to": to, "from": me or "unknown", "from_id": mid, "body": body, "kind": kind}
+        if tracked:
+            payload["tracked"] = True
+        resp = _http("POST", "/send", payload)
     except BusError as e:
         sys.stderr.write("[romp mail] %s\n" % e); return 1
     # Echo what actually happened, not a blanket "delivered": a cross-host send is only RELAYING (or

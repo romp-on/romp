@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import json, os, re, sys, time, hashlib
+import json, os, re, sys, time, hashlib, threading
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +41,12 @@ MESSAGES_LOG = STATE / "timeline" / "messages.jsonl"
 # A turn ends when the model hands the floor back: stream `end_turn` / `stop_sequence`.
 # Mid-turn the model stops with `tool_use` (a tool cycle) — that does NOT end the turn.
 END_STOPS = ("end_turn", "stop_sequence")
+# The toolUseResult keys a consumer actually reads (Edit's structuredPatch → diffRows,
+# AskUserQuestion's answers map → the answered box). The atom carry is GATED on one of these
+# being present: an unconditional dict carry held every Read result's full file bytes in the
+# parse cache by reference — ~a fifth of transcript bytes on read-heavy sessions — for shapes
+# nothing reads. Widen this set when a new consumer appears; never revert to carry-all.
+TUR_CONSUMED_KEYS = frozenset(("answers", "structuredPatch"))
 # romp's own postal marker, injected into a delivered message body. It is the ONLY
 # postal signal — never the generic "Stop hook feedback:" prefix (any blocking Stop
 # hook produces that). The sender rompUuid is resolved from timeline/messages.jsonl
@@ -439,6 +445,11 @@ _JSONL_CACHE_MAX = 256            # bounds MEMORY only — past the cap, evict t
                                   # background burn (recurred 2026-08-15, kernel pinned at ~30-60% CPU; the survival
                                   # guarantee is pinned by tests/test_kernel_jsonl_cache.py).
 _JSONL_TAIL_GUARD = 64            # bytes of pre-offset content re-verified before an incremental read
+_JSONL_CACHE_LOCK = threading.Lock()   # the cache has cross-thread callers (the judge tiers' worker pools,
+                                       # the pusher, the warm threads) and HITS mutate (LRU reinsert): the
+                                       # lock covers only the cheap dict ops — the parse runs outside it —
+                                       # and pops stay guarded so a lost race degrades to a re-parse, never
+                                       # a raise
 
 
 def _scan_jsonl_bytes(data, base_offset):
@@ -466,13 +477,15 @@ def _read_jsonl_incremental(path):
     try:
         st = os.stat(path)
     except OSError:
-        _JSONL_CACHE.pop(path, None)
+        with _JSONL_CACHE_LOCK:
+            _JSONL_CACHE.pop(path, None)
         return []
-    hit = _JSONL_CACHE.get(path)
-    if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size:
-        _JSONL_CACHE.pop(path)            # reinsert at the LRU tail: a served entry is a USED entry
-        _JSONL_CACHE[path] = hit
-        return hit[4]
+    with _JSONL_CACHE_LOCK:
+        hit = _JSONL_CACHE.get(path)
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size:
+            _JSONL_CACHE.pop(path, None)  # reinsert at the LRU tail: a served entry is a USED entry
+            _JSONL_CACHE[path] = hit
+            return hit[4]
     try:
         with open(path, "rb") as fh:
             if hit is not None and st.st_size > hit[1]:
@@ -490,12 +503,14 @@ def _read_jsonl_incremental(path):
             fh.seek(tail_from)
             tail = fh.read(offset - tail_from)
     except OSError:
-        _JSONL_CACHE.pop(path, None)
+        with _JSONL_CACHE_LOCK:
+            _JSONL_CACHE.pop(path, None)
         return []
-    _JSONL_CACHE.pop(path, None)
-    while len(_JSONL_CACHE) >= _JSONL_CACHE_MAX:
-        _JSONL_CACHE.pop(next(iter(_JSONL_CACHE)))   # oldest-used first; hot entries survive any cold flood
-    _JSONL_CACHE[path] = (st.st_mtime, st.st_size, offset, tail, records)
+    with _JSONL_CACHE_LOCK:
+        _JSONL_CACHE.pop(path, None)
+        while len(_JSONL_CACHE) >= _JSONL_CACHE_MAX:
+            _JSONL_CACHE.pop(next(iter(_JSONL_CACHE)))   # oldest-used first; hot entries survive any cold flood
+        _JSONL_CACHE[path] = (st.st_mtime, st.st_size, offset, tail, records)
     return records
 
 
@@ -666,7 +681,10 @@ class FileAdapter:
                     # parentUuid normally; compact_boundary carries parentUuid:null +
                     # logicalParentUuid:<pre-compaction leaf> — follow that so the active
                     # path survives compaction instead of orphaning every pre-compaction turn.
-                    self.parent_of[u] = r.get("parentUuid") or r.get("logicalParentUuid")
+                    # A SELF-referential link (corrupt record) becomes a root: kept as-is it
+                    # 1-cycles every walk that starts or passes there.
+                    p = r.get("parentUuid") or r.get("logicalParentUuid")
+                    self.parent_of[u] = None if p == u else p
                     if is_leaf:
                         self.leaf_uuid = u
                 if t == "attachment":
@@ -684,8 +702,14 @@ class FileAdapter:
         # stale override (wrong file, raced clear) falls back to the true file leaf, never an empty parse.
         if leaf_override and leaf_override in self.by_uuid:
             self.leaf_uuid = leaf_override
+        self._adopted = {}       # boundary uuid -> its episode's splice record (the /compact stdout),
+        #                          filled by _adopt_detached_compactions. Downstream consumers key on
+        #                          membership: an ADOPTED boundary is a LIVE manual compact, so the
+        #                          replay dedup must not arm on it (nothing after it is a replayed
+        #                          tail) and its atom must sort AFTER the episode's stdout.
         self._repair_compaction_stitches()
         self._stitch_resume_forks()
+        self._adopt_detached_compactions()
 
     def _stitch_resume_forks(self):
         """Some CLI resumes of a machine-cut turn FORK the transcript with a FRESH head (parentUuid
@@ -733,6 +757,166 @@ class FileAdapter:
                     self.parent_of[u] = cand
                     break
 
+    def _adopt_detached_compactions(self):
+        """A LIVE manual /compact writes its compact_boundary + summary as a DETACHED side
+        branch: the boundary carries parentUuid:null + logicalParentUuid:<pre-compact leaf>,
+        the summary record is its only child, and NOTHING chains through them — the visible
+        conversation parents through the /compact invocation records (caveat/wrapper/stdout)
+        instead. The backward walk never visits the side branch, so the compaction atom — the
+        chat's "Context compacted" card — was silently never emitted for a live manual
+        compact, while auto-compactions (whose continuation chains THROUGH boundary+summary)
+        kept theirs (the user 2026-08-19).
+
+        Adopt the orphaned pair by splicing it in AFTER its own invocation episode's stdout
+        record: …anchor ← caveat ← wrapper ← stdout ← boundary ← summary ← former child. Two
+        deliberate choices there, both corrections of the first cut (2026-08-19 review):
+
+        * The boundary's own EPISODE — not its bare anchor — is both the gate and the splice
+          point. The designed link is the summary record's promptId, which the CLI stamps
+          with the invoking /compact's promptId (13/13 manual boundaries in the live corpus;
+          file-order adjacency is the fallback for summaries carrying NO promptId at all, and
+          is genuinely a fallback: one corpus episode is appended BEFORE its boundary). Gating
+          on the bare anchor resurrected compactions the user had REWOUND AWAY (next prompt
+          re-parents at the pre-compact leaf: wrappers off-path, anchor still on it), and two
+          compactions sharing one anchor threaded through each other. Episode off the active
+          path → its /compact was undone → the boundary stays hidden with it; no episode →
+          nothing witnesses the invocation on the visible history → stays hidden — and a
+          promptId that names NOTHING on record stays hidden the same way, never handed to
+          adjacency: that is the crash-truncated write this module models mid-write, and
+          adjacency in its place stole a later same-anchor /compact's episode.
+        * Splicing BEFORE the stdout pulled that stdout atom out of its /compact command
+          segment into the boundary's fresh triggerless turn, minting a brand-new
+          judge-visible WORK unit ("Compacted (ctrl+o…)") for every manual compact in every
+          existing session. After the stdout, the command segment keeps its output and the
+          boundary's turn holds nothing — no assistant work, no unit.
+
+        Keyed on the SHAPE (boundary off the active path, its episode on it), never on
+        trigger=manual: an attached boundary of either kind (auto, or the resume re-splice a
+        manual pair arrives back in) no-ops here. When the stdout IS the leaf (the user
+        compacted and has not typed since), the pair becomes the chain's new tail — the card
+        must not wait for the next prompt. Runs after the stitch repair and the resume
+        stitching (the active path must already cross files). parent_of/leaf_uuid only —
+        records are never mutated, so the shared _read_jsonl_incremental cache lists stay
+        pristine. Adopted boundaries are recorded in self._adopted for the two downstream
+        consumers that must NOT treat them as attached: the replay dedup (a live manual
+        compact replays no tail — arming it ate the user's next genuine prompt whenever its
+        text repeated an earlier one) and the emit-order override (the boundary record is
+        appended BEFORE the stdout, so raw (t, seq) order would put the card inside the
+        command exchange it belongs after).
+
+        Placement note (re-derived 2026-08-19 against the golden scenario AND every
+        boundary-bearing live-corpus transcript, plan_units pre vs post — the first cut
+        asserted no-bump from intention and was wrong, so only measurements are recorded
+        here; tests/test_placements_canary.py pins the class): the added boundary atom's
+        turn holds no user ask and no assistant work of its own, so on the golden scenario
+        and 11 of 12 corpus transcripts the unit sets are byte-identical pre/post — no
+        recorded placement key shifts, no unit appears or disappears. The residue: when
+        assistant work FOLLOWS the manual compact with no new opener (a queued prompt
+        spliced through it — 1 of 12), that continuation moves from the /compact command
+        segment (where the old parse misfiled it as a human-triggered "/compact worked"
+        unit) into the boundary's own turn — the same non-human continuation unit an
+        attached auto-compact has always produced. One re-attributed unit per such
+        transcript. DECIDED no-bump (2026-08-19, from traced evidence): the orphaned row
+        is inert — every placements consumer queries only units the CURRENT parse yields,
+        and _migrate_placements never removes old rows, so orphans are the normal
+        post-bump state of every store since v2; the fuzzy _placed_key path reads them
+        only in the dedup direction (prevents replay, never causes one). The one NEW unit
+        costs a single planner call. A bump would be strictly worse: it seals every
+        store's currently-ready unplaced units — measured ~29 across the live corpus,
+        including genuinely pending work — the silent drop of a real ask this repo calls
+        its one fatal error."""
+        active = self.active_path()
+        if not any(r.get("type") == "system" and r.get("subtype") == "compact_boundary"
+                   and u not in active for u, r in self.by_uuid.items()):
+            return                        # nothing detached — skip the episode scan entirely
+        # the active CHILD of each on-path uuid — the chain has at most one per node
+        child_of, u = {}, self.leaf_uuid
+        while u is not None:
+            p = self.parent_of.get(u)
+            if p is None or p in child_of:
+                break
+            child_of[p] = u
+            u = p
+        # /compact invocation EPISODES, keyed by promptId: head = first record in file order
+        # (the caveat/raw twin, parented on the pre-compact leaf); splice = the FIRST stdout
+        # record — a restore burst can replay the episode verbatim with the promptId preserved,
+        # and a later copy must never re-seat the card off the original splice (the copy
+        # seq-nearest the boundary+summary pair; the replayed copy's atoms fall to the dedup) —
+        # else the last record seen: a MID-WRITE episode, one parse wide, never hidden, each
+        # phase self-correcting at the next record. Boundary- or summary-as-leaf the pair is ON
+        # the active path (attached by shape, emits natively; the dedup arms there on an empty
+        # window — the file ends at the pair); caveat- or wrapper-as-leaf it adopts AT the
+        # episode's last landed record — adopted, so unarmed — and re-seats once the stdout lands.
+        episodes = {}
+        for eu, er in self.by_uuid.items():          # insertion order = file read order
+            pid = er.get("promptId")
+            if not pid or er.get("type") != "user" or er.get("isCompactSummary"):
+                continue
+            blocks = _content(er.get("message"))
+            btext = (_text_of(blocks) if blocks else "") or ""
+            g = episodes.setdefault(pid, {"head_parent": self.parent_of.get(eu),
+                                          "head_seq": self.seq_of.get(eu, 0),
+                                          "splice": eu, "stdout": None, "compact": False})
+            m = COMMAND_NAME_ANY_RE.search(btext)
+            if m:
+                name = m.group(1).strip()
+                if (name if name.startswith("/") else "/" + name) == "/compact":
+                    g["compact"] = True              # the episode invokes /compact, not some other command
+            if LOCAL_STDOUT_RE.match(btext) and g["stdout"] is None:
+                g["stdout"] = eu                     # first stdout wins — see the splice rule above
+            g["splice"] = g["stdout"] or eu
+        boundaries = sorted((self.seq_of.get(u, 0), u) for u, r in self.by_uuid.items()
+                            if r.get("type") == "system" and r.get("subtype") == "compact_boundary")
+        for _, b in boundaries:
+            if b in active:
+                continue                  # attached (auto / resume re-splice) — never double-emit
+            summary = next((s for s, sr in self.by_uuid.items()
+                            if sr.get("isCompactSummary") is True and self.parent_of.get(s) == b),
+                           None)
+            pid = (self.by_uuid.get(summary) or {}).get("promptId") if summary else None
+            if pid:
+                # the designed link, and the ONLY one honored when present: a promptId that
+                # names no on-record /compact episode (a crash-truncated compaction —
+                # boundary+summary landed, the episode records never did) keeps its boundary
+                # HIDDEN. Degrading to adjacency stole a later same-anchor /compact's episode:
+                # the stale summary rendered at the live splice, and the already-claimed guard
+                # below then hid the real compact's card (2026-08-19 second review).
+                ep = episodes.get(pid)
+                if ep is not None and not ep["compact"]:
+                    ep = None             # the summary's promptId names some OTHER exchange — not a witness
+            else:
+                # fallback ONLY for summaries carrying no promptId at all (older writes,
+                # synthetic shapes): b's own episode is the nearest /compact invoked from b's
+                # anchor and appended after b — the CLI writes boundary+summary first, then
+                # the episode records
+                anchor = self.parent_of.get(b)
+                cands = [g for g in episodes.values()
+                         if g["compact"] and g["head_parent"] == anchor
+                         and g["head_seq"] > self.seq_of.get(b, 0)]
+                ep = min(cands, key=lambda g: g["head_seq"]) if cands else None
+            if ep is None:
+                continue                  # no on-record /compact invocation owns this boundary — stays hidden
+            sp = ep["splice"]
+            if sp not in active or sp == b or sp in self._adopted.values():
+                continue                  # the episode was rewound/cleared away (or already claimed) — hidden
+            c = child_of.get(sp)
+            tail = summary if summary is not None else b
+            self.parent_of[b] = sp        # …stdout <- b (<- summary) <- former child
+            if c is not None:
+                self.parent_of[c] = tail
+            else:
+                self.leaf_uuid = tail     # the stdout was the leaf: the adopted pair is the new tail
+            active.add(b)
+            child_of[sp] = b
+            if summary is not None:
+                active.add(summary)
+                child_of[b] = summary
+                if c is not None:
+                    child_of[summary] = c
+            elif c is not None:
+                child_of[b] = c
+            self._adopted[b] = sp
+
     def active_path(self):
         """The set of uuids on the leaf->root chain (directed walk, O(chain length))."""
         active, u, guard = set(), self.leaf_uuid, 0
@@ -758,15 +942,22 @@ class FileAdapter:
                 out.add(u)
         return out
 
-    def kept_uuids(self, active):
-        """The active leaf-ancestors PLUS any line on a BROKEN chain (its parentUuid points
-        at a uuid that exists in NO transcript — corruption / a partial write). The two
-        kinds of off-path line we DO drop are both intentional: a rewind fork (its chain
-        rejoins the active spine) and a clear branch (its chain reaches a clean null root
-        the leaf does not share — `/clear` breaks the parent link, spec-mandated drop). A
-        dangling chain is the one thing we cannot prove dead, and silently dropping a real
-        ask is this repo's one fatal error, so we keep it. (Verified 0 dangling cases
-        across the live corpus: this is a safety net, not a behavior change.)"""
+    def chain_verdicts(self, active=None):
+        """THE chain-membership identity, one verdict per uuid in the graph — the single
+        implementation every consumer must share (the goal-store rewind cleanup grew four
+        hand-rolled partial twins of this walk before it was exported, and they disagreed
+        on exactly the cases that matter — resume forks, pending cuts, broken chains):
+          "active" — on the leaf->root spine (what the chat shows).
+          "rewind" — the chain rejoins the active spine: this line was REWOUND AWAY. The
+                     only verdict that ever justifies dropping/sweeping content.
+          "clear"  — the chain reaches a clean null root the leaf does not share: `/clear`
+                     jurisdiction (the episode machinery settles those) — never swept as
+                     a rewind.
+          "broken" — parentUuid points at a uuid in NO transcript, or a cycle: unprovable,
+                     KEPT (silently dropping a real ask is this repo's one fatal error).
+        `active` defaults to active_path(); pass it when already computed."""
+        if active is None:
+            active = self.active_path()
         verdict = {}
         def classify(start):
             path, u = [], start
@@ -787,11 +978,25 @@ class FileAdapter:
             for x in path:
                 verdict[x] = res
             return res
-        kept = set(active)
+        out = {}
         for u in self.by_uuid:
-            if u not in active and classify(u) == "broken":
-                kept.add(u)
-        return kept
+            out[u] = "active" if u in active else classify(u)
+        return out
+
+    def kept_uuids(self, active):
+        """The active leaf-ancestors PLUS any line on a BROKEN chain (its parentUuid points
+        at a uuid that exists in NO transcript — corruption / a partial write). The two
+        kinds of off-path line we DO drop are both intentional: a rewind fork (its chain
+        rejoins the active spine) and a clear branch (its chain reaches a clean null root
+        the leaf does not share — `/clear` breaks the parent link, spec-mandated drop). A
+        dangling chain is the one thing we cannot prove dead, and silently dropping a real
+        ask is this repo's one fatal error, so we keep it. (Verified 0 dangling cases
+        across the live corpus: this is a safety net, not a behavior change.)
+        Derived from chain_verdicts — one implementation, so the exported membership
+        predicate (chain_membership) can never diverge from what the parse keeps.
+        set(active) is unioned as-is: the walk can record a dangling FINAL ancestor that is
+        in no file's index, and it has always been kept."""
+        return set(active) | {u for u, v in self.chain_verdicts(active).items() if v == "broken"}
 
     def _absorbed_atom(self, full, t, seq, auid, rompuuid, postal_index):
         """One synthesized user atom for a mid-turn splice. The atom carries the FULL text — any
@@ -877,7 +1082,14 @@ class FileAdapter:
                 continue
             if r.get("type") == "system" and r.get("subtype") == "compact_boundary":
                 _compacted = True
-                _restoring = True          # the restore burst starts here and ends at the next assistant
+                if u not in self._adopted:
+                    # the restore burst starts here and ends at the next assistant. An ADOPTED
+                    # boundary (a LIVE manual compact) never arms it: its transcript replays NO
+                    # tail — the records after it are the user's genuine next actions, and the
+                    # armed window silently ate the next typed prompt whenever its text repeated
+                    # any earlier message ("continue", a nudge) — a dropped real ask (2026-08-19).
+                    # Attached boundaries (auto, and the resume re-splice, which DOES replay) keep it.
+                    _restoring = True
                 last_boundary = u
             elif r.get("type") == "assistant":
                 _restoring = False         # work resumed → anything later is new, not restored context
@@ -1053,6 +1265,19 @@ class FileAdapter:
                 atom = {"type": "user", "uuid": u, "session_id": rompuuid, "t": ts,
                         "fsid": fsid, "parentUuid": r.get("parentUuid"),
                         "message": _norm_message(r.get("message")), "_seq": seq}
+                if has_tool_result and isinstance(r.get("toolUseResult"), dict) \
+                        and (set(r["toolUseResult"]) & TUR_CONSUMED_KEYS):
+                    # The record's top-level toolUseResult — Claude Code's STRUCTURED result (Edit's
+                    # structuredPatch, AskUserQuestion's answers map). The kernel's chat build reads it
+                    # at tool_result attach time; the atom used to drop it, so every consumer silently
+                    # fell to its lossy fallback (regex-scraping the flat output string — which is how
+                    # quote-bearing AskUserQuestion answers vanished from the answered box). Dict form
+                    # only: an errored result records a plain string, which no consumer reads. Carried
+                    # ONLY when a consumed key is present (_TUR_CONSUMED_KEYS): an unconditional carry
+                    # held every Read result's full file bytes in the parse cache by reference —
+                    # roughly a fifth of transcript bytes on read-heavy sessions — for shapes nothing
+                    # reads. Widen the key set when a new consumer appears; never back to carry-all.
+                    atom["toolUseResult"] = r["toolUseResult"]
                 if ps:
                     atom["promptSource"] = ps
                 author = author_of(blocks, ps, postal_index, getattr(self, "sdk_human", False))
@@ -1062,10 +1287,25 @@ class FileAdapter:
                     atom["rompAuto"] = True
                 out.append(atom)
             elif t == "system" and r.get("subtype") == "compact_boundary":
+                if (r.get("parentUuid") or r.get("logicalParentUuid")) == u:
+                    continue   # self-anchored (corrupt): a boundary claiming to compact itself
+                               # anchors nothing — no card, and no cycle for the turn builder
+                sp = self._adopted.get(u)
+                if sp is not None:
+                    # an ADOPTED boundary's record is appended BEFORE its episode's stdout, so raw
+                    # (t, seq) order would drop the card into the middle of the /compact exchange —
+                    # and the stdout atom would then fold into the boundary's fresh turn as
+                    # "assistant work", minting a phantom WORK unit (2026-08-19). Sort it right
+                    # after the stdout instead: the moment the compaction visibly completed.
+                    spt = parse_z((self.by_uuid.get(sp) or {}).get("timestamp"))
+                    if spt is not None and (ts is None or spt > ts):
+                        ts = spt
+                    seq = self.seq_of.get(sp, seq) + 0.5
                 cm = r.get("compactMetadata") or r.get("compact_metadata") or {}
                 out.append({"type": "system", "subtype": "compact_boundary", "uuid": u,
                             "session_id": rompuuid, "t": ts, "fsid": fsid,
-                            "parentUuid": self.parent_of.get(u),   # the repaired stitch (see _repair_compaction_stitches)
+                            "parentUuid": self.parent_of.get(u),   # the repaired stitch (see _repair_compaction_stitches);
+                            #                                        for an ADOPTED boundary, its episode's stdout record
                             "compact_metadata": {"trigger": cm.get("trigger"),
                                                  "pre_tokens": cm.get("preTokens") or cm.get("pre_tokens"),
                                                  "post_tokens": cm.get("postTokens") or cm.get("post_tokens")},
@@ -1473,6 +1713,62 @@ def resume_fork_links(srows):
     return links
 
 
+def _lineage_closure(leaf_path, candidate_files, links):
+    """The candidate-file set CLOSED over the recorded resume lineage: a fork chain across several
+    restarts needs every resumed-from file present for the stitched walk to cross (a caller's anchor
+    covers only one hop). Shared by parse_session AND chain_membership so the exported membership
+    predicate reads the exact same file set the display parse does. From-files are frozen after
+    their fork (the CLI writes only the new file), so callers' cache keys stay honest."""
+    if not links:
+        return list(candidate_files)
+    have = {Path(f).stem for f in candidate_files}
+    stem, hops = Path(leaf_path).stem, 0
+    candidate_files = list(candidate_files)
+    while stem in links and hops < 16:
+        stem = links[stem]
+        hops += 1
+        fp = Path(leaf_path).with_name(stem + ".jsonl")
+        if stem not in have and fp.exists():
+            candidate_files.append(str(fp))
+            have.add(stem)
+    return candidate_files
+
+
+def chain_membership(leaf_path, candidate_files=None, states=None, leaf_override=None):
+    """THE exported chain-membership fact — {"kept", "rewind", "clear", "broken"} uuid sets, built
+    from the DISPLAY parse's exact inputs (resume links + lineage closure + leaf_override = the
+    kernel's pending bare-rollback cut) so it can never disagree with what the user sees. This is
+    the one predicate every rewind-cleanup consumer must use (goal sweeps, mint-time stand-downs,
+    the dead-branch reconciliation): before it was exported, four partial hand-rolled twins of this
+    walk disagreed on resume forks, pending cuts and broken chains (2026-08-17).
+
+    "rewind" is the ONLY set that ever justifies sweeping a goal: "clear" branches are /clear
+    jurisdiction (the episode machinery settles those cards), "broken" chains are kept by design,
+    and a uuid in NO set is unprovable (a synthetic orphan:<t> salvage id, a cross-file uuid whose
+    file is outside the lineage, a legacy None) — callers must treat unknown as NOT abandoned.
+    Caveat (resume-fork stitch shape): a recorded fork's fresh head is re-pointed at the from-file's
+    LAST record — if that tip was itself an abandoned tail, the stitch makes it active again; this
+    predicate follows the stitch exactly as the display parse does (kept semantics, by design)."""
+    leaf_path = Path(leaf_path)
+    if candidate_files is None:
+        candidate_files = [str(leaf_path)]
+    links = resume_fork_links(_load_states(states))
+    candidate_files = _lineage_closure(leaf_path, candidate_files, links)
+    adapter = FileAdapter(candidate_files, leaf_path, leaf_override=leaf_override, resume_links=links)
+    active = adapter.active_path()
+    verdicts = adapter.chain_verdicts(active)
+    # kept, derived from the verdicts already in hand — BY DEFINITION the same set kept_uuids
+    # computes (active ∪ broken; see its docstring: "derived from chain_verdicts — one
+    # implementation"), without paying the graph walk a second time inside it. The hold view
+    # re-asks this on every build of a held session, so the walk count matters there.
+    out = {"kept": set(active) | {u for u, v in verdicts.items() if v == "broken"},
+           "rewind": set(), "clear": set(), "broken": set()}
+    for u, v in verdicts.items():
+        if v != "active":
+            out[v].add(u)
+    return out
+
+
 def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None,
                   candidate_files=None, states=None, postal_log=None, now=None, sdk_human=False,
                   leaf_override=None):
@@ -1502,23 +1798,13 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     postal_index = _load_postal_index(postal_log)
     _srows = _load_states(states)
     links = resume_fork_links(_srows)
-    if links:
-        # The lineage closure joins the candidate set: a fork chain across several restarts needs
-        # every resumed-from file present for the stitched walk to cross (the caller's anchor covers
-        # only one hop). Resolved HERE so both parses (the judge's and the kernel's) inherit it from
-        # the one states plumbing they already share. From-files are frozen after their fork (the CLI
-        # writes only the new file), so the callers' cache keys — candidate files + the states file,
-        # whose mtime moves when a lineage row lands — stay honest without knowing about these.
-        have = {Path(f).stem for f in candidate_files}
-        stem, hops = leaf_path.stem, 0
-        candidate_files = list(candidate_files)
-        while stem in links and hops < 16:
-            stem = links[stem]
-            hops += 1
-            fp = leaf_path.with_name(stem + ".jsonl")
-            if stem not in have and fp.exists():
-                candidate_files.append(str(fp))
-                have.add(stem)
+    # The lineage closure joins the candidate set: a fork chain across several restarts needs
+    # every resumed-from file present for the stitched walk to cross (the caller's anchor covers
+    # only one hop). Resolved HERE so both parses (the judge's and the kernel's) inherit it from
+    # the one states plumbing they already share; chain_membership shares the same helper. The
+    # callers' cache keys — candidate files + the states file, whose mtime moves when a lineage
+    # row lands — stay honest without knowing about these.
+    candidate_files = _lineage_closure(leaf_path, candidate_files, links)
     adapter = FileAdapter(candidate_files, leaf_path, leaf_override=leaf_override, resume_links=links)
     adapter.sdk_human = sdk_human            # SDK-backed session → unmarked promptSource "sdk" is the human
     atoms = adapter.atoms(rompuuid, postal_index)

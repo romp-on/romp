@@ -1,16 +1,9 @@
-// Doc review (the user 2026-08-14, who found coordinating a markdown review painful): reading a doc an
-// agent wrote meant opening it in an editor and hand-copying every line you wanted changed back into the
-// chat. This module is the pure half of the fix — the chat pane renders the doc, you highlight a span and
-// comment on it, and ONE submit turns every comment into a single message drafted into that session's
-// composer. No DOM here so it is unit-testable; render.ts wires the reader and the composer insert.
-
-export interface DocComment {
-  id: string;
-  quote: string;         // the span the user highlighted, whitespace-normalized
-  line: number | null;   // 1-based source line, or null when we could not honestly find one
-  body: string;          // what the user wants changed
-  ts: number;
-}
+// The file viewer's quote anchoring (born 2026-08-14 as the doc-review module; consolidated
+// 2026-08-23): selecting a passage in the viewer seeds the chat's own labeled quote chip, and the
+// label needs the passage's source LINE — anchorFor finds it by progressively looser matching, and
+// quoteSrcLabel composes the path:line origin the chip carries. The old review-comment half
+// (DocComment, buildReviewMessage, the per-file store key) is gone: batching notes for one hand-off
+// is exactly what quote chips + ⌘⏎ staging already do. No DOM here so it is unit-testable.
 
 // Collapse runs of whitespace (a rendered selection carries the layout's newlines and indentation, the
 // source carries its own) so both sides compare on words alone.
@@ -59,30 +52,9 @@ export function anchorFor(source: string, selected: string): { quote: string; li
   return { quote, line: null };
 }
 
-// Comments are held per session AND per file: reviewing two docs in one session keeps two batches, and
-// each submits on its own. render.ts owns the Map and persists it beside the drafts; the key lives here
-// so the shape is pinned by a test.
-export function docKey(sid: string, path: string): string {
-  return sid + "\0" + path;
-}
-
-const QUOTE_MAX = 140;   // long enough to identify the span, short enough that the message stays readable
-
-function shortQuote(q: string): string {
-  return q.length <= QUOTE_MAX ? q : q.slice(0, QUOTE_MAX - 1).trimEnd() + "…";
-}
-
-// The message the composer receives. It is read by an agent that has never heard of romp (CLAUDE.md), so
-// it names no machinery — it reads as the person it works for listing what they want changed, with the
-// anchors attached so nothing has to be copy-pasted back.
-export function buildReviewMessage(path: string, comments: DocComment[]): string {
-  const live = comments.filter((c) => c.body.trim());
-  if (!live.length) return "";
-  const parts = live.map((c, i) => {
-    const where = c.line ? `line ${c.line} — ` : "";
-    const head = `${i + 1}. ${where}"${shortQuote(c.quote)}"`;
-    const body = c.body.trim().split("\n").map((l) => "   " + l.trimEnd()).join("\n");
-    return head + "\n" + body;
-  });
-  return `Comments on ${path} — all of them, one pass:\n\n` + parts.join("\n\n") + "\n";
+// The chip's origin label: "path:line" when the selection's source line can honestly be found,
+// the bare path otherwise (a wrong line sends the agent to the wrong place — worse than none).
+export function quoteSrcLabel(path: string, source: string | null, selected: string): string {
+  const line = source ? anchorFor(source, selected).line : null;
+  return line ? path + ":" + line : path;
 }

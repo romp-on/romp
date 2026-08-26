@@ -96,7 +96,7 @@ class PeerRoutePrefersDirect(_Seeded):
         self.assertEqual(agent.get("id"), FAR_ID)
 
     def test_resolve_recipient_lands_direct_with_no_ambiguity_error(self):
-        pm.local_agents, saved = (lambda: []), pm.local_agents
+        pm.local_agents, saved = (lambda threads=False: []), pm.local_agents
         try:
             r = pm.resolve_recipient("web", frm_id=HUB_ID)
         finally:
@@ -107,7 +107,7 @@ class PeerRoutePrefersDirect(_Seeded):
 
 class GossipCarriesIdentity(_Seeded):
     def test_fleet_presence_rides_the_far_bus_id_on_via_rows(self):
-        pm.local_agents, saved = (lambda: []), pm.local_agents
+        pm.local_agents, saved = (lambda threads=False: []), pm.local_agents
         try:
             rows = pm.fleet_presence("asker")
         finally:

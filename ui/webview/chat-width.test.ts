@@ -14,12 +14,12 @@ test("the chat column is fluid (--chat-col), not a hardcoded 820px cap", () => {
   assert.match(CSS, /\.thread \{[^}]*max-width: var\(--chat-col\)/);
 });
 
-test("the time-marker left gutter is reserved unconditionally, tightened to 44px for prose width", () => {
+test("the time-marker left gutter is reserved unconditionally, 56px so the day label owns its column", () => {
   // tightened 54→44 (the user 2026-07-05) so the HH:MM times sit nearer the left margin and text gains width;
   // the turn's own text indent also drops 30→24, and the time-marker re-fits the smaller gutter (left/width)
-  assert.match(CSS, /\.thread \{[^}]*padding: 0 24px 0 44px/);
+  assert.match(CSS, /\.thread \{[^}]*padding: 0 24px 0 56px/);
   assert.match(CSS, /\.turn \{[^}]*padding-left: 24px/);
   assert.match(CSS, /\.time-marker \{[\s\S]*?left: -45px; width: 48px/);
   // the statusline shares the same left gutter so its controls stay aligned with the transcript column
-  assert.match(CSS, /\.statusline \{[^}]*padding: 7px 24px 0 44px/);
+  assert.match(CSS, /\.statusline \{[^}]*padding: 7px 24px 0 56px/);
 });

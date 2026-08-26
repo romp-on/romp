@@ -1,0 +1,10 @@
+<!-- SYNTHETIC fixture: a short chat exchange — user bubble, agent prose, romp follow-up bubble —
+     for eyeballing the transcript's vertical rhythm (turn padding, bubble padding). Invented
+     content (notes-api demo domain). Run:
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/transcript-density.html \
+           --out /tmp/transcript.png --size 700x420 --extra-css 'body{display:block;padding:10px 20px}'
+-->
+<div class="turn turn-user"><div class="user-bubble">Can you ship the notes-api exporter today?</div></div>
+<div class="turn"><div class="md"><p>Working on it — the failing suite in <code>tests/</code> is the blocker. Two cases assume the old CSV header; I'm updating the fixtures now and will re-run the full suite before pushing.</p></div></div>
+<div class="turn turn-user"><div class="user-bubble">Great — ping me when CI is green.</div></div>
+<div class="turn"><div class="md"><p>Will do. The branch is <code>exporter-v2</code>; the PR opens as soon as the suite passes.</p></div></div>

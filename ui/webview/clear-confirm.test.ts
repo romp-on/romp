@@ -38,7 +38,7 @@ test("the confirm detail: null with nothing open; singular/plural; long lists ca
   assert.match(clearConfirmDetail(["one card"])!, /Its 1 open card gets dropped with it: one card/);
   const two = clearConfirmDetail(["a", "b"])!;
   assert.match(two, /Its 2 open cards get dropped with it: a, b/);
-  assert.match(two, /Undo clear/, "the way back is named in the same breath");
+  assert.match(two, /Undo on the feed/, "the way back is named in the same breath");
   const long = clearConfirmDetail(Array.from({ length: 30 }, (_, i) => "card number " + i))!;
   assert.ok(long.length < 400, "the titles list is capped so the modal stays readable");
   assert.match(long, /…/);

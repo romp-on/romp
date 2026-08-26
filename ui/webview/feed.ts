@@ -7,8 +7,13 @@
 // pushes and updated in place — never torn down — so hovering one doesn't flicker
 // when the fleet streams new deliverables in.
 import { distillText, distillInputs, applyDistillLine, distillPending, distillStaleNote } from "./distiller-line";
-import { spinFor, KIND_WORD } from "./spin-caption";
+import { spinFor, KIND_WORD, waitedSuffix } from "./spin-caption";
 import { onlyTag, matchesOnly } from "./only-filter";
+import { searchMatches, searchSids } from "./feed-search";
+import { TagLens, lensAll, lensLabel, lensVisible, lensUnions } from "./tag-lens";
+import { openTagMenu, tagMenuButton, syncTagFilter } from "./tag-menu";
+import { SessionViews } from "./session-views";
+import { freezeDiff, contentSig } from "./feed-freeze";
 import { hostNameNodes, hostPartsNodes, hostIsDown, hostDownNote, hostOf } from "./host-prefix";
 import { extHoverMatches } from "./card-key";
 import { provenanceRows, provenanceGroupRows, rootStart, type ProvFmt, type ProvRow } from "./provenance";
@@ -17,7 +22,9 @@ import { badgeNotices, clearBoundaryNotices, sdkProblemNotices, syncNotices,
   type ClearNoticeRow, type SdkNoticeRow, type SyncNoticeRow } from "./badge-mirror";
 import { initStrip } from "./strip";
 import { installSettingsSync } from "./settings";
-import { previewThumb, previewKind } from "./preview";
+import { previewThumb, previewKind, canPreview } from "./preview";
+import { initFileView } from "./file-view";
+import { initFileBrowse, openFileBrowse } from "./file-browse";
 import { VIEW_STATE_KEY, parseViewState, serializeViewState, pruneViewState, capViewState, type FeedViewState } from "./feed-view-state";
 
 // (The standalone-deliverable "FeedItem" subsystem was REMOVED 2026-07-07: the kernel had emitted
@@ -49,6 +56,7 @@ interface AskTreeNode {
   trgb?: [number, number, number];                               // last-activity recency tint (timestamp)
   cleared?: boolean;                                             // user-cleared sub (nodeOverride op:clear) → struck-through faded row + "cleared" chip; the mark stays tied to status (box = done, the user 2026-07-26)
   reviewedEarlier?: boolean;                                     // this done sub predates the top's review boundary (kernel flatten ↔ jd.review_boundary, the distiller's own scoping) → collapsed behind one "N reviewed earlier" row (the user 2026-08-19)
+  parked?: { n: number } | null;                                 // LEAPFROGGED open row (kernel _parked_rows, the user 2026-08-24): nothing filed under it while n younger siblings were dispatched past it → quiet "parked" tag + the card's dim sub-goals suffix; retires on its own delegation edge or any verdict
   log?: NodeLogRow[] | null;                                     // the node's newest verdict rows (kernel _node_log_rows, non-done only) → the modal's per-item story (the user 2026-07-20)
   children: string[];
 }
@@ -82,6 +90,7 @@ interface AskItem {
               tooLong?: boolean;   // apiError: a "prompt is too long" error (on you → compact) vs a transient API error
               spendLimit?: boolean;   // apiError: a monthly spend cap (on you → raise it, never auto-retried; the user 2026-07-14)
               modelLimit?: boolean;   // apiError: this session's MODEL is out of allowance (on you → switch model or add credits; the user 2026-08-01)
+              refusal?: boolean;   // apiError: the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — deterministic on the same input, the user 2026-08-15)
               mode?: string; since?: number;   // judgeAuth adds these: which billing its judges ride ('key'|'login') + the first refusal time — romp can't analyze the session until the credential is fixed (the user 2026-08-12)
               toName?: string; toSid?: string;    // parkedHandoff adds to*
               mid?: string; frm?: string; to?: string; origin?: string; body?: string; gist?: string };   // quarantine (held peer mail) adds these; gist = the bus's 90-char collapse for the compact card line
@@ -98,9 +107,13 @@ interface AskItem {
   failLog?: { t: number; line: string; model: string; note: string }[] | null;   // the summarizer's failed ATTEMPTS on this card (judge _fail_log): when, which line, which MODEL, the literal error — the chip's hover history + the modal's "What was tried" (the user 2026-08-18, who needed to SEE "tried opus — 529" ×3 to know switching the model would fix it)
   nudged?: { count: number; times: number[] } | null;   // auto-nudge HISTORY (kernel _nudge_times): how many times romp followed up + when — the stalled chip's evidence (tooltip + modal line, the user 2026-07-02)
   warnRows?: { t: number; judge: string; err: string; note?: string; debug?: { input?: string; reply?: string } }[] | null;   // DEBUG MODE only (romp debug on): every judge failure touching this card (kernel _card_warn_rows) → "Warnings (debug)" modal section; rows captured in debug carry the failing call's input + reply (the user 2026-07-09)
-  origin?: { peer: string; peerSid: string; peerHost?: string; color: { bg: string; fg: string } | null; live?: boolean } | null;  // courier handoff: planted by a peer's message → "↪ from <peer>"; peerHost = a FEDERATED sender's host, rendered as the quiet "host:" prefix (absent on older payloads / local senders). live = the sender's linked entry is still OPEN; false → the badge is PROVENANCE, dimmed (the completed-column merge, the user 2026-08-16)
-  waitingOn?: { peerSid: string; name: string; color: { bg: string; fg: string } | null; inCycle: boolean; kind?: string } | null;  // unanswered msg out to a live peer → "Awaiting <peer>" chip, or "Handed off to <peer>" when kind is "delegate" (peer name in native colour, no emoji; kernel _wait_for_graph; the user 2026-06-22 / 2026-07-25)
-  awaiting?: { why?: string | null; kind?: string | null; tasks?: string[] | null } | null;   // AWAITING flavor: held in Working, ⏳ awaiting badge — waiting on dispatched/delegated work (agents/subagents/a build), NOT on you (kernel build_feed; the user 2026-06-22). The peer case rides waitingOn; this carries the generic "why". `tasks` = live bg-task descriptions (the user 2026-07-13): present → the compact "Awaiting task" pill (expands the list, like Sub-goals) replaces the boxed why.
+  origin?: { peer: string; peerSid: string; peerHost?: string; color: { bg: string; fg: string } | null; live?: boolean } | null;
+  handoffTo?: { peer: string; peerSid: string; peerHost?: string; color?: { bg: string; fg: string } | null } | null;  // sender-side handoff provenance (the user 2026-08-24): this card IS a top-level "↪ delegated to <peer>" tracking node — the kernel titles it with the WORK and ships the delegation here, the mirror of origin's "↪ from"; click opens the recipient
+  satellite?: boolean | null;                        // tracked delegation (the user 2026-08-24): this card is the recipient-side copy of a delegator-homed primary — off the default board; the session filter still reaches it (nothing runs in secret)
+  delegTracked?: { name: string; host?: string; sid: string; color?: { bg: string; fg: string } | null }[] | null;  // tracked delegation PRIMARY: the recipient identities whose live status this one card carries  // courier handoff: planted by a peer's message → "↪ from <peer>"; peerHost = a FEDERATED sender's host, rendered as the quiet "host:" prefix (absent on older payloads / local senders). live = the sender's linked entry is still OPEN; false → the badge is PROVENANCE, dimmed (the completed-column merge, the user 2026-08-16)
+  waitingOn?: { peerSid: string; name: string; color: { bg: string; fg: string } | null; inCycle: boolean; kind?: string; since?: number } | null;  // unanswered msg out to a live peer → "Awaiting <peer>" chip, or "Handed off to <peer>" when kind is "delegate" (peer name in native colour, no emoji; kernel _wait_for_graph; the user 2026-06-22 / 2026-07-25). since = when the unanswered ask was sent → the chip's elapsed readout (the user 2026-08-23)
+  awaiting?: { why?: string | null; kind?: string | null; since?: number | null; tasks?: string[] | null;
+               peers?: { name: string; host?: string; sid?: string; color?: { bg: string; fg: string } | null }[] | null } | null;   // peers: delegation wait → the box names them in identity colour (the user 2026-08-23)   // AWAITING flavor: held in Working, ⏳ awaiting badge — waiting on dispatched/delegated work (agents/subagents/a build), NOT on you (kernel build_feed; the user 2026-06-22). The peer case rides waitingOn; this carries the generic "why". `tasks` = live bg-task descriptions (the user 2026-07-13): present → the compact "Awaiting task" pill (expands the list, like Sub-goals) replaces the boxed why. since = the wait's own event time → the box/pill elapsed readout (the user 2026-08-23)
   groupTitle?: string;                             // host: this ask shares a typed turn with siblings → the group's title
   groupN?: number;                                 // host: sibling count for that turn (>1 ⇒ fold into one group card)
   provisional?: boolean;                           // a LIVE-PROMPT placeholder (kernel _provisional_card): the session is working an in-progress turn the planner hasn't classified yet. No goal node (empty tree) — dim, non-interactive, no clear/nudge/modal; replaced by the real card once the planner places the segment.
@@ -161,7 +174,7 @@ const askEls = new Map<string, HTMLElement>();
 // lists them), so a stale push can't resurrect a card mid-dismiss (the user 2026-06-19).
 const pendingCleared = new Set<string>();
 // A LIFO of recently-cleared card batches, holding the AskItem data itself (a single Clear pushes [it]; a
-// Clear-all pushes the whole batch). "Undo clear" pops the latest and re-inserts those cards IMMEDIATELY —
+// Clear-all pushes the whole batch). "Undo" pops the latest and re-inserts those cards IMMEDIATELY —
 // optimistic restore — so the card reappears on click instead of waiting on the kernel round-trip + next feed
 // build. Mirrors the kernel's _undo_clear (restores the most-recent clear batch). (the user 2026-06-27.)
 const clearedStack: AskItem[][] = [];
@@ -459,6 +472,59 @@ let sessionOrder: string[] = [];
 // menu lists exactly the tabs (the user 2026-08-08) — a session with no cards still appears, and
 // filtering to it shows an empty board. Federation prefixes sid+name per host and concatenates.
 let sessionsMeta: { sid: string; name: string; color: { bg: string; fg: string } | null }[] = [];
+// Attached hosts whose CARD payload hasn't merged yet (the user 2026-08-25: sessions land via the
+// faster channels, cards trail with no cue) — the federation merge names them (pendingHosts), the
+// board hints per host, and the hint retires ONLY on the real events: that host's first contribution
+// (an empty one included) or its detach. The 45s mark ESCALATES the copy ("still waiting…"), never
+// hides — the first cut's backstop RETIRED the hint while the host genuinely still pended (the user
+// 2026-08-25, round two: the dots vanished, the cards still hadn't come; the signal knew, the
+// backstop overrode it — a backstop must never make the board lie about a true wait). A DEAD link
+// (pendingDead, from the merge's socket truth) names itself instead of waiting open-endedly.
+let pendingHosts: string[] = [];
+let pendingDead: string[] = [];
+const hostloadTimers = new Map<string, number>();
+const hostloadLong = new Set<string>();
+function syncHostloadBackstops(): void {
+  for (const h of pendingHosts) {
+    if (!hostloadTimers.has(h)) {
+      hostloadTimers.set(h, window.setTimeout(() => { hostloadLong.add(h); render(); }, 45000));
+    }
+  }
+  for (const [h, t] of Array.from(hostloadTimers)) {
+    if (!pendingHosts.includes(h)) {   // the payload landed (or the host detached) — the ONLY removals
+      window.clearTimeout(t);
+      hostloadTimers.delete(h);
+      hostloadLong.delete(h);
+    }
+  }
+}
+// The feed's LOCAL tag lens (the user 2026-08-25, T70): the shared TagLens model (tag-lens.ts, the
+// multi-select every surface speaks) applied as THIS board's own deliberate narrowing — never the
+// shared blob's `active` (the decoupling ruling stands); the payload's views blob feeds tag
+// DEFINITIONS only (lensUnions). Persistence is sessionStorage, the feed's storage-split convention
+// (romp:feedOnly's reasoning): reload-proof, but a fresh window starts on All — a lens persisting
+// for days would read as silently missing cards, and the disclosure line only mitigates. The tags
+// dialog's "set for all surfaces" writes localStorage romp:feedTags-set {lens,t}; the storage
+// listener below adopts it into this pane's own lens (the PR-B adoption contract).
+let feedTagViews: SessionViews | null = null;
+let feedLens: TagLens = { all: true };
+try { feedLens = JSON.parse(sessionStorage.getItem("romp:feedTags") || "") || { all: true }; } catch { /* default All */ }
+function setFeedLens(l: TagLens): void {
+  feedLens = l;
+  try {
+    if (lensAll(l)) sessionStorage.removeItem("romp:feedTags");
+    else sessionStorage.setItem("romp:feedTags", JSON.stringify(l));
+  } catch { /* storage blocked */ }
+}
+try {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== "romp:feedTags-set" || !e.newValue) return;
+    try {
+      const v = JSON.parse(e.newValue);
+      if (v && v.lens) { setFeedLens(v.lens as TagLens); render(); }
+    } catch { /* malformed set-for-all — ignore */ }
+  });
+} catch { /* no storage events */ }
 // The one session the board is filtered to, or null — the DEFAULT, nothing selected, everything shows.
 // sessionStorage, deliberately: it survives this tab's reloads (webviews reload on updates) but a fresh
 // window always starts unfiltered — a filter that persisted for days would read as silently lost cards.
@@ -467,6 +533,15 @@ try { feedOnlySid = sessionStorage.getItem("romp:feedOnly") || null; } catch { /
 function setFeedOnly(sid: string | null): void {
   feedOnlySid = sid;
   try { sid ? sessionStorage.setItem("romp:feedOnly", sid) : sessionStorage.removeItem("romp:feedOnly"); } catch { /* ignore */ }
+}
+// The SEARCH query (the user 2026-08-23): type-to-filter by session name, host prefix included —
+// "snape" keeps every session on that machine. Same storage lifetime as the session filter: survives
+// this tab's reloads, never a fresh window (a filter persisting for days reads as silently lost cards).
+let feedSearchQ = "";
+try { feedSearchQ = sessionStorage.getItem("romp:feedSearch") || ""; } catch { /* storage blocked */ }
+function setFeedSearch(q: string): void {
+  feedSearchQ = q;
+  try { q ? sessionStorage.setItem("romp:feedSearch", q) : sessionStorage.removeItem("romp:feedSearch"); } catch { /* ignore */ }
 }
 
 // OPTIMISTIC colour echo from the chat pane's tab menu (the user 2026-08-08): the chat repaints its
@@ -494,6 +569,17 @@ window.addEventListener("storage", (e) => {
 });
 // names of sessions currently WORKING → a working dot before that name everywhere
 // it renders (card titles, modal title, group name). Pushed in each feed message.
+// INSTANT chat acknowledgment for a card click (the user 2026-08-24: clicking into a not-shown
+// session felt slow): the felt latency is the kernel ROUND-TRIP — click → WS → _reveal_chat_for →
+// focus frame — and a busy kernel holds its WS handler behind push builds, while the chat already
+// HOLDS every session's data (measured: the chat's own first render of a 6000-event hidden
+// transcript is ~25ms). So the click also drops a same-origin echo the chat hears in milliseconds
+// (the storage event; the romp:color-echo precedent), activating the tab/peek and the loader
+// immediately; the kernel's focus frame follows and lands the anchor idempotently. VS Code webviews
+// don't share localStorage — there the kernel path stands alone, unchanged.
+function focusEcho(sid: string): void {
+  try { localStorage.setItem("romp:focus-echo", JSON.stringify({ sid, t: Date.now() })); } catch { /* storage blocked */ }
+}
 let workingSet = new Set<string>();
 // This machine's own name (kernel _self_host, on every feed payload) and the identity colour of every
 // session the feed knows, keyed "host:name" for a remote one and plain for a local one. Held mail names
@@ -802,6 +888,20 @@ function showCardMenu(e: MouseEvent, card: HTMLElement): void {
     setCardNotify(card, it, !on);
   });
   menu.appendChild(item);
+  // Browse the session's working tree. Only the sid rides: the feed payload doesn't carry cwd, and
+  // "." lets the OWNING kernel resolve it authoritatively (_resolve_open_path) rather than this pane
+  // scraping another pane's state. Gated on canPreview() (web only): the VS Code webview can't reach
+  // the kernel origin, and the editor has its own explorer.
+  if (canPreview()) {
+    const browse = el("div", "ctx-item");
+    browse.textContent = "Browse files";
+    browse.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      dismissCardMenu();
+      openFileBrowse(".", it.sid);
+    });
+    menu.appendChild(browse);
+  }
   document.body.appendChild(menu);
   cardMenuEl = menu;
   const r = menu.getBoundingClientRect();   // at the cursor, clamped inside the pane
@@ -942,16 +1042,22 @@ function makeAskCard(it: AskItem): HTMLElement {
   // name — they describe the session's live state, and keeping them OFF the action row stops them shoving
   // the buttons past the card's right edge on a narrow card (the user 2026-06-19; mirrors the ↻ Followed-up
   // chip moved up 2026-06-18). idwrap is flex:1 so the name ellipsizes before the badge is ever clipped.
-  idwrap.append(retryBadge, apiBadge, jauthBadge, blkBadge);
   // COMPACTNESS (the user 2026-07-07): Clear rides the NAME row (right side, after the chips) and the
   // Background/Summary toggles ride the TIME row — freeing a whole action row. So the action row holds only
   // Retry / Revive (rare states); both rows flex-WRAP so nothing overflows or overlaps on a narrow card.
-  actions.append(apiRetry, revive, qApprove, qDeny);
+  actions.append(revive, qApprove, qDeny);
   // "↪ from <peer>" provenance + the "reopened"/"↻ Followed up" chips ride the name row's right side;
   // row2 wraps them onto a new line when there isn't room, so the provenance never overlaps a chip
   // (the user 2026-06-20). origin sits left of the chips, matching the "from … · Followed up" reading order.
   // (Clear left this row 2026-08-08 — it rides row1's action corner in every mode now, see fask-btns.)
-  row2.append(idwrap, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge);
+  // EVERY session-state badge rides row2 DIRECTLY — grouped mode hides idwrap wholesale (the card
+  // drops its name into the session header), which silently blanked whatever lived inside it: first
+  // found as the lone red Retry (the user 2026-08-24, screenshot — its ⚠ badge sat hidden in the
+  // wrap), then the same mechanism for ⚠ retrying-since, judge-auth, and the ⏸ approval chip. As
+  // direct children they render in BOTH modes, count toward row2's grouped-mode liveness, and the
+  // API badge stays immediately before its Retry button — one visual unit. idwrap keeps only the
+  // name. Placement only; every badge's mint/retire semantics are untouched.
+  row2.append(idwrap, retryBadge, apiBadge, apiRetry, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge);
   // the bell BUTTON (the user 2026-07-28): INLINE in row1's metadata cluster, right after the
   // timestamp (the last line's tail), the one spot that never shoves the title — and in-flow, so it
   // cannot overlap the floated Clear. It hides with VISIBILITY, so its slot is reserved whether or
@@ -1070,7 +1176,7 @@ function makeAskCard(it: AskItem): HTMLElement {
   if (titleAnchor === "prompt" && !titleUuid && cardAnchorUuid) { titleAnchor = "work"; titleUuid = cardAnchorUuid; }
   // A PROVISIONAL placeholder has no goal node / timeline anchor — clicking anywhere just opens the live
   // session (go see what it's working on); the modal, timeline deep-link, and path-hover are all skipped.
-  title.onclick = (ev) => { ev.stopPropagation(); if (it.provisional) { openOrReviveSession(it.sid, it.live, it.name); return; } vscodeApi?.postMessage({ type: "showOnTimeline", itemId: it.itemId, sid: it.sid, t: it.t, anchor: titleAnchor, anchorUuid: titleUuid }); };
+  title.onclick = (ev) => { ev.stopPropagation(); if (it.provisional) { openOrReviveSession(it.sid, it.live, it.name); return; } focusEcho(it.sid); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: it.itemId, sid: it.sid, t: it.t, anchor: titleAnchor, anchorUuid: titleUuid }); };
   // (The auto-line is plain text now — no deep-link — so no onclick here; its hover tooltip = the planner's
   // why, set in updateAskCard. The inline sub-goal checkmarks remain clickable via wireNodeZones.)
   name.onclick = (ev) => { ev.stopPropagation(); openOrReviveSession(it.sid, it.live, it.name); };
@@ -1080,8 +1186,9 @@ function makeAskCard(it: AskItem): HTMLElement {
     // never fires and the timeline/chat highlight stuck until you moved the mouse (the user 2026-07-03). The
     // synthetic mouseleave runs the exact leave logic (clears the highlight, or restores a pinned card's).
     card.dispatchEvent(new MouseEvent("mouseleave"));
+    dressHeaderIfLast(card, it.sid);   // the run's last card takes its header with it — one motion (2026-08-24)
     pendingCleared.add(it.itemId);   // suppress from incoming pushes until the kernel confirms the clear
-    clearedStack.push([it]);         // cache for an instant optimistic Undo clear
+    clearedStack.push([it]);         // cache for an instant optimistic Undo
     card.classList.add("dismissing");
     vscodeApi?.postMessage({ type: "askClear", itemId: it.itemId, sid: it.sid });
     setTimeout(() => { if (askEls.get(it.itemId) === card && card.classList.contains("dismissing")) { card.remove(); askEls.delete(it.itemId); dropDismissed([it.itemId]); } }, 180);
@@ -1101,6 +1208,7 @@ function makeAskCard(it: AskItem): HTMLElement {
   // clear if none pinned.
   let hoverTimer: number | undefined;
   card.addEventListener("mouseenter", () => {
+    freezeEnter(it.itemId);                            // hover-freeze: pointer truth, no debounce
     if (it.provisional) return;                        // no timeline path for a placeholder
     hoverTimer = window.setTimeout(() => {
       hoverTimer = undefined;
@@ -1109,6 +1217,7 @@ function makeAskCard(it: AskItem): HTMLElement {
     }, 120);
   });
   card.addEventListener("mouseleave", () => {
+    freezeLeave(it.itemId);                            // hover-freeze: leaving the card flushes queued payloads
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = undefined; }
     if (hoverAskId === it.itemId) {
       hoverAskId = null; applyFocus();
@@ -1127,6 +1236,7 @@ function makeAskCard(it: AskItem): HTMLElement {
     pending = window.setTimeout(() => {
       pending = undefined;
       fullscreenAskId = it.itemId;
+      vscodeApi?.postMessage({ type: "cardOpened", itemId: it.itemId, sid: it.sid });   // the open-metric row (2026-08-25)
       vscodeApi?.postMessage({ type: "showAskPath", itemId: it.itemId, sid: it.sid, locate: false });
       render();
     }, 220);
@@ -1183,8 +1293,10 @@ function makeAskCard(it: AskItem): HTMLElement {
 // "none" (collapsed), so NEW cards arrive collapsed too. Clicking a toggle sets an explicit per-card override
 // (click the open one → off; click another → switch) that survives the mode.
 const secChoice = new Map<string, "bg" | "summary" | "subgoals" | "tasks" | "stall" | "none">();
-function resolveSec(id: string): "bg" | "summary" | "subgoals" | "tasks" | "stall" | "none" {
-  return secChoice.get(id) ?? (feedPrefs().collapsed ? "none" : "summary");
+function resolveSec(id: string, hasAwaitTasks = false): "bg" | "summary" | "subgoals" | "tasks" | "stall" | "none" {
+  // an awaiting-on-tasks card OPENS its task list by default (the user 2026-08-23: the wait is the
+  // one thing to read on that card); an explicit user pick and collapsed mode still win
+  return secChoice.get(id) ?? (feedPrefs().collapsed ? "none" : hasAwaitTasks ? "tasks" : "summary");
 }
 // The Stalled body's text: the staller's plain-language note when the judge has written one, else the
 // kernel's own mechanical reason. Never a waiting-on-the-judge placeholder — a stalled card always has
@@ -1207,10 +1319,13 @@ const cardTreeExpanded = new Set<string>();
 // above are exactly the state worth carrying: what the USER chose to open. Everything else module-level here
 // is a DOM cache or an in-flight optimistic record, and restoring those would resurrect predictions made
 // against a kernel that no longer exists — see feed-view-state.ts.
-// Stacked-layout column state (the user 2026-08-16): which categories are folded to their header, and
-// the dragged top-down order. Layout state, not card state — prune-exempt, persisted with the rest.
+// Column-layout state (the user 2026-08-16; drag extended to BOTH layouts 2026-08-24): which
+// categories are folded to their header, and the dragged column order — ONE order, two renderings
+// (the user thinks of the two layouts as one arrangement): a drag in either layout re-sequences both. Layout
+// state, not card state — prune-exempt, persisted with the rest (the key stays `order`, so an
+// arrangement dragged before the merge survives it).
 const collapsedCols = new Set<string>();
-let stackOrder: string[] = [];                       // [] = the CSS default (Completed, Blocked, Working)
+let colOrder: string[] = [];                         // [] = each layout's own CSS default
 
 (function hydrateViewState() {
   let st;
@@ -1222,7 +1337,7 @@ let stackOrder: string[] = [];                       // [] = the CSS default (Co
   for (const k of st.asks) expandedAsks.add(k);
   for (const k of st.threads) collapsedThreads.add(k);
   for (const k of st.cols) collapsedCols.add(k);
-  stackOrder = st.order.slice();
+  colOrder = st.order.slice();
 })();
 
 function currentViewState(): FeedViewState {
@@ -1230,7 +1345,7 @@ function currentViewState(): FeedViewState {
   secChoice.forEach((v, k) => { sec[k] = v; });
   return { v: 1, sec, tree: [...cardTreeExpanded], nodes: [...collapsedNodes], logs: [...nodeLogOpen],
            asks: [...expandedAsks], threads: [...collapsedThreads], cols: [...collapsedCols],
-           order: stackOrder.slice() };
+           order: colOrder.slice() };
 }
 
 // Written at the END of every render rather than from each toggle handler: the feed re-renders on every
@@ -1297,7 +1412,7 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
   // the stall note (the user 2026-07-23) — shown whenever the kernel says romp is holding this card, with
   // or without a judge-written note, since `why` alone already answers "why is nothing happening"
   const stall = it.stalled && it.stalled.why ? it.stalled : null;
-  let choice = resolveSec(id);
+  let choice = resolveSec(id, hasTasks);
   if (choice === "bg" && !bg) choice = "none";
   if (choice === "summary" && !distillShown) choice = "none";
   if (choice === "subgoals" && !hasSubs) choice = "none";
@@ -1349,6 +1464,28 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
   const subBtn = a._subBtn as HTMLElement;
   subBtn.style.display = hasSubs ? "" : "none";
   subBtn.textContent = subCount === 1 ? "1 sub-goal" : subCount + " sub-goals";
+  // dim " · N parked" suffix (the user 2026-08-24): the card-level gist of the row tags. Counts ONLY
+  // rows the checklist this button toggles can actually reach — the same walk, stopping at handoff
+  // nodes (delegations render in their own section) and at the root (the card head, not a row) — so
+  // the suffix never advertises rows no expansion reveals (review 2026-08-24; a parked ask under a
+  // LIVE delegation is the modal tree's to show).
+  let parkedCount = 0;
+  if (root) {
+    const pseen = new Set<string>([root.id]);
+    const pwalk = (nid: string) => {
+      const n = byId.get(nid);
+      if (!n || n.kind === "handoff" || pseen.has(n.id)) return;
+      pseen.add(n.id);
+      if (n.parked && n.parked.n) parkedCount++;
+      for (const c of n.children || []) pwalk(c);
+    };
+    for (const c of (root.children || [])) pwalk(c);
+  }
+  if (hasSubs && parkedCount) {
+    const pk = el("span", "fask-subparked");
+    pk.textContent = " · " + parkedCount + " parked";
+    subBtn.appendChild(pk);
+  }
   subBtn.classList.toggle("on", choice === "subgoals");
   subBtn.setAttribute("aria-pressed", choice === "subgoals" ? "true" : "false");
   subBtn.title = choice === "subgoals" ? "hide the sub-goals" : "show the sub-goals";
@@ -1363,8 +1500,12 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
   // class in the visible label (tooltips are dead on the touch PWA); kindless keeps the classic "task"
   const kw = KIND_WORD[(it.awaiting && it.awaiting.kind) || ""] || "task";
   const one = kw === "agents" ? "agent" : kw;   // singular form: "Awaiting agent", plural "N agents"
+  // the wait's elapsed time rides the pill exactly as it rides the awaiting box and the working
+  // narration — a stuck wait must be glanceable everywhere the state shows (the user 2026-08-23)
+  const pillWaited = waitedSuffix(it.awaiting && it.awaiting.since, Date.now() / 1000);
   (a._taskLbl as HTMLElement).textContent =
-    taskList.length === 1 ? "Awaiting " + one : "Awaiting " + taskList.length + " " + (one === kw ? kw + "s" : kw);
+    (taskList.length === 1 ? "Awaiting " + one
+                           : "Awaiting " + taskList.length + " " + (one === kw ? kw + "s" : kw)) + pillWaited;
   taskBtn.classList.toggle("on", choice === "tasks");
   taskBtn.setAttribute("aria-pressed", choice === "tasks" ? "true" : "false");
   taskBtn.title = choice === "tasks" ? "hide the tasks" : "show the tasks";
@@ -1448,6 +1589,7 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
       const txt = el("span", "fcheck-text"); txt.textContent = s.text;
       row.append(tri, mark, txt);
       if (s.cleared) row.appendChild(clearedTag());   // the strike alone doesn't say WHY — see CLEARED_TIP
+      if (s.parked && s.parked.n && !s.cleared) row.appendChild(parkedTag(s.parked.n));   // leapfrogged — see parkedTag
       // clicks match the modal tree node exactly (text → the message, checkbox → where it resolved) via the
       // SAME wireNodeZones; a dim repeat is display-only (wire=false).
       wireNodeZones(it, s, mark, txt, null, !repeat);
@@ -1549,6 +1691,58 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   } else {
     og.style.display = "none";
   }
+  // ↪ sender-side handoff provenance (the user 2026-08-24): a TOP-LEVEL "↪ delegated to <peer>"
+  // tracking node wore its provenance as the card TITLE, arrow and all. The kernel now titles the
+  // card with the WORK and ships the delegation here — the mirror of ↪ from above: identity color,
+  // quiet host: prefix for a federated recipient, click opens the recipient session. STACKS after
+  // an ↪ from badge rather than replacing it (origin and this are different facts about one card —
+  // the same rule the 2026-08-24 review pinned on this slot).
+  if (it.handoffTo && it.handoffTo.peerSid) {
+    const hadOrigin = !!(it.origin && it.origin.peer);
+    og.style.display = "";
+    if (!hadOrigin) {
+      og.replaceChildren(); og.style.color = ""; og.classList.remove("fask-origin-absorbed");
+      og.title = "delegated to " + it.handoffTo.peer + "; their result checks this card off · click opens the session";
+      og.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: it.handoffTo!.peerSid }); };
+    }
+    const pre = el("span", "fask-origin-pre"); pre.textContent = (hadOrigin ? " · " : "") + "↪ delegated to ";
+    const peer = el("span", "fask-origin-peer");
+    peer.replaceChildren(...hostPartsNodes(it.handoffTo.peerHost, it.handoffTo.peer));
+    if (it.handoffTo.color) peer.style.color = it.handoffTo.color.bg;
+    peer.title = "delegated to " + it.handoffTo.peer + "; their result checks this card off · click opens the session";
+    peer.style.cursor = "pointer";
+    peer.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: it.handoffTo!.peerSid }); };
+    og.append(pre, peer);
+  }
+  // tracked delegation PRIMARY (the user 2026-08-24): the ONE card, homed here under the delegator —
+  // it names the recipient(s) in their identity colors with the board's own live dot
+  // (working/awaiting/idle), so the manager reads the worker's state without leaving this card.
+  // STACKS after an ↪ from badge rather than replacing it (review 2026-08-24: an else-if hid a
+  // middleman's own tracked handoff — origin and delegTracked are different facts about one card);
+  // each recipient span carries its own click, so the ↪ from click keeps opening the sender.
+  if (it.delegTracked && it.delegTracked.length) {
+    const hadOrigin = !!(it.origin && it.origin.peer);
+    og.style.display = "";
+    if (!hadOrigin) {
+      og.replaceChildren(); og.style.color = ""; og.classList.remove("fask-origin-absorbed");
+      og.title = "a tracked handoff: the work runs with " + it.delegTracked.map((d) => d.name).join(", ")
+        + " and reports back to this card";
+      og.onclick = null;
+    }
+    const pre = el("span", "fask-origin-pre"); pre.textContent = (hadOrigin ? " · " : "") + "↪ delegated to ";
+    og.append(pre);
+    it.delegTracked.forEach((d, i) => {
+      if (i) og.append(", ");
+      const peer = el("span", "fask-origin-peer");
+      peer.replaceChildren(...hostPartsNodes(d.host, d.name));
+      if (d.color && d.color.bg) peer.style.color = d.color.bg;
+      setWorkDot(peer, dotFor(d.name));
+      peer.title = "a tracked handoff: the work runs with " + d.name + " and reports back to this card · click opens the session";
+      peer.style.cursor = "pointer";
+      peer.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: d.sid }); };
+      og.append(peer);
+    });
+  }
   a._time.textContent = relAge(hostNow - it.t);
   // hover the stamp for provenance (the user 2026-07-27): the age marks the NEWEST event (a done card's
   // age is its completion), so the popover tells where the thread came from — started when, each sub +
@@ -1625,6 +1819,13 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
     const woName = el("span", "fask-waiton-name"); woName.textContent = wo.name;
     if (wo.color && wo.color.bg) woName.style.color = wo.color.bg;   // the peer's own identity colour
     a._waitOn.append(woPre, woName);
+    // elapsed since the unanswered ask went out (kernel _wait_for_graph's since) — the same readout the
+    // working narration and awaiting box wear, so a wait stuck for hours is glanceable (the user 2026-08-23)
+    const woWaited = waitedSuffix(wo.since, Date.now() / 1000);
+    if (woWaited) {
+      const woDur = el("span", "fask-waiton-dur"); woDur.textContent = woWaited;
+      a._waitOn.append(woDur);
+    }
     a._waitOn.title = wo.inCycle
       ? "MUTUAL WAIT — this session and " + wo.name + " are each waiting on the other (a deadlock); auto-nudge surfaces it instead of nudging"
       : wo.kind === "delegate"
@@ -1661,7 +1862,36 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   // because spin reads as in-flight and nothing is (the user 2026-08-14).
   a._awaitSpin.classList.toggle("await-paused", awaitingBg);
   a._awaitSpin.classList.toggle("await-still", !!spin.still);
-  if (spinCaption) { a._awaitWhy.textContent = spinCaption; a._awaitSpin.title = spinTip || spinCaption; }
+  if (spinCaption) {
+    // a DELEGATION wait names its peers the way the "↪ from" line does (the user 2026-08-23): the
+    // quiet host: prefix + the peer's identity colour, never a colourless "Awaiting peer". The
+    // ladder's caption stays the fallback (older kernel payloads carry no peers).
+    const awPeers = (awaitingBg && it.awaiting && it.awaiting.peers) || [];
+    if (awPeers.length) {
+      a._awaitWhy.replaceChildren();
+      a._awaitWhy.append("Awaiting ");
+      awPeers.forEach((p, i) => {
+        if (i) a._awaitWhy.append(", ");
+        const nm = el("span", "fask-waiton-name");
+        nm.replaceChildren(...hostPartsNodes(p.host, p.name));
+        if (p.color && p.color.bg) nm.style.color = p.color.bg;
+        if (p.sid) {
+          // the standard session-chip gesture (the handoffTo idiom above): click opens the session
+          nm.title = "waiting on " + p.name + " — click opens the session";
+          nm.style.cursor = "pointer";
+          nm.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: p.sid }); };
+        }
+        a._awaitWhy.appendChild(nm);
+      });
+      a._awaitWhy.append(waitedSuffix(it.awaiting && it.awaiting.since, Date.now() / 1000));
+    } else a._awaitWhy.textContent = spinCaption;
+    a._awaitSpin.title = spinTip || spinCaption;
+    // HONEST fallback (the user 2026-08-26): a peer-kind wait with no named session says WHY the
+    // name is missing, instead of presenting "peer" as a style — identity is only truly unknowable
+    // when the record predates identity capture or an older/offline kernel shipped the payload.
+    if (awaitingBg && !awPeers.length && it.awaiting && it.awaiting.kind === "peer")
+      a._awaitSpin.title += " (No session is named in this wait's record — it predates identity capture, or an older kernel shipped it.)";
+  }
   // The swirl's "Analyzing…" caption + tooltip REPLACES the separate "↩ re-judging" chip (the user
   // 2026-06-29: don't show both) — drop the chip the recheck branch set above when the swirl is saying it.
   // ("Analyzing…" is the user-facing label for the re-judging spin, the user 2026-07-08.)
@@ -1753,7 +1983,7 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   if (distillShown && it.summaryAnchorUuid) {
     dl.classList.add("fask-distill-link");
     dl.title = "jump to where this was written";
-    dl.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: it.itemId, sid: it.sid, t: it.t, anchor: "work", anchorUuid: it.summaryAnchorUuid }); };
+    dl.onclick = (ev: Event) => { ev.stopPropagation(); focusEcho(it.sid); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: it.itemId, sid: it.sid, t: it.t, anchor: "work", anchorUuid: it.summaryAnchorUuid }); };
   } else if (distillShown) {
     // No anchor recorded (a card minted from a postal delegate, a completion turn not yet landed) — the
     // line must still ACKNOWLEDGE the click instead of rendering as silently dead text (the user
@@ -1786,12 +2016,23 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   // a transient stall, not a block — so this badge + Retry are the only API-error cue; no column move.
   const spendLimit = !!(it.blocked && it.blocked.spendLimit);
   const modelLimit = !!(it.blocked && it.blocked.modelLimit);
-  a._apiBadge.style.display = isApiErr ? "" : "none";
+  const refusal = !!(it.blocked && it.blocked.refusal);
+  // …and the whole unit RETIRES the moment the session recovers (the user 2026-08-24, screenshot: a
+  // GREEN awaiting dot beside a lone red Retry — the control read as arbitrary): visibility keys on
+  // the session's LIVE state from this very payload — a session working again, or awaiting the
+  // background work it dispatched, has resumed, and there is nothing to resume by hand no matter
+  // what the card's stored block record still says. The same sets the session dot reads
+  // (workingSet/awaitingSet), refreshed on every push — event-keyed, never a timer.
+  const apiRecovered = workingSet.has(it.name) || awaitingSet.has(it.name);
+  const showApiErr = isApiErr && !apiRecovered;
+  a._apiBadge.style.display = showApiErr ? "" : "none";
   // Retry pastes "retry" to resume a stalled turn — useless against a monthly spend cap (retrying can't lift a
   // billing limit), so hide it there and let the badge tell you to raise the cap (the user 2026-07-14).
   // A spent MODEL allowance is the same shape: Retry re-fails until you switch model or top up, and the
   // badge says so (the user 2026-08-01). Its window does reset on its own, which the badge title carries.
-  a._apiRetry.style.display = (isApiErr && !spendLimit && !modelLimit) ? "" : "none";
+  // A safeguards REFUSAL is the same shape again (the user 2026-08-15): deterministic on the same input,
+  // so Retry re-collects the same refusal — the badge names the real fix (rewrite it or drop the thread).
+  a._apiRetry.style.display = (showApiErr && !spendLimit && !modelLimit && !refusal) ? "" : "none";
   // "Continue" shows on a LIVE needs-you card with no live ask attached: the gesture claims "you're not
   // waiting on me", which means nothing in Working/Completed, can't answer a real permission prompt or
   // picker (it.blocked — text sent there would just queue behind the ask), and has no one to tell on a
@@ -1803,14 +2044,16 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   if (contBtn.disabled && !it.followupPending && !it.recheck && !it.rejudging) {
     contBtn.disabled = false; contBtn.textContent = "Continue";
   }
-  if (isApiErr && it.blocked) {
+  if (showApiErr && it.blocked) {
     // on-you errors name themselves: a spend cap (raise it), "prompt too long" (compact), or a spent model
     // allowance (switch model); other API errors are transient and auto-retrying (2026-06-29 / 07-14 / 08-01).
     a._apiBadge.textContent = spendLimit ? "⚠ Spend limit"
       : it.blocked.tooLong ? "⚠ Prompt too long"
       : modelLimit ? "⚠ Model limit"
+      : refusal ? "⚠ Safeguards refused"
       : it.blocked.status ? `⚠ API error · ${it.blocked.status}` : "⚠ API error";
-    a._apiBadge.title = spendLimit ? it.blocked.what : (it.blocked.text || it.blocked.what);
+    // a refusal's raw CLI text buries the remedy — the kernel's `what` states it plainly, so title with that
+    a._apiBadge.title = (spendLimit || refusal) ? it.blocked.what : (it.blocked.text || it.blocked.what);
     a._apiRetry.disabled = false; a._apiRetry.textContent = "Retry";
     a._apiRetry.onclick = (ev: Event) => {
       ev.stopPropagation();
@@ -2067,8 +2310,9 @@ function makeGroupCard(g: AskGroup): HTMLElement {
     ev.stopPropagation();
     card.dispatchEvent(new MouseEvent("mouseleave"));   // flush the group's stuck hover highlight (see the ask card's clear)
     const cur = (card as any)._g as AskGroup;
+    dressHeaderIfLast(card, cur.sid);   // a group is one session's turn — same one-motion rule (2026-08-24)
     card.classList.add("dismissing");
-    clearedStack.push(cur.members.slice());   // cache the whole batch for an instant optimistic Undo clear
+    clearedStack.push(cur.members.slice());   // cache the whole batch for an instant optimistic Undo
     for (const m of cur.members) { pendingCleared.add(m.itemId); vscodeApi?.postMessage({ type: "askClear", itemId: m.itemId, sid: m.sid }); }   // clear every member
     // only finalize if a render in the 180ms window didn't revive (re-render clears
     // .dismissing) or replace this card — else a stale timeout yanks the wrong one
@@ -2078,6 +2322,7 @@ function makeGroupCard(g: AskGroup): HTMLElement {
   // (first member). leave → restore the pin (ask OR group) or clear.
   let hoverTimer: number | undefined;
   card.addEventListener("mouseenter", () => {
+    freezeEnter(fkey);                                 // hover-freeze: pointer truth, no debounce
     hoverTimer = window.setTimeout(() => {
       hoverTimer = undefined;
       hoverAskId = fkey; applyFocus();
@@ -2085,6 +2330,7 @@ function makeGroupCard(g: AskGroup): HTMLElement {
     }, 120);
   });
   card.addEventListener("mouseleave", () => {
+    freezeLeave(fkey);                                 // hover-freeze: leaving the card flushes queued payloads
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = undefined; }
     if (hoverAskId === fkey) {
       hoverAskId = null; applyFocus();
@@ -2100,7 +2346,8 @@ function makeGroupCard(g: AskGroup): HTMLElement {
     pending = window.setTimeout(() => {
       pending = undefined;
       fullscreenAskId = fkey;
-      const m = m0(); if (m) vscodeApi?.postMessage({ type: "showAskPath", itemId: m.itemId, sid: m.sid, locate: false });
+      const m = m0(); if (m) vscodeApi?.postMessage({ type: "cardOpened", itemId: m.itemId, sid: m.sid });   // the open-metric row (2026-08-25)
+      if (m) vscodeApi?.postMessage({ type: "showAskPath", itemId: m.itemId, sid: m.sid, locate: false });
       render();
     }, 220);
   });
@@ -2188,6 +2435,18 @@ function clearedTag(): HTMLElement {
   const tag = el("span", "fcleared-tag");
   tag.textContent = "cleared";
   tag.title = CLEARED_TIP;
+  return tag;
+}
+
+// The parked row's plain-language story (the user 2026-08-24: a queued ask silently sat 40 minutes
+// while the same card's younger items were dispatched one after another, and nothing said so). One
+// quiet word on the row, the explanation on hover — a hint, never a needs-you alarm; the kernel
+// retires it the instant the row gets its own delegation or any verdict (_parked_rows).
+function parkedTag(n: number): HTMLElement {
+  const tag = el("span", "fparked-tag");
+  tag.textContent = "parked";
+  tag.title = "nothing has happened here yet — " + n + " newer ask" + (n === 1 ? " was" : "s were")
+    + " dispatched past this one; this tag clears on its own dispatch or any ruling";
   return tag;
 }
 
@@ -2302,6 +2561,9 @@ function hasQuestionDescendant(node: AskTreeNode, byId: Map<string, AskTreeNode>
 function treeSig(it: AskItem): string {
   return it.tree.map((n) =>
     n.id + n.status + (n.cleared ? "x" : "") + (n.whoWorking ? "W" : "")
+    // parked can mint/retire off a DIFFERENT top's dispatch (tops are siblings), which changes
+    // nothing else in THIS tree — without it in the sig an open group modal kept a stale tag
+    + (n.parked && n.parked.n ? "p" + n.parked.n : "")
     + (collapsedNodes.has(it.itemId + ":" + n.id) ? "c" : "")
     + (nodeLogOpen.has(it.itemId + ":" + n.id) ? "L" : "") + ((n.log || []).length || "")).join("|");
 }
@@ -2452,13 +2714,13 @@ function wireNodeZones(it: AskItem, node: AskTreeNode, mark: HTMLElement, txt: H
   // anchorUuid can arrive null for a beat (the kernel's cache-only parse goes cold on every transcript
   // write); fall to the stored promptAnchorUuid rather than dispatch a null the chat can only toast on
   // (the user 2026-07-20: three dead clicks on a blocked sub's ⏸ mark in one cold beat).
-  const goWork = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: navId, sid: navSid, t: resolveT, anchor: "work", anchorUuid: node.anchorUuid ?? node.promptAnchorUuid ?? null }); };
+  const goWork = (ev: Event) => { ev.stopPropagation(); focusEcho(navSid); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: navId, sid: navSid, t: resolveT, anchor: "work", anchorUuid: node.anchorUuid ?? node.promptAnchorUuid ?? null }); };
   // prompt-intent: jump to the minting user message. But a node with no opener (an autonomous note, or an
   // opener compacted off-path) has no promptAnchorUuid, so the jump would honest-fail with "couldn't locate".
   // Fall back to goWork — where the work actually happened — rather than toast (the user 2026-06-30).
   const goMsg = (ev: Event) => {
     if (!node.promptAnchorUuid && node.anchorUuid) { goWork(ev); return; }
-    ev.stopPropagation(); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: navId, sid: navSid, t: node.t, anchor: "prompt", anchorUuid: node.promptAnchorUuid ?? null });
+    ev.stopPropagation(); focusEcho(navSid); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: navId, sid: navSid, t: node.t, anchor: "prompt", anchorUuid: node.promptAnchorUuid ?? null });
   };
   if (!wire) return goWork;
   // tooltip names the destination by status: a blocked node was "marked blocked", a done node "checked off"
@@ -2522,6 +2784,7 @@ function renderTreeNode(box: HTMLElement, it: AskItem, node: AskTreeNode, byId: 
   if (node.status === "question") mark.title = node.qderived ? "a sub-goal inside is blocked — the ⏸ below is the ask" : "blocked — needs you";
   const txt = el("span", "ftree-text"); txt.textContent = node.text || "(node)"; line.appendChild(txt);
   if (node.cleared) line.appendChild(clearedTag());   // same one-word story as the card checklist
+  if (node.parked && node.parked.n && !node.cleared) line.appendChild(parkedTag(node.parked.n));   // and the parked hint
   // (The node's why/blocked/done rationale hover tooltip was removed 2026-06-27 — just the goal text now.)
   if (node.who && node.who !== parentWho) {
     const who = el("a", "ftree-who"); who.title = node.whoWorking ? "open this session (working now)" : "open this session";
@@ -2702,6 +2965,7 @@ function renderTreeNode(box: HTMLElement, it: AskItem, node: AskTreeNode, byId: 
         row.title = "jump to this moment in the chat";
         row.onclick = (ev) => {
           ev.stopPropagation();
+          focusEcho(navSidOf(it, node));
           vscodeApi?.postMessage({ type: "showOnTimeline", itemId: node.id, sid: navSidOf(it, node),
                                    t: r.evT || rt, anchor: "work", anchorUuid: r.anchorUuid ?? null });
         };
@@ -2919,7 +3183,7 @@ function renderModal() {
     titleHoverId = grp.turnId;
     const gm0 = grp.members[0];   // prompt-intent title → the first member's MINTING message (resolves by id, kernel 92e23ff)
     const gm0Prompt = gm0.tree?.find((n) => n.id === gm0.itemId)?.promptAnchorUuid ?? null;
-    ttlEl.onclick = () => vscodeApi?.postMessage({ type: "showOnTimeline", itemId: gm0.itemId, sid: grp.sid, t: grp.t, anchor: "prompt", anchorUuid: gm0Prompt });
+    ttlEl.onclick = () => focusEcho(grp.sid); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: gm0.itemId, sid: grp.sid, t: grp.t, anchor: "prompt", anchorUuid: gm0Prompt });
     agent.replaceChildren(...hostNameNodes(grp.name, grp.sid)); if (grp.color) agent.style.color = grp.color.bg; setWorkDot(agent, dotFor(grp.name)); agent.classList.toggle("dead", !grp.live);
     agent.onclick = () => vscodeApi?.postMessage({ type: "openSession", id: grp.sid });
     ageEl.textContent = relAge(hostNow - grp.t);
@@ -3014,6 +3278,14 @@ type Entry =
   // `folded` = how many of this run's cards the header is standing in for (0 when the thread is expanded)
   | { kind: "sess"; t: number; sid: string; name: string; color: { bg: string; fg: string } | null; live: boolean; folded: number };
 
+// ONE counting rule (the user 2026-08-26): every number on the board counts CARDS, never rows — a
+// turn-group entry is worth its members, a folded session header is worth the cards it stands in for.
+// Both the section chips and the fold accumulator read THIS, so expanded and collapsed can never
+// disagree (the traced bug: the chip counted a group as 1 row while the fold header said "cards").
+function entryCards(e: Entry): number {
+  return e.kind === "sess" ? e.folded : e.kind === "group" ? e.group.members.length : 1;
+}
+
 // Grouped-mode session headers, one reused element per (column, sid) — same keyed-incremental treatment as
 // cards so re-renders never rebuild a header mid-press. Pruned when a reconcile drops them from the DOM.
 const sessHeadEls = new Map<string, HTMLElement>();
@@ -3039,6 +3311,7 @@ function makeSessHead(): HTMLElement {
   return h;
 }
 function updateSessHead(h: HTMLElement, e: Entry & { kind: "sess" }): void {
+  h.setAttribute("data-fsid", e.sid);   // the hover-freeze badge painter finds headers by sid
   const nm = (h as any)._name as HTMLElement;
   nm.replaceChildren(...hostNameNodes(e.name, e.sid));
   if (e.color) nm.style.color = e.color.bg;
@@ -3054,7 +3327,9 @@ function updateSessHead(h: HTMLElement, e: Entry & { kind: "sess" }): void {
   fold.setAttribute("aria-expanded", shut ? "false" : "true");
   fold.setAttribute("aria-label", (shut ? "expand " : "collapse ") + e.name);
   foldn.style.display = shut && e.folded ? "" : "none";
-  foldn.textContent = e.folded === 1 ? "1 card" : e.folded + " cards";
+  // just the number (the user 2026-08-26) — the section chips' own vocabulary; the words live on hover
+  foldn.textContent = String(e.folded);
+  foldn.title = e.folded === 1 ? "1 card folded under this session" : e.folded + " cards folded under this session";
   fold.onclick = (ev) => {
     ev.stopPropagation();   // the fold IS the acknowledgement: local state + an immediate re-render
     if (collapsedThreads.has(e.sid)) collapsedThreads.delete(e.sid); else collapsedThreads.add(e.sid);
@@ -3079,14 +3354,15 @@ function updateSessHead(h: HTMLElement, e: Entry & { kind: "sess" }): void {
   }));
 }
 
-// UndoClear (top right): restore the most recently cleared card — the host pops
+// Undo (top right): restore the most recently cleared card — the host pops
 // the newest cleared.jsonl row. Built fresh wherever the top strip renders: on
 // the legend row when columns exist, and on the empty state too (clearing the
-// LAST card is exactly when undo is wanted).
+// LAST card is exactly when undo is wanted). One word (the user 2026-08-24,
+// dropping "Undo clear"): it sits right beside Clear all — context enough.
 function makeUndoClearBtn(): HTMLElement {
   const b = el("button", "fdismiss ffollow");   // restorative → blue hover (.ffollow), not Clear's red
   b.id = "feed-undoclear";
-  b.textContent = "Undo clear";
+  b.textContent = "Undo";
   b.title = "restore the most recently cleared card";
   b.onclick = (ev) => {
     ev.stopPropagation();
@@ -3142,12 +3418,12 @@ function ensureUndoClear(): HTMLElement {
 }
 
 // Clear all: inbox-zero every open card at once. Destructive, so it hovers RED (.fdismiss); the single
-// UndoClear restores the whole batch (the host clears them as one cleared.jsonl batch).
+// Undo restores the whole batch (the host clears them as one cleared.jsonl batch).
 function makeClearAllBtn(): HTMLElement {
   const b = el("button", "fdismiss");
   b.id = "feed-clearall";
   b.textContent = "Clear all";
-  b.title = "clear every open card (inbox-zero) — UndoClear restores them";
+  b.title = "clear every open card (inbox-zero) — Undo restores them";
   b.onclick = (ev) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "clearAll" }); };
   return b;
 }
@@ -3158,110 +3434,229 @@ function ensureClearAll(): HTMLElement {
   return b;
 }
 
-// A persisted toggle-button helper for the footer (the user 2026-07-07): a small pressed-state button that
-// writes a boolean into the shared romp:settings and re-renders. Used for "Newest first" and "Collapsed".
-// `after` runs BEFORE the re-render (e.g. drop per-card overrides), on the NEW value.
-function makeFeedToggle(id: string, label: string, get: () => boolean, key: string, after?: (on: boolean) => void): HTMLElement {
-  const b = el("button", "fdismiss ffollow feed-modetoggle");   // view action → blue hover; .on = accent (pressed)
-  b.id = id; b.textContent = label;
-  b.onclick = (ev) => {
-    ev.stopPropagation();
-    if (b.classList.contains("forced")) return;   // stacking is automatic at this width — a no-op toggle lies
-    const on = !get();
-    try {
-      const s = JSON.parse(localStorage.getItem("romp:settings") || "{}");
-      s[key] = on;
-      localStorage.setItem("romp:settings", JSON.stringify(s));
-    } catch { /* ignore */ }
-    after?.(on);
-    window.dispatchEvent(new Event("romp:settings"));   // same-doc signal → re-render (order / default section)
-  };
+// The feed's mount of the SHARED tag-lens menu (tag-menu.ts — one component every surface mounts;
+// the user's generalized design). The button is the shared monochrome tag glyph; active (a narrowed
+// lens) wears the accent like every footer .on state. The menu inherits cross-pane dismissal free
+// (romp:menu-echo). Configure routes to the tags dialog through the kernel (openTagsDialog).
+function ensureTagLensBtn(): HTMLElement {
+  let b = document.getElementById("feed-taglens") as HTMLElement | null;
+  if (!b) {
+    b = tagMenuButton("filter this board by tag — combinations union; All shows everything", (btn) => {
+      openTagMenu(btn, {
+        lens: () => feedLens,
+        unions: () => lensUnions(feedTagViews),
+        onApply: (l) => { setFeedLens(l); render(); },
+        onConfigure: () => vscodeApi?.postMessage({ type: "openTagsDialog" }),
+      });
+    });
+    b.id = "feed-taglens";
+    // FOOTER DRESS (the user 2026-08-25, round two: at rest the button outlined blue, and All faded
+    // it darker than its neighbours): the shared component ships its own inline style, and inline
+    // beats every class rule — strip it and wear the EXACT sibling vocabulary, so the resting state
+    // is the neighbours' computed style by construction and can never drift dark again. Active is
+    // the standard .on accent ONLY — the class the siblings use, never an inline colour.
+    b.removeAttribute("style");
+    b.className = "fdismiss ffollow feed-modetoggle";
+    (document.getElementById("feed-foot") || document.body).appendChild(b);
+  }
+  // THE BUTTON CONVENTION (the user 2026-08-25), shared renderer — subsumes the 696 instance
+  // toggle: same .on class mechanics (mode "class", so the footer's sibling dress stands), plus
+  // the chips of everything selected beside the button, identical to every other mount
+  let ch = document.getElementById("feed-tagchips") as HTMLElement | null;
+  if (!ch) {
+    ch = document.createElement("span");
+    ch.id = "feed-tagchips";
+    ch.setAttribute("style", "display:inline-flex;gap:5px;align-items:center;margin-left:2px;");
+    b.after(ch);
+  }
+  syncTagFilter(b, ch, feedLens, lensUnions(feedTagViews) as never, (l) => { setFeedLens(l); render(); }, "class");
   return b;
 }
-function ensureFeedToggle(id: string, label: string, get: () => boolean, key: string, onTitle: string, offTitle: string, after?: (on: boolean) => void): HTMLElement {
-  let b = document.getElementById(id) as HTMLElement | null;
-  if (!b) { b = makeFeedToggle(id, label, get, key, after); (document.getElementById("feed-foot") || document.body).appendChild(b); }
-  const on = get();
-  b.classList.toggle("on", on);
-  b.setAttribute("aria-pressed", on ? "true" : "false");
-  b.title = on ? onTitle : offTitle;
-  return b;
+
+// The footer VIEW MENU (the user 2026-08-24): the three view controls — sort direction, single-column
+// layout, by-session grouping — live behind ONE monochrome icon button now, a popup wearing the shared
+// .ctx-menu vocabulary, where three word-buttons crowded the footer and the labels can breathe.
+// Prefs still write the shared romp:settings (the ⛭ gear's watcher and other panes read the same keys).
+// The button is ensure-once; the menu lives on document.body outside render()'s reconcile, opening
+// upward like the session menu (click-safety: a push can never rebuild it mid-press).
+function setViewPref(key: string, on: boolean, after?: (on: boolean) => void): void {
+  try {
+    const s = JSON.parse(localStorage.getItem("romp:settings") || "{}");
+    s[key] = on;
+    localStorage.setItem("romp:settings", JSON.stringify(s));
+  } catch { /* ignore */ }
+  after?.(on);   // runs BEFORE the re-render (e.g. apply the stack style var), on the NEW value
+  window.dispatchEvent(new Event("romp:settings"));   // same-doc signal -> re-render (order / layout / grouping)
 }
-// "Modified ↑/↓" — the sort control (the user 2026-08-18, renamed from the "Newest first" toggle): cards
-// sort by modified time, the arrow shows the direction, and a click reverses it. Both directions are
-// valid sorts, so the button never wears the pressed accent — the arrow IS the state.
-function ensureNewestFirst(): HTMLElement {
-  const b = ensureFeedToggle("feed-newestfirst", "Modified", () => feedPrefs().newestFirst, "newestFirst",
-    "newest at the top — click for oldest first",
-    "oldest at the top — click for newest first");
-  b.textContent = "Modified " + (feedPrefs().newestFirst ? "\u2193" : "\u2191");
-  b.classList.remove("on");
-  return b;
-}
-// "Stack" — force the one-column layout at ANY width (the user 2026-08-18): the same stacked view the
-// narrow container query produces, as a standing choice. The pref drives a style() container condition
-// on #feed-list (see feed.css), so the CSS stays the single owner of what stacking means; the narrow
-// query still stacks regardless.
+// "Single column view" (the user 2026-08-18, the footer "Stack" button then): force the one-column
+// layout at ANY width — the same stacked view the narrow container query produces, as a standing
+// choice. The pref drives a style() container condition on #feed-list (see feed.css), so the CSS
+// stays the single owner of what stacking means; the narrow query still stacks regardless.
 function applyStacked(on: boolean) {
   document.getElementById("feed-list")?.style.setProperty("--romp-stack", on ? "on" : "off");
 }
 // FORCED stacking (the user 2026-08-19): at or under the container query's own 540px the layout
-// stacks regardless of the pref, so the toggle is a no-op there — unclicking it would change
-// nothing. The button says so instead of lying: faded, unclickable, tooltip naming the way out
-// (more width). Width changes are the event — a ResizeObserver on #feed-list, installed once.
+// stacks regardless of the pref, so the toggle is a no-op there — the menu row says so instead of
+// lying: still ✓-checked (stacking IS on), faded, inert, tooltip naming the way out (more width).
+// Width changes are the event — a ResizeObserver on #feed-list, installed once.
 const STACK_FORCED_W = 540;   // MUST match feed.css's @container (max-width: 540px) stack query
 let stackResizeWatch: ResizeObserver | null = null;
-function refreshStackForced(b: HTMLElement): void {
+let stackForced = false;
+function refreshStackForced(): void {
   const list = document.getElementById("feed-list");
   const forced = !!list && list.clientWidth > 0 && list.clientWidth <= STACK_FORCED_W;
-  b.classList.toggle("forced", forced);
-  b.setAttribute("aria-disabled", forced ? "true" : "false");
-  if (forced) b.title = "stacked automatically at this width — widen the feed to unstack into three columns";
-}
-function ensureStackToggle(): HTMLElement {
-  const b = ensureFeedToggle("feed-stacked", "Stack", () => feedPrefs().stacked, "stacked",
-    "one-column layout at any width — click for side-by-side columns when the feed is wide",
-    "stack the columns into one, whatever the width",
-    (on) => applyStacked(on));
-  refreshStackForced(b);                      // per render: the ensure title above just overwrote ours
-  const list = document.getElementById("feed-list");
-  if (!stackResizeWatch && list && typeof ResizeObserver !== "undefined") {
-    stackResizeWatch = new ResizeObserver(() => refreshStackForced(b));
-    stackResizeWatch.observe(list);
-  }
-  return b;
+  if (forced === stackForced) return;
+  stackForced = forced;
+  if (viewMenuEl) paintViewMenu(viewMenuEl);   // an open menu repaints on the deciding event
 }
 // (The "Collapsed" default-section toggle moved into the settings modal, 2026-08-18 — a set-and-forget
 // preference, not a per-glance view action. The pref and its behavior are unchanged; the gear writes
 // romp:settings.collapsed and the settings watcher below drops the per-card overrides on change.)
 
-// "Group" — organize each column BY SESSION (the user 2026-07-13): kernel tab/lane order, a name+dot header
-// on the backdrop opening each session's run, per-card names dropped (the header carries the identity).
-function ensureGroupToggle(): HTMLElement {
-  return ensureFeedToggle("feed-grouped", "Group", () => feedPrefs().grouped, "grouped",
-    "grouped by session — click for the flat column order",
-    "group each column's cards by session (tab order), a session header between runs");
+let viewMenuEl: HTMLElement | null = null;
+function closeViewMenu(): void {
+  if (viewMenuEl?.contains(document.activeElement)) document.getElementById("feed-viewbtn")?.focus();
+  viewMenuEl?.remove(); viewMenuEl = null;
+  document.removeEventListener("pointerdown", viewMenuAway, true);
+  document.removeEventListener("keydown", viewMenuKey, true);
+}
+function viewMenuAway(ev: Event): void {
+  const t = ev.target as Node;
+  if (viewMenuEl && !viewMenuEl.contains(t) && !(document.getElementById("feed-viewbtn")?.contains(t))) closeViewMenu();
+}
+function viewMenuKey(ev: KeyboardEvent): void { if (ev.key === "Escape") closeViewMenu(); }
+// The rows: "Sort by most recent ↓/↑" keeps the Modified button's rule (the user 2026-08-18) — both
+// directions are valid sorts, so the arrow IS the state and the row never wears the ✓; "Single column
+// view" and "Group by session" are ✓ rows over the same prefs the old Stack/Group buttons wrote
+// ("Group" organizes each column BY SESSION, the user 2026-07-13 — kernel tab/lane order, a name+dot
+// header opening each session's run; grouped still defaults ON via feedPrefs' !== false, so the ✓
+// reads exactly the way the pressed button did). Rows are real <button>s — Tab-reachable and
+// Enter/Space-activatable, the operability the replaced footer buttons had — built ONCE per open and
+// then synced IN PLACE (paintViewMenu below), so a live repaint (a settings change from another pane,
+// the width crossing 540px) never swaps a row out from under a pressed pointer (click-safety), and a
+// click always acts on the prefs AS OF the click, not as of the last paint.
+function buildViewMenu(menu: HTMLElement): void {
+  const mk = (check: boolean, act: () => void): HTMLElement => {
+    const r = el("button", "ctx-item");
+    (r as HTMLButtonElement).type = "button";
+    r.setAttribute("role", check ? "menuitemcheckbox" : "menuitem");
+    r.onclick = (ev) => {
+      ev.stopPropagation();
+      if (r.classList.contains("forced")) return;   // stacking is automatic at this width — a no-op toggle lies
+      act();
+      closeViewMenu();
+    };
+    menu.appendChild(r);
+    return r;
+  };
+  mk(false, () => setViewPref("newestFirst", !feedPrefs().newestFirst));
+  mk(true, () => setViewPref("stacked", !feedPrefs().stacked, applyStacked));
+  mk(true, () => setViewPref("grouped", !feedPrefs().grouped));
+}
+// Sync the three rows to the CURRENT prefs — labels, ✓s, the forced state — without rebuilding them.
+function paintViewMenu(menu: HTMLElement): void {
+  const p = feedPrefs();
+  const rows = menu.querySelectorAll(".ctx-item");
+  if (rows.length !== 3) return;
+  const set = (i: number, label: string, opts: { current: boolean; forced?: boolean; title: string }) => {
+    const r = rows[i] as HTMLElement;
+    r.textContent = label;
+    r.title = opts.title;
+    r.classList.toggle("current", opts.current);
+    r.classList.toggle("forced", !!opts.forced);
+    if (r.getAttribute("role") === "menuitemcheckbox") r.setAttribute("aria-checked", opts.current ? "true" : "false");
+    if (opts.forced) r.setAttribute("aria-disabled", "true"); else r.removeAttribute("aria-disabled");
+  };
+  set(0, "Sort by most recent " + (p.newestFirst ? "\u2193" : "\u2191"), {
+    current: false,   // a DIRECTION row — never the ✓-current mark
+    title: p.newestFirst ? "newest at the top — click for oldest first" : "oldest at the top — click for newest first",
+  });
+  set(1, "Single column view", {
+    current: p.stacked || stackForced, forced: stackForced,
+    title: stackForced ? "stacked automatically at this width — widen the feed to unstack into three columns"
+      : p.stacked ? "one-column layout at any width — click for side-by-side columns when the feed is wide"
+      : "stack the columns into one, whatever the width",
+  });
+  set(2, "Group by session", {
+    current: p.grouped,
+    title: p.grouped ? "grouped by session — click for the flat column order"
+      : "group each column's cards by session (tab order), a session header between runs",
+  });
+}
+function openViewMenu(btn: HTMLElement): void {
+  closeSessList();   // one menu at a time: a keyboard open fires no pointerdown, so the away-closers never ran
+  const menu = el("div", "ctx-menu feed-viewmenu");
+  menu.setAttribute("role", "menu");
+  refreshStackForced();   // decide the forced row from the CURRENT width, not the last observed one
+  buildViewMenu(menu);
+  paintViewMenu(menu);
+  document.body.appendChild(menu);
+  // above the footer, left-aligned to the button, clamped into the viewport (the session menu's placement)
+  const r = btn.getBoundingClientRect();
+  menu.style.bottom = Math.round(window.innerHeight - r.top + 6) + "px";
+  menu.style.left = Math.round(Math.max(6, Math.min(r.left, window.innerWidth - menu.offsetWidth - 6))) + "px";
+  viewMenuEl = menu;
+  (menu.querySelector(".ctx-item") as HTMLElement | null)?.focus();   // a keyboard open lands on the first row
+  document.addEventListener("pointerdown", viewMenuAway, true);
+  document.addEventListener("keydown", viewMenuKey, true);
+}
+// A WORD, not an icon (the user 2026-08-24, round two: the ordering glyph beside "Sessions ▴" read
+// as "not what I would expect for what to show"): "View ▴" says exactly what clicking does — the
+// footer's own word-button vocabulary, the same upward caret its Sessions neighbour wears. The
+// original glyph existed to be compact; one short word costs a few px and buys first-look legibility.
+function ensureViewMenuBtn(): HTMLElement {
+  let b = document.getElementById("feed-viewbtn") as HTMLElement | null;
+  if (!b) {
+    b = el("button", "fdismiss ffollow feed-modetoggle");
+    b.id = "feed-viewbtn";
+    b.textContent = "View \u25b4";
+    b.title = "view options — sort direction, single column, group by session";
+    b.setAttribute("aria-haspopup", "menu");
+    b.onclick = (ev) => {   // opening the menu IS the acknowledgement (same as the session filter)
+      ev.stopPropagation();
+      if (viewMenuEl) closeViewMenu(); else openViewMenu(b!);
+    };
+    (document.getElementById("feed-foot") || document.body).appendChild(b);
+  }
+  const list = document.getElementById("feed-list");
+  if (!stackResizeWatch && list && typeof ResizeObserver !== "undefined") {
+    stackResizeWatch = new ResizeObserver(() => refreshStackForced());
+    stackResizeWatch.observe(list);
+  }
+  return b;
 }
 
-// The SESSION FILTER (the user 2026-08-08): a footer menu listing every session the chat tab strip
-// shows, in ITS order, each written the way every other surface writes a session — bold name in its
-// identity colour, "host:" prefix folded quiet, the shared working/awaiting status dot. Picking one
-// shows only that session's cards; "All sessions" (the default — nothing selected) shows everything.
-// The menu opens UPWARD from the footer (that is where the space is) and lives on document.body,
-// outside render()'s reconcile, so a push can never rebuild it mid-press; the button itself is
-// ensure-once like the other footer controls.
-let sessMenuEl: HTMLElement | null = null;
-function closeSessMenu(): void {
-  sessMenuEl?.remove(); sessMenuEl = null;
-  document.removeEventListener("pointerdown", sessMenuAway, true);
-  document.removeEventListener("keydown", sessMenuKey, true);
+// The SESSION COMBOBOX (the user 2026-08-24, merging the 2026-08-08 session picker and the
+// 2026-08-23 search box): ONE footer control owns "which sessions am I looking at". Collapsed, a
+// single "Sessions ▴" word-button. Open, the top-bar-style input with the session list beneath —
+// every row written the way every other surface writes a session (bold name in its identity colour,
+// "host:" prefix folded quiet, the shared working/awaiting dot; the current pick wears the accent
+// wash, exactly today's menu). TYPING narrows the list AND applies the live substring filter
+// (romp:feedSearch — semantics unchanged); PICKING a row applies the exact-session filter
+// (romp:feedOnly — semantics unchanged), rendered as a chip in the bar whose ✕ hands the bar back
+// to typing. The two filters compose downstream exactly as before (viewFiltered). Invariants kept
+// from both parents: an ACTIVE filter of either kind force-opens the bar (a compact state can never
+// hide a live filter); Escape folds, and folding with anything live CLEARS it; the wrap is
+// ensure-once and the list lives on document.body outside render()'s reconcile (click-safety); the
+// list is built ONCE per open and typing only toggles row display, so a keystroke can never rebuild
+// a row out from under a press.
+let sessListEl: HTMLElement | null = null;
+function closeSessList(): void {
+  sessListEl?.remove(); sessListEl = null;
+  document.removeEventListener("pointerdown", sessListAway, true);
+  document.removeEventListener("keydown", sessListKey, true);
 }
-function sessMenuAway(ev: Event): void {
+function sessListAway(ev: Event): void {
   const t = ev.target as Node;
-  if (sessMenuEl && !sessMenuEl.contains(t) && !(document.getElementById("feed-sessfilter")?.contains(t))) closeSessMenu();
+  if (!sessListEl || sessListEl.contains(t) || document.getElementById("feed-search")?.contains(t)) return;
+  closeSessList();
+  // an away-click closes the LIST only — never a filter-clearing fold: clicking a card must not
+  // wipe a live filter (clear-on-fold is for EXPLICIT folds — Escape, the button). With nothing
+  // live the bar collapses quietly; force-open keeps it up otherwise.
+  if (!feedSearchQ.trim() && !feedOnlySid) document.getElementById("feed-search")?.classList.remove("open");
 }
-function sessMenuKey(ev: KeyboardEvent): void { if (ev.key === "Escape") closeSessMenu(); }
-// A session's name in the menu wears EXACTLY the identity treatment every other surface gives it (the
+function sessListKey(ev: KeyboardEvent): void { if (ev.key === "Escape") { closeSessList(); foldSessBox(); } }
+// A session's name in the list wears EXACTLY the identity treatment every other surface gives it (the
 // user 2026-08-08): bold, in the session's own colour, host prefix folded quiet — the way the chat tabs
 // and the grouped session headers write it. Never a colour swatch: a dot beside a name on this board
 // already MEANS working/awaiting (the shared fwork-dot vocabulary), so that status dot rides here too.
@@ -3271,56 +3666,178 @@ function sessMenuName(s: { sid: string; name: string; color: { bg: string; fg: s
   if (s.color) nm.style.color = s.color.bg;
   return nm;
 }
-function openSessMenu(btn: HTMLElement): void {
+// Typing narrows the OPEN list in place: display toggles only, never a rebuild (click-safety). The
+// "All sessions" row always shows — the way back can never be filtered away (no-dead-end).
+function filterSessList(q: string): void {
+  if (!sessListEl) return;
+  sessListEl.querySelectorAll<HTMLElement>(".fsm-row").forEach((r) => {
+    const name = r.getAttribute("data-name");
+    r.style.display = name === null || searchMatches(q, name) ? "" : "none";
+  });
+}
+function repaintSessListCurrent(): void {
+  if (!sessListEl) return;
+  sessListEl.querySelectorAll<HTMLElement>(".fsm-row").forEach((r) => {
+    const on = (r.getAttribute("data-sid") || null) === feedOnlySid;
+    r.classList.toggle("on", on);
+    r.setAttribute("aria-selected", on ? "true" : "false");   // option rows select; checked is the checkbox pattern
+  });
+}
+function openSessList(): void {
+  closeViewMenu();   // one menu at a time: a keyboard open fires no pointerdown, so the away-closers never ran
+  const wrap = document.getElementById("feed-search");
+  if (!wrap || sessListEl) return;
   const menu = el("div", "feed-sessmenu");
-  const row = (on: boolean, pick: string | null, label: HTMLElement, dotName?: string) => {
-    const r = el("div", "fsm-row" + (on ? " on" : ""));
+  menu.setAttribute("role", "listbox");
+  const row = (pick: string | null, label: HTMLElement, name: string | null, dotName?: string) => {
+    const r = el("div", "fsm-row");
     r.appendChild(label);
     if (dotName) setWorkDot(label, dotFor(dotName));   // inserts the status dot before the name, in place
-    r.setAttribute("role", "menuitemradio"); r.setAttribute("aria-checked", on ? "true" : "false");
-    r.onclick = (ev) => { ev.stopPropagation(); setFeedOnly(on ? null : pick); closeSessMenu(); render(); };
+    r.setAttribute("role", "option");
+    if (pick !== null) r.setAttribute("data-sid", pick);
+    if (name !== null) r.setAttribute("data-name", name);
+    // TAG CHIPS inline (the user 2026-08-25 — the unification call's smaller variant): the session's
+    // name-keyed union tags as compact outline chips, the dialog's own one-chip-per-name vocabulary,
+    // NON-interactive (grouping made visible; the two controls stay separate and the pick is
+    // untouched). The strip ellipsizes in the row's leftover space so names stay primary.
+    // (Deliberately NOT built, decided: search matching tag names — the pick list stays sessions-only.)
+    if (pick !== null) {
+      const chips = el("span", "fsm-chips");
+      for (const g of lensUnions(feedTagViews)) {
+        if (!g.members.includes(pick)) continue;
+        const c = el("i", "fsm-chip-tag");
+        c.textContent = g.name;
+        if (g.color) { c.style.color = g.color; c.style.borderColor = g.color; }
+        chips.appendChild(c);
+      }
+      if (chips.childElementCount) r.appendChild(chips);
+    }
+    r.onclick = (ev) => {   // pick = the exact filter, worn as the bar's chip; the list closes, the bar stays
+      ev.stopPropagation();
+      const already = (r.getAttribute("data-sid") || null) === feedOnlySid;
+      setFeedOnly(already ? null : pick);
+      const inp = document.getElementById("feed-search-input") as HTMLInputElement | null;
+      if (inp) { inp.value = ""; inp.focus(); }   // back to typing mode; the chip carries the pick
+      setFeedSearch("");
+      closeSessList();
+      render();
+    };
     menu.appendChild(r);
   };
   const all = el("span", "");
   all.textContent = "All sessions";
-  row(!feedOnlySid, null, all);
+  row(null, all, null);
   // tab order: rank by the kernel's session-order list (the same rank grouped mode sorts by); a sid the
   // list doesn't know keeps its place in the kernel's tab list (stable sort), after the ranked ones
   const rank = new Map(sessionOrder.map((s, i) => [s, i] as const));
   const rows = sessionsMeta.slice().sort((a, b) => (rank.get(a.sid) ?? 1e9) - (rank.get(b.sid) ?? 1e9));
-  for (const s of rows) row(feedOnlySid === s.sid, s.sid, sessMenuName(s), s.name);
+  for (const s of rows) row(s.sid, sessMenuName(s), s.name, s.name);
   document.body.appendChild(menu);
-  // above the footer, left-aligned to the button, clamped into the viewport
-  const r = btn.getBoundingClientRect();
+  // above the footer, aligned to the BAR and at least its width (combobox convention), clamped in
+  const r = wrap.getBoundingClientRect();
+  menu.style.minWidth = Math.max(150, Math.round(r.width)) + "px";
   menu.style.bottom = Math.round(window.innerHeight - r.top + 6) + "px";
   menu.style.left = Math.round(Math.max(6, Math.min(r.left, window.innerWidth - menu.offsetWidth - 6))) + "px";
-  sessMenuEl = menu;
-  document.addEventListener("pointerdown", sessMenuAway, true);
-  document.addEventListener("keydown", sessMenuKey, true);
+  sessListEl = menu;
+  repaintSessListCurrent();
+  filterSessList(feedSearchQ);
+  document.addEventListener("pointerdown", sessListAway, true);
+  document.addEventListener("keydown", sessListKey, true);
 }
-function ensureSessionFilter(): HTMLElement {
-  let b = document.getElementById("feed-sessfilter") as HTMLElement | null;
-  if (!b) {
-    b = el("button", "fdismiss ffollow feed-modetoggle");
-    b.id = "feed-sessfilter";
-    b.onclick = (ev) => {   // opening the menu IS the acknowledgement (same as the fold caret)
-      ev.stopPropagation();
-      if (sessMenuEl) closeSessMenu(); else openSessMenu(b!);
+// Folding with anything live CLEARS it — the bar never hides an active filter of either kind.
+function foldSessBox(): void {
+  const wrap = document.getElementById("feed-search");
+  const inp = document.getElementById("feed-search-input") as HTMLInputElement | null;
+  let changed = false;
+  if (inp && inp.value.trim()) { inp.value = ""; changed = true; }
+  if (feedSearchQ.trim()) { setFeedSearch(""); changed = true; }
+  if (feedOnlySid) { setFeedOnly(null); changed = true; }
+  wrap?.classList.remove("open");
+  closeSessList();
+  if (changed) render();
+}
+function ensureSessionBox(): HTMLElement {
+  let wrap = document.getElementById("feed-search") as HTMLElement | null;
+  if (!wrap) {
+    wrap = el("span", "");
+    wrap.id = "feed-search";
+    const btn = el("button", "fdismiss ffollow feed-modetoggle");
+    btn.id = "feed-search-btn";
+    btn.textContent = "Sessions \u25b4";
+    btn.title = "filter the board by session — type to narrow (host prefix counts), or pick one exactly";
+    btn.setAttribute("aria-haspopup", "listbox");
+    const chip = el("span", "fsm-chip");
+    chip.id = "feed-sess-chip";
+    chip.hidden = true;
+    const inp = document.createElement("input");
+    inp.id = "feed-search-input";
+    inp.type = "search";
+    inp.placeholder = "session or host…";
+    inp.setAttribute("aria-label", "filter cards by session name (host prefix included), or pick a session from the list");
+    const openBox = () => { wrap!.classList.add("open"); openSessList(); inp.focus(); };
+    btn.onclick = (ev) => { ev.stopPropagation(); wrap!.classList.contains("open") ? foldSessBox() : openBox(); };
+    inp.onfocus = () => { if (!sessListEl) openSessList(); };   // focus re-opens the list (a pick closed it)
+    inp.oninput = () => { setFeedSearch(inp.value); filterSessList(inp.value); render(); };   // live: narrows list AND board
+    inp.onkeydown = (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); foldSessBox(); } };
+    inp.onblur = () => {   // an empty bar folds quietly when focus leaves AND the list is gone — a row
+      //                      press keeps the list (blur fires first); the away-closer owns that case
+      if (!sessListEl && !inp.value.trim() && !feedOnlySid) wrap!.classList.remove("open");
     };
-    (document.getElementById("feed-foot") || document.body).appendChild(b);
+    const clr = el("button", "");
+    clr.id = "feed-search-clear";
+    (clr as HTMLButtonElement).type = "button";
+    clr.setAttribute("aria-label", "Clear search");
+    clr.title = "Clear search";
+    clr.hidden = true;   // shown only with text to clear (the top bar's semantics); render() below syncs it
+    clr.textContent = "\u00d7";
+    clr.onclick = (ev) => {   // clear + REFOCUS — the user is mid-search, never fold under them
+      ev.stopPropagation();
+      inp.value = ""; setFeedSearch(""); filterSessList(""); inp.focus(); render();
+    };
+    wrap.appendChild(btn); wrap.appendChild(chip); wrap.appendChild(inp); wrap.appendChild(clr);
+    (document.getElementById("feed-foot") || document.body).appendChild(wrap);
   }
+  const inp = wrap.querySelector("input") as HTMLInputElement;
+  if (inp && inp.value !== feedSearchQ && document.activeElement !== inp) inp.value = feedSearchQ;
+  const clrBtn = document.getElementById("feed-search-clear");
+  if (clrBtn && inp) clrBtn.hidden = !inp.value.trim();   // trimmed, like the fold + the filter — whitespace is no query
+  // the chip quotes the picked session verbatim, dot included — a narrowed board must never look whole
+  const chip = document.getElementById("feed-sess-chip") as HTMLElement | null;
   const cur = feedOnlySid ? sessionsMeta.find((s) => s.sid === feedOnlySid) : undefined;
-  const on = !!feedOnlySid;
-  b.classList.toggle("on", on);
-  b.setAttribute("aria-pressed", on ? "true" : "false");
-  b.title = cur ? "showing only " + cur.name + " — click to change or show all"
-    : "show a single session's cards (default: all)";
-  if (cur) {
-    const nm = sessMenuName(cur);
-    b.replaceChildren(nm, document.createTextNode(" ▴"));
-    setWorkDot(nm, dotFor(cur.name));   // the button quotes the picked session verbatim, dot included
-  } else b.replaceChildren(document.createTextNode("Session ▴"));
-  return b;
+  if (chip) {
+    chip.hidden = !cur;
+    if (cur) {
+      // the ✕ is built ONCE (a per-render rebuild would swap it under a press — click-safety);
+      // only the NAME re-quotes each render, so colour echoes and the working/awaiting dot stay live
+      let nm = (chip as any)._nm as HTMLElement | undefined;
+      if (!nm) {
+        nm = el("span", "fsm-name");
+        const x = el("button", "fsm-chipx");
+        (x as HTMLButtonElement).type = "button";
+        x.textContent = "\u00d7";
+        x.setAttribute("aria-label", "show all sessions");
+        x.title = "show all sessions — back to typing";
+        x.onclick = (ev) => {
+          ev.stopPropagation();
+          setFeedOnly(null);
+          repaintSessListCurrent();
+          (document.getElementById("feed-search-input") as HTMLInputElement | null)?.focus();
+          render();
+        };
+        chip.replaceChildren(nm, x);
+        (chip as any)._nm = nm;
+      }
+      nm.replaceChildren(...hostNameNodes(cur.name, cur.sid));
+      nm.style.color = cur.color ? cur.color.bg : "";
+      setWorkDot(nm, dotFor(cur.name));
+    }
+  }
+  // an ACTIVE filter of either kind force-opens the bar — never hidden behind the collapsed button
+  const active = !!feedSearchQ.trim() || !!feedOnlySid;
+  if (active) wrap.classList.add("open");
+  const btn = document.getElementById("feed-search-btn");
+  if (btn) { btn.classList.toggle("on", active); btn.setAttribute("aria-pressed", active ? "true" : "false"); }
+  return wrap;
 }
 
 // (The footer "Sub-goals" checkbox was removed 2026-07-08: sub-goals is now a per-card "Sub-goals" button
@@ -3330,19 +3847,23 @@ function ensureSessionFilter(): HTMLElement {
 // rebuild if torn down (empty state). "Awaiting" (the user's ruling 2026-06-10):
 // matches the session-chip vocabulary — anything here awaits HIM (a question,
 // an action like reload, an idea), red like the awaiting chip.
-const STACK_DEFAULT = ["completed", "needsInput", "asks"];   // the CSS default top-down stacking
+const STACK_DEFAULT = ["completed", "needsInput", "asks"];   // the stacked CSS default, top-down (2026-07-30)
+const ROW_DEFAULT = ["asks", "needsInput", "completed"];     // the side-by-side CSS default — the build order
 
-// Paint the stacked-column state: each section's fold (list hidden, caret pointed) and its top-down
-// slot (a --stack-order var the container query applies — the side-by-side layout ignores it, so a
-// drag in the narrow view never rearranges the wide one). Idempotent; runs at build and per toggle.
+// Paint the column-order state (ONE order, two renderings — the user 2026-08-24): each column's
+// --col-order var feeds BOTH layouts' `order:` rules; with no custom order the var comes OFF, so
+// each layout keeps its own default (stacked: Completed→Blocked→Working, the user 2026-07-30; side
+// by side: Working→Blocked→Completed, the build order). Also each section's fold (stacked-only CSS).
+// Idempotent; runs at build, per toggle, and per drag re-slot.
 function applyColStack(): void {
-  const order = stackOrder.length === 3 ? stackOrder : STACK_DEFAULT;
+  const custom = colOrder.length === 3 ? colOrder : null;
   for (const key of ["asks", "needsInput", "completed"]) {
     const col = document.querySelector<HTMLElement>(".feed-col.col-" + key);
     if (!col) continue;
     const folded = collapsedCols.has(key);
     col.classList.toggle("col-collapsed", folded);
-    col.style.setProperty("--stack-order", String(order.indexOf(key) + 1));
+    if (custom) col.style.setProperty("--col-order", String(custom.indexOf(key) + 1));
+    else col.style.removeProperty("--col-order");
     const fold = col.querySelector<HTMLElement>(".fcol-fold");
     if (fold) {
       fold.textContent = folded ? "▸" : "▾";
@@ -3351,24 +3872,30 @@ function applyColStack(): void {
   }
 }
 
-// Drag a section header by its grip to re-slot the category in the STACK (pointer events, capture on
-// the grip so the drag survives leaving it). Only the stacked layout listens: in the side-by-side
-// layout the grip is display:none. The order updates live while dragging (flex `order` reflows), and
-// the drop persists it.
-// Drag a section by its CATEGORY CHIP (the user 2026-08-16, dropping the earlier grip handle): the
-// grab cursor on the chip is the affordance. While dragging, the grabbed section FOLLOWS the pointer
-// (a transform, so nothing reflows under the hand) and the displaced sections FLIP-animate into their
-// provisional slots — the arrangement you see mid-drag is the arrangement you get. Only the stacked
-// layout listens: side by side the chip keeps its normal cursor and this returns before capturing.
+// Drag a section by its CATEGORY CHIP — in BOTH layouts now (the user 2026-08-24, reversing the
+// 2026-08-16 stacked-only exclusion with their own ask: the columns should drag around in
+// three-column view just as the sections already do stacked): stacked, the drag re-slots the section vertically;
+// side by side, it reorders the three columns horizontally. ONE persisted order feeds both
+// renderings (colOrder). The grab cursor on the chip is the affordance. While dragging, the grabbed
+// section FOLLOWS the pointer along the drag axis (a transform, so nothing reflows under the hand)
+// and the displaced sections FLIP-animate into their provisional slots — the arrangement you see
+// mid-drag is the arrangement you get on drop.
 function wireColDrag(chip: HTMLElement, col: HTMLElement, key: string): void {
   chip.addEventListener("pointerdown", (down) => {
     const colsEl = document.getElementById("feed-cols");
-    if (!colsEl || getComputedStyle(colsEl).flexDirection !== "column") return;
+    if (!colsEl) return;
+    const vertical = getComputedStyle(colsEl).flexDirection === "column";   // the drag AXIS, per layout
     down.preventDefault();
     down.stopPropagation();
     chip.setPointerCapture(down.pointerId);
     col.classList.add("col-dragging");
-    const startY = down.clientY;
+    const pos = (ev: PointerEvent) => (vertical ? ev.clientY : ev.clientX);
+    const edge = (r: DOMRect) => (vertical ? r.top : r.left);
+    const midOf = (r: DOMRect) => (vertical ? r.top + r.height / 2 : r.left + r.width / 2);
+    const translate = (d: number) => (vertical ? "translateY(" + d + "px)" : "translateX(" + d + "px)");
+    const fallback = vertical ? STACK_DEFAULT : ROW_DEFAULT;
+    const hadCustom = colOrder.length === 3;   // for the no-trace rule in up()
+    const start = pos(down);
     let slotShift = 0;   // the dragged section's own accumulated slot movement — folded into its
     //                      follow-transform so a re-slot never yanks it out from under the pointer
     const applyOrderFlip = (order: string[]) => {
@@ -3377,38 +3904,37 @@ function wireColDrag(chip: HTMLElement, col: HTMLElement, key: string): void {
         const e = document.querySelector<HTMLElement>(".feed-col.col-" + k);
         if (e) els.push([k, e]);
       }
-      const before = new Map(els.map(([k, e]) => [k, e.getBoundingClientRect().top]));
-      stackOrder = order;
+      const before = new Map(els.map(([k, e]) => [k, edge(e.getBoundingClientRect())]));
+      colOrder = order;
       applyColStack();
       for (const [k, e] of els) {
-        const d = (before.get(k) || 0) - e.getBoundingClientRect().top;
+        const d = (before.get(k) || 0) - edge(e.getBoundingClientRect());
         if (!d) continue;
         if (k === key) { slotShift -= d; continue; }   // both rects carry the follow-transform, so d is pure slot delta
-        e.animate([{ transform: "translateY(" + d + "px)" }, { transform: "translateY(0)" }],
+        e.animate([{ transform: translate(d) }, { transform: translate(0) }],
                   { duration: 150, easing: "ease" });
       }
     };
     const move = (ev: PointerEvent) => {
-      const order = (stackOrder.length === 3 ? stackOrder : STACK_DEFAULT).slice();
+      const order = (colOrder.length === 3 ? colOrder : fallback).slice();
       const from = order.indexOf(key);
-      // the slot whose vertical midpoint the pointer is past — walk the OTHER two sections' rects
+      // the slot whose axis midpoint the pointer is past — walk the OTHER two sections' rects
       let to = from;
       for (const other of order) {
         if (other === key) continue;
         const oc = document.querySelector<HTMLElement>(".feed-col.col-" + other);
         if (!oc) continue;
-        const r = oc.getBoundingClientRect();
-        const mid = r.top + r.height / 2;
+        const m = midOf(oc.getBoundingClientRect());
         const oi = order.indexOf(other);
-        if (oi < from && ev.clientY < mid) { to = Math.min(to, oi); }
-        if (oi > from && ev.clientY > mid) { to = Math.max(to, oi); }
+        if (oi < from && pos(ev) < m) { to = Math.min(to, oi); }
+        if (oi > from && pos(ev) > m) { to = Math.max(to, oi); }
       }
       if (to !== from) {
         order.splice(from, 1);
         order.splice(to, 0, key);
         applyOrderFlip(order);
       }
-      col.style.transform = "translateY(" + (ev.clientY - startY - slotShift) + "px)";
+      col.style.transform = translate(pos(ev) - start - slotShift);
     };
     const up = () => {
       chip.removeEventListener("pointermove", move);
@@ -3417,11 +3943,18 @@ function wireColDrag(chip: HTMLElement, col: HTMLElement, key: string): void {
       // settle: animate from wherever the hand left it into its slot, then drop the transform
       const hang = col.style.transform;
       col.style.transform = "";
-      if (hang && hang !== "translateY(0px)") {
-        col.animate([{ transform: hang }, { transform: "translateY(0)" }],
+      if (hang && hang !== translate(0)) {
+        col.animate([{ transform: hang }, { transform: translate(0) }],
                     { duration: 150, easing: "ease" });
       }
       col.classList.remove("col-dragging");
+      // a drag dropped back where it started leaves NO trace (review 2026-08-24): without a
+      // pre-existing custom order, ending on this layout's own default must not mint an EXPLICIT
+      // order — that would silently re-arrange the OTHER layout, which keeps a different default
+      if (!hadCustom && colOrder.length === 3 && colOrder.join() === fallback.join()) {
+        colOrder = [];
+        applyColStack();
+      }
       persistViewState();
     };
     chip.addEventListener("pointermove", move);
@@ -3441,10 +3974,10 @@ function ensureCols(list: HTMLElement) {
     for (const [key, label, chip] of [["asks", "Working", "working"], ["needsInput", "Blocked", "blocked"], ["completed", "Completed", "completed"]] as const) {
       const col = el("div", "feed-col col-" + key);
       const head = el("div", "feed-col-head");
-      // stacked-layout furniture (the user 2026-08-16), both hidden in the side-by-side layout by CSS:
-      // a caret LEFT of the chip folds the whole category to its header, and a grip (hover-revealed on
-      // pointer devices, faintly visible on touch) drags the section to a new spot in the stack. These
-      // live on the build-once header, so they are click-safe across the feed's constant re-renders.
+      // header furniture (the user 2026-08-16): a caret LEFT of the chip folds the whole category to
+      // its header (stacked-only, hidden side by side by CSS), and the CHIP ITSELF drags the section
+      // to a new slot — in BOTH layouts since 2026-08-24 (see wireColDrag). These live on the
+      // build-once header, so they are click-safe across the feed's constant re-renders.
       const fold = el("button", "fcol-fold");
       fold.setAttribute("aria-label", "Collapse " + label);
       fold.addEventListener("click", (ev) => {
@@ -3480,6 +4013,44 @@ function ensureCols(list: HTMLElement) {
 // Keyed in-place reconcile of ONE column (mixes ask + standalone cards; a card
 // whose column changed is MOVED, not rebuilt — no hover flicker). Records each key
 // in `globalDesired` for the cross-column cache cleanup the caller runs after.
+// A grouped session header leaves as ONE MOTION with its run's last card (the user 2026-08-24,
+// whose recording showed the header popping out a frame after the card finished fading): the exit
+// wears the card-dismiss family (fade + slight shrink + height collapse) instead of vanishing at
+// the next render. The element is UN-KEYED first — dropped from sessHeadEls and re-keyed to a
+// tombstone — so a reappearing run mints a FRESH header while the ghost finishes; DOM removal keys
+// on animationend (the event), with a backstop timeout so a lost event can never trap the ghost,
+// and reduced motion removes at once (no animation ever plays there).
+let sessGhostSeq = 0;
+function startSessHeadExit(key: string, head: HTMLElement): void {
+  if (sessHeadEls.get(key) === head) sessHeadEls.delete(key);
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    head.remove();
+    return;
+  }
+  head.dataset.key = "x:" + (++sessGhostSeq);   // keyed-but-never-desired: survives the unkeyed-child sweep
+  head.classList.add("sess-exit");
+  const done = () => head.remove();
+  head.addEventListener("animationend", done, { once: true });
+  window.setTimeout(done, 600);                 // backstop — a lost event can never trap the ghost
+}
+// The CONJUNCTION half: when a dismissing card is its run's LAST, the header starts its exit at the
+// same moment (the same click), not at the post-dismiss render. Grouped mode only; a run with other
+// live cards keeps its header rock-steady. The walk reads the CURRENT DOM: back to the run's own
+// header, then across the run for any member that is neither the leaving card nor already dismissing.
+function dressHeaderIfLast(card: HTMLElement, sid: string): void {
+  if (!feedPrefs().grouped) return;
+  let head: HTMLElement | null = null;
+  for (let p = card.previousElementSibling as HTMLElement | null; p; p = p.previousElementSibling as HTMLElement | null) {
+    if (p.classList.contains("feed-sess-head")) { head = p; break; }
+  }
+  if (!head || head.getAttribute("data-fsid") !== sid || head.classList.contains("sess-exit")) return;
+  for (let n = head.nextElementSibling as HTMLElement | null; n && !n.classList.contains("feed-sess-head"); n = n.nextElementSibling as HTMLElement | null) {
+    if (n !== card && n.classList.contains("fitem") && !n.classList.contains("dismissing")) return;   // the run lives on
+  }
+  const key = head.dataset.key || "";
+  startSessHeadExit(key, head);
+}
+
 function reconcileCol(listEl: HTMLElement, entries: Entry[], globalDesired: Set<string>) {
   const existing = new Map<string, HTMLElement>();
   for (const c of Array.from(listEl.children) as HTMLElement[]) {
@@ -3511,7 +4082,12 @@ function reconcileCol(listEl: HTMLElement, entries: Entry[], globalDesired: Set<
     globalDesired.add(key); colDesired.add(key);
     ordered.push(card);
   }
-  for (const [k, c] of existing) if (!colDesired.has(k)) c.remove();
+  for (const [k, c] of existing) {
+    if (colDesired.has(k)) continue;
+    if (c.classList.contains("sess-exit")) continue;             // a ghost mid-exit — its end event removes it
+    if (k.startsWith("s:")) startSessHeadExit(k, c);             // headers leave as one motion (2026-08-24)
+    else c.remove();
+  }
   let cur: ChildNode | null = listEl.firstChild;
   for (const node of ordered) {
     if (cur === node) { cur = cur.nextSibling; continue; }
@@ -3665,6 +4241,80 @@ function paintJudgeLimit(): void {
   b.style.display = "";
 }
 
+// The render's display-side view: the footer session filter (the user 2026-08-08 — display-side
+// only, `asks` stays complete so flipping it needs no kernel round-trip) composed with the search
+// query (the user 2026-08-23 — a card passes when its session's meta name matches OR its own
+// per-card label does, so a just-died session's cards keep matching after the meta list drops it).
+// Shared by render() and the hover-freeze badge painter, so the deferred-churn hint counts exactly
+// what the user would see move.
+function viewScope(list: AskItem[]): AskItem[] {
+  // The board shows EVERY session's cards, whatever tag view the tabs/timeline hold (the user's
+  // 2026-08-25 ruling, superseding the 2026-08-24 feed-follows-the-view coupling after living with
+  // it): the feed is the attention/clearing surface — hidden-elsewhere work still lands and clears
+  // here. Its ONLY narrowing is its own local scoping (this combobox exact filter + search) and
+  // the feed-local TAG LENS (viewBase). A tracked
+  // delegation's satellite lives under its delegator's PRIMARY card: the default board hides it,
+  // and picking its session in the filter is the one-click path back.
+  let shown = feedOnlySid ? list.filter((a) => a.sid === feedOnlySid) : list.filter((a) => !a.satellite);
+  const sMatch = searchSids(feedSearchQ, sessionsMeta);
+  if (sMatch) shown = shown.filter((a) => sMatch.has(a.sid) || searchMatches(feedSearchQ, (a as { name?: string }).name));
+  return shown;
+}
+
+// The feed-local TAG LENS slot (the user 2026-08-25, T70; disclosure lineage: the 665 outside-view
+// treatments, retired with the shared-view coupling, live again here under the user's OWN lens).
+// Needs-you always passes — the same interrupt rule the satellite and internals lens wear: a
+// view-hidden session that needs the human is this board's whole job.
+function viewBase(list: AskItem[]): AskItem[] {
+  const s = viewScope(list);
+  if (lensAll(feedLens)) return s;   // default All = today's board, byte-identical
+  const u = lensUnions(feedTagViews);
+  return s.filter((a) => lensVisible(feedLens, u, a.sid) || a.column === "needs_input");
+}
+
+// The disclosure count: what the TAG LENS alone hides (breakthroughs already show; counting them
+// would double-speak) — viewScope minus viewBase, by construction.
+function outsideLensCount(list: AskItem[]): number {
+  return lensAll(feedLens) ? 0 : viewScope(list).length - viewBase(list).length;
+}
+
+// The board's final display view. (The 2026-08-25 team-internals lens lived in this slot for a
+// day and RETIRED the same day on the user's verdict: team-internal cards must not be CREATED —
+// chain-rooted minting in the courier owns that now — rather than created-then-foldable. No
+// display class, no footer toggle; the slot family stays so future lenses layer the same way.)
+// INSIDE this helper on purpose — the hover-freeze churn badges count through it, so they see
+// exactly what the board shows (a filter outside would paint +N for cards that never appear).
+function viewFiltered(list: AskItem[]): AskItem[] {
+  return viewBase(list);
+}
+
+// The per-host loading strip (the user 2026-08-25): while an attached host's cards are pending,
+// one quiet line per host — the romp loader family scoped to a strip, never a board takeover; the
+// cards already present stay fully live. Retires per host on the exact event of its first merged
+// contribution (pendingHosts, federation.ts) or on the standing can't-trap backstop; the lines are
+// non-interactive, so a per-render rebuild is click-safe by construction.
+function ensureHostLoad(list: HTMLElement): void {
+  let strip = document.getElementById("feed-hostload");
+  if (!pendingHosts.length) { strip?.remove(); return; }   // the real events emptied the list — the only way off
+  if (!strip) {
+    strip = el("div", "");
+    strip.id = "feed-hostload";
+  }
+  list.appendChild(strip);   // last child in either board state (cards or the empty wordmark)
+  strip.replaceChildren(...pendingHosts.map((h) => {
+    const line = el("div", "hostload-line");
+    const swirl = el("span", "fask-awaiting-swirl");   // the shared reverse-spin glyph, LEFT of the text
+    const txt = el("span", "");
+    txt.textContent = pendingDead.includes(h)
+      ? "can\u2019t reach " + h + " \u2014 its cards return when it reconnects"
+      : hostloadLong.has(h)
+        ? "still waiting on " + h + "\u2026"
+        : "loading cards from " + h + "\u2026";
+    line.append(swirl, txt);
+    return line;
+  }));
+}
+
 function render() {
   const list = document.getElementById("feed-list")!;
   pruneAgeTip();   // drop the tip only if the render tore its hovered stamp out (see pruneAgeTip)
@@ -3672,12 +4322,11 @@ function render() {
   paintJudgeLimit();   // the usage-limit banner above the columns (build-once; hidden when unlatched)
   auditShownColumns(asks); // tripwire: what this render SHOWS is the record a bounce report needs
   const prevScroll = list.scrollTop;
-  // footer pane (below the cards, no overlap): Newest first · Collapsed · Clear all · UndoClear
+  // footer pane (below the cards, no overlap): view menu · Session filter · Search | Clear all · Undo
   const showCA = !!asks.length;
-  ensureNewestFirst().style.display = showCA ? "" : "none";       // Modified ↑/↓ — the sort direction
-  ensureStackToggle().style.display = showCA ? "" : "none";       // force one-column at any width (the user 2026-08-18)
-  ensureGroupToggle().style.display = showCA ? "" : "none";       // by-session grouping (the user 2026-07-13)
-  ensureSessionFilter().style.display = showCA ? "" : "none";     // one-session filter menu (the user 2026-08-08)
+  ensureViewMenuBtn().style.display = showCA ? "" : "none";       // sort + layout menu (the user 2026-08-24)
+  ensureTagLensBtn().style.display = showCA ? "" : "none";        // the feed-local tag lens (the user 2026-08-25, T70)
+  ensureSessionBox().style.display = showCA ? "" : "none";        // session combobox: type-or-pick filter (the user 2026-08-24)
   ensureClearAll().style.display = showCA ? "" : "none";
   ensureUndoClear().style.display = canUndoClear ? "" : "none";
   const foot = document.getElementById("feed-foot");
@@ -3699,15 +4348,15 @@ function render() {
       e.setAttribute("role", "img"); e.setAttribute("aria-label", "All tasks complete");
       list.appendChild(e);
     }
+    ensureHostLoad(list);   // an attached host's cards may be the ONLY thing coming — say so here too
     return;
   }
 
   const cols = ensureCols(list);
   const buckets: Record<Column, Entry[]> = { asks: [], needsInput: [], completed: [] };
-  // The footer session filter (the user 2026-08-08): with a session picked, the board draws ONLY its
-  // cards. Display-side only — `asks` stays complete, so flipping the filter needs no kernel round-trip
-  // and everything else (the modal, optimistic moves, the empty check above) still sees the whole board.
-  const shown = feedOnlySid ? asks.filter((a) => a.sid === feedOnlySid) : asks;
+  // The display-side view filters (session filter + search), shared with the hover-freeze badge
+  // painter so the deferred-churn hint counts exactly what the user would see move (viewFiltered).
+  let shown = viewFiltered(asks);
   // Derive sibling GROUPS at render time, keyed by the shared typed turn (turnId).
   // Only host-flagged asks (groupTitle) participate, and a turn needs ≥2 current
   // members to fold — a lone survivor (siblings cleared) renders as a single card.
@@ -3753,8 +4402,9 @@ function render() {
           withHeads.push(head);
         }
         // A COLLAPSED thread contributes its header and nothing else — the run's cards are counted onto the
-        // header instead of rendered, so the folded row still says how much is under it.
-        if (collapsedThreads.has(s)) { if (head) head.folded++; continue; }
+        // header instead of rendered, so the folded row still says how much is under it. CARDS, not rows
+        // (entryCards): a turn-group folds as its member count, the same rule the section chip reads.
+        if (collapsedThreads.has(s)) { if (head) head.folded += entryCards(e); continue; }
         withHeads.push(e);
       }
       buckets[k] = withHeads;
@@ -3786,8 +4436,11 @@ function render() {
   const setCount = (elc: HTMLElement, n: number) => { elc.textContent = n ? String(n) : ""; elc.style.display = n ? "" : "none"; };
   // Headers aren't cards — but a FOLDED header stands in for its run, so its cards count. The column chip
   // reports what is on the board, never what you happen to have open: folding a thread must not read as
-  // work having left the column (the user 2026-07-31).
-  const nCards = (es: Entry[]) => es.reduce((n, e) => n + (e.kind === "sess" ? e.folded : 1), 0);
+  // work having left the column (the user 2026-07-31). ONE counting rule (the user 2026-08-26): a number
+  // is always CARDS, never rows — a turn-group row is its members, a folded header is the cards it hides
+  // (entryCards, which the fold accumulator uses too) — so a section's number cannot move on any fold or
+  // grouping, only when cards actually enter or leave the column.
+  const nCards = (es: Entry[]) => es.reduce((n, e) => n + entryCards(e), 0);
   setCount(cols.asksCount, nCards(buckets.asks));
   setCount(cols.needsInputCount, nCards(buckets.needsInput));
   setCount(cols.completedCount, nCards(buckets.completed));
@@ -3815,7 +4468,61 @@ function render() {
   }
   for (const tid of Array.from(groupEls.keys())) if (!desired.has("g:" + tid) && undismissed(groupEls.get(tid))) { groupEls.get(tid)?.remove(); groupEls.delete(tid); }
 
+  // The tag lens's disclosure line (the user 2026-08-25, T70; lineage: the 665 outside-view line +
+  // promoted banner, retired with the shared-view coupling, revived under the user's OWN lens —
+  // what a filter hides stays one glance from reach, never silent, the 2026-08-11 rule). The click
+  // resets to All, purely local (no kernel round-trip: sessionStorage + render).
+  const lensOutN = outsideLensCount(asks);
+  let lmore = document.getElementById("feed-lensmore");
+  if (!lmore) {
+    lmore = el("div", "");
+    lmore.id = "feed-lensmore";
+    lmore.title = "cards the tag filter hides — click to show all";
+    lmore.onclick = () => { setFeedLens({ all: true }); render(); };
+    list.appendChild(lmore);
+  }
+  const lensShownN = viewFiltered(asks).length;
+  lmore.classList.toggle("prominent", lensOutN > lensShownN);
+  lmore.style.display = lensOutN ? "" : "none";
+  if (lensOutN) {
+    lmore.textContent = lensOutN > lensShownN
+      ? "Showing \u201c" + lensLabel(feedLens) + "\u201d \u2014 " + lensOutN
+        + (lensOutN === 1 ? " card is" : " cards are") + " outside this filter \u00b7 show all"
+      : lensOutN + (lensOutN === 1 ? " card" : " cards") + " outside this tag filter \u2014 show all";
+  }
+  ensureHostLoad(list);
   list.scrollTop = prevScroll;
+  // Stale-freeze heal (hover-freeze): a LOCAL render can detach or re-key the hovered element with
+  // no mouseleave — a removed element never fires leave events (typing in search filters the card
+  // out; toggling Group swaps the ask card for a group card in place). :hover is live pointer
+  // truth, checked per render (event-based, never a timer): no card under the pointer → the freeze
+  // is stale, clear it and flush the queue; a DIFFERENT card under the pointer (re-keyed in place,
+  // so no enter event ever fired) → re-arm to the element actually being hovered.
+  if (freezeKey) {
+    const hov = document.querySelector<HTMLElement>(".feed-cols .fitem:hover");
+    if (!hov) { freezeKey = null; flushFreeze(); }
+    else { const k = kbHoverId(hov); if (k && k !== freezeKey) freezeKey = k; }
+  }
+  paintFreezeBadges();   // hover-freeze: local renders while frozen re-sync the +N/-N hints (no-op unfrozen)
+  // stale-ring heal: releaseTabScope sweeps the DOCUMENT, but a card DETACHED at release (filtered
+  // out by search, say) keeps its ring and the reconcile may reattach that cached element later —
+  // with no scope active, any ring inside a card is stale; strip per render (kbMode owns its own)
+  if (!tabScopeKey && !kbMode) document.querySelectorAll(".fitem .kbd-focus").forEach((n) => n.classList.remove("kbd-focus"));
+  // keyboard-scope focus restore (the user 2026-08-24): a re-render may rebuild the focused
+  // control's element, and a rebuild must not eat keyboard focus (click-safety, applied to the
+  // keyboard). Find the control again by LOGICAL identity — class + label, then the old slot.
+  if (tabScopeKey && tabScopeSig) {
+    const card = cardElByKey(tabScopeKey);
+    const ae = document.activeElement;
+    if (!card) releaseTabScope();
+    else if (!ae || ae === document.body || !card.contains(ae)) {
+      const els = cardControls(card);
+      let i = els.findIndex((e2) => ctrlSig(e2) === tabScopeSig!.sig);
+      if (i < 0) i = Math.min(tabScopeSig.idx, els.length - 1);
+      if (i >= 0) tabScopeFocus(card, els, i);
+      else releaseTabScope();
+    }
+  }
   // FLIP-across-identity: a card whose KEY is new this render (group→solo, solo→group, umbrella absorb) has no
   // First rect of its own, so the normal FLIP can't slide it. Alias it to its PREDECESSOR's rect — the card
   // key that covered one of its goals LAST render — so it glides in from where that predecessor sat instead of
@@ -3871,9 +4578,20 @@ window.addEventListener("click", (e) => {
 // out. Every highlight + action reuses the mouse path — card cursor = the same hoverAskId/applyFocus/showAskPath
 // the hover uses; element cursor dispatches a real mouseenter (so zone highlights + timeline light exactly as on
 // hover) and Enter calls the element's own click() — so the keyboard can never drift from the mouse.
-const KB_EL_SEL = ".fcard-title.nav,.fask-distill-link,.fname,.fask-apiRetry,.fask-revive,.fdismiss,.fcheck .lz-nav,.fask-delegation";
+const KB_EL_SEL = ".fcard-title.nav,.fask-distill-link,.fname,.fask-apiRetry,.fask-revive,.fdismiss,.fask-secbtn,.fask-bellbtn,.fcheck .lz-nav,.fask-delegation";
 function kbCardEls(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>(".feed-cols .fitem:not(.dismissing)"));
+  // VISUAL order, not DOM order (review 2026-08-24): the columns re-sequence via --col-order — in
+  // both layouts since the drag extended — so the arrow cursor sorts cards by their column's
+  // effective `order` (getComputedStyle resolves the var), DOM order within a column.
+  const els = Array.from(document.querySelectorAll<HTMLElement>(".feed-cols .fitem:not(.dismissing)"));
+  const slot = new Map<HTMLElement, number>();
+  for (const e of els) {
+    const col = e.closest<HTMLElement>(".feed-col");
+    slot.set(e, col ? parseInt(getComputedStyle(col).order || "0", 10) || 0 : 0);
+  }
+  return els.map((e, i) => ({ e, i, s: slot.get(e) || 0 }))
+    .sort((a, b) => a.s - b.s || a.i - b.i)
+    .map((x) => x.e);
 }
 function kbHoverId(el: HTMLElement): string {
   const key = el.dataset.key || "";
@@ -3948,6 +4666,7 @@ function onSettingsChanged(): void {
   const p = feedPrefs();
   if (p.collapsed !== lastCollapsedPref) { lastCollapsedPref = p.collapsed; secChoice.clear(); }
   applyStacked(p.stacked);
+  if (viewMenuEl) paintViewMenu(viewMenuEl);   // an open view menu re-reads the prefs it shows
   render();
 }
 window.addEventListener("storage", (e) => { if (e.key === "romp:settings") onSettingsChanged(); });
@@ -3997,6 +4716,297 @@ function mirrorBadges(items: AskItem[], clears: ClearNoticeRow[], sdk: SdkNotice
   try { localStorage.setItem(BADGE_SEEN_KEY, JSON.stringify(Array.from(active))); } catch { /* storage full */ }
 }
 
+// ── HOVER-FREEZE (the user 2026-08-24) ──────────────────────────────────────────────────────────
+// While the pointer rests on a card, the board must not move under it: incoming feed payloads QUEUE
+// (newest wins — intermediate states were never on screen, so nothing owes them an animation)
+// instead of rendering, and the deferred churn shows as a subtle +N/-N beside the column pills and,
+// in grouped mode, the session headers. Only the PAYLOAD path defers: the hovered card's own
+// controls and every local gesture still render live from the displayed model. Flush is event-based
+// (repo rule, no timers): the hovered card's mouseleave applies everything at once — a card CLEARED
+// under the pointer flushes too, via its synthetic mouseleave — and window blur is the backstop.
+let freezeKey: string | null = null;     // the hovered card's focus key, or null — pointer truth, no debounce
+let pendingFeedPayload: any = null;      // newest queued payload; older ones are superseded unseen
+function freezeEnter(key: string): void { freezeKey = key; }
+function freezeLeave(key: string): void {
+  if (tabScopeKey === key) releaseTabScope();   // hover-away releases the keyboard scope too
+  if (freezeKey !== key) return;
+  freezeKey = null;
+  flushFreeze();
+}
+let flushQueued = false;
+function flushFreeze(): void {
+  if (flushQueued) return;
+  flushQueued = true;
+  queueMicrotask(() => {   // after the CURRENT gesture's handlers finish — a synthetic mouseleave
+    flushQueued = false;   // dispatched mid-click (the clear path) must not re-render the board under
+    //                        the rest of its own handler (pendingCleared.add, .dismissing come after
+    //                        the dispatch). Gesture-ordering, not a timer: no time window anywhere.
+    // EITHER holder keeps the queue (post-merge audit 2026-08-24): with the keyboard scope on card
+    // A and the pointer merely visiting card B, B's mouseleave queues this flush — running it would
+    // apply the payload and move the card being keyed. The scope's own release paths all flush.
+    if (freezeKey || tabScopeKey) return;
+    const m = pendingFeedPayload;
+    pendingFeedPayload = null;
+    if (m) applyFeedPayload(m);          // render() repaints the badges away (nothing pending)
+  });
+}
+window.addEventListener("blur", () => { releaseTabScope(); freezeKey = null; flushFreeze(); });   // backstop:
+//   focus left the pane — BOTH gate holders release (the keyboard scope has no pointer to leave with)
+
+// The queued payload's would-be card list — the same pre-filters applyFeedPayload will apply,
+// WITHOUT its bookkeeping side effects (a hint must never mutate pendingCleared or the disclosure
+// state; the flush re-runs the real thing).
+function payloadView(m: any): AskItem[] {
+  const incoming: AskItem[] = Array.isArray(m.asks) ? m.asks : [];
+  const only = onlyTag();
+  const vis = only ? incoming.filter((a) => matchesOnly(a.name, only)) : incoming;
+  let out = pendingCleared.size ? vis.filter((a) => !pendingCleared.has(a.itemId)) : vis;
+  // mirror the optimistic-restore overlay applyFeedPayload keeps (read-only): a restored card the
+  // flush will push right back must not hint as a departure
+  if (pendingRestored.size) {
+    const present = new Set(out.map((a) => a.itemId));
+    const inIncoming = new Set(incoming.map((a) => a.itemId));   // carried by the payload → the flush DROPS
+    out = out.slice();                                            // its overlay entry; it rides (or is filtered
+    //                                                               with) the normal path, so no re-add here
+    for (const it of pendingRestored.values()) if (!present.has(it.itemId) && !inIncoming.has(it.itemId)) out.push(it);
+  }
+  return out;
+}
+// Paint (or clear) the deferred-churn badges: +N accent / -N block-red beside each column pill, and
+// beside each on-board session header in grouped mode. Ensure-once spans on the build-once column
+// heads; session badges ride the reconciled headers (found by the data-fsid stamp) and are re-synced
+// at every render tail, so a local re-render while frozen can never strand a stale count.
+function paintFreezeParts(b: HTMLElement, c: { add: number; del: number }): void {
+  b.replaceChildren();
+  if (c.add) { const i = el("i", "fz-add"); i.textContent = "+" + c.add; b.appendChild(i); }
+  if (c.add && c.del) b.appendChild(document.createTextNode("/"));
+  if (c.del) { const i = el("i", "fz-del"); i.textContent = "-" + c.del; b.appendChild(i); }
+  // the explicit reading (the user 2026-08-25, liking the +N/−N but wanting it to say what it
+  // means): a parenthetical in the accent dress, well under their verbosity ceiling
+  const note = el("i", "fz-note");
+  note.textContent = " (" + (c.add + c.del) + " changed — mouse away to apply)";
+  b.appendChild(note);
+  b.title = "updates waiting while you hover — they apply when the pointer leaves the card";
+}
+// Has the FROZEN card's own content changed in the withheld payload? Churn elsewhere and a stale
+// card under the pointer are different facts (the user 2026-08-25) — this one gets its own line,
+// shown WITH the churn badges when both are true. Group keys compare the turn's member set
+// (itemId-sorted, so payload order can never fake a change); ask keys compare the one item.
+function pendingSelfChanged(key: string): boolean {
+  if (!pendingFeedPayload) return false;
+  const pend = payloadView(pendingFeedPayload);
+  const byId = (a: AskItem, b2: AskItem) => (a.itemId < b2.itemId ? -1 : 1);
+  // CONTENT-projected compares only (contentSig — the user 2026-08-25): the whole-item compare
+  // flagged the per-build recency-tint recompute as "this card updated" on nearly every card
+  if (key.startsWith("g:")) {
+    const tid = key.slice(2);
+    const cur = asks.filter((a) => a.turnId === tid).slice().sort(byId).map((a) => contentSig(a as any)).join("|");
+    const nxt = pend.filter((a) => a.turnId === tid).slice().sort(byId).map((a) => contentSig(a as any)).join("|");
+    return cur !== nxt;
+  }
+  return contentSig(asks.find((a) => a.itemId === key) as any) !== contentSig(pend.find((a) => a.itemId === key) as any);
+}
+function paintFreezeBadges(): void {
+  if (!pendingFeedPayload) {
+    document.querySelectorAll(".freeze-badge").forEach((n) => n.remove());
+    document.getElementById("freeze-selfnote")?.remove();
+    return;
+  }
+  const toItems = (list: AskItem[]) => viewFiltered(list).map((a) => ({ id: a.itemId, col: askColumn(a) as string, sid: a.sid }));
+  const d = freezeDiff(toItems(asks), toItems(payloadView(pendingFeedPayload)));
+  const put = (host: Element | null, c: { add: number; del: number } | undefined) => {
+    if (!host) return;
+    let b = host.querySelector(":scope > .freeze-badge") as HTMLElement | null;
+    if (!c || (!c.add && !c.del)) { b?.remove(); return; }
+    if (!b) { b = el("span", "freeze-badge"); host.appendChild(b); }
+    paintFreezeParts(b, c);
+  };
+  for (const key of ["asks", "needsInput", "completed"]) {
+    put(document.querySelector(".feed-col.col-" + key + " .feed-col-head"), d.cols[key]);
+  }
+  const groupedNow = feedPrefs().grouped;
+  document.querySelectorAll<HTMLElement>(".feed-sess-head").forEach((h) => {
+    put(h, groupedNow ? d.sess[h.getAttribute("data-fsid") || ""] : undefined);
+  });
+  // the hovered/keyed card's OWN pending update — its own line, independent of the churn badges
+  // (both show when both are true). Body-mounted and pointer-inert: it must never affect hover,
+  // and the frozen card's rect is stable by construction (that is the freeze's whole contract).
+  const selfKey = freezeKey || tabScopeKey;
+  const selfCard = selfKey ? cardElByKey(selfKey) : null;
+  let selfNote = document.getElementById("freeze-selfnote");
+  if (!selfKey || !selfCard || !pendingSelfChanged(selfKey)) {
+    selfNote?.remove();
+  } else {
+    if (!selfNote) {
+      selfNote = el("div", "");
+      selfNote.id = "freeze-selfnote";
+      selfNote.textContent = "(this card updated — mouse away to refresh)";
+      document.body.appendChild(selfNote);
+    }
+    const r = selfCard.getBoundingClientRect();
+    selfNote.style.left = Math.round(r.left + 12) + "px";
+    selfNote.style.top = Math.round(r.bottom - 24) + "px";
+  }
+}
+
+// ── CARD KEYBOARD SCOPE (the user 2026-08-24) ──────────────────────────────────────────────────
+// Tab, pressed while a card is hovered (a click puts the pointer there too) or held by the keyboard
+// card cursor, scopes to THAT card: it cycles every visible control on it — section pills, Clear,
+// retries, the bell, follow-up, sub-goal links — wrapping at the ends; Enter/Space activate; the
+// accent .kbd-focus ring marks the stop. Escape or the pointer leaving the card releases back to
+// normal page order. Focus survives the feed's constant re-renders by LOGICAL control identity
+// (class + label, then the old slot) — the click-safety rule applied to keyboard focus. While focus
+// is inside, the card holds the payload gate hover-freeze uses, so the board cannot move the card
+// being keyed (same gate as the pointer).
+let tabScopeKey: string | null = null;
+let tabScopeSig: { sig: string; idx: number } | null = null;
+function cardElByKey(key: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-key="' + (key.startsWith("g:") ? key : "a:" + key) + '"]');
+}
+function cardControls(card: HTMLElement): HTMLElement[] {
+  // the card's own DOM order IS its visual reading order — title row, pills, tail controls
+  return Array.from(card.querySelectorAll<HTMLElement>(KB_EL_SEL)).filter((e) => e.offsetParent !== null);
+}
+function ctrlSig(e: HTMLElement): string {
+  return e.className + "|" + (e.getAttribute("aria-label") || e.textContent || "").trim().slice(0, 24);
+}
+function tabScopeFocus(card: HTMLElement, els: HTMLElement[], i: number): void {
+  document.querySelectorAll(".kbd-focus").forEach((n) => n.classList.remove("kbd-focus"));
+  const el2 = els[i];
+  if (!el2) return;
+  tabScopeKey = kbHoverId(card);
+  tabScopeSig = { sig: ctrlSig(el2), idx: i };
+  if (el2.tabIndex < 0 && !el2.matches("button, a, input")) el2.tabIndex = -1;   // focusable, outside page order
+  el2.classList.add("kbd-focus");
+  el2.focus();
+}
+function releaseTabScope(): void {
+  if (!tabScopeKey) return;
+  tabScopeKey = null;
+  tabScopeSig = null;
+  document.querySelectorAll(".kbd-focus").forEach((n) => n.classList.remove("kbd-focus"));
+  const ae = document.activeElement as HTMLElement | null;
+  if (ae && ae.closest(".fitem")) ae.blur();
+  if (!freezeKey) flushFreeze();   // the scope held the payload gate — releasing applies the queue
+}
+window.addEventListener("keydown", (e) => {
+  if (document.getElementById("feed-modal")) return;   // the modal owns keys while it is open
+  if (e.key === "Escape" && tabScopeKey) {
+    e.preventDefault(); e.stopPropagation();
+    releaseTabScope();
+    return;
+  }
+  if (e.key === "Tab") {
+    let card = tabScopeKey ? cardElByKey(tabScopeKey) : null;
+    if (!card) card = (freezeKey ? cardElByKey(freezeKey) : null) || kbCardEl;   // hover/click, else the kb cursor
+    if (!card || !card.isConnected) return;
+    const ae = document.activeElement as HTMLElement | null;
+    if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && !card.contains(ae)) return;   // typing elsewhere
+    const els = cardControls(card);
+    if (!els.length) return;
+    e.preventDefault(); e.stopPropagation();
+    let i = ae ? els.indexOf(ae) : -1;
+    i = e.shiftKey ? (i <= 0 ? els.length - 1 : i - 1) : (i >= els.length - 1 ? 0 : i + 1);   // WRAP at the ends
+    //                                                     (Shift+Tab = the same cycle, reversed)
+    tabScopeFocus(card, els, i);
+    // SELECT-ON-FOCUS for the view pills (the user 2026-08-24): landing on a SELECTOR applies it at
+    // once, no Enter — radio-group semantics. The split: .fask-secbtn (Background/Summary/Sub-goals,
+    // which switch what the card SHOWS) are selectors; everything else — Clear, retries, the bell,
+    // follow-up, session names, sub-goal links — is an ACTION and must never fire from mere focus
+    // (action is the default for anything ambiguous). The click lives HERE, in the Tab gesture, and
+    // NOT in tabScopeFocus: the render-tail focus restore calls tabScopeFocus too, and a click there
+    // would re-apply per re-render — one application per user gesture. The already-selected pill is
+    // a no-op (focus keeps, nothing toggles), so cycling through it never flips the card's view off.
+    const landed = els[i];
+    if (landed && landed.matches(".fask-secbtn") && !landed.classList.contains("on")) landed.click();
+    return;
+  }
+  if ((e.key === "Enter" || e.key === " ") && tabScopeKey) {
+    const ae = document.activeElement as HTMLElement | null;
+    const card = cardElByKey(tabScopeKey);
+    if (!ae || !card || !card.contains(ae)) return;
+    if (ae.matches("button, a, input")) return;   // native activation already fires the click
+    e.preventDefault();
+    ae.click();                                   // EXACTLY a mouse click on that control
+  }
+}, true);
+
+// The feed payload's full application — model swap, bookkeeping, render. One body, two callers:
+// the message handler applies live when no card is hovered; flushFreeze applies the newest queued
+// payload when the pointer leaves (hover-freeze above).
+function applyFeedPayload(m: any): void {
+  judgeLimit = m.judgeLimit && typeof m.judgeLimit === "object"
+    ? m.judgeLimit as { bucket?: string; resets_at?: number; model?: string } : null;
+  const incomingAsks: AskItem[] = Array.isArray(m.asks) ? m.asks : [];
+  // A clear is CONFIRMED once the kernel's payload no longer lists it → stop suppressing it. Then drop
+  // any still-pending (kernel hasn't caught up) from this payload so a stale push can't resurrect them.
+  for (const id of Array.from(pendingCleared)) if (!incomingAsks.some((a) => a.itemId === id)) pendingCleared.delete(id);
+  // demo/recording view filter (the user 2026-07-14): `#only=<tag>` shows only matching-name cards; the
+  // clear/follow bookkeeping above still runs against the FULL payload, so hidden cards stay consistent.
+  // Self-clean the persisted disclosure state against the AUTHORITATIVE live set (the user 2026-07-24).
+  // incomingAsks, deliberately — not `visible` below: `#only=` hides cards without ending them, and
+  // pruning against the filtered list would throw away the hidden cards' sections. Event-based: a card
+  // leaving the payload (cleared, archived) IS the signal, so nothing ages out on a timer.
+  pruneViewStateTo(new Set(incomingAsks.map((a) => a.itemId)));
+  const only = onlyTag();
+  const visible = only ? incomingAsks.filter((a) => matchesOnly(a.name, only)) : incomingAsks;
+  asks = pendingCleared.size ? visible.filter((a) => !pendingCleared.has(a.itemId)) : visible;
+  // confirm/clear optimistic follow-up moves against the authoritative payload. buildId says WHEN this
+  // payload read the store, which is what makes "the kernel has answered my click" an event and not a
+  // guess (see reconcileFollowMove); a kernel too old to send one reads as 0 and simply never confirms
+  // an acked prediction early, leaving the backstop to retire it.
+  lastFeedEvent = "payload";                         // tripwire: this render's inputs are the fresh payload
+  lastPayloadBuildId = typeof m.buildId === "number" ? m.buildId : 0;
+  // per-host counters when this is a merged multi-kernel payload (mergeHostFeeds.buildIds);
+  // absent on a single-kernel payload, where the top-level buildId is the one counter there is
+  const perHostBuildIds = m.buildIds && typeof m.buildIds === "object" && !Array.isArray(m.buildIds)
+    ? m.buildIds as Record<string, number> : undefined;
+  reconcileFollowMove(incomingAsks, lastPayloadBuildId, perHostBuildIds);
+  reconcilePendingDone(incomingAsks);   // retire an optimistic tick once the real tree carries it
+  // An optimistic Undo is CONFIRMED once the kernel's payload carries the id again → stop forcing it.
+  // Until then, keep the cached card in `asks` so the replace above can't drop the just-restored card (flicker).
+  if (pendingRestored.size) {
+    for (const id of Array.from(pendingRestored.keys())) if (incomingAsks.some((a) => a.itemId === id)) pendingRestored.delete(id);
+    const present = new Set(asks.map((a) => a.itemId));
+    for (const it of pendingRestored.values()) if (!present.has(it.itemId)) asks.push(it);
+  }
+  workingSet = new Set(Array.isArray(m.working) ? m.working : []);
+  if (typeof m.selfHost === "string" && m.selfHost) feedSelfHost = m.selfHost;
+  // Index every session's colour by the name a peer would address it by. Federation merges the hosts'
+  // payloads, so one pass over the merged asks covers the whole fleet; a card whose session has no
+  // cards of its own simply gets no colour, which is honest rather than invented.
+  for (const a of incomingAsks) {
+    if (!a.color || !a.name) continue;
+    sessionColors.set(a.name, a.color.bg);
+    const c = a.sid ? a.sid.indexOf(":") : -1;             // remote sid → also index the bare name under its host
+    if (c > 0 && !a.name.includes(":")) sessionColors.set(a.sid.slice(0, c) + ":" + a.name, a.color.bg);
+  }
+  awaitingSet = new Set(Array.isArray(m.awaiting) ? m.awaiting : []);   // await-green awaiting dots (the user 2026-07-13)
+  unknownSet = new Set(Array.isArray(m.stateUnknown) ? m.stateUnknown : []);   // listed-but-unreadable → gray ring, never a blank
+  bgServicesMap = m.bgServices && typeof m.bgServices === "object" ? m.bgServices : {};   // session name -> judge-classified service descs → the session-header chip (2026-07-24)
+  if (Array.isArray(m.order)) sessionOrder = m.order.filter((x: any) => typeof x === "string");   // grouped-mode session rank (tab/lane order)
+  pendingHosts = Array.isArray(m.pendingHosts) ? m.pendingHosts.filter((h: any) => typeof h === "string") : [];
+  pendingDead = Array.isArray(m.pendingDead) ? m.pendingDead.filter((h: any) => typeof h === "string") : [];
+  syncHostloadBackstops();
+  if (m.views && typeof m.views === "object") feedTagViews = m.views as SessionViews;   // tag DEFINITIONS only — never `active`
+  if (Array.isArray(m.sessions)) {
+    sessionsMeta = m.sessions.filter((s: any) => s && typeof s.sid === "string" && typeof s.name === "string");
+    // a filter aimed at a session the tab strip no longer shows is moot — clear it (the deciding
+    // event: the session left the tab list), rather than leaving the board silently pinned to nothing
+    if (feedOnlySid && !sessionsMeta.some((s) => s.sid === feedOnlySid)) setFeedOnly(null);
+  }
+  hostNow = typeof m.now === "number" ? m.now : Math.floor(Date.now() / 1000);
+  mirrorBadges(incomingAsks, Array.isArray(m.clearNotices) ? m.clearNotices : [],
+    Array.isArray(m.sdkNotices) ? m.sdkNotices : [],
+    Array.isArray(m.syncNotices) ? m.syncNotices : []);   // card trouble chips + /clear drops + SDK failures + fleet syncs also log in the shell's bell (chips stay on the cards)
+  if (typeof m.dismissedCount === "number") dismissedCount = m.dismissedCount;
+  clearUndoBusy();   // the push the undo was waiting on has landed (or any fresher one) — cue off
+  if (typeof m.showDismissed === "boolean") showDismissed = m.showDismissed;
+  if (typeof m.canUndoClear === "boolean") canUndoClear = m.canUndoClear;
+  render();
+}
+
+
 window.addEventListener("message", (e: MessageEvent) => {
   const m = e.data;
   if (!m) return;
@@ -4018,71 +5028,10 @@ window.addEventListener("message", (e: MessageEvent) => {
     return;
   }
   if (m.type === "feed") {
-    judgeLimit = m.judgeLimit && typeof m.judgeLimit === "object"
-      ? m.judgeLimit as { bucket?: string; resets_at?: number; model?: string } : null;
-    const incomingAsks: AskItem[] = Array.isArray(m.asks) ? m.asks : [];
-    // A clear is CONFIRMED once the kernel's payload no longer lists it → stop suppressing it. Then drop
-    // any still-pending (kernel hasn't caught up) from this payload so a stale push can't resurrect them.
-    for (const id of Array.from(pendingCleared)) if (!incomingAsks.some((a) => a.itemId === id)) pendingCleared.delete(id);
-    // demo/recording view filter (the user 2026-07-14): `#only=<tag>` shows only matching-name cards; the
-    // clear/follow bookkeeping above still runs against the FULL payload, so hidden cards stay consistent.
-    // Self-clean the persisted disclosure state against the AUTHORITATIVE live set (the user 2026-07-24).
-    // incomingAsks, deliberately — not `visible` below: `#only=` hides cards without ending them, and
-    // pruning against the filtered list would throw away the hidden cards' sections. Event-based: a card
-    // leaving the payload (cleared, archived) IS the signal, so nothing ages out on a timer.
-    pruneViewStateTo(new Set(incomingAsks.map((a) => a.itemId)));
-    const only = onlyTag();
-    const visible = only ? incomingAsks.filter((a) => matchesOnly(a.name, only)) : incomingAsks;
-    asks = pendingCleared.size ? visible.filter((a) => !pendingCleared.has(a.itemId)) : visible;
-    // confirm/clear optimistic follow-up moves against the authoritative payload. buildId says WHEN this
-    // payload read the store, which is what makes "the kernel has answered my click" an event and not a
-    // guess (see reconcileFollowMove); a kernel too old to send one reads as 0 and simply never confirms
-    // an acked prediction early, leaving the backstop to retire it.
-    lastFeedEvent = "payload";                         // tripwire: this render's inputs are the fresh payload
-    lastPayloadBuildId = typeof m.buildId === "number" ? m.buildId : 0;
-    // per-host counters when this is a merged multi-kernel payload (mergeHostFeeds.buildIds);
-    // absent on a single-kernel payload, where the top-level buildId is the one counter there is
-    const perHostBuildIds = m.buildIds && typeof m.buildIds === "object" && !Array.isArray(m.buildIds)
-      ? m.buildIds as Record<string, number> : undefined;
-    reconcileFollowMove(incomingAsks, lastPayloadBuildId, perHostBuildIds);
-    reconcilePendingDone(incomingAsks);   // retire an optimistic tick once the real tree carries it
-    // An optimistic Undo clear is CONFIRMED once the kernel's payload carries the id again → stop forcing it.
-    // Until then, keep the cached card in `asks` so the replace above can't drop the just-restored card (flicker).
-    if (pendingRestored.size) {
-      for (const id of Array.from(pendingRestored.keys())) if (incomingAsks.some((a) => a.itemId === id)) pendingRestored.delete(id);
-      const present = new Set(asks.map((a) => a.itemId));
-      for (const it of pendingRestored.values()) if (!present.has(it.itemId)) asks.push(it);
-    }
-    workingSet = new Set(Array.isArray(m.working) ? m.working : []);
-    if (typeof m.selfHost === "string" && m.selfHost) feedSelfHost = m.selfHost;
-    // Index every session's colour by the name a peer would address it by. Federation merges the hosts'
-    // payloads, so one pass over the merged asks covers the whole fleet; a card whose session has no
-    // cards of its own simply gets no colour, which is honest rather than invented.
-    for (const a of incomingAsks) {
-      if (!a.color || !a.name) continue;
-      sessionColors.set(a.name, a.color.bg);
-      const c = a.sid ? a.sid.indexOf(":") : -1;             // remote sid → also index the bare name under its host
-      if (c > 0 && !a.name.includes(":")) sessionColors.set(a.sid.slice(0, c) + ":" + a.name, a.color.bg);
-    }
-    awaitingSet = new Set(Array.isArray(m.awaiting) ? m.awaiting : []);   // await-green awaiting dots (the user 2026-07-13)
-    unknownSet = new Set(Array.isArray(m.stateUnknown) ? m.stateUnknown : []);   // listed-but-unreadable → gray ring, never a blank
-    bgServicesMap = m.bgServices && typeof m.bgServices === "object" ? m.bgServices : {};   // session name -> judge-classified service descs → the session-header chip (2026-07-24)
-    if (Array.isArray(m.order)) sessionOrder = m.order.filter((x: any) => typeof x === "string");   // grouped-mode session rank (tab/lane order)
-    if (Array.isArray(m.sessions)) {
-      sessionsMeta = m.sessions.filter((s: any) => s && typeof s.sid === "string" && typeof s.name === "string");
-      // a filter aimed at a session the tab strip no longer shows is moot — clear it (the deciding
-      // event: the session left the tab list), rather than leaving the board silently pinned to nothing
-      if (feedOnlySid && !sessionsMeta.some((s) => s.sid === feedOnlySid)) setFeedOnly(null);
-    }
-    hostNow = typeof m.now === "number" ? m.now : Math.floor(Date.now() / 1000);
-    mirrorBadges(incomingAsks, Array.isArray(m.clearNotices) ? m.clearNotices : [],
-      Array.isArray(m.sdkNotices) ? m.sdkNotices : [],
-      Array.isArray(m.syncNotices) ? m.syncNotices : []);   // card trouble chips + /clear drops + SDK failures + fleet syncs also log in the shell's bell (chips stay on the cards)
-    if (typeof m.dismissedCount === "number") dismissedCount = m.dismissedCount;
-    clearUndoBusy();   // the push the undo was waiting on has landed (or any fresher one) — cue off
-    if (typeof m.showDismissed === "boolean") showDismissed = m.showDismissed;
-    if (typeof m.canUndoClear === "boolean") canUndoClear = m.canUndoClear;
-    render();
+    // HOVER-FREEZE: a hovered card must not move on screen — queue the payload (newest wins) and
+    // hint the deferred churn on the headers instead; mouseleave/blur flush it (see freezeEnter).
+    if (freezeKey || tabScopeKey) { pendingFeedPayload = m; paintFreezeBadges(); return; }
+    applyFeedPayload(m);
   } else if (m.type === "hoverCards") {
     // rail-dot hover in the CHAT panel → white-outline the card(s) built from
     // that turn, plus the matching ROWS inside an open modal (eid). The host
@@ -4121,6 +5070,7 @@ window.addEventListener("message", (e: MessageEvent) => {
     // ask itemId, "i:<itemId>" standalone, "g:<turnId>" group). hl = the clicked
     // turn's event id: ring its row(s) and scroll the first one into view.
     fullscreenAskId = m.key;
+    vscodeApi?.postMessage({ type: "cardOpened", itemId: m.key, sid: "" });   // rail-dot opens count too (2026-08-25)
     if (typeof m.hl === "string" && m.hl) extHoverEid = m.hl;
     renderModal();
     applyExtHover();
@@ -4344,5 +5294,8 @@ setInterval(() => {
     if (it && t) t.textContent = relAge(now - it.t);
   }
 }, 15000);
+
+initFileView((m) => vscodeApi?.postMessage(m));   // the file browser opens the viewer in this pane (and saves ride the poster)
+initFileBrowse((m) => vscodeApi?.postMessage(m));   // …and a Browse files ask lands its sibling overlay
 
 vscodeApi?.postMessage({ type: "ready" });

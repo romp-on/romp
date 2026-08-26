@@ -27,7 +27,7 @@ export function clearConfirmDetail(titles: string[]): string | null {
   const n = titles.length;
   return (n === 1 ? "Its 1 open card gets dropped with it: " : "Its " + n + " open cards get dropped with it: ")
     + shown
-    + ". Undo clear on the feed restores the cards, but the agent will no longer remember the work behind them.";
+    + ". Undo on the feed restores the cards, but the agent will no longer remember the work behind them.";
 }
 
 // The END confirm's detail (the user 2026-08-15, who ended a session holding an open task and got no

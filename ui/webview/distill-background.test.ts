@@ -36,7 +36,7 @@ test("the buttons ARE the toggles: pressed state reads at a glance, mutually exc
   assert.match(FEED, /a\._takeBtn\.classList\.toggle\("on", choice === "summary"\);/);
   assert.match(FEED, /a\._bgBtn\.setAttribute\("aria-pressed", choice === "bg" \? "true" : "false"\);/);
   // selected = the rail toggles' accent language: blue text, accent border, faint accent wash, bolder
-  assert.match(CSS, /\.fask-secbtn\.on \{ color: var\(--accent\); border-color: var\(--accent\);\n  background: rgba\(156, 210, 255, 0\.10\); font-weight: 600; \}/);
+  assert.match(CSS, /\.fask-secbtn\.on \{ color: var\(--accent\); border-color: var\(--accent\);\n  background: var\(--accent-wash\); font-weight: 600; \}/);
   assert.match(CSS, /--accent: #9cd2ff;/, "feed.css defines --accent in its own :root");
   assert.doesNotMatch(FEED, /fask-less/, "the less control is gone");
 });
@@ -53,7 +53,7 @@ test("state: a single mutually-exclusive secChoice (bg | summary | subgoals | ta
   // the "Awaiting task" list is the FOURTH (the user 2026-07-13)
   assert.match(FEED, /const secChoice = new Map<string, "bg" \| "summary" \| "subgoals" \| "tasks" \| "stall" \| "none">\(\);/);
   // absent from the map → the DEFAULT, set by the footer "Collapsed" toggle (off → summary, on → none)
-  assert.match(FEED, /return secChoice\.get\(id\) \?\? \(feedPrefs\(\)\.collapsed \? "none" : "summary"\);/);
+  assert.match(FEED, /return secChoice\.get\(id\) \?\? \(feedPrefs\(\)\.collapsed \? "none" : hasAwaitTasks \? "tasks" : "summary"\);/);
   // click the showing section → off; click another → switch (one at a time)
   assert.match(FEED, /secChoice\.set\(id, choice === want \? "none" : want\)/);
   assert.match(FEED, /a\._bgBtn\.onclick = pick\("bg"\);/);

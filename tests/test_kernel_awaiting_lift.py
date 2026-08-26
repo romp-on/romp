@@ -160,6 +160,30 @@ class AwaitingLift(unittest.TestCase):
         self.assertIsNone(self._stamp(), "a real terminal record ends the wait for every kind")
 
     # ---- self-scoping: the other awaiting flavors are untouched ----
+    def test_a_return_newer_than_the_last_lift_lifts_despite_a_late_reassert(self):
+        # the 2026-08-25 audit's watcher shape: assert → lift → the watch re-armed and RETURNED →
+        # the closer, auditing a segment cut BEFORE that return, re-asserted seconds after it. The
+        # old stand-down read the WRITE time as the epistemic boundary and blocked the lift forever;
+        # the discriminator is the EVIDENCE against the last lift — a return newer than the last
+        # lift was never ruled on, whatever the re-assert's arrival says.
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        why = "the re-armed watcher; reports when it lands"
+        nd = {"id": self.gid, "text": "a goal", "parentId": None, "nodeComplete": False,
+              "blocked": False, "cleared": False, "trail": [], "t": BORN, "mt": BORN,
+              "awaitingWhy": why, "awaitingAt": STAMP, "log": [
+                  {"ev_t": STAMP, "src": "closer", "kind": "awaiting", "why": why, "at": STAMP + 10},
+                  {"ev_t": STAMP, "src": "romp", "kind": "awaiting", "lift": True, "at": STAMP + 20},
+                  {"ev_t": STAMP, "src": "closer", "kind": "awaiting", "why": why,
+                   "at": BACK + 10}]}                 # the live shape: a SAME-ANCHOR re-assert (two closer
+        #                                               rows on one ev_t), written AFTER the 400 return
+        #                                               its audit segment never saw
+        (km.jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
+            "rompUuid": SID, "seq": 1, "placements": {}, "status": {}, "nodes": {self.gid: nd}}))
+        self._tick()
+        self.assertIsNone(self._stamp(),
+                          "the return (endT %d) postdates the last lift (%d) — new information lifts"
+                          % (BACK, STAMP + 20))
+
     def test_a_wait_with_no_dispatches_of_its_own_is_untouched(self):
         # a CI run / scheduled check-back / peer handoff: nothing was dispatched, so nothing can be paired
         self._transcript([])
@@ -398,6 +422,123 @@ class AwaitingLift(unittest.TestCase):
         self.assertIsNone(self._stamp(), "precondition: this lift lands")
         self.assertNotIn(self.gid, km._auto_nudge_data().get("nudged", {}),
                          "the lift erases the spent record so the ladder can re-engage")
+
+
+class RestartReconcile(unittest.TestCase):
+    """Restart orphans (the user 2026-08-24): a kernel/backend restart kills tracked subagents and
+    workflows WITH the claude process — the terminal record never lands, so the transcript pairing
+    shows them running forever and the awaiting-agents stamp orphaned (~16h over an EMPTY registry).
+    The reconciliation is event-keyed: the backend's lifecycle set (present-but-empty is
+    authoritative) names what is actually alive, and a transcript-"running" task absent from it
+    died with its process — its return event IS the backend's (re)spawn. SYNTHETIC fixtures."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        td = Path(self.td.name)
+        self.saved = {k: getattr(km, k) for k in ("_alive_sessions", "_mark_views_dirty", "_sdk_spawned_at")}
+        self.saved_jd = (km.jd.STATE, km.jd.GOALDIR)
+        km.jd.STATE = td
+        km.jd.GOALDIR = td / "goals"
+        km.jd.GOALDIR.mkdir(parents=True)
+        self.path = str(td / (SID + ".jsonl"))
+        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": self.path}]
+        km._mark_views_dirty = lambda *a, **k: None
+        km._sdk_spawned_at = lambda sid: self.spawn      # the CLI epoch — the restart moment
+        self.spawn = BACK                                # default: the backend respawned after the stamp
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        self.gid = SID + ":g1"
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(km, k, v)
+        km.jd.STATE, km.jd.GOALDIR = self.saved_jd
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        self.td.cleanup()
+
+    def _transcript(self, recs):
+        with open(self.path, "w") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+        km._bgall_cache.clear(); km._bgtasks_cache.clear()
+
+    def _seed(self, kind, why="waiting on a dispatched investigation", anchor=STAMP):
+        nd = {"id": self.gid, "text": "a goal", "parentId": None, "nodeComplete": False,
+              "blocked": False, "cleared": False, "trail": [], "t": BORN, "mt": BORN,
+              "awaitingWhy": why, "awaitingAt": anchor,
+              **({"awaitingKind": kind} if kind else {}),
+              "log": [{"ev_t": anchor, "src": "closer", "kind": "awaiting", "why": why,
+                       **({"awaitKind": kind} if kind else {}), "at": anchor}]}
+        (km.jd.GOALDIR / (SID + ".json")).write_text(json.dumps(
+            {"rompUuid": SID, "seq": 1, "placements": {}, "status": {}, "nodes": {self.gid: nd}}))
+
+    def _stamp(self):
+        nodes = json.loads((km.jd.GOALDIR / (SID + ".json")).read_text())["nodes"]
+        return nodes[self.gid].get("awaitingWhy") or None
+
+    def _tick(self, snap, now=BACK + 100):
+        km._lift_spent_awaiting(now, {SID: snap})
+
+    def test_a_task_that_vanished_across_a_restart_retires_the_stamp(self):
+        # the DoD case: a bgTasks entry that vanishes across a simulated restart retires the mark.
+        # The launch is in the transcript, its notification never lands (killed with the process),
+        # and the respawned backend's lifecycle set is PRESENT and does not know the task.
+        self._transcript([_launch("t-restart-1", LAUNCH)])
+        self._seed("task")
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNone(self._stamp(), "the vanished task returned AT the respawn — stamp lifted")
+
+    def test_no_lifecycle_set_means_no_reconciliation(self):
+        # a tmux CLI (or an SDK gap mid-reattach) carries no set: registry-absent is NOT evidence —
+        # the transcript-running task keeps the wait honest exactly as before
+        self._transcript([_launch("t-restart-2", LAUNCH)])
+        self._seed("task")
+        self._tick({"state": ""})
+        self.assertIsNotNone(self._stamp(), "no authoritative set -> the old conservative read holds")
+
+    def test_a_live_registry_entry_keeps_the_stamp(self):
+        self._transcript([_launch("t-restart-3", LAUNCH)])
+        self._seed("agents")
+        self._tick({"state": "", "bgTasks": [{"toolUseId": "t-restart-3", "desc": "x", "since": LAUNCH}]})
+        self.assertIsNotNone(self._stamp(), "the registry still tracks it — genuinely in flight")
+
+    def test_job_stamps_ignore_the_registry(self):
+        # the watcher dying with a restart is the CARRIER going, not the job returning — kind=job
+        # keeps requiring a real terminal record (the 2026-08-15 rule survives the reconciliation)
+        self._transcript([_launch("t-restart-4", LAUNCH)])
+        self._seed("job")
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNotNone(self._stamp(), "the slurm job may run on — only its terminal record lifts")
+
+    def test_a_dispatchless_agents_stamp_over_an_empty_registry_lifts(self):
+        # the live 2026-08-24 shape: a closer misread peer sessions as agents and stamped kind=agents
+        # with NO dispatch recorded anywhere; after a restart nothing can ever end that wait
+        self._transcript([])
+        self._seed("agents", why="workers still building the pieces; merges when they report")
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNone(self._stamp(), "no dispatch anywhere + empty authoritative set -> orphan, lifted")
+
+    def test_the_dispatchless_lift_respects_the_anchor_and_the_kind(self):
+        # (2026-08-25 audit) the respawn is ONE sufficient evidence, not the only one: an agents
+        # stamp over a world with NOTHING running anywhere — registry authoritatively empty, no
+        # subagents, no raw-running task in the pairing — lifts regardless of the spawn epoch (the
+        # misread-peer-as-agents shape: the notification it claims to await can never arrive). A
+        # world with a dispatch still RUNNING keeps every stamp, exactly as before.
+        self._transcript([_monitor("t1", LAUNCH, timeout_ms=30_000_000)])   # one genuinely-running task
+        self._seed("agents")
+        self.spawn = STAMP - 50                       # the stamp POSTDATES the last restart
+        self._tick({"state": "", "bgTasks": [{"toolUseId": "t1"}]})   # …and the registry agrees it lives
+        self.assertIsNotNone(self._stamp(), "something IS running — no lift without its return")
+        self._transcript([])
+        self._seed("agents")
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNone(self._stamp(), "nothing running anywhere → the wait can never end; lifted")
+        self.spawn = BACK
+        self._seed(None)                              # a kindless stamp never matches the agents-orphan rule
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNotNone(self._stamp(), "kindless stamps keep the conservative dispatch-less skip")
+        self._seed("agents")
+        self._tick({"state": "", "bgTasks": [], "subagents": [{"type": "Task", "since": BACK}]})
+        self.assertIsNotNone(self._stamp(), "live subagents ARE the wait — never lifted from under them")
 
 
 if __name__ == "__main__":

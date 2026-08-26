@@ -6,7 +6,7 @@ The recipient is an agent with NO idea it is being tracked. It has never seen th
 of a card, a goal, a board or a column, and cannot act on any of it. A message that narrates that
 machinery reads as a system notice rather than the person it works for asking for something. The
 2026-07-24 sweep found five: the two feed status asks, the multi-goal bundle, the nudge quote header,
-and the fork/stalled nudge, plus the clear wrap-up that started it.
+and the fork/stalled nudge. (The clear wrap-up retired 2026-08-23: clear is a silent discard.)
 
 This test renders each injected body from SYNTHETIC fixtures and fails on romp vocabulary in the PROSE.
 It is the guardrail behind the CLAUDE.md rule, so the rule holds without anyone remembering it.
@@ -22,7 +22,9 @@ Scope note — what is deliberately NOT checked:
   session manager's bookkeeping to ignore (the user 2026-07-25). Pinned by test_session_prompt.py.
 - sdk_backend's "[romp] The kernel restarted…" notices, which are genuinely ABOUT romp: they tell a
   session why its turn was cut, so naming it is the point (and the housekeeping note gives the
-  name meaning).
+  name meaning). The rename ping (RENAME_NUDGE, 2026-08-24) is the same family — it tells a session
+  its own new name — and is pinned below to stay one marker-free line with no romp nouns beyond
+  the sanctioned prefix.
 
 SYNTHETIC fixtures only (placeholder ids, invented goal text).
 """
@@ -113,8 +115,15 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             "continue button": km._followup_body(TOP, None, km.CONTINUE_TEXT),
             "multi-goal bundle": km._nudge_bundle_body([TOP, TOP2], nodes, set()),
             "multi-goal bundle (fork)": km._nudge_bundle_body([TOP, TOP2], nodes, {TOP}),
-            "clear wrap-up": km._clear_wrap_body([TOP], nodes),
-            "clear wrap-up (batch)": km._clear_wrap_body([TOP, TOP2], nodes),
+            # the Merge handoff (the user 2026-08-23): a comment thread's discussion folded back into
+            # the parent session — the reader has never heard of romp; it must read as the person's
+            # own record of a side discussion
+            "comment-thread merge": km._merge_body(
+                "the caching layer should be write-through",
+                [{"who": "user", "text": "should we make the cache write-through instead?"},
+                 {"who": "assistant", "text": "Yes: write-through avoids the stale-read window and "
+                                              "the extra invalidation pass; the cost is one write "
+                                              "per update, which this workload absorbs."}]),
             "debt reminder (question)": km._debt_reminder_body(
                 [("web", T0, "question", "Which port should the staging server use?")]),
             "debt reminder (handoff)": km._debt_reminder_body(
@@ -130,6 +139,9 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # the user's own words; the quoting frame around them is romp-authored and scanned here
             "comment thread opener": km._comment_first_message(
                 "Cap the retry delay at two minutes.", "Why two minutes and not five?"),
+            # the dashboard-edit trace (the user 2026-08-22): the file viewer saved over a file in this
+            # session's tree, and the session is told in the person's voice — never edited under silently
+            "edit trace": km._edit_trace_body("/TESTDIR/notes-api/README.md"),
         }
         # every repeat-nudge variant wears the same voice as the first fire (the user 2026-08-11): the
         # rotation exists so a re-ask doesn't read canned, so a variant that broke the voice rule would
@@ -150,12 +162,28 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
                                      "it works for asking — see CLAUDE.md, 'Messages we inject into a "
                                      "session'." % (name, word, why))
 
+    def test_the_rename_ping_stays_one_clean_mechanics_line(self):
+        # the [romp] prefix is the sanctioned mechanics family (the restart notices' shape); past
+        # it, the line must speak plainly — no markers (it joins an EXISTING message and would
+        # re-author it), no romp nouns, one line
+        import os as _os
+        from importlib.machinery import SourceFileLoader as _L
+        sb = _L("romp_sdk_backend_voice", _os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        line = sb.RENAME_NUDGE % "tests"
+        self.assertTrue(line.startswith("[romp] "), "the sanctioned mechanics prefix")
+        self.assertNotIn("\n", line, "one line")
+        self.assertNotIn("<!--", line, "marker-free — it rides inside an existing message")
+        body = line.split("]", 1)[1].lower()
+        for word, why in ROMP_WORDS:
+            self.assertNotIn(word, body, "the ping speaks plainly past its prefix (%r: %s)" % (word, why))
+        self.assertIn("renamed", body)
+        self.assertIn("'tests'", body, "…and it names the new name itself")
+
     def test_the_untitled_fallback_names_no_romp_object(self):
         # a node with no text still renders SOMETHING; that placeholder must not smuggle in "goal"
         nodes = _nodes()
         nodes[TOP]["text"] = ""
-        for name, body in (("bundle", km._nudge_bundle_body([TOP], nodes, set())),
-                           ("clear wrap-up", km._clear_wrap_body([TOP], nodes))):
+        for name, body in (("bundle", km._nudge_bundle_body([TOP], nodes, set())),):
             self.assertIn("(untitled)", prose(body), name)
             self.assertNotIn("goal", prose(body).lower(), name)
 
@@ -179,9 +207,14 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # words as its body, so there is no romp-authored ask in it to check; the DEBT reminder
             # asks for a reply to a PEER, not a progress report to the user; a comment thread's
             # opener is the user's own comment on a quoted passage — a conversation, never a nudge
-            if name in ("clear wrap-up", "clear wrap-up (batch)", "typed follow-up on a summary",
+            # …and the edit trace is an FYI about something the user already DID (a file changed under
+            # the session) — telling, not asking; a status question bolted on would be noise
+            # …and the MERGE handoff is a record handed over with direction ("account for it"),
+            # never a status ask — bolting a progress question onto it would be noise
+            if name in ("typed follow-up on a summary",
                         "debt reminder (question)", "debt reminder (handoff)",
-                        "debt reminder (several)", "comment thread opener"):
+                        "debt reminder (several)", "comment thread opener", "edit trace",
+                        "comment-thread merge"):
                 continue
             text = prose(body).lower()
             with self.subTest(message=name):

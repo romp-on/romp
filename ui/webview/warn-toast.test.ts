@@ -23,9 +23,33 @@ test("render handles kernel warn messages with a toast", () => {
 
 test("warn toasts stack on the right and dismiss on click", () => {
   assert.match(RENDER, /getElementById\("warn-toasts"\)/);
-  assert.match(RENDER, /addEventListener\("click", \(\) => t\.remove\(\)\)/);
   assert.match(STYLES, /#warn-toasts \{\s*\n\s*position: fixed; top: 44px; right: 14px;/);
   assert.match(STYLES, /\.warn-toast \{/);
+});
+
+test("the family dismissal: a visible ✕, Escape clears the stack, click-safe by construction", () => {
+  // the user 2026-08-25: the notice floats over the tab strip and "gets in the way" — useful copy,
+  // no visible way out. ONE shared treatment on the family renderer, not per-mint-site ✕s.
+  assert.match(RENDER, /const x = el\("button", "warn-toast-x"\);/);
+  assert.match(RENDER, /x\.setAttribute\("aria-label", "Dismiss"\);/);
+  // dismissal rides ONE delegated handler on the stable container (created once, toasts appended —
+  // the standing click-safety rule), so the ✕ AND the toast body both dismiss, and removal is the
+  // immediate acknowledgement
+  assert.match(RENDER, /box\.addEventListener\("click", \(e\) => \{\s*\n\s*\(e\.target as HTMLElement \| null\)\?\.closest\("\.warn-toast"\)\?\.remove\(\);/);
+  // Escape clears the stack, additively — it never stops propagation, so no other surface loses the key
+  assert.match(RENDER, /if \(e\.key === "Escape"\) for \(const w of Array\.from\(box!\.children\)\) w\.remove\(\);/);
+  assert.doesNotMatch(RENDER.split('if (e.key === "Escape") for (const w of')[1].slice(0, 120), /stopPropagation/);
+  // the ✕ wears the chip-✕ dress: dim at rest, separate, hover-brightens
+  assert.match(STYLES, /\.warn-toast-x \{\s*\n\s*flex: 0 0 auto; border: none; background: none; cursor: pointer; color: var\(--dim\);/);
+  assert.match(STYLES, /\.warn-toast-x:hover \{ color: var\(--fg\); background: rgba\(255, 255, 255, 0\.08\); \}/);
+  // the auto-fade stays — dismissal is ADDITIVE to the timeout, a user gesture always beats the event
+  assert.match(RENDER, /setTimeout\(\(\) => t\.classList\.add\("fade"\), 11000\);/);
+});
+
+test("the specimen's copy is untouched — only the trap was the bug", () => {
+  const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
+  assert.ok(KERNEL.includes("that message predates the last context compaction; only newer passages can open a thread"),
+    "the comment-thread refusal keeps its exact wording — the user likes the information");
 });
 
 test("federation surfaces a dropped route instead of vanishing it", () => {

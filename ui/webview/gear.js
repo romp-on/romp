@@ -61,6 +61,10 @@ var GEAR_HTML =
   '<span><b>Auto Nudge</b><span class=rs-mixed id=rs-autonudge-split hidden></span>' +
   '<span class=rs-sub id=rs-autonudge-sub>' + AUTONUDGE_SUB + '</span>' +
   '</span></label>' +
+  "<label class='rs-row'><input type=checkbox id=rs-fileedit>" +
+  '<span><b>File editing</b><span class=rs-mixed hidden></span>' +
+  '<span class=rs-sub>Let the file viewer’s Edit save straight to disk on the file’s machine. Off by default; the viewer asks the first time. A session working in the edited folder is told, and a save always refuses when the file changed underneath you. Applies on every connected machine’s kernel.</span>' +
+  '</span></label>' +
   "<div class='rs-row' style='cursor:default'><span style='flex:1 1 auto'><b>Automatic updates <span class=rs-mixed hidden></span></b>" +
   '<span class=rs-sub>romp watches for new tagged releases (every 6 hours) AND new commits on main (origin polled every few minutes, plus a restart offer when updated code sits on disk unbooted) — one banner covers both, and acting on it converges every attached machine. Check and ask (the default) offers the banner with an Update button; Install automatically converges by itself, restarting at the next quiet moment; Off never checks. Kernel-side setting.</span>' +
   "<select id=rs-updates style='margin-top:5px;width:100%;background:#1e1e1e;color:#ccc;" +
@@ -96,12 +100,16 @@ var GEAR_HTML =
   "border:1px solid #3a3a3a;border-radius:5px;padding:3px 4px;cursor:pointer'>" +
   '<option value=over50>When above 50%</option><option value=always>Always</option><option value=never>Never</option>' +
   '</select></span></div>' +
+  "<div class='rs-row' style='cursor:default'><span style='flex:1 1 auto'><b>Text scheme</b>" +
+  "<span class=rs-sub>Chat text colors only. Each row previews its own tiers — prose, the dimmer tool text, code. (Solarized Light is omitted — its tiers are made for a light page and turn muddy here.)</span>" +
+  "<div id=rs-chatscheme style='margin-top:5px;display:flex;flex-direction:column;gap:4px'></div>" +
+  '</span></div>' +
   '<div class=rs-sec>Feed</div>' +
   '<label class=rs-row><input type=checkbox id=rs-feedcollapsed>' +
   '<span><b>Collapse cards by default</b>' +
   '<span class=rs-sub>Every card arrives collapsed to its one-line gist; expanding one is a per-card override. Moved here from the feed footer — a set-and-forget default, not a per-glance action.</span>' +
   '</span></label>' +
-  '<div class=rs-sec>Timeline</div>' +
+  '<div class=rs-sec>Sessions pane</div>' +   // the pane's label (renamed from Timeline, the user 2026-08-24); "pane" disambiguates from the session-defaults section above
   '<label class=rs-row><input type=checkbox id=rs-activeonly checked>' +
   '<span><b>Show active sessions only</b>' +
   '<span class=rs-sub>Only draw lanes for sessions with work in the visible time range, so idle sessions do not take up room. They stay in the chat, and a lane reappears the moment you zoom or pan to a stretch where it did something.</span>' +
@@ -165,12 +173,14 @@ function initGear(post) {
     an = document.getElementById('rs-autonudge'), bk = document.getElementById('rs-backend'),
     dd = document.getElementById('rs-defaultdir'), gb = document.getElementById('rs-branch'),
     tc = document.getElementById('rs-tabctx'),
+    cs = document.getElementById('rs-chatscheme'),
     cg = document.getElementById('rs-collapsegaps'), ao = document.getElementById('rs-activeonly'),
     fc = document.getElementById('rs-feedcollapsed'),
     jm = document.getElementById('rs-judgemodel'),
     im = document.getElementById('rs-indexmodel'), je = document.getElementById('rs-judgeeffort'),
     ie = document.getElementById('rs-indexeffort'), upm = document.getElementById('rs-updates'),
     dm = document.getElementById('rs-distillmodel'), de = document.getElementById('rs-distilleffort'),
+    fe = document.getElementById('rs-fileedit'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
   function load() { try { return Object.assign({ compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', collapseGaps: true, activeOnly: true }, JSON.parse(localStorage.getItem('romp:settings') || 'null')); } catch (e) { return { compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', collapseGaps: true, activeOnly: true }; } }
   // mirrors settings.ts tabCtxMode (this file can't import the TS module): the gauge shipped for a
@@ -192,6 +202,35 @@ function initGear(post) {
   cc.addEventListener('change', function () { var s = load(); s.compact = cc.checked; save(s); });
   if (gb) gb.addEventListener('change', function () { var s = load(); s.showBranch = gb.checked; save(s); });
   if (tc) tc.addEventListener('change', function () { var s = load(); s.tabCtx = tc.value; save(s); });
+  // The scheme PREVIEW CARDS (the user 2026-08-24, on the live check: "I need to see a preview").
+  // Tier hexes MIRROR styles.css body.scheme-* (this file can't read the sheet across webviews);
+  // chat-scheme.test.ts pins the two byte-equal so they cannot drift. Default previews the stock
+  // tiers. Each card paints ITS OWN tiers on the chat's dark ground; the current pick wears the
+  // menu vocabulary's ✓-in-circle. Clicking applies live (save() dispatches romp:settings).
+  var SCHEMES = [
+    { id: 'default', name: 'Default', fg: '#cccccc', dim: '#9a9a9a', code: '#e1c08d' },
+    { id: 'high-contrast', name: 'High contrast', fg: '#e8e8e8', dim: '#b8b8b8', code: '#ecd9ae' },
+    { id: 'solarized-dark', name: 'Solarized Dark', fg: '#eee8d5', dim: '#93a1a1', code: '#d5b02d' }
+  ];
+  function csPaint() {
+    if (!cs) return;
+    var cur = load().chatScheme; cur = (cur === 'high-contrast' || cur === 'solarized-dark') ? cur : 'default';
+    cs.innerHTML = '';
+    SCHEMES.forEach(function (sc) {
+      var row = document.createElement('button');
+      row.type = 'button'; row.dataset.scheme = sc.id;
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;text-align:left;background:#1e1e1e;' +
+        'border:1px solid ' + (sc.id === cur ? '#1EA1EB' : '#3a3a3a') + ';border-radius:5px;padding:5px 8px;cursor:pointer;font:inherit;color:#ccc';
+      row.innerHTML = '<span style="flex:0 0 auto;width:15px;color:#1EA1EB">' + (sc.id === cur ? '\u2713' : '') + '</span>' +
+        '<span style="flex:0 0 auto;min-width:96px;color:#ccc">' + sc.name + '</span>' +
+        '<span style="flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
+        '<span style="color:' + sc.fg + '">Prose text</span> \u00b7 ' +
+        '<span style="color:' + sc.dim + '">tool / meta</span> \u00b7 ' +
+        '<span style="color:' + sc.code + ';font-family:monospace">code()</span></span>';
+      row.addEventListener('click', function () { var s = load(); s.chatScheme = sc.id; save(s); csPaint(); });
+      cs.appendChild(row);
+    });
+  }
   jix.addEventListener('change', function () { var s = load(); s.showIndexJudges = jix.checked; save(s); });
   jtr.addEventListener('change', function () { var s = load(); s.showTriageJudges = jtr.checked; save(s); });
   if (cg) cg.addEventListener('change', function () { var s = load(); s.collapseGaps = cg.checked; save(s); });
@@ -206,7 +245,127 @@ function initGear(post) {
     clearAutoNudgeSplit();
     post({ type: 'setAutoNudge', enabled: an.checked });
   });
+  if (fe) fe.addEventListener('change', function () { post({ type: 'setFileEditing', enabled: fe.checked }); });
   if (upm) upm.addEventListener('change', function () { post({ type: 'setUpdateMode', mode: upm.value }); });
+  // The judge MODEL pickers mirror the session pickers (the user 2026-08-25): families top-level,
+  // clicking a family sends its /models `default` (the user's remembered version), hover or
+  // ArrowRight reveals a side submenu of versions. The native select stays (hidden) as the VALUE
+  // holder — fill()/mixed marks keep working — and the button+menu is the visible control. The
+  // caret ALWAYS faces right (▸); the submenu PREFERS the right side, falling left only when the
+  // right edge would clip (measured, never assumed).
+  function versionMenu(sel, extraFirst) {
+    if (!sel) return;
+    sel.style.display = 'none';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'rs-vermenu-btn';
+    btn.setAttribute('style', 'background:#1e1e1e;color:#ccc;border:1px solid rgba(255,255,255,0.25);'
+      + 'border-radius:5px;padding:2px 8px;cursor:pointer;font:inherit;');
+    sel.parentNode.insertBefore(btn, sel.nextSibling);
+    var labelOf = function (val) {
+      var o = sel.querySelector('option[value="' + val + '"]');
+      return o ? o.textContent : val;
+    };
+    var syncBtn = function () { btn.textContent = labelOf(sel.value) + ' \u25BE'; };
+    var mo = new MutationObserver(syncBtn);
+    mo.observe(sel, { childList: true });
+    sel.addEventListener('change', syncBtn);
+    setTimeout(syncBtn, 0);
+    var menu = null, sub = null;
+    var closeAll = function () { if (sub) { sub.remove(); sub = null; } if (menu) { menu.remove(); menu = null; } };
+    document.addEventListener('click', closeAll);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeAll(); });
+    try { window.addEventListener('storage', function (e) { if (e.key === 'romp:menu-echo' && e.newValue) closeAll(); }); } catch (e) {}
+    var pick = function (val) { sel.value = val; sel.dispatchEvent(new Event('change')); syncBtn(); closeAll(); };
+    var MSTYLE = 'position:fixed;z-index:1001;min-width:130px;padding:4px;background:#252526;'
+      + 'border:1px solid rgba(255,255,255,0.12);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.35);'
+      + 'font-size:12px;line-height:1.4;color:#cccccc;user-select:none;';
+    var rowStyle = 'padding:4px 22px 4px 8px;border-radius:4px;cursor:pointer;position:relative;white-space:nowrap;display:flex;align-items:center;';
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (menu) { closeAll(); return; }
+      menu = document.createElement('div');
+      menu.setAttribute('style', MSTYLE);
+      menu.addEventListener('click', function (e2) { e2.stopPropagation(); });
+      (extraFirst || []).concat(choices && choices.models || []).forEach(function (fam) {
+        var row = document.createElement('div');
+        row.setAttribute('style', rowStyle);
+        row.tabIndex = 0;
+        row.appendChild(document.createTextNode(fam.label));
+        var versions = fam.versions || [];
+        var famCur = sel.value === fam.value || versions.some(function (v) { return v.value === sel.value; });
+        if (famCur) {
+          var ck = document.createElement('span'); ck.textContent = '\u2713';
+          ck.setAttribute('style', 'position:absolute;right:6px;top:50%;transform:translateY(-50%);background:#1EA1EB;color:#fff;border-radius:50%;width:13px;height:13px;font-size:9px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;line-height:1;');
+          row.appendChild(ck);
+        }
+        var openSub = versions.length > 1 ? function () {
+          if (sub) { sub.remove(); sub = null; }
+          sub = document.createElement('div');
+          sub.setAttribute('style', MSTYLE + 'z-index:1002;');
+          versions.forEach(function (v) {
+            var r2 = document.createElement('div');
+            r2.setAttribute('style', rowStyle);
+            r2.tabIndex = 0;
+            r2.appendChild(document.createTextNode(v.label));
+            if (sel.value === v.value) {
+              var c2 = document.createElement('span'); c2.textContent = '\u2713';
+              c2.setAttribute('style', 'position:absolute;right:6px;top:50%;transform:translateY(-50%);background:#1EA1EB;color:#fff;border-radius:50%;width:13px;height:13px;font-size:9px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;line-height:1;');
+              r2.appendChild(c2);
+            }
+            r2.addEventListener('mouseenter', function () { r2.style.background = 'rgba(255,255,255,0.09)'; });
+            r2.addEventListener('mouseleave', function () { r2.style.background = 'transparent'; });
+            r2.addEventListener('click', function (e2) { e2.stopPropagation(); pick(v.value); });
+            r2.addEventListener('keydown', function (e2) {
+              if (e2.key === 'Enter' || e2.key === ' ') { e2.preventDefault(); e2.stopPropagation(); pick(v.value); }
+              else if (e2.key === 'ArrowLeft') { e2.preventDefault(); sub.remove(); sub = null; row.focus(); }
+            });
+            sub.appendChild(r2);
+          });
+          document.body.appendChild(sub);
+          var rr = row.getBoundingClientRect();
+          // the side rule: PREFER right; fall left only when the right edge would clip (measured)
+          var sw = sub.offsetWidth || 130;
+          if (rr.right + 4 + sw <= window.innerWidth - 8) sub.style.left = Math.round(rr.right + 4) + 'px';
+          else sub.style.left = Math.max(8, Math.round(rr.left) - sw - 4) + 'px';
+          var sh = sub.offsetHeight || 0;
+          sub.style.top = Math.min(Math.round(rr.top), Math.max(8, window.innerHeight - sh - 8)) + 'px';
+          return sub;
+        } : null;
+        if (openSub) {
+          var caret = document.createElement('span');
+          caret.textContent = '\u25B8';   // ALWAYS right-facing — it marks "expandable", not the side
+          caret.setAttribute('style', 'margin-left:auto;padding-left:10px;opacity:0.55;');
+          row.appendChild(caret);
+          row.addEventListener('mouseenter', function () { row.style.background = 'rgba(255,255,255,0.09)'; openSub(); });
+        } else {
+          row.addEventListener('mouseenter', function () { row.style.background = 'rgba(255,255,255,0.09)'; if (sub) { sub.remove(); sub = null; } });
+        }
+        row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; });
+        row.addEventListener('click', function (e2) { e2.stopPropagation(); pick(fam.default || fam.value); });
+        row.addEventListener('keydown', function (e2) {
+          if (e2.key === 'Enter' || e2.key === ' ') { e2.preventDefault(); e2.stopPropagation(); pick(fam.default || fam.value); }
+          else if ((e2.key === 'ArrowRight' || e2.key === 'ArrowLeft') && openSub) {
+            e2.preventDefault();
+            var s = openSub();
+            var first = s && s.querySelector('[tabindex]');
+            if (first) first.focus();
+          }
+        });
+        menu.appendChild(row);
+      });
+      document.body.appendChild(menu);
+      var br = btn.getBoundingClientRect();
+      menu.style.left = Math.max(8, Math.min(Math.round(br.left), window.innerWidth - (menu.offsetWidth || 140) - 8)) + 'px';
+      var mh = menu.offsetHeight || 0;
+      menu.style.top = (br.bottom + 4 + mh > window.innerHeight - 8 ? Math.max(8, Math.round(br.top) - mh - 4) : Math.round(br.bottom + 4)) + 'px';
+    });
+  }
+  fillChoices().then(function () {
+    versionMenu(jm);
+    versionMenu(im);
+    versionMenu(dm, [{ value: 'triage', label: 'Follow triage', versions: [] }]);
+  });
   if (jm) jm.addEventListener('change', function () { post({ type: 'setJudgeModel', model: jm.value }); });
   if (im) im.addEventListener('change', function () { post({ type: 'setIndexModel', model: im.value }); });
   if (je) je.addEventListener('change', function () { post({ type: 'setJudgeEffort', effort: je.value }); });
@@ -270,7 +429,10 @@ function initGear(post) {
     if (choices) return Promise.resolve(choices);
     return fetch(ku('/models'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
       choices = d || { models: [], efforts: [] };
-      var mo = (choices.models || []).map(function (m) { return '<option value="' + m.value + '">' + m.label + '</option>'; }).join('');
+      var mo = (choices.models || []).map(function (m) {
+        var vs = (m.versions || []).map(function (v) { return '<option value="' + v.value + '">' + v.label + '</option>'; }).join('');
+        return '<option value="' + m.value + '">' + m.label + '</option>' + vs;   // versions ride as options too — the hidden select stays the value holder for any pick
+      }).join('');
       var eff = (choices.efforts || []).map(function (m) { return '<option value="' + m.value + '">' + m.label + '</option>'; }).join('');
       var eo = '<option value="">Default</option>' + eff;
       if (jm) jm.innerHTML = mo; if (im) im.innerHTML = mo;
@@ -325,7 +487,7 @@ function initGear(post) {
   function fillMixedMarks(v, rows) {
     var mine = (v && v.settings) || null;
     [['updateMode', upm], ['judgeModel', jm], ['judgeEffort', je], ['indexModel', im],
-     ['indexEffort', ie], ['distillModel', dm], ['distillEffort', de]].forEach(function (pair) {
+     ['indexEffort', ie], ['distillModel', dm], ['distillEffort', de], ['fileEditing', fe]].forEach(function (pair) {
       var key = pair[0], el = pair[1];
       if (!el) return;
       var row = el.closest ? el.closest('.rs-row') : null;
@@ -350,6 +512,7 @@ function initGear(post) {
       fillAutoNudge(v.autoNudge, rows);
       fillMixedMarks(v, rows);
     }).catch(function () { fillAutoNudge(v.autoNudge, []); fillMixedMarks(v, []); });
+    if (fe) fe.checked = !!v.fileEditing;   // the kernel's persisted opt-in is authoritative (see the viewer's consent popup)
     if (upm && typeof v.updateMode === 'string') upm.value = v.updateMode;   // the kernel's persisted mode is authoritative
     if (jm && typeof v.judgeModel === 'string') jm.value = v.judgeModel;   // the judge's ACTUAL current model/effort per tier is authoritative
     if (im && typeof v.indexModel === 'string') im.value = v.indexModel;
@@ -402,7 +565,7 @@ function initGear(post) {
     // settings-open, which is what un-hides #feed-pane when the feed is toggled off — measuring first
     // burned the whole 5-frame retry against a display:none pane, latched rs-pane-gone, and the
     // full-viewport fallback box blacked out every pane behind the modal.
-    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (tc) tc.value = tabCtxMode(s.tabCtx); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); if (bk) bk.value = s.backend || 'sdk'; if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
+    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (tc) tc.value = tabCtxMode(s.tabCtx); csPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); if (bk) bk.value = s.backend || 'sdk'; if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
   window.addEventListener('message', function (e) { if (e.data && e.data.romp === 'openSettings') openSettings(); });
   // The shortcuts row: the web shell (same-origin parent) gets the customize link — it opens the

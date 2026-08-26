@@ -168,17 +168,18 @@ class GrouperMovesOnceDone(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.td, ignore_errors=True)
 
-    def test_group_relinks_everdone_top(self):
+    def test_group_never_relinks_anything_anymore(self):
+        # T101: the once-done guard question is moot — the group op itself is retired
         store = {"rompUuid": SID, "seq": 3, "placements": {}, "status": {},
-                 "nodes": {G1: node(G1, "Fix the parser",                   # reopened once-done top —
+                 "nodes": {G1: node(G1, "Fix the parser",
                                     log=[{"ev_t": NOW - 400, "src": "closer", "kind": "done", "at": NOW - 400},
                                          {"ev_t": NOW - 200, "src": "user", "kind": "reopen", "at": NOW - 200}]),
-                           G2: node(G2, "Parser rewrite umbrella"),
+                           G2: node(G2, "Parser rewrite effort"),
                            G3: node(G3, "Add parser tests")}}
         tops = [store["nodes"][G1], store["nodes"][G2], store["nodes"][G3]]
         ops = [{"do": "group", "goal": 1, "under": 2, "why": "same parser effort"}]
-        self.assertEqual(jd.apply_group(store, tops, ops, NOW), 1)
-        self.assertEqual(store["nodes"][G1]["parentId"], G2)
+        self.assertEqual(jd.apply_group(store, tops, ops, NOW), 0)
+        self.assertIsNone(store["nodes"][G1].get("parentId"), "every top stays its own card")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 # Install romp onto this machine:
 #   - symlink the Claude Code hooks into ~/.claude/hooks/
 #   - symlink the MCP config (Romp Postal Service) into ~/.claude/
-#   - symlink the romp + romp-postal skills into ~/.claude/skills/
+#   - symlink the romp-postal skill into ~/.claude/skills/
 #   - build + install the romp-chat-view VS Code extension
 #
 # bin/ is NOT symlinked anywhere — add it to PATH in your shell rc:
@@ -184,6 +184,21 @@ fi
 # the link itself.
 ln -sfn "$ROMP_DIR/claude/skills/romp-postal" "$HOME/.claude/skills/romp-postal"
 echo "  Symlinked romp-postal skill"
+
+# The bundled `manager` skill was moved OUT to the user's dotfiles 2026-08-23 (the router-skill
+# carve-out: a way of USING romp lives outside the tool's repo — romp ships the primitives, the
+# /tag and /color routes and CLI verbs, and workflows live on top). An install from the bundled
+# era still has the symlink; remove it ONLY when it still points into this repo — the dotfiles
+# successor claims the same name, and a plain unlink would delete that successor link.
+if [ -L "$HOME/.claude/skills/manager" ]; then
+    _mgr_target="$(readlink "$HOME/.claude/skills/manager")"
+    case "$_mgr_target" in
+        "$ROMP_DIR"/*)
+            rm -f "$HOME/.claude/skills/manager"
+            echo "  Removed the retired bundled manager skill (it lives in dotfiles now)"
+            ;;
+    esac
+fi
 
 # The Agent SDK venv — the backend plain `romp new` uses. Best-effort: a host missing python >= 3.10
 # or Debian's python3-venv still runs tmux sessions (romp-sdk-setup says exactly what to install).

@@ -23,7 +23,7 @@ test("pathPins ride the chat events as a sibling map and thread into every linki
 });
 
 test("the embed and its lightbox request the pinned bytes; unpinned surfaces stay live", () => {
-  assert.match(RENDER, /previewFull\(p, activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)/);
+  assert.match(RENDER, /previewFull\(p, renderingOwnerSid \?\? activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)/);
   assert.match(PREVIEW, /previewFull\(path: string, sid\?: string \| null, verified = false, pin\?: string\)/);
   assert.match(PREVIEW, /const url = fileUrl\(path, sid\) \+ \(pin \? "&pin=" \+ encodeURIComponent\(pin\) : ""\);/);
   assert.match(PREVIEW, /openLightbox\(path, sid, pin\); \};/, "the big view shows the same pixels the embed did");

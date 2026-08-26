@@ -20,8 +20,8 @@ test("renderTodo shows the surfaced error instead of the task list", () => {
   // and it returns early — the normal per-task rendering is skipped when erroring
   const body = RENDER.slice(RENDER.indexOf("function renderTodo"));
   const errIdx = body.indexOf("if (ev.error)");
-  const loopIdx = body.indexOf("for (const t of ev.tasks)");
-  assert.ok(errIdx > -1 && loopIdx > -1 && errIdx < loopIdx, "the error branch precedes (and returns before) the task loop");
+  const rowIdx = body.indexOf("const row = (t:");
+  assert.ok(errIdx > -1 && rowIdx > -1 && errIdx < rowIdx, "the error branch precedes (and returns before) the row machinery");
 });
 
 test("the error card is styled in the error color, not a normal card", () => {

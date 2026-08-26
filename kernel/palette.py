@@ -61,6 +61,16 @@ PALETTES = {
         "fg": ["white", "black", "black", "white", "white",
                "white", "black", "white", "black"],
     },
+    # pastel — a soft high-lightness set (all-black text) for anyone who finds the saturated sets
+    # loud across many tabs (2026-08-26). Hand-tuned like the romp set, same colorblind-tuned
+    # order (blue, green, teal first); every swatch stays under the mid-tone luminance cap.
+    "pastel": {
+        "label": "pastel — romp soft",
+        "bg": ["#8FC7F2", "#9AD48A", "#7ED4C8", "#D9A7EC", "#F2B27C",
+               "#C9CBB0", "#F2A09E", "#EBD584", "#B4AFF2"],
+        "fg": ["black", "black", "black", "black", "black",
+               "black", "black", "black", "black"],
+    },
 }
 
 

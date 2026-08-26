@@ -12,13 +12,15 @@
 //
 // Living in the CHAT page also removes a whole relay: the click and the viewer are the same document
 // now, so there is no shell forwarding, no feed-pane bring-forward/put-back, and the standalone /chat
-// page views files exactly like the framed one.
+// page views files exactly like the framed one. The module stays pane-agnostic on purpose: the file
+// BROWSER (file-browse.ts, feed bundle) opens files through this same viewer in the FEED document, so
+// whichever bundle imports it gets the identical modal.
 import hljs from "highlight.js/lib/core";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { fileUrl } from "./preview";
-import { findAnchorRange, sliceRanges } from "./comments";
-import { anchorFor, buildReviewMessage, docKey, type DocComment } from "./docreview";
+import { kernelUrl } from "./media";
+import { quoteSrcLabel } from "./docreview";
 
 // hljs is registered per-bundle. Same language set (and grammar registrations) the chat's fence
 // highlighting uses, dup-guarded, so importing this module alongside render.ts costs nothing.
@@ -79,17 +81,19 @@ marked.use({
 // must survive a kernel restart without a round-trip to the thing that just restarted). RENDERED is the
 // default for markdown (the user 2026-08-09); Raw stays one click away.
 const FMT_KEY = "romp:fileviewFmt";
-type FileViewFmt = { md: "rendered" | "raw"; wrap: boolean };
+// wrap is GONE from the format state (the user 2026-08-24: "there doesn't need to be a button for
+// that") — long lines always soft-wrap; a stored wrap key from the toggle era is simply ignored.
+type FileViewFmt = { md: "rendered" | "raw" };
 
 // Any malformed/foreign value reads as the defaults rather than throwing — a corrupt entry may cost the
 // stored preference, never the viewer (feed-view-state's parseViewState contract).
 function parseFmt(raw: string | null | undefined): FileViewFmt {
-  const def: FileViewFmt = { md: "rendered", wrap: false };
+  const def: FileViewFmt = { md: "rendered" };
   if (!raw) return def;
   try {
-    const o = JSON.parse(raw) as { md?: unknown; wrap?: unknown };
+    const o = JSON.parse(raw) as { md?: unknown };
     if (!o || typeof o !== "object") return def;
-    return { md: o.md === "raw" ? "raw" : "rendered", wrap: o.wrap === true };
+    return { md: o.md === "raw" ? "raw" : "rendered" };
   } catch { return def; }
 }
 
@@ -107,51 +111,90 @@ function el(tag: string, cls?: string): HTMLElement {
   return e;
 }
 
-// ── review comments (the user 2026-08-14, who found coordinating a doc review painful) ─────────────
-// Reading a doc an agent wrote used to mean hand-copying every line you wanted changed back into the
-// chat. Now you comment on passages IN the viewer and one Submit hands the whole set over as a single
-// message drafted into that session's composer, each comment carrying its quote and source line — so
-// the agent applies the lot in one pass and nothing is copy-pasted.
-//
-// The layer is deliberately thin: the viewer already renders the file, so this adds selection →
-// comment, the marks, and the Submit. docreview.ts holds the pure half (anchoring + message shape).
-const CMT_KEY = "romp:fileviewComments";
-const comments = new Map<string, DocComment[]>();      // docKey(sid, path) → un-submitted comments
+// ── raw-mode editing (the file browser's slice 2, the user 2026-08-14) ─────────────────────────────
+// The save op rides the WS poster the pane's boot hands initFileView; replies route back to the OPEN
+// viewer through these module-level hooks (the viewer itself is a per-open closure).
+let post: (m: Record<string, unknown>) => void = () => { /* bound by initFileView */ };
+let saveSeq = 0;
+let editHooks: { reqId: number; saved: (mtimeNs: string) => void; failed: (err: string) => void } | null = null;
+// Set by the open viewer: returns false to VETO a close (an editor holding unsaved changes asks
+// first). The guard must live in closeFileView itself, because the browser overlay and the Escape
+// handler both close through it without knowing an edit is in progress.
+let closeGuard: (() => boolean) | null = null;
 
-function loadComments(): void {
-  try {
-    const raw = JSON.parse(localStorage.getItem(CMT_KEY) || "{}");
-    for (const [k, v] of Object.entries(raw)) {
-      const list = (Array.isArray(v) ? v : []).filter((c: any) =>
-        c && typeof c.id === "string" && typeof c.quote === "string" && typeof c.body === "string");
-      if (list.length) comments.set(k, list as DocComment[]);
-    }
-  } catch { /* unreadable store — start empty rather than throw on open */ }
-}
-loadComments();
-
-function saveComments(): void {
-  try { localStorage.setItem(CMT_KEY, JSON.stringify(Object.fromEntries(comments))); } catch { /* quota */ }
+// ── viewer action registry (the user 2026-08-22) ── INTERNAL SEAM, no compatibility promise:
+// reshape freely. Anything acting on the OPEN file declares itself here instead of hand-wiring into
+// openFileView's action row, where every file-viewer change used to collide. mount() runs once per
+// open and returns the action's element for the row (or null to sit this file out); an action that
+// answers asynchronously (the GitHub link's kernel ask) mounts hidden and reveals itself when its
+// reply lands. Ordering is registration order, after the built-ins.
+export interface FileViewActionCtx { path: string; sid: string | null; }
+export interface FileViewAction { id: string; mount: (ctx: FileViewActionCtx) => HTMLElement | null; }
+const fileViewActions: FileViewAction[] = [];
+export function registerFileViewAction(a: FileViewAction): void {
+  if (!fileViewActions.some((x) => x.id === a.id)) fileViewActions.push(a);
 }
 
-// render.ts owns the composer, and it imports THIS module — so the finished message is handed back
-// through a sink it registers at startup rather than importing render.ts here (which would be a cycle).
-// The sink takes THE REVIEWED SESSION'S sid and reports whether the draft LANDED (2026-08-19, two
-// user-data-loss bugs from one root): the old void sink read activeId at submit time, so switching
-// tabs drafted session A's review into session B — and Submit deleted the comments unconditionally,
-// so a closed tab or missing composer erased the whole review from memory and localStorage silently.
-let commentSink: ((sid: string, text: string) => boolean) | null = null;
-export function setCommentSink(fn: (sid: string, text: string) => boolean): void { commentSink = fn; }
+// ── the GitHub link (the user 2026-08-15) — the registry's first entry ─────────────────────────────
+// An anchor, not a button: the browser owns opening a new tab. Hidden until the OWNING kernel answers
+// the lazy fileGitLink ask with a real URL — an untracked file, a non-repo path, or a non-GitHub
+// origin all honestly have no link, and it simply never appears. One question per open, reqId-guarded.
+let gitSeq = 0;
+let gitHooks: { reqId: number; apply: (url: string) => void } | null = null;
+registerFileViewAction({
+  id: "github-link",
+  mount({ path, sid }) {
+    const gh = el("a", "fileview-btn fileview-gh") as HTMLAnchorElement;
+    gh.textContent = "GitHub ↗";
+    gh.target = "_blank"; gh.rel = "noopener";
+    gh.hidden = true;
+    gitHooks = {
+      reqId: ++gitSeq,
+      apply: (url) => {
+        if (!url) return;
+        gh.href = url;
+        gh.title = url;                            // the full URL one hover away
+        gh.hidden = false;
+      },
+    };
+    post({ type: "fileGitLink", path, sid: sid || undefined, reqId: gitSeq });
+    return gh;
+  },
+});
+
+// ── quote a passage into the composer (the user 2026-08-23, the three-verbs consolidation) ────────
+// Selecting text in the viewer seeds the SAME labeled quote chip a VS Code editor highlight does:
+// the selection posts to our own window in the editorSelection shape, so render.ts's existing
+// handler owns the chip end to end (no import cycle — the browseFiles precedent), labeled path:line
+// via quoteSrcLabel. From there the flow is the chat's own: type a note (or none), Stage, keep
+// going, send once. This REPLACED the viewer's separate review layer — the per-file comment store
+// (romp:fileviewComments), the painted marks, and the one-shot Submit that assembled a message —
+// because batching notes for one hand-off is exactly what quote chips + ⌘⏎ staging already do,
+// and "comment" now means only the transcript's live threads.
+
+// The retired store's data would otherwise sit in localStorage forever on every browser that
+// ever commented — sweep it on load.
+try { localStorage.removeItem("romp:fileviewComments"); } catch { /* storage may be denied */ }
 
 export function closeFileView(): void {
   const wrap = document.getElementById("romp-fileview");
   if (!wrap) return;
+  if (closeGuard && !closeGuard()) return;   // unsaved edits, and the user chose to keep them
+  closeGuard = null;
+  editHooks = null;
+  gitHooks = null;                                     // a reply landing after the close decorates nothing
   wrap.remove();
   document.body.classList.remove("fileview-open");
 }
 
 /** Show `path` in a modal over this pane. Re-opening replaces whatever is up — never stacks. */
 export function openFileView(path: string, sid?: string | null): void {
+  // The replace path bypasses closeFileView, so it needs the same dirty ask: opening file B over an
+  // edited-but-unsaved file A must not silently eat A's buffer.
+  if (document.getElementById("romp-fileview") && closeGuard && !closeGuard()) return;
+  closeGuard = null;
+  editHooks = null;
+  gitHooks = null;                                     // the replace path skips closeFileView — same drop
   document.getElementById("romp-fileview")?.remove();
   // backdrop (the whole overlay carries the id every open/closed check targets) + the ~95% card.
   // The backdrop treatment matches the lightbox: dimmed, click outside the card closes, content
@@ -163,6 +206,17 @@ export function openFileView(path: string, sid?: string | null): void {
   document.body.classList.add("fileview-open");
 
   const bar = el("div", "fileview-bar");
+  // BACK to the listing (the user 2026-08-24): a file opened FROM the browser overlays it with the
+  // listing intact beneath (the one-directional stack above) — closing just the viewer IS the back.
+  // The button renders only when a listing is actually underneath; a viewer opened from a path link
+  // has nowhere to go back to and shows none. Import-free by design: presence is the DOM id (the
+  // browser may not even be loaded in this document).
+  if (document.getElementById("romp-filebrowse")) {
+    const back = el("button", "fileview-btn fileview-back") as HTMLButtonElement;
+    back.type = "button"; back.textContent = "‹ Files"; back.title = "Back to the file listing";
+    back.addEventListener("click", () => closeFileView());
+    bar.appendChild(back);
+  }
   // Directory then basename as TWO elements, because only the directory may be truncated: the filename
   // is what identifies the file, so it never shrinks however deep the path is. (A single text node with
   // the rtl-ellipsis trick would truncate the right end — exactly the wrong half.)
@@ -173,23 +227,19 @@ export function openFileView(path: string, sid?: string | null): void {
   dir.textContent = cut >= 0 ? path.slice(0, cut + 1) : "";
   const base = el("span", "fileview-base");
   base.textContent = path.slice(cut + 1);
+  if (cut >= 0) {
+    // The discoverability path into the file BROWSER: the directory half of the title is a click
+    // into its listing. Posted to our OWN window — initFileBrowse listens on the same channel the
+    // shell relays into, so no import cycle between the two overlays.
+    dir.classList.add("fileview-dir-link");
+    dir.title = "Browse this file's folder";
+    dir.addEventListener("click", () => {
+      try { window.postMessage({ romp: "browseFiles", path: path.slice(0, cut) || "/", sid }, "*"); }
+      catch { /* messaging our own window cannot really fail */ }
+    });
+  }
   name.appendChild(dir); name.appendChild(base);
   const acts = el("div", "fileview-acts");
-
-  // Review controls. Both stay hidden until this file actually has a comment, so a plain read of a
-  // file is exactly as uncluttered as it was before this feature existed.
-  const key = docKey(sid || "", path);
-  const cmtCount = el("div", "fileview-cmtcount");
-  const submitBtn = el("button", "fileview-btn fileview-submit") as HTMLButtonElement;
-  submitBtn.type = "button";
-  submitBtn.title = "Hand every comment on this file to the session as one message";
-  const syncReview = () => {
-    const n = (comments.get(key) || []).length;
-    cmtCount.textContent = n === 1 ? "1 comment" : n + " comments";
-    submitBtn.textContent = "Submit " + n + (n === 1 ? " comment" : " comments");
-    cmtCount.hidden = !n;
-    submitBtn.hidden = !n;
-  };
 
   // ── format toggles (the user 2026-08-09) ── A markdown file opens RENDERED, its Raw form one click
   // away; everything else keeps the code view, whose long lines the Wrap toggle can soft-wrap. Both
@@ -198,6 +248,17 @@ export function openFileView(path: string, sid?: string | null): void {
   // here, same as Copy path below.
   const fmt = loadFmt();
   let text: string | null = null;             // set once the fetch lands; earlier clicks just save the pref
+  let mtimeNs = "";                           // the file's mtime at load, NANOSECONDS AS A STRING —
+  //   saveFile's conflict floor (ns because whole seconds let a same-second agent write slip the
+  //   guard; a string because ~1.7e18 exceeds JS's safe-integer range and a number would round)
+  let isText = false;                         // the kernel's verdicts (text/plain AND faithful UTF-8)
+  let editing = false;
+  let dirty = false;
+  let eolCRLF = false;                        // the file's dominant line ending — textareas normalize
+  //   CRLF→LF on assignment, so an untouched CRLF file would otherwise save with every ending rewritten
+  let ta: HTMLTextAreaElement | null = null;   // the FALLBACK surface (and the buffer pre-CodeMirror)
+  let cm: { value(): string; focus(): void; destroy(): void } | null = null;   // the CodeMirror handle when mounted
+  const bufValue = (): string | null => (cm ? cm.value() : ta ? ta.value : null);   // whichever surface owns the buffer
   const isMd = langFor(path) === "markdown";  // .md/.markdown — the only kind with a Rendered form
   const segBtns: Array<["rendered" | "raw", HTMLButtonElement]> = [];
   if (isMd) {
@@ -211,10 +272,55 @@ export function openFileView(path: string, sid?: string | null): void {
       acts.appendChild(b);
     }
   }
-  const wrapBtn = el("button", "fileview-btn") as HTMLButtonElement;
-  wrapBtn.type = "button"; wrapBtn.textContent = "Wrap"; wrapBtn.title = "Soft-wrap long lines";
-  wrapBtn.addEventListener("click", () => { fmt.wrap = !fmt.wrap; saveFmt(fmt); renderBody(); });
-  acts.appendChild(wrapBtn);
+
+  // ── edit (the raw-mode slice) ── exactly what raw mode can show is what Edit can touch: the
+  // button arms only when the kernel served text/plain WITH a Last-Modified to anchor the save's
+  // conflict floor (an old remote kernel that mirrors neither gets no Edit rather than an unguarded
+  // one). Markdown edits from its Raw view — what you edit is what raw shows.
+  const editBtn = el("button", "fileview-btn") as HTMLButtonElement;
+  editBtn.type = "button"; editBtn.textContent = "Edit"; editBtn.title = "Edit this file in place";
+  editBtn.hidden = true;
+  // The consent gate (the user 2026-08-22): editing is a kernel-side opt-in the SAVE ROUTE enforces —
+  // this popup is where the one yes happens, and it broadcasts through the settings mesh so every
+  // attached kernel's save route opens together (setFileEditing rides KERNEL_SETTING). The flag is
+  // read fresh per click, never cached: another machine's gear may have flipped it meanwhile. A
+  // decline changes nothing and is asked again next time — consent latches only on yes. If /version
+  // is unreachable the popup still asks: the kernel-side gate refuses regardless, so the worst a
+  // wrongly-granted yes here can do is draw one refused save with its plain-words error.
+  async function editingAllowed(): Promise<boolean> {
+    let on = false;
+    try { on = !!(await (await fetch(kernelUrl("/version"), { cache: "no-store" })).json()).fileEditing; } catch { /* ask below */ }
+    if (on) return true;
+    if (!window.confirm(
+      "Allow editing files from the dashboard?\n\n" +
+      "Saves write straight to disk on the file's machine — and this applies on every machine " +
+      "connected here. A session working in that folder is told when you edit under it.\n\n" +
+      "You can turn this off later in the settings gear.")) return false;
+    post({ type: "setFileEditing", enabled: true });
+    return true;
+  }
+  editBtn.addEventListener("click", () => {
+    void editingAllowed().then((ok) => {
+      if (!ok) return;
+      if (isMd && fmt.md === "rendered") { fmt.md = "raw"; saveFmt(fmt); }
+      enterEdit();
+    });
+  });
+  const saveBtn = el("button", "fileview-btn") as HTMLButtonElement;
+  saveBtn.type = "button"; saveBtn.textContent = "Save"; saveBtn.title = "Write the file (Ctrl/Cmd+S)";
+  saveBtn.hidden = true;
+  saveBtn.addEventListener("click", () => doSave());
+  const cancelBtn = el("button", "fileview-btn") as HTMLButtonElement;
+  cancelBtn.type = "button"; cancelBtn.textContent = "Cancel"; cancelBtn.title = "Leave edit mode";
+  cancelBtn.hidden = true;
+  cancelBtn.addEventListener("click", () => { if (confirmDiscard()) exitEdit(); });
+  acts.appendChild(editBtn); acts.appendChild(saveBtn); acts.appendChild(cancelBtn);
+  // Registered actions render after the built-ins — the registry walk is the ONE place row
+  // conventions live (see registerFileViewAction above). The GitHub link mounts here.
+  for (const a of fileViewActions) {
+    const n = a.mount({ path, sid: sid || null });
+    if (n) acts.appendChild(n);
+  }
 
   // ── download (the user 2026-08-09) ── Any linked file can be SAVED, including everything the pane
   // cannot show: the kernel's ?download=1 serves anything on disk (the rationale lives with
@@ -237,7 +343,6 @@ export function openFileView(path: string, sid?: string | null): void {
   close.type = "button"; close.textContent = "✕"; close.title = "Close (Esc)";
   close.setAttribute("aria-label", "Close the file viewer");
   close.addEventListener("click", closeFileView);
-  acts.appendChild(cmtCount); acts.appendChild(submitBtn);
   acts.appendChild(copy); acts.appendChild(close);
   bar.appendChild(name); bar.appendChild(acts);
 
@@ -262,178 +367,176 @@ export function openFileView(path: string, sid?: string | null): void {
       const on = fmt.md === mode;
       b.classList.toggle("on", on);
       b.setAttribute("aria-pressed", String(on));
+      b.hidden = editing;                       // format choices leave with edit mode; Save/Cancel own the bar
     }
-    // wrap governs the pre view only — rendered prose always wraps — so the button leaves with it
-    wrapBtn.hidden = rendered;
-    wrapBtn.classList.toggle("on", fmt.wrap);
-    wrapBtn.setAttribute("aria-pressed", String(fmt.wrap));
-    if (text === null) return;   // still loading; the saved pref is honored when the bytes land
-    body.replaceChildren(rendered ? mdBlock(text) : codeBlock(text, path, fmt.wrap));
-    markComments();
+    editBtn.hidden = editing || text === null || !isText || !mtimeNs;
+    saveBtn.hidden = !editing;
+    cancelBtn.hidden = !editing;
+    if (text === null || editing) return;   // loading, or the textarea owns the body right now
+    body.replaceChildren(rendered ? mdBlock(text) : codeBlock(text, path, true));   // long lines always soft-wrap (the user 2026-08-24)
   };
 
-  // Paint every commented span. Reuses the chat comment threads' re-anchoring: findAnchorRange is
-  // whitespace-tolerant, which is what lets a span selected in the RENDERED view still be found in the
-  // Raw one (and the other way round). A span that can no longer be found keeps its comment — only the
-  // highlight is missing, and the Submit still carries it.
-  function markComments(): void {
-    const list = comments.get(key) || [];
-    syncReview();
-    list.forEach((c, i) => {
-      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-      const nodes: Text[] = [];
-      let n: Node | null;
-      while ((n = walker.nextNode())) if (!n.parentElement?.closest("mark.fv-hl")) nodes.push(n as Text);
-      const r = findAnchorRange(nodes.map((t) => t.data).join(""), c.quote);
-      if (!r) return;
-      const slices = sliceRanges(nodes.map((t) => t.data.length), r.start, r.end);
-      slices.forEach((sl, k) => {
-        const t = nodes[sl.idx];
-        const mid = sl.s > 0 ? t.splitText(sl.s) : t;
-        if (sl.e - sl.s < mid.data.length) mid.splitText(sl.e - sl.s);
-        const m = document.createElement("mark");
-        m.className = "fv-hl";
-        m.title = c.body;
-        mid.parentNode?.insertBefore(m, mid);
-        m.appendChild(mid);
-        if (k === slices.length - 1) {          // the number rides the run's tail; click to read/remove
-          const badge = document.createElement("sup");
-          badge.className = "fv-num";
-          badge.textContent = String(i + 1);
-          badge.title = c.body;
-          badge.addEventListener("click", (ev) => { ev.stopPropagation(); showNote(c, badge); });
-          m.appendChild(badge);
-        }
-      });
-    });
-  }
-
-  // The comment's text, one click under its marker — the compact form is the number (the progressive
-  // disclosure rule). Clicking the same marker again closes it.
-  function showNote(c: DocComment, at: HTMLElement): void {
-    const open = body.querySelector(".fv-note") as HTMLElement | null;
-    const same = open?.dataset.dcid === c.id;
-    open?.remove();
-    if (same) return;
-    const note = el("span", "fv-note");
-    note.dataset.dcid = c.id;
-    const txt = el("span"); txt.textContent = c.body;
-    const del = el("button", "fv-note-x") as HTMLButtonElement;
-    del.type = "button"; del.textContent = "✕"; del.title = "Remove this comment";
-    del.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      const left = (comments.get(key) || []).filter((x) => x.id !== c.id);
-      if (left.length) comments.set(key, left); else comments.delete(key);
-      saveComments();
-      renderBody();                              // repaint so the numbering closes up
-    });
-    note.appendChild(txt); note.appendChild(del);
-    at.parentNode?.insertBefore(note, at.nextSibling);
-  }
-
-  // Right-click a selection → Comment. Bound on the viewer body, so it never competes with the chat's
-  // own selection menu behind the backdrop.
-  body.addEventListener("contextmenu", (ev) => {
+  // Selection → labeled quote chip (the user 2026-08-23): mouseup is the gesture's settle point.
+  // The chip behaves exactly like a VS Code editor highlight's — one live source-labeled chip,
+  // replaced by the next selection, persisting until sent, staged, or ✕'d — because it IS that
+  // chip: render.ts's editorSelection handler seeds it. The post carries THIS viewer's sid, so the
+  // chip lands in the session the file was opened FOR even if the active tab changed while the
+  // modal was up (the 2026-08-19 routing rule: the gesture's session, never activeId-at-gesture).
+  let seedSeq = 0;                                 // last gesture wins if two fresh reads race
+  box.addEventListener("mouseup", () => {
+    if (editing) return;   // CodeMirror selections are edit gestures, not quotes
     const sel = window.getSelection();
-    const picked = sel ? sel.toString() : "";
-    if (!picked.trim() || !sel?.anchorNode || !body.contains(sel.anchorNode)) return;
-    ev.preventDefault();
-    document.querySelector(".fv-menu")?.remove();
-    const menu = el("div", "ctx-menu fv-menu");
-    const item = (label: string, fn: () => void) => {
-      const it = el("div", "ctx-item");
-      it.textContent = label;
-      it.addEventListener("click", (e2) => { e2.stopPropagation(); menu.remove(); fn(); });
-      menu.appendChild(it);
-    };
-    item("Comment", () => askComment(picked));
-    item("Copy", () => { navigator.clipboard?.writeText(picked).catch(() => { /* best effort */ }); });
-    document.body.appendChild(menu);
-    const r = menu.getBoundingClientRect();
-    menu.style.left = Math.max(0, Math.min(ev.clientX, window.innerWidth - r.width - 4)) + "px";
-    menu.style.top = Math.max(0, Math.min(ev.clientY, window.innerHeight - r.height - 4)) + "px";
-    const away = (e3: MouseEvent) => {
-      if (menu.contains(e3.target as Node)) return;
-      menu.remove();
-      document.removeEventListener("mousedown", away, true);
-    };
-    document.addEventListener("mousedown", away, true);
+    if (!sel || sel.isCollapsed || !sel.anchorNode || !box.contains(sel.anchorNode)) return;
+    const picked = sel.toString().trim();
+    if (!picked) return;
+    // The label's line is minted NOW, not at open: agents edit these same trees, so the open-time
+    // snapshot's numbering may have quietly moved. Anchor against a fresh read; a FAILED re-read
+    // falls back to the snapshot rather than fabricating drift nobody observed (the old Submit
+    // guard's rule). quoteSrcLabel itself degrades to the bare path when the passage cannot be
+    // honestly found in whichever bytes it gets.
+    const seq = ++seedSeq;
+    fetch(fileUrl(path, sid), { cache: "no-store" })
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+      .catch(() => text)
+      .then((doc) => {
+        if (seq !== seedSeq) return;
+        try { window.postMessage({ type: "editorSelection", text: picked, sid: sid || undefined, src: quoteSrcLabel(path, doc, picked) }, "*"); }
+        catch { /* messaging our own window cannot really fail */ }
+      });
   });
 
-  // The box that takes a new comment. Shows the anchor it will carry, so you can see where the agent
-  // will be sent before typing.
-  function askComment(picked: string): void {
-    box.querySelector(".fv-new")?.remove();
-    const a = anchorFor(text || "", picked);
-    if (!a.quote) return;
-    const nb = el("div", "fv-new");
-    const at = el("div", "fv-at");
-    at.textContent = (a.line ? "line " + a.line + " — " : "") + "\u201c" + a.quote.slice(0, 120) + "\u201d";
-    const ta = el("textarea", "fv-ta") as HTMLTextAreaElement;
-    ta.placeholder = "What should change here?";
-    const row = el("div", "fv-newrow");
-    const add = el("button", "fileview-btn fileview-submit") as HTMLButtonElement;
-    add.type = "button"; add.textContent = "Add comment";
-    const cancel = el("button", "fileview-btn") as HTMLButtonElement;
-    cancel.type = "button"; cancel.textContent = "Cancel";
-    const done = () => {
-      if (!ta.value.trim()) return;
-      const list = (comments.get(key) || []).concat([{
-        id: "fc" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        quote: a.quote, line: a.line, body: ta.value.trim(), ts: Date.now(),
-      }]);
-      comments.set(key, list);
-      saveComments();
-      nb.remove();
-      renderBody();
-    };
-    add.addEventListener("click", done);
-    cancel.addEventListener("click", () => nb.remove());
-    ta.addEventListener("keydown", (e4) => {
-      if (e4.key === "Enter" && (e4.metaKey || e4.ctrlKey)) { e4.preventDefault(); done(); }
-      if (e4.key === "Escape") { e4.preventDefault(); e4.stopPropagation(); nb.remove(); }
+  // ── edit mode (the raw-mode slice) ── a plain textarea holding the raw bytes: an embedded editor
+  // is a different project, and a textarea that keeps your changes beats a half-editor. The kernel's
+  // mtime floor does the real safety work (agents edit these same trees — see _save_file).
+  const confirmDiscard = (): boolean =>
+    !editing || !dirty || window.confirm("Discard unsaved changes to " + path.slice(cut + 1) + "?");
+  closeGuard = confirmDiscard;
+  const norm = (s: string): string => s.replace(/\r\n/g, "\n");   // the textarea's own view of any text
+  // The editing substrate is CodeMirror 6 (the user 2026-08-22), living in its OWN lazily-loaded
+  // bundle so people who never edit download nothing (the main bundles import none of it — the
+  // contract is the window global the chunk registers). The URL derives from the page's own running
+  // bundle script — same directory, same ?v= cache token — so it resolves on the kernel pages and
+  // the VS Code webview alike, and a rebuilt kernel always serves a matching chunk. A failed load
+  // rejects ONCE and clears the latch so a later attempt retries fresh.
+  let edChunk: Promise<{ mount: (host: HTMLElement, opts: object) => { value(): string; focus(): void; destroy(): void } }> | null = null;
+  const editorChunk = () => edChunk || (edChunk = new Promise((res, rej) => {
+    const w = window as any;
+    if (w.__rompEditor) return res(w.__rompEditor);
+    const self = Array.from(document.querySelectorAll("script[src]"))
+      .map((n) => (n as HTMLScriptElement).src).find((u) => /\/(render|feed)\.js/.test(u));
+    if (!self) return rej(new Error("no bundle script tag to derive the editor chunk URL from"));
+    const sc = document.createElement("script");
+    sc.src = self.replace(/\/(render|feed)\.js/, "/editor-chunk.js");
+    sc.onload = () => { const e = (window as any).__rompEditor; e ? res(e) : rej(new Error("editor chunk loaded but did not register")); };
+    sc.onerror = () => { edChunk = null; rej(new Error("the editor bundle failed to load")); };
+    document.head.appendChild(sc);
+  }));
+  const enterFallback = () => {                 // the plain textarea: LOUD fallback, never a silent one
+    ta = el("textarea", "fileview-editor") as HTMLTextAreaElement;
+    ta.value = text!;                           // the browser normalizes CRLF→LF on assignment…
+    ta.spellcheck = false;
+    ta.addEventListener("input", () => { dirty = ta!.value !== norm(text!); });   // …so compare normalized
+    ta.addEventListener("keydown", (e) => {     // the editor's own save chord; Esc falls through to onKey
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); doSave(); }
     });
-    row.appendChild(add); row.appendChild(cancel);
-    nb.appendChild(at); nb.appendChild(ta); nb.appendChild(row);
-    box.appendChild(nb);
+    body.replaceChildren(ta);
     ta.focus();
-  }
-
-  // Submit: every comment on this file becomes ONE message drafted into the composer. Before building
-  // it, re-read the file — if the agent rewrote it while you were reading, the line anchors may now
-  // point somewhere else, and you are told so rather than sending quietly-wrong numbers.
-  submitBtn.addEventListener("click", () => {
-    const list = comments.get(key) || [];
-    if (!list.length || !commentSink) return;
-    submitBtn.disabled = true;
-    submitBtn.textContent = "Submitting\u2026";                 // acknowledge the click before the round trip
-    fetch(fileUrl(path, sid), { cache: "no-store" })
-      .then((r) => (r.ok ? r.text() : Promise.reject(new Error("re-read failed"))))
-      .then((fresh) => fresh !== text)
-      .catch(() => false)                                       // can't re-read → claim no staleness we didn't see
-      .then((stale) => {
-        const msg = buildReviewMessage(path, list);
-        if (!msg) { submitBtn.disabled = false; submitBtn.textContent = "Submit"; return; }
-        const landed = commentSink!(sid || "", stale
-          ? msg + "\n(Heads up: the file changed while I was reading it, so the line numbers may have moved.)\n"
-          : msg);
-        if (!landed) {
-          // the review is the user's WORK — never erased on a failed handoff. Say so, visibly,
-          // and keep every comment (memory + localStorage) for the next attempt.
-          submitBtn.disabled = false;
-          submitBtn.textContent = "Couldn't draft it — comments kept, try again";
+  };
+  let editSeq = 0;                              // stale chunk resolutions (edit left before load) no-op
+  const enterEdit = () => {
+    if (text === null || editing) return;
+    editing = true; dirty = false;
+    eolCRLF = /\r\n/.test(text);
+    renderBody();
+    // per the loading-state rule the chunk wait shows the romp loader, not a blank body
+    const wait = el("div", "fileview-load");
+    wait.innerHTML = '<img src="/media/romp-swirl-glyph.svg" alt=""><span>romp</span>'
+      + '<i class="fileview-dot"></i><i class="fileview-dot"></i><i class="fileview-dot"></i>';
+    body.replaceChildren(wait);
+    const my = ++editSeq;
+    editorChunk().then((ed) => {
+      if (!editing || my !== editSeq) return;   // edit mode left (or re-entered) while the chunk loaded
+      const host = el("div", "fileview-cm");
+      body.replaceChildren(host);
+      cm = ed.mount(host, {
+        text: norm(text!), ext: path.slice(path.lastIndexOf(".") + 1),
+        onChange: () => { dirty = cm!.value() !== norm(text!); },
+        onSave: () => doSave(),
+      });
+      cm.focus();
+    }).catch((err) => {
+      if (!editing || my !== editSeq) return;
+      document.getElementById("fileview-save-err")?.remove();
+      const bar2 = el("div", "fileview-err");   // loud: say the editor is degraded, never pretend
+      bar2.id = "fileview-save-err";
+      bar2.textContent = String(err && (err as Error).message || err) + " — editing in the plain fallback editor.";
+      enterFallback();
+      body.prepend(bar2);
+    });
+  };
+  const exitEdit = () => {
+    editing = false; dirty = false; ta = null;
+    cm?.destroy(); cm = null;
+    editHooks = null;                           // a cancelled save's late ack must not touch a NEW session
+    saveBtn.disabled = false; saveBtn.textContent = "Save";
+    renderBody();
+  };
+  const doSave = () => {
+    const buf = bufValue();
+    if (!editing || buf === null || saveBtn.disabled) return;
+    if (!dirty) { exitEdit(); return; }         // nothing changed — leaving is the honest ack
+    saveBtn.disabled = true; saveBtn.textContent = "Saving…";   // acknowledge before the round-trip
+    // restore the file's own line endings — an untouched CRLF file must round-trip byte-identical
+    const content = eolCRLF ? buf.replace(/\n/g, "\r\n") : buf;
+    editHooks = {
+      reqId: ++saveSeq,
+      saved: (mtNs) => {
+        mtimeNs = mtNs;
+        text = content;
+        // Keystrokes typed DURING the round-trip survive the ack (the review's in-flight-typing
+        // finding): if the live buffer moved past the snapshot we saved, stay in edit mode with the
+        // new baseline — never re-render over what the user is still typing.
+        if (bufValue() !== null && bufValue() !== norm(content)) {
+          dirty = true;
+          saveBtn.disabled = false; saveBtn.textContent = "Save";
           return;
         }
-        comments.delete(key);
-        saveComments();
-        closeFileView();
-      });
-  });
+        exitEdit();                             // re-renders the highlighted view from the saved bytes
+      },
+      failed: (err) => {
+        saveBtn.disabled = false; saveBtn.textContent = "Save";
+        // Loud, in place, and the BUFFER SURVIVES: the error bar sits above the textarea. A conflict
+        // (the disk moved — an agent wrote it) offers Reload, which re-opens fresh — behind the same
+        // discard confirm, so the user's edits are never thrown away silently (never a merge UI).
+        document.getElementById("fileview-save-err")?.remove();
+        const bar2 = el("div", "fileview-err");
+        bar2.id = "fileview-save-err";
+        bar2.textContent = err;
+        if (/changed on disk/.test(err)) {
+          const re = el("button", "fileview-btn fileview-err-dl") as HTMLButtonElement;
+          re.type = "button"; re.textContent = "Reload file";
+          re.title = "Fetch the file as it is now (asks before discarding your edits)";
+          re.addEventListener("click", () => {
+            if (!confirmDiscard()) return;
+            dirty = false;                      // confirmed once — the replace guard must not ask twice
+            openFileView(path, sid);
+          });
+          bar2.appendChild(re);
+        }
+        body.prepend(bar2);
+      },
+    };
+    post({ type: "saveFile", path, sid: sid || undefined, content, baseMtimeNs: mtimeNs, reqId: saveSeq });
+  };
   renderBody();   // buttons take their initial state now; the loader stays up until the fetch lands
 
   const onKey = (e: KeyboardEvent) => {
     if (e.key !== "Escape" || !document.getElementById("romp-fileview")) return;
     e.preventDefault();
+    if (editing) {                              // Escape peels edit mode first, never the whole viewer
+      if (confirmDiscard()) exitEdit();
+      return;
+    }
     closeFileView();
     document.removeEventListener("keydown", onKey);
   };
@@ -447,6 +550,13 @@ export function openFileView(path: string, sid?: string | null): void {
     if (!r.ok) return r.text().then((t) => {
       throw Object.assign(new Error(t || ("HTTP " + r.status)), { status: r.status });
     });
+    // Edit arms off the KERNEL's verdicts, never a client guess: text/plain AND a faithful UTF-8
+    // round-trip (the latin-1 fallback re-decodes non-UTF-8 files — saving that back would rewrite
+    // every non-ASCII byte, the review's executed repro), anchored by the ns mtime header (an old
+    // kernel that sends neither simply gets no Edit button).
+    isText = (r.headers.get("Content-Type") || "").startsWith("text/plain")
+      && r.headers.get("X-Romp-Text-Utf8") !== "0";
+    mtimeNs = r.headers.get("X-Romp-Mtime-Ns") || "";
     return r.text();
   }).then((t) => {
     if (!document.getElementById("romp-fileview")) return;    // closed while it was in flight
@@ -590,4 +700,46 @@ function mdBlock(text: string): HTMLElement {
     } catch { /* leave plain */ }
   });
   return box;
+}
+
+/** Bind the pane's WS poster and route saveFile + fileGitLink replies back to the open viewer.
+ *  Called once, from the pane's boot (render.ts and feed.ts today — either document, one mechanism);
+ *  every reply is reqId-guarded so one landing after a close or a replace-open touches nothing. The
+ *  viewFile branch honors a shell's relay of a chat file-link click — nothing sends it since the
+ *  viewer moved into the chat document, but a not-yet-reloaded shell page still might, and honoring
+ *  it costs nothing. */
+export function initFileView(poster: (m: Record<string, unknown>) => void): void {
+  post = poster;
+  window.addEventListener("message", (e: MessageEvent) => {
+    const m = e.data;
+    if (!m) return;
+    if (m.romp === "viewFile" && typeof m.path === "string" && m.path) {
+      openFileView(m.path, typeof m.sid === "string" ? m.sid : null);
+    } else if (m.type === "fileGitLink" && gitHooks && m.reqId === gitHooks.reqId) {
+      const h = gitHooks; gitHooks = null;
+      h.apply(String(m.url || ""));
+    } else if (m.type === "fileSaved" && editHooks && m.reqId === editHooks.reqId) {
+      const h = editHooks; editHooks = null;
+      h.saved(String(m.mtimeNs || ""));
+    } else if (m.type === "fileSaveFailed" && editHooks && m.reqId === editHooks.reqId) {
+      const h = editHooks; editHooks = null;
+      h.failed(String(m.error || "the save failed"));
+    } else if (m.type === "warn" && editHooks) {
+      // A federation drop (the session's host unreachable) answers a saveFile with a warn instead
+      // of a reply — the feed page renders no toasts, so without this the button spins forever
+      // (the same hole the browse overlay closed for listDir).
+      const h = editHooks; editHooks = null;
+      h.failed(String(m.text || "the session's host is not answering — the save was not sent"));
+    }
+  });
+  // A socket drop mid-save loses the ack, and the frame itself may or may not have reached the
+  // kernel — the honest answer is to say exactly that and re-arm Save: a save that DID land will
+  // refuse the retry as "changed on disk", and Reload resolves it from there. Keying on the shim's
+  // own drop event (not a timer) is the house rule; the browse overlay set the precedent.
+  window.addEventListener("romp:wsdown", () => {
+    if (!editHooks) return;
+    const h = editHooks; editHooks = null;
+    h.failed("the connection dropped mid-save — it may or may not have landed; "
+      + "Save again once the connection returns (a save that DID land will refuse as changed-on-disk)");
+  });
 }

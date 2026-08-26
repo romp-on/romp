@@ -13,11 +13,16 @@ export type CommentThread = {
   color?: string;             // the comment's identity color — picked distinct from its parent's
   anchorUuid: string;
   exact: string;
-  status: "open" | "resolved" | "promoting" | "promoted";
+  status: "open" | "resolved" | "promoting" | "promoted" | "merging" | "merged";   // merging/merged: folded back into the parent (the user 2026-08-23)
   createdT: number;
   state: string;              // the thread session's live state ("working"/"waiting"/…, "" when dormant)
   error?: string;             // the thread CLI's launch error, when it could not start
   unread: boolean;            // an agent reply newer than the read watermark
+  sinceEpoch?: number;        // ms epoch the thread's current state began — the popover chip's timer
+  mode?: string;              // the thread's permission mode — the popover statusline's Auto badge
+  fast?: string;              // fast-mode state ("on"/"off"/"cooldown"; "" = unknown → no badge)
+  modelColor?: number[];      // the chat statusline's rank tints, so metaColor paints the popover
+  effortColor?: number[];     //   badges exactly as the chat's (the 2026-08-25 color rider)
   promotedName: string;       // the board session it became, when status === "promoted"
   model?: string;             // the thread's live/chosen model (the popover's switchable chip)
   effort?: string;            // the thread's effort level (ditto)
@@ -44,6 +49,28 @@ export function threadBusy(state: string): boolean {
 
 /** The thread session is stuck on an interactive prompt the popover can't answer — say so, and point
  *  at Break out (a full session can). */
+// A reply is OWED the moment the user's message is the thread's newest with no agent reply landed
+// since (the user 2026-08-24, second report: the mark flashed green on create, dropped to YELLOW
+// while the thread CLI was still booting — its live state read idle, a flapping boot-time proxy —
+// then went green again once generation started). The in-flight color keys on the EXCHANGE's own
+// events: user message in → green until the reply message lands, however the worker session's state
+// wobbles on the way. The find-the-event rule, applied to a color.
+export function replyOwed(th: CommentThread): boolean {
+  const last = th.msgs.length ? th.msgs[th.msgs.length - 1] : null;
+  return !!last && last.who === "you";
+}
+// THE EXCHANGE LATCH (T102, the user 2026-08-26 — replacing the push-count settle): the busy pulse
+// is exchange-scoped. It LATCHES at the user's SEND gesture (client-side, optimistic — before any
+// kernel round-trip; thread-open must never be the start trigger) and CLEARS only on the
+// REPLY-ARRIVED event for that send: the agent's reply RECORD landing in the thread's projected
+// msgs — concretely, th.msgs holding MORE who==="agent" entries than it held at the send. Counts of
+// the exchange's own records: never wall clocks (cross-host transcripts skew) and never push counts
+// (the banned proxy — the old two-quiet-pushes settle counter killed the create-window green
+// while the fork booted, and any stall in its 0→1→2 stepping parked green forever with no event to
+// clear it). agentCount is the reply-arrived detector's datum; render.ts holds the per-send base.
+export function agentCount(th: CommentThread): number {
+  return (th.msgs || []).filter((m) => m.who === "agent").length;
+}
 export function threadStuck(state: string): boolean {
   return state === "permission" || state === "picker";
 }

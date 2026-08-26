@@ -70,5 +70,5 @@ test("gear → Chat picker (When above 50% / Always / Never), persisted as setti
 });
 
 test("a gear change repaints the tab strip live, not on the next kernel push", () => {
-  assert.match(RENDER, /onExternalSettingsChange\(\(s\) => \{ settings = s; renderTabs\(\); rerenderAll\(\); \}\)/);
+  assert.match(RENDER, /onExternalSettingsChange\(\(s\) => \{ settings = s; applyChatScheme\(s\); renderTabs\(\); rerenderAll\(\); refillOpenCommentPop\(\); \}\)/);
 });

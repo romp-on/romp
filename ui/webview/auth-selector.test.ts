@@ -77,7 +77,7 @@ test("the switching CONTROL is the tab menu's Billing submenu, gated on both", (
   assert.match(RENDER, /if \(st\.auth !== c\.value && vscodeApi\) vscodeApi\.postMessage\(\{ type: "setAuth", id, value: c\.value \}\);/);
   // the item's sub-line names the current billing, or the applying reconnect
   assert.match(RENDER, /st\.authPending \? "applying…"/);
-  assert.match(RENDER, /auth\?: string; authPending\?: boolean; authBoth\?: boolean; authAcct\?: string;/);
+  assert.match(RENDER, /auth\?: string; authLive\?: string; authPending\?: boolean; authBoth\?: boolean; authAcct\?: string;/);
 });
 
 test("no key material reaches the webview — no tail plumbing survives anywhere", () => {
@@ -91,7 +91,13 @@ test("no key material reaches the webview — no tail plumbing survives anywhere
 test("the chat tab hover says Billing whenever the backend reports it, naming the login", () => {
   // ungated on machine shape (the user 2026-08-09: one-auth machines included; only a tmux session,
   // whose CLI env romp does not control, reports nothing) — and 'Login (account)' when known
-  assert.match(RENDER, /if \(s\.status\.auth\) rows\.push\(\["Billing", s\.status\.auth === "key" \? "API key"\s*\n\s*: \(s\.status\.authAcct \? `Login \(\$\{s\.status\.authAcct\}\)` : "Login"\)\]\);/);
+  assert.match(RENDER, /s\.status\.auth === "key" \? "API key"\s*\n\s*: \(s\.status\.authAcct \? `Login \(\$\{s\.status\.authAcct\}\)` : "Login"\)\]\);/);
+  // …and when the CLI's own init landed on the OTHER side (authLive — a key found via apiKeyHelper
+  // on a login launch), the row carries the live truth beside the intent instead of wearing the lie,
+  // and the account name yields its parenthetical — it is not the account being billed (2026-08-15).
+  // Anchored at the gate + label: a no-auth session (tmux — the exclusion above) must never grow a
+  // fabricated Billing row, so the `if (s.status.auth)` guard is part of the pinned behavior.
+  assert.match(RENDER, /if \(s\.status\.auth\) rows\.push\(\["Billing",\s*\n\s*s\.status\.authLive && s\.status\.authLive !== s\.status\.auth\s*\n\s*\? \(s\.status\.auth === "key" \? "API key" : "Login"\)\s*\n\s*\+ ` \(CLI reports \$\{s\.status\.authLive === "key" \? "API key" : "login"\}\)`/);
 });
 
 test("setAuth is an intent op — held through a kernel-restart window, never dropped", () => {

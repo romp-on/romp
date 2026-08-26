@@ -102,6 +102,57 @@ class StoreCas(unittest.TestCase):
         self.assertIn(("planner", "block"), kinds, "the first writer's event survives")
         self.assertIn(("closer", "done"), kinds, "the second writer's event is there too")
 
+    def test_a_stale_pass_no_longer_erases_a_fresh_takeaway(self):
+        # "Stuck on Distilling" (the user 2026-08-23): distill-family fields are STATE, not log rows,
+        # so the event fold never carried them — a pass holding a pre-distill snapshot across its model
+        # call erased the freshly-published summary on save, the card flipped back to "Distilling…",
+        # and the distiller re-ran, oscillating for as long as writers overlapped.
+        self._seed()
+        gid = self._nid(1)
+        a = jd.load_goals(SID)                       # pass A's snapshot (pre-distill)
+        d = jd.load_goals(SID)                       # the distiller
+        d["nodes"][gid]["summary"] = "Shipped the exporter end to end."
+        d["nodes"][gid]["distilledMt"] = T0 + 500
+        d["nodes"][gid]["blockSummary"] = "Decide: keep or drop the legacy path."
+        d["nodes"][gid]["briefedMt"] = T0 + 500
+        jd.save_goals(SID, d)
+        jd.record_verdict(a, a["nodes"][gid], "planner", "unblock", T0 + 600, why="a's own event")
+        jd.save_goals(SID, a)                        # the stale pass publishes; must rebase, not clobber
+        nd = jd.load_goals(SID)["nodes"][gid]
+        self.assertEqual(nd.get("summary"), "Shipped the exporter end to end.",
+                         "the takeaway survives a stale writer's save")
+        self.assertEqual(nd.get("distilledMt"), T0 + 500)
+        self.assertEqual(nd.get("blockSummary"), "Decide: keep or drop the legacy path.")
+
+    def test_the_newer_distill_episode_wins_and_a_deliberate_reopen_is_kept(self):
+        self._seed()
+        gid = self._nid(1)
+        # disk holds an OLD episode; our snapshot re-distilled a NEWER one → ours stands
+        d0 = jd.load_goals(SID)
+        d0["nodes"][gid]["summary"] = "old episode"
+        d0["nodes"][gid]["distilledMt"] = T0 + 100
+        jd.save_goals(SID, d0)
+        mine = jd.load_goals(SID)
+        stale = jd.load_goals(SID)
+        mine["nodes"][gid]["summary"] = "new episode"
+        mine["nodes"][gid]["distilledMt"] = T0 + 200
+        jd.save_goals(SID, stale)                    # move the rev so mine must rebase
+        jd.save_goals(SID, mine)
+        self.assertEqual(jd.load_goals(SID)["nodes"][gid].get("summary"), "new episode")
+        # the blocked path's deliberate ""→None re-open keeps its OLD briefedMt on purpose: an equal
+        # disk stamp must not resurrect the "" it nulled
+        b0 = jd.load_goals(SID)
+        b0["nodes"][gid]["blockSummary"] = ""
+        b0["nodes"][gid]["briefedMt"] = T0 + 300
+        jd.save_goals(SID, b0)
+        reopener = jd.load_goals(SID)
+        mover = jd.load_goals(SID)
+        reopener["nodes"][gid]["blockSummary"] = None
+        jd.save_goals(SID, mover)                    # rev moves; the re-opener must rebase
+        jd.save_goals(SID, reopener)
+        self.assertIsNone(jd.load_goals(SID)["nodes"][gid].get("blockSummary"),
+                          "an equal disk stamp keeps the re-opener's pending state")
+
     def test_a_node_minted_by_the_other_writer_is_adopted(self):
         self._seed()
         a = jd.load_goals(SID)                       # snapshot before the other writer mints

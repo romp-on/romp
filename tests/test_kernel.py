@@ -1443,7 +1443,8 @@ class ViewBuilder(unittest.TestCase):
         self.assertTrue(km._states_awaiting_overlay(SID).get("awaiting"),
                         "awaiting:true with no later work turn stays awaiting")
         self.assertEqual(km._session_awaiting(SID, str(self.tpath), True),
-                         {"kind": None, "why": "Waiting on 2 background jobs it launched."},
+                         {"kind": None, "since": 200,   # the overlay row's own stamp → the chips' elapsed readout (the user 2026-08-23)
+                          "why": "Waiting on 2 background jobs it launched."},
                          "the genuine awaiting badge still shows")
 
     def test_blocked_rolls_up_the_card_tree_so_a_buried_block_is_visible(self):
@@ -1534,21 +1535,22 @@ class ViewBuilder(unittest.TestCase):
             # per agent); the why counts via len() (the pre-fix code %d-formatted the list itself)
             km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "", "since": T0}, {"type": "", "since": T0}]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
-                             {"kind": "agents", "why": "2 background agents still working"},
+                             {"kind": "agents", "why": "2 background agents still working",
+                              "since": T0},   # the oldest live agent's start → the chips' elapsed readout (the user 2026-08-23)
                              "a live subagent DOES leave an idle session awaiting (a working flavor)")
             # source 0.5: the live bg-task set — one task shows its description verbatim
             km._tmux_sessions = lambda: {SID: {"bgTasks": [timer]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
-                             {"kind": "task",
+                             {"kind": "task", "since": T0 + 9,   # the dispatch stamp (the user 2026-08-23)
                               "why": "waiting on a background task: 20-minute timer for campaign-start check"})
             km._tmux_sessions = lambda: {SID: {"bgTasks": [timer, dict(timer, desc="power watcher")]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
-                             {"kind": "task",
+                             {"kind": "task", "since": T0 + 9,
                               "why": "waiting on 2 background tasks — 20-minute timer for campaign-start check, …"})
             # subagents outrank bg tasks when both run (they're the bigger dispatch)
             km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "", "since": T0}], "bgTasks": [timer]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
-                             {"kind": "agents", "why": "1 background agent still working"})
+                             {"kind": "agents", "why": "1 background agent still working", "since": T0})
         finally:
             km._tmux_sessions = saved
 
@@ -1563,7 +1565,8 @@ class ViewBuilder(unittest.TestCase):
             {"t": T0 + 2, "state": "idle"},
         ]) + "\n")
         self.assertEqual(km._session_awaiting(SID, "/nonexistent", True),
-                         {"kind": None, "why": "3 agents in flight"},
+                         {"kind": None, "why": "3 agents in flight",
+                          "since": T0 + 1},   # the overlay row's own stamp (the user 2026-08-23)
                          "the latest awaiting overlay (interleaved with state records) drives the badge")
         self.assertIsNone(km._session_awaiting(SID, "/nonexistent", False),
                           "a WORKING session is not 'awaiting' (idle=False short-circuits)")
@@ -5316,6 +5319,22 @@ class ViewBuilder(unittest.TestCase):
         self.assertEqual(msgs["m2"]["toId"], "foreignsid")
         self.assertEqual(msgs["m2"]["to"], "", "foreign recipient: no local name — the merge fills it")
 
+    def test_postal_exec_joins_regardless_of_recipient_liveness(self):
+        # the 2026-08-24 floating-point report's leg (b), verified CLEAN and pinned: a message
+        # consumed by a session/thread that later DIED keeps its real exec — the join is by id,
+        # never gated on alive_sids, so the view can draw the true sent→exec span for dead-thread
+        # mail instead of an un-arrived point
+        md = jd.STATE / "timeline"; md.mkdir(parents=True, exist_ok=True)
+        a = "aaaa1111"
+        (md / "messages.jsonl").write_text(
+            json.dumps({"ev": "sent", "id": "m9", "from_id": a, "to_id": "dead-thread-sid",
+                        "t": NOW - 300, "from": "alpha", "body": "do the piece"}) + "\n"
+            + json.dumps({"ev": "exec", "id": "m9", "t": NOW - 60}) + "\n")
+        m = km._postal_messages(NOW, {a}, {a: "alpha"})[0]
+        self.assertTrue(m["hasExec"], "the exec joined although the recipient is in no alive set")
+        self.assertEqual(m["exec"], NOW - 60)
+        self.assertFalse(m["pending"])
+
     def test_postal_connector_ships_no_dead_goal_binding(self):
         # toGoal (the courier-planted goal id) shipped on every connector but no view ever rendered it —
         # dropped (2026-07-07 payload audit), along with the hardcoded-False `parked`.
@@ -7545,7 +7564,7 @@ class WaitGraphDelegatesAndStampSupersede(unittest.TestCase):
         # the peer's reply lands (also busts the postal-key on the stamp cache) → the stamp view lifts
         self._log(self._msg(self.B, self.A, NOW - 100, "coordinate", body="built and merged"))
         full, tops, _deleg = km._session_stamp_read(self.A)
-        self.assertEqual(full, (None, None, None, None), "the answered handoff supersedes the older stamp")
+        self.assertEqual(full, (None, None, None, None, ()), "the answered handoff supersedes the older stamp")
         self.assertEqual(tops, frozenset())
 
 

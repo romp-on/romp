@@ -15,7 +15,9 @@ const LANE_GAP = 26, BAR_H = 8, CORNER = 6, MSG_DROP = 10, DOT_R = 6, CLEAR = DO
 // Demo/recording VIEW filter (the user 2026-07-14): the dashboard loaded at `#only=<tag>` scopes every
 // pane to sessions whose name starts with <tag>. The timeline reads the SHELL's URL (window.top) so one
 // tag on the dashboard URL filters the lanes here too; a cross-origin top falls back to our own URL.
-// Filtering data.sessions is enough — cross-session flows already skip when a lane is absent (vidx guard).
+// Filtering data.sessions is enough for FULL connectors — those skip when a lane is absent (vidx
+// guard). A message with exactly ONE endpoint on-camera still draws its band-edge stub (the stub
+// pass in draw()), whose tooltip names the off-camera counterpart — mind that when recording.
 function _rompOnlyTag() {
   const read = (loc) => { try { const hay = (loc.hash || "") + " " + (loc.search || ""); const m = hay.match(/only=([^&\s]+)/i); return m ? (decodeURIComponent(m[1]).trim().toLowerCase() || null) : null; } catch (e) { return null; } };
   if (typeof window === "undefined") return null;   // no DOM (a test/headless context) → no filter
@@ -24,43 +26,140 @@ function _rompOnlyTag() {
 }
 // <tag> may be a comma-separated LIST (`#only=api,tests,web`) so demo sessions need no shared
 // on-camera prefix (the user 2026-07-16). Mirrors ui/webview/only-filter.ts's matchesOnly.
-// ── session VIEWS (the user 2026-08-18): which sessions the lanes — and the chat tab strip — show.
-// {active:"all"|gid, hidden:[id...], groups:[{id,name,color,members:[id...]}]}, kernel-persisted
-// (timeline-views.json) and echoed on every payload as data.views. The DEFAULT-GROUP model (the user
-// 2026-08-19): every session is in the default group at birth; `hidden` stores the sessions REMOVED
-// from it ("all" minus hidden IS the default group, so the wire shape is unchanged). A session out of
-// the default group is a BACKGROUND session — still judged and carded, surfaced by the feed and the
-// pickers. Named groups are independent member lists (multi-membership by construction: put a manager
-// in the default group AND its workers' group; remove the workers from default and they live only in
-// their group). A named group shows exactly its members — membership beats the hidden bit. The
-// kernel's _view_visible is the decision of record; this is its three-line mirror for the lanes.
+// ── session VIEWS (the user 2026-08-18; the hidden set RETIRED outright 2026-08-24 — the tag
+// system covers backgrounding, and the kernel migrated existing hidden entries into an "archived"
+// tag once): {active:"all"|"untagged"|gid, tags:[{id,name,color,members:[id...]}]},
+// kernel-persisted (timeline-views.json) and echoed on every payload as data.views. TWO built-in
+// sentinels, not tags: "all" — the DEFAULT — shows LITERALLY EVERYTHING (that is All's meaning
+// now; nothing can hide from it); "untagged" keeps the old default's meaning under its own honest
+// name — a TAG marks a SPECIALIZED session (the user 2026-08-23), excluded from the untagged view
+// and shown under its tag views (independent member lists, multi-membership by construction). A
+// tag view shows exactly its members. A tagged session is a BACKGROUND session — still judged and
+// carded, surfaced by the feed and the pickers. The kernel's _view_visible is the decision of
+// record; this is its mirror for the lanes. The kernel emits `tags`; `groups` is honored as the
+// pre-rename key an un-updated kernel still pushes, in ONE place so every rule reads through it.
+function viewTags(views) { return (views && (views.tags || views.groups)) || []; }
+// A tag IS its NAME, everywhere (user ruling 2026-08-24: "if the UX requires understanding that
+// tags exist across different kernels, it is not good"): one name = one identity, membership the
+// UNION across every kernel defining that name, the LOCAL store's color winning the render. The
+// stored duplicates stay separate under the hood (no automatic store merges — the anti-clobber
+// rule); this is PRESENTATION, and the mirrors (session-views.ts, kernel _view_visible) agree.
+function viewTagUnion(views) {
+  // byName is null-prototype: a user-typed tag NAME can be "constructor"/"toString", which a
+  // plain {} resolves through the prototype chain — the lookup returned a Function and the
+  // union builder crashed on it (found in adversarial review 2026-08-25; the ordering lookups
+  // below wear the same guard)
+  const out = [], byName = Object.create(null);
+  for (const t of viewTags(views)) {
+    const g = byName[t.name] || (byName[t.name] = { name: t.name || 'tag', color: '', members: [],
+                                                    ids: [], localId: null, homes: [], remotes: [] });
+    if (!g.localId) { g.localId = t.id; g.color = t.color || g.color; }
+    g.ids.push(t.id);
+    for (const m of (t.members || [])) if (g.members.indexOf(m) < 0) g.members.push(m);
+    if (out.indexOf(g) < 0) out.push(g);
+  }
+  for (const rt of ((views && views.remoteTags) || [])) {
+    const g = byName[rt.name] || (byName[rt.name] = { name: rt.name || 'tag', color: '', members: [],
+                                                      ids: [], localId: null, homes: [], remotes: [] });
+    if (!g.localId && !g.color) g.color = rt.color || '';
+    g.ids.push(rt.id);
+    g.homes.push(rt.host || '');
+    g.remotes.push(rt);
+    for (const m of (rt.members || [])) if (g.members.indexOf(m) < 0) g.members.push(m);
+    if (out.indexOf(g) < 0) out.push(g);
+  }
+  // THE ordering rule, stated once per mirror (the user 2026-08-25; session-views.ts is the
+  // typed twin): unions render in the user's dragged order (views.tagOrder, name-keyed — a
+  // remote-homed name holds its position too); unlisted names follow in natural order (stable
+  // sort, so a new tag lands at the end). Every chip list, menu row list, and dialog row list
+  // here renders through this union, so the order flows everywhere from this line.
+  const ord = (views && views.tagOrder) || [];
+  if (ord.length) {
+    // null-prototype lookup: a user-typed tag NAME can be "constructor"/"toString", which a plain
+    // {} would resolve through the prototype chain (the TS twin uses a Map for the same reason)
+    const ix = Object.create(null);
+    ord.forEach((n, i) => { if (!(n in ix)) ix[n] = i; });
+    out.sort((a, b) => (a.name in ix ? ix[a.name] : ord.length) - (b.name in ix ? ix[b.name] : ord.length));
+  }
+  return out;
+}
 function viewVisible(views, id) {
-  if (!views || !views.active || views.active === 'all')
-    return !(views && Array.isArray(views.hidden) && views.hidden.indexOf(id) >= 0);
-  const g = (views.groups || []).find((x) => x.id === views.active);
-  return g ? (g.members || []).indexOf(id) >= 0 : true;
+  if (!views || !views.active || views.active === 'all') {
+    return true;                                   // All = literally everything (hidden retired 2026-08-24)
+  }
+  if (views.active === 'untagged') {
+    // the UNION excludes (the user 2026-08-24): a session held by ANY kernel's tag is tagged —
+    // a remote-homed tag pulls it out of untagged exactly like a local one
+    return !viewTags(views).concat((views && views.remoteTags) || []).some((t) => (t.members || []).indexOf(id) >= 0);
+  }
+  // a tag view shows the NAME-KEYED UNION (user ruling 2026-08-24): whichever store's id is
+  // active, the members are every same-name tag's, local and remote joined
+  const g = viewTagUnion(views).find((x) => x.ids.indexOf(views.active) >= 0);
+  return g ? g.members.indexOf(id) >= 0 : true;
 }
 function viewLabel(views) {
-  if (!views || !views.active || views.active === 'all') return 'default';
-  const g = (views.groups || []).find((x) => x.id === views.active);
-  return g ? (g.name || 'group') : 'default';
+  if (!views || !views.active || views.active === 'all') return 'All';
+  if (views.active === 'untagged') return '(no tags)';   // the user-chosen words (2026-08-24); parens stay, marking the built-in apart from tag names
+  const g = viewTagUnion(views).find((x) => x.ids.indexOf(views.active) >= 0);
+  return g ? g.name : 'All';   // the NAME, never a host prefix — kernels are plumbing
 }
-// live sessions the current view is NOT showing — the "N more" cue that keeps a hidden session
-// exactly one glance away (nothing may run in secret: the 2026-08-11 hidden-tabs rule)
+// live sessions the current view is NOT showing (tag-filtered) — the "N more" cue that keeps a
+// backgrounded session exactly one glance away (nothing may run in secret: the 2026-08-11 rule)
 function viewMoreCount(views, sessions) {
-  return (sessions || []).filter((s) => s.live && !viewVisible(views, s.id)).length;
+  const unions = viewTagUnion(views);
+  return (sessions || []).filter((s) => s.live && !lensVisible(timelineLens(views), unions, s.id)).length;
 }
-// the dialog's two checkbox mutations, pure (executed by tests; the dialog itself only wires DOM):
-// all-view → toggle the hidden bit; group view → toggle membership in that group alone
-function viewToggleHidden(views, id) {
-  const v = JSON.parse(JSON.stringify(views || {}));
-  const i = (v.hidden || []).indexOf(id);
-  if (i >= 0) v.hidden.splice(i, 1); else (v.hidden = v.hidden || []).push(id);
-  return v;
+// ── the shared TagLens, inlined (mirrors ui/webview/tag-lens.ts: this pane loads no modules —
+// Obsidian host). Multi-select per surface (the user 2026-08-25): All exclusive, last-off returns
+// to All, visibility = the UNION over selected buckets, tags addressed by NAME. ──
+function lensAll(l) { if (!l || l.all) return true; return !l.none && !(l.tags && l.tags.length); }
+function lensToggle(l, pick) {
+  if (pick === 'all') return { all: true };
+  const cur = lensAll(l) ? {} : { none: l.none, tags: (l.tags || []).slice() };
+  if (pick === 'none') cur.none = !cur.none;
+  else {
+    const t = cur.tags || (cur.tags = []);
+    const i = t.indexOf(pick.tag);
+    if (i >= 0) t.splice(i, 1); else t.push(pick.tag);
+  }
+  if (!cur.none && !(cur.tags && cur.tags.length)) return { all: true };
+  const out = {};
+  if (cur.none) out.none = true;
+  if (cur.tags && cur.tags.length) out.tags = cur.tags;
+  return out;
 }
+function lensVisible(l, unions, id) {
+  if (lensAll(l)) return true;
+  const inAnyHome = unions.some((u) => u.members.indexOf(id) >= 0);
+  if (l.none && !inAnyHome) return true;
+  const picked = l.tags || [];
+  return unions.some((u) => picked.indexOf(u.name) >= 0 && u.members.indexOf(id) >= 0);
+}
+function lensLabel(l) {
+  if (lensAll(l)) return 'All';
+  const parts = (l.tags || []).slice();
+  if (l.none) parts.push('no tags');
+  return parts.join(' + ') || 'All';
+}
+// THIS surface's lens: the timeline keys on actives.timeline (per-surface selections, the user
+// 2026-08-25). A pre-lens blob (an older kernel, a client-held legacy shape) derives its lens from
+// the legacy scalar EXACTLY as the kernel normalizer seeds it — behavior migrates, not just shape:
+// an untagged view keeps excluding tagged sessions rather than falling open.
+function timelineLens(views) {
+  const l = ((views && views.actives) || {}).timeline;
+  if (l) return l;
+  const a = views && views.active;
+  if (!a || a === 'all') return { all: true };
+  if (a === 'untagged') return { none: true };
+  const g = viewTagUnion(views).find((x) => x.ids.indexOf(a) >= 0);
+  return g ? { tags: [g.name] } : { all: true };
+}
+
+// the dialog's pure mutation (executed by tests; the dialog itself only wires DOM): membership in
+// one tag alone. (the hide toggle retired with the hidden set, the user 2026-08-24.)
 function viewToggleMember(views, gid, id) {
   const v = JSON.parse(JSON.stringify(views || {}));
-  const g = (v.groups || []).find((x) => x.id === gid);
+  const g = viewTags(v).find((x) => x.id === gid);
   if (!g) return v;
   const i = (g.members || []).indexOf(id);
   if (i >= 0) g.members.splice(i, 1); else (g.members = g.members || []).push(id);
@@ -572,7 +671,7 @@ class TimelinePanel {
     // evidence arrived" event — until then the active filter must not judge it.
     this._barsSeen = new Set();
     this._loaderBackstop = null;   // timer id: force the loader done if a warming build never brings content
-    this.M = { left: 130, right: 16, top: 8, bottom: 22 };   // axis labels live in the bottom margin
+    this.M = { left: 130, right: 16, top: 8, bottom: 27 };   // axis labels + the corner filter chip live in the bottom margin (27: the taller chip breathes — the user 2026-08-24)
     this._mc = document.createElement('canvas').getContext('2d');
 
     // No on-screen controls: window width + offset are driven entirely by trackpad gestures
@@ -601,6 +700,8 @@ class TimelinePanel {
     this._dismissed = new Set(); // sids cleared via the dead-lane Clear pill, held STICKY the same way (see _reconcileDismissed)
     this._views = null;          // the kernel-echoed views blob (data.views); null until the first push
     this._pendingViews = null;   // an optimistic edit held sticky until a push echoes it (see _reconcileViews)
+    this._pendingTagEdits = {};  // remote-tag edits held optimistically until the owner's poll echoes (federation v1): id → {tag: shape|null(=deleted), age}
+    this._tagEditErr = null;     // the LOUD failure of the last remote-tag edit ({host, name, error}), shown in the dialog until dismissed
     this._pendingViewsAge = 0;   // pushes since the edit — the kernel is authoritative, so a stale pending yields
     this._viewsMenu = null;      // the Show-dropdown element, when open
     this._viewsDialog = null;    // the sessions/group dialog backdrop, when open
@@ -706,6 +807,42 @@ class TimelinePanel {
           + '.romp-tl-meta-dots i:nth-child(2){animation-delay:0.16s}.romp-tl-meta-dots i:nth-child(3){animation-delay:0.32s}'
           + '@keyframes romp-tl-metadots{0%,70%,100%{opacity:0.3}35%{opacity:1}}';
         document.head.appendChild(dst);
+      }
+    } catch (e) {}
+
+    // THE CORNER BAR (the user 2026-08-25, round three: the SVG-drawn outlines still read awkward
+    // and missized live): the display-options + tag-filter buttons are REAL HTML <button>s in a
+    // persistent layer over the SVG's bottom-left strip — an SVG imitation of a CSS button is never
+    // the same picture, because the box comes from the LAYOUT ENGINE (the 10.5px line box, inside
+    // borders, its own AA), not from viewBox math. The values below are the feed footer's own
+    // (#feed-foot .fdismiss / .feed-modetoggle.on / the syncTagFilter chip), stated BY VALUE —
+    // computed equality with the feed instance, never a shared stylesheet (the 678 lesson). The
+    // layer persists across SVG wipes (click-safe by construction — the compact-bar precedent) and
+    // rebuilds only when its content signature changes.
+    this._cornerBar = document.createElement('div');
+    this._cornerBar.className = 'romp-tl-corner';
+    this.wrap.appendChild(this._cornerBar);
+    this._cornerSig = null;
+    try {
+      if (typeof document !== 'undefined' && document.head && !document.getElementById('tl-corner-css')) {
+        const bst = document.createElement('style'); bst.id = 'tl-corner-css';
+        bst.textContent =
+          '.romp-tl-corner{position:absolute;left:8px;bottom:4px;display:flex;align-items:center;gap:8px;'
+          + 'pointer-events:none;font-size:13px;'
+          + 'font-family:var(--vscode-font-family,-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif)}'
+          + '.romp-tl-corner>*{pointer-events:auto}'
+          + '.romp-tl-cbtn{display:inline-flex;align-items:center;font:inherit;font-size:10.5px;padding:4px 6px;'
+          + 'color:var(--vscode-descriptionForeground,#9a9a9a);background:transparent;'
+          + 'border:1px solid rgba(255,255,255,0.10);border-radius:6px;cursor:pointer;white-space:nowrap;opacity:0.95;'
+          + 'transition:color 0.12s ease,border-color 0.12s ease,background 0.12s ease}'
+          + '.romp-tl-cbtn svg{display:block}'
+          + '.romp-tl-cbtn:hover{border-color:var(--accent,#9cd2ff);color:var(--accent,#9cd2ff);background:rgba(156,210,255,0.12)}'
+          + '.romp-tl-cbtn.on{color:var(--accent,#9cd2ff);border-color:var(--accent,#9cd2ff);background:rgba(156,210,255,0.12);opacity:1}'
+          + '.romp-tl-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;'
+          + 'font-size:0.82em;border:1px solid;background:transparent;white-space:nowrap}'
+          + '.romp-tl-chipx{cursor:pointer;opacity:0.75;color:#9aa0a6;font-size:0.9em}'
+          + '.romp-tl-ctail{color:#9aa0a6;opacity:0.7;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap}';
+        document.head.appendChild(bst);
       }
     } catch (e) {}
 
@@ -859,6 +996,15 @@ class TimelinePanel {
     this._onDocKey = (e) => { if (e.key === 'Escape') { this._closeMetaMenu(); this._closeLaneMenu(); this._closeViewsMenu(); } };
     document.addEventListener('click', this._onDocClick);
     document.addEventListener('keydown', this._onDocKey);
+    // CROSS-PANE dismissal (the user 2026-08-25, who clicked another pane and the menu stayed):
+    // sibling panes' pointer events never reach this document, so every pane WRITES a pointerdown
+    // echo (the romp:color-echo idiom) and every open menu LISTENS — the storage event fires only
+    // in the OTHER same-origin panes, exactly the gap the local closers can't cover.
+    this._onMenuEcho = (e) => { if (e.key === 'romp:menu-echo' && e.newValue) this._onDocClick(); };
+    try { window.addEventListener('storage', this._onMenuEcho); } catch (e) { /* storage blocked */ }
+    document.addEventListener('pointerdown', () => {
+      try { localStorage.setItem('romp:menu-echo', JSON.stringify({ t: Date.now() })); } catch (e) { /* storage blocked */ }
+    }, true);
     // The menus render in the tip's host document (see _menuHost), so a click or Escape landing on the
     // HOST page — which now shows the menu — must close them too. Same teardown discipline as the tip:
     // pagehide unhooks the host listeners and drops any open menu, so an iframe reload can't orphan either.
@@ -1006,10 +1152,25 @@ class TimelinePanel {
     return [24, 24, 24];
   }
 
-  _font(b) { this._mc.font = (b ? '700 ' + BADGE_FS + 'px ' : '650 12px ') + FONT; }
+  // the family the svg's text ACTUALLY renders in — inherited from the host (VS Code, Obsidian and
+  // the web page each set their own UI font; svg text carries no family of its own). Measuring with
+  // the hardcoded FONT stack drifted from rendered widths wherever the host font differs — the
+  // gutter width and the corner chip's box/ellipsis are sized from these measures. Resolved once
+  // per panel: a host's UI font does not change under a live pane. FONT stays the fallback for a
+  // measure before the wrap is styled (and for bare-node tests, where getComputedStyle is absent).
+  _fontFace() {
+    if (!this._fontFaceCache) {
+      try {
+        this._fontFaceCache = (this.wrap && typeof getComputedStyle === 'function'
+          && getComputedStyle(this.wrap).fontFamily) || FONT;
+      } catch (e) { this._fontFaceCache = FONT; }
+    }
+    return this._fontFaceCache;
+  }
+  _font(b) { this._mc.font = (b ? '700 ' + BADGE_FS + 'px ' : '650 12px ') + this._fontFace(); }
   labelWidth(s) { this._font(false); return this._mc.measureText(s || '').width; }
   badgeWidth(s) { this._font(true); return this._mc.measureText(s || '').width; }
-  ctxWidth(s) { this._mc.font = '600 11px ' + FONT; return this._mc.measureText(s || '').width; }
+  ctxWidth(s) { this._mc.font = '600 11px ' + this._fontFace(); return this._mc.measureText(s || '').width; }
 
   // Number.isFinite (not != null): the min/max clamp passes NaN straight through, and a NaN window
   // makes every x() NaN — the whole plot vanishes. Non-finite → the same default as unset.
@@ -1444,6 +1605,7 @@ class TimelinePanel {
     this._reconcilePendingFlags();   // hold an optimistic eye-toggle sticky until THIS push (or a later one) confirms it
     this._reconcileDismissed();      // ...and a Cleared dead lane, so a stale/merged push can't pop it back
     this._reconcileViews();          // ...and an optimistic view edit, until the kernel echoes it
+    this._reconcileTagEdits();       // ...and any remote-tag edits, until the owner's poll echoes them
     this._signalReady();             // first lanes are about to paint → let the shell drop the boot splash
     // Live-edge baseline: the edge free-runs off a FIXED anchor and each poll rebases it MONOTONICALLY
     // (reanchorEdge) — it catches up forward when behind but NEVER moves backward, so bursty/jittery/
@@ -1803,7 +1965,7 @@ class TimelinePanel {
     for (const e of ends) {
       svg.appendChild(el('line', { x1: e[0], y1: top, x2: e[0], y2: axisY, stroke: '#ffffff20', 'stroke-width': 1, 'pointer-events': 'none' }));
       const s = clock(e[1]), lx = e[0] + e[3];
-      this._mc.font = '9px ' + FONT;
+      this._mc.font = '9px ' + this._fontFace();
       const w = this._mc.measureText(s).width;
       if (placeLabel && !placeLabel(e[2] === 'end' ? lx - w : lx, e[2] === 'end' ? lx : lx + w)) continue;
       const tx = el('text', { x: lx, y: axisY + 14, 'text-anchor': e[2], fill: 'var(--text-muted)', 'font-size': 9, 'pointer-events': 'none' }); tx.textContent = s; svg.appendChild(tx);
@@ -2245,7 +2407,7 @@ class TimelinePanel {
     } catch (e) { /* no host hook + no Node → can't send */ }
   }
 
-  _closeMetaMenu() { if (this._metaMenu) { this._metaMenu.remove(); this._metaMenu = null; } }
+  _closeMetaMenu() { if (this._metaMenu) { if (this._metaMenu._sub) this._metaMenu._sub.remove(); this._metaMenu.remove(); this._metaMenu = null; } }
 
   // Where a drop-down should live and be measured: the tip's host document (the topmost same-origin
   // window — in the web shell that's the whole page, so a menu taller than the timeline band gets the
@@ -2280,23 +2442,77 @@ class TimelinePanel {
     const menu = document.body.createDiv();
     menu.setAttribute('style', 'position:fixed;z-index:1001;min-width:96px;' + MENU_STYLE);
     menu._kind = kind; menu._sid = s.id;
+    const h = this._menuHost(anchorEl.getBoundingClientRect());
+    const pick = (value) => {
+      this._sendCommand(s.name, '/' + kind + ' ' + value, kind === 'model');
+      const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+      this._metaPending[s.id + ':' + kind] = { was: (kind === 'model' ? s.model : s.effort) || '', until: now + 20000 };
+      this._closeMetaMenu();
+      this.draw();
+    };
+    const closeSub = () => { if (menu._sub) { menu._sub.remove(); menu._sub = null; } };
     for (const c of (kind === 'model' ? MODEL_CHOICES : EFFORT_CHOICES)) {
       const cur = isCurrentMeta(kind, s, c.value);
+      const versions = kind === 'model' ? (c.versions || []) : [];
       const item = menu.createDiv({ text: c.label });
-      item.setAttribute('style', 'padding:4px 22px 4px 8px;border-radius:4px;cursor:pointer;position:relative;white-space:nowrap;');
+      item.setAttribute('style', 'padding:4px 22px 4px 8px;border-radius:4px;cursor:pointer;position:relative;white-space:nowrap;display:flex;align-items:center;');
+      item.setAttribute('tabindex', '0');
       if (cur) { const ck = item.createSpan({ text: '✓' }); ck.setAttribute('style', MENU_CHECK_STYLE); }
-      item.addEventListener('mouseenter', () => { item.style.background = 'rgba(255,255,255,0.09)'; });
+      // A family with more than one live version wears the side-submenu affordance (the user
+      // 2026-08-25): hovering (or right-arrow) reveals every version, each directly pickable with
+      // the ✓ on the lane's current one; clicking the family itself picks its DEFAULT — the version
+      // the user last chose for that family, else the newest (the kernel's /models `default`).
+      // .ctx-caret/.ctx-sub vocabulary inlined — this pane may live in a foreign document (Obsidian).
+      const openSub = versions.length > 1 ? () => {
+        closeSub();
+        const sub = document.body.createDiv();
+        sub.setAttribute('style', 'position:fixed;z-index:1002;min-width:96px;' + MENU_STYLE);
+        for (const v of versions) {
+          const cv = ((s.model || '').toLowerCase() === v.label.toLowerCase());
+          const row = sub.createDiv({ text: v.label });
+          row.setAttribute('style', 'padding:4px 22px 4px 8px;border-radius:4px;cursor:pointer;position:relative;white-space:nowrap;');
+          row.setAttribute('tabindex', '0');
+          if (cv) { const ck = row.createSpan({ text: '✓' }); ck.setAttribute('style', MENU_CHECK_STYLE); }
+          row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,0.09)'; });
+          row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+          row.addEventListener('click', (e) => { e.stopPropagation(); pick(v.value); });
+          row.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); pick(v.value); }
+            else if (e.key === 'ArrowLeft') { e.preventDefault(); closeSub(); item.focus(); }
+          });
+        }
+        const hr = item.getBoundingClientRect();
+        h.doc.body.appendChild(sub);
+        const iw = (h.win.innerWidth || 9999);
+        let sl = Math.round(hr.right + 2);
+        if (sl + (sub.offsetWidth || 120) > iw - 6) sl = Math.max(6, Math.round(hr.left) - (sub.offsetWidth || 120) - 2);
+        sub.style.left = sl + 'px';
+        sub.style.top = Math.round(menuTop(hr, sub.offsetHeight || 0, h.win.innerHeight || 9999)) + 'px';
+        menu._sub = sub;
+        return sub;
+      } : null;
+      if (openSub) {
+        const caret = item.createSpan({ text: '\u25B8' });
+        caret.setAttribute('style', 'margin-left:auto;padding-left:10px;opacity:0.55;');
+        item.addEventListener('mouseenter', () => { item.style.background = 'rgba(255,255,255,0.09)'; openSub(); });
+      } else {
+        item.addEventListener('mouseenter', () => { item.style.background = 'rgba(255,255,255,0.09)'; closeSub(); });
+      }
       item.addEventListener('mouseleave', () => { item.style.background = 'transparent'; });
       item.addEventListener('click', (e) => {
         e.stopPropagation();
-        this._sendCommand(s.name, '/' + kind + ' ' + c.value, kind === 'model');
-        const now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
-        this._metaPending[s.id + ':' + kind] = { was: (kind === 'model' ? s.model : s.effort) || '', until: now + 20000 };
-        this._closeMetaMenu();
-        this.draw();
+        pick(kind === 'model' ? (c.default || c.value) : c.value);
+      });
+      item.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); pick(kind === 'model' ? (c.default || c.value) : c.value); }
+        else if (e.key === 'ArrowRight' && openSub) {
+          e.preventDefault();
+          const sub = openSub();
+          const first = sub && sub.querySelector('[tabindex]');
+          if (first) first.focus();
+        }
       });
     }
-    const h = this._menuHost(anchorEl.getBoundingClientRect());
     h.doc.body.appendChild(menu);   // a cross-document append ADOPTS the node; its listeners are kept
     // clamp to the host viewport so a right-edge lane's menu stays on-screen
     const left = Math.min(Math.round(h.rect.left), (h.win.innerWidth || 9999) - 140);
@@ -2313,20 +2529,194 @@ class TimelinePanel {
   // gray = off), its label + state word, and a plain-language line on what it does. Clicking a row
   // toggles that flag with the SAME optimistic + sticky treatment as the old direct icons, and the menu
   // stays open, repainting in place — it's a settings panel, not a command.
-  // ── the corner control panel (the user 2026-08-18): "Show: <view> ▾ · N more" in the bottom-left
-  // corner — the empty strip under the lane gutter, left of the first time label. Progressive
+  // ── the corner control panel (the user 2026-08-18; filter-chip form 2026-08-23): "Filter ▾" in
+  // the bottom-left corner — the empty strip under the lane gutter, left of the first time label.
+  // An active group renders as a REMOVABLE CHIP beside it ("· <name> ✕", the group's colour):
+  // clicking the chip clears the filter back to the default view, no menu trip — the control is
+  // named for what it does now (it FILTERS the lanes; "Show:" read as a passive label). Progressive
   // disclosure: the trigger is the one-line version; the dropdown holds the views and the two
   // timeline display toggles; the dialog holds the per-session checkboxes. All pointerdown-based
   // (the redraw-eats-click rule) and rebuilt per draw like the gear/lock.
-  _curViews() { return this._pendingViews || this._views || { active: 'all', hidden: [], groups: [] }; }
+  _curViews() {
+    const base = this._pendingViews || this._views || { active: 'all', hidden: [], tags: [] };
+    const ids = Object.keys(this._pendingTagEdits || {});
+    if (!ids.length) return base;
+    // remote-tag edits render optimistically (federation v1): the pending shape overlays the polled
+    // one until the owner's next poll echoes it (or the 3-cycle yield in _reconcileTagEdits)
+    const v = {}; for (const k in base) v[k] = base[k];
+    let rt = (base.remoteTags || []).slice();
+    for (const id of ids) {
+      const pend = this._pendingTagEdits[id];
+      const i = rt.findIndex((t) => t.id === id);
+      if (pend.tag === null) { if (i >= 0) rt.splice(i, 1); }
+      else if (i >= 0) rt[i] = pend.tag;
+      else rt.push(pend.tag);
+    }
+    if (rt.length) v.remoteTags = rt; else delete v.remoteTags;
+    return v;
+  }
 
   // one canonical serialization for echo comparison: the kernel normalizer sorts hidden/members and
   // may clamp names, so compare shapes, not object identity
   _viewsKey(v) {
     return JSON.stringify({ active: v.active || 'all',
+      order: v.tagOrder || [],   // the dragged union order is client-posted state (2026-08-25)
       hidden: (v.hidden || []).slice().sort(),
-      groups: (v.groups || []).map((g) => ({ id: g.id, name: g.name, color: g.color,
-                                             members: (g.members || []).slice().sort() })) });
+      tags: viewTags(v).map((t) => ({ id: t.id, name: t.name, color: t.color,
+                                      members: (t.members || []).slice().sort() })) });
+  }
+
+  _reconcileTagEdits() {
+    // the sessionViews precedent, per REMOTE tag (federation v1): a pending edit clears when the
+    // owner's polled copy matches it (canonical compare — the poll re-sorts members), and yields to
+    // the polled truth after three silent pushes (the owner rejected it, or another dashboard won)
+    const ids = Object.keys(this._pendingTagEdits || {});
+    if (!ids.length) return;
+    const polled = ((this._views && this._views.remoteTags) || []);
+    const canon = (t) => t ? JSON.stringify({ n: t.name, c: t.color, m: (t.members || []).slice().sort() }) : null;
+    for (const id of ids) {
+      const pend = this._pendingTagEdits[id];
+      const seen = polled.find((t) => t.id === id) || null;
+      if (canon(seen) === canon(pend.tag)) { delete this._pendingTagEdits[id]; continue; }
+      if (++pend.age >= 3) delete this._pendingTagEdits[id];
+    }
+  }
+
+  // one remote-tag edit, dispatched to its HOME kernel and rendered optimistically meanwhile.
+  // Ids ride viewer-relative; the kernel sends only the bare sid tails (sids are global) and the
+  // owner resolves them into ITS frame. No hook (the Obsidian panel) → the tag stays read-only
+  // and the refusal is immediate and visible, never a silent drop.
+  _editRemoteTag(rt, edit) {
+    if (typeof window === 'undefined' || typeof window.__rompTimelineEditTag !== 'function') {
+      this._tagEditErr = { host: rt.host, name: rt.name,
+                           error: 'this panel cannot reach ' + (rt.host || 'the owner') + " — edit with: romp tag --host " + (rt.host || '<kernel>') };
+      this.draw();
+      return false;
+    }
+    let next = null;
+    if (!edit.delete) {
+      next = { id: rt.id, host: rt.host, name: edit.rename || rt.name, color: edit.color || rt.color,
+               members: (rt.members || []).slice() };
+      for (const x of (edit.add || [])) if (next.members.indexOf(x) < 0) next.members.push(x);
+      if (edit.remove) next.members = next.members.filter((x) => edit.remove.indexOf(x) < 0);
+    }
+    this._pendingTagEdits[rt.id] = { tag: next, age: 0 };
+    window.__rompTimelineEditTag({ host: rt.host, name: rt.name, rename: edit.rename,
+                                   color: edit.color, add: edit.add, remove: edit.remove,
+                                   delete: !!edit.delete });
+    this.draw();
+    return true;
+  }
+
+  // the kernel's LOUD refusal (a down owner, a name collision there): the optimistic copy reverts
+  // and the reason shows in the dialog (rebuilt in place if open) until dismissed
+  tagEditFailed(m) {
+    for (const id of Object.keys(this._pendingTagEdits || {}))
+      if (id.split(':')[0] === m.host) delete this._pendingTagEdits[id];   // edits are name-addressed per host — revert them all
+    this._tagEditErr = { host: m.host || '', name: m.name || '', error: m.error || 'refused' };
+    if (this._viewsDialog && this._viewsDialogBuild) this._viewsDialogBuild();
+    this.draw();
+  }
+
+  // ── the NAME-KEYED tag editor (user ruling 2026-08-24), shared by the dialog and the lane gear ──
+  // One union group = one tag identity. Edits stay routed under the hood: an ADD lands on the LOCAL
+  // store when the name exists locally, else the tag's single home; a REMOVE removes the
+  // (name, member) pair from EVERY store holding it — a removal never half-works; rename/recolor/
+  // delete fan out to every home the same way. Local writes post the whole blob (unchanged);
+  // remote writes ride _editRemoteTag (optimistic overlay + loud tagEditFailed, federation v1).
+  _editTagUnion(g, edit) {
+    if (edit.add && edit.add.length) {
+      if (g.localId) {
+        const nv = JSON.parse(JSON.stringify(this._curViews()));
+        const t = viewTags(nv).find((x) => x.id === g.localId);
+        if (t) { t.members = Array.from(new Set((t.members || []).concat(edit.add))); this._setViews(nv); }
+      } else if (g.remotes.length) this._editRemoteTag(g.remotes[0], { add: edit.add.slice() });
+    }
+    if (edit.remove && edit.remove.length) {
+      if (g.localId) {
+        const nv = JSON.parse(JSON.stringify(this._curViews()));
+        const t = viewTags(nv).find((x) => x.id === g.localId);
+        if (t && (t.members || []).some((m) => edit.remove.indexOf(m) >= 0)) {
+          t.members = (t.members || []).filter((m) => edit.remove.indexOf(m) < 0);
+          this._setViews(nv);
+        }
+      }
+      for (const rt of g.remotes)
+        if ((rt.members || []).some((m) => edit.remove.indexOf(m) >= 0))
+          this._editRemoteTag(rt, { remove: edit.remove.slice() });
+    }
+    if (edit.rename || edit.color || edit.delete) {
+      if (g.localId) {
+        const nv = JSON.parse(JSON.stringify(this._curViews()));
+        if (edit.delete) {
+          nv.tags = viewTags(nv).filter((x) => x.id !== g.localId); delete nv.groups;
+          if (nv.active === g.localId) nv.active = 'all';
+        } else {
+          const t = viewTags(nv).find((x) => x.id === g.localId);
+          if (t) { if (edit.rename) t.name = edit.rename; if (edit.color) t.color = edit.color; }
+        }
+        this._setViews(nv);
+      }
+      for (const rt of g.remotes)
+        this._editRemoteTag(rt, { rename: edit.rename, color: edit.color, delete: !!edit.delete });
+    }
+  }
+
+  // the chips for ONE session — one solid chip per union tag holding it, ✕ = remove-everywhere.
+  // Home-kernel detail lives in the tooltip at most (kernels are plumbing).
+  _tagChips(box, s, rebuild) {
+    for (const g of viewTagUnion(this._curViews())) {
+      if (g.members.indexOf(s.id) < 0) continue;
+      const tc = g.color || '#cccccc';
+      const ch = box.createSpan();
+      ch.setAttribute('style', 'display:inline-flex;align-items:center;gap:5px;'
+        + 'padding:2px 7px;border-radius:9px;font-size:0.82em;cursor:pointer;white-space:nowrap;'
+        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;');
+      ch.addEventListener('mouseenter', () => { ch.style.background = 'rgba(255,255,255,0.09)'; });
+      ch.addEventListener('mouseleave', () => { ch.style.background = 'transparent'; });
+      ch.createSpan({ text: g.name });
+      const chx = ch.createSpan({ text: '✕' });
+      chx.setAttribute('style', 'color:' + MODEL_FG + ';opacity:0.75;font-size:0.9em;');
+      ch.setAttribute('title', 'tagged "' + g.name + '"'
+        + (g.homes.length ? ' (also defined on ' + g.homes.join(', ') + ')' : '')
+        + ' — click to take this tag off everywhere it holds this session');
+      ch.addEventListener('click', () => { this._editTagUnion(g, { remove: [s.id] }); rebuild(); });
+    }
+  }
+
+  // the join menu for one-or-many sessions: one option per union tag some rowId lacks, plus the
+  // new-tag input (a new tag mints LOCALLY, as always)
+  _tagJoinMenu(box, rowIds, rebuild) {
+    for (const g of viewTagUnion(this._curViews())) {
+      if (!rowIds.some((id) => g.members.indexOf(id) < 0)) continue;
+      const tc = g.color || '#cccccc';
+      const opt = box.createSpan({ text: g.name });
+      opt.setAttribute('style', 'padding:1px 8px;border-radius:9px;font-size:0.82em;cursor:pointer;'
+        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;');
+      opt.addEventListener('mouseenter', () => { opt.style.background = 'rgba(255,255,255,0.09)'; });
+      opt.addEventListener('mouseleave', () => { opt.style.background = 'transparent'; });
+      opt.addEventListener('click', () => {
+        this._tagAddFor = null;
+        this._editTagUnion(g, { add: rowIds.filter((id) => g.members.indexOf(id) < 0) }); rebuild();
+      });
+    }
+    const ni = document.createElement('input');
+    ni.placeholder = 'new tag…'; ni.maxLength = 40;
+    ni.setAttribute('style', 'width:90px;background:#1e1e1e;color:#ccc;border:1px solid rgba(255,255,255,0.12);'
+      + 'border-radius:9px;padding:1px 7px;font:inherit;font-size:0.82em;');
+    ni.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || !ni.value.trim()) return;
+      const nv = JSON.parse(JSON.stringify(this._curViews()));
+      const used = new Set(viewTags(nv).map((t) => t.color));
+      const color = (this._palette || []).find((c) => !used.has(c)) || (this._palette || [])[0] || '#1EA1EB';
+      nv.tags = viewTags(nv).concat([{ id: 'g' + Date.now().toString(36),
+        name: ni.value.trim().slice(0, 40), color, members: rowIds.slice() }]);
+      delete nv.groups;
+      this._tagAddFor = null;
+      this._setViews(nv); rebuild();
+    });
+    box.appendChild(ni);
+    ni.focus();
   }
 
   _reconcileViews() {
@@ -2365,31 +2755,125 @@ class TimelinePanel {
     this.draw();
   }
 
-  _drawViewsTrigger(svg, axisY) {
+  // ── THE CORNER BAR — real HTML over the SVG strip (the user 2026-08-25, round three) ─────────
+  // The 702 pass drew the feed button's anatomy in SVG and it STILL read awkward live: a CSS
+  // button's box is the layout engine's product, and copying its numbers into viewBox math gives a
+  // different picture. So the corner controls render as real HTML in the persistent layer the
+  // constructor mounts, and parity with the feed footer is the RENDERED image (verified by
+  // side-by-side crops), not just the computed numbers — the 702 lesson generalized. Any
+  // non-All selection is a FILTER shown as PER-SELECTION CHIPS (the 2026-08-25 convention): each
+  // selected tag as its own chip in its color, the no-tags bucket as its own chip, a dim ✕ per
+  // chip unselecting that one pick. Chips that don't fit the gutter collapse into a dim "+N"
+  // that opens the menu. Rebuilds only when the content signature changes, so a press can never
+  // land on a node a redraw just replaced.
+  _renderCornerBar() {
+    if (!this._cornerBar) return;
     const v = this._curViews();
-    const g = (v.groups || []).find((x) => x.id === v.active);
+    const lens = timelineLens(v);
+    const unions = viewTagUnion(v);
     const more = viewMoreCount(v, (this.data && this.data.sessions) || []);
-    // ellipsize so the WHOLE trigger stays inside the gutter — measured on the full string (the
-    // 650-weight lane font over-measures the plain spans, which is the safe direction), because a
-    // fixed reserve under-counted "· NN more" and let the tail cross into the first time label
-    let name = viewLabel(v);
-    const tail = ' ▾' + (more ? ' · ' + more + ' more' : '');
-    const fits = (n) => this.labelWidth('Show: ' + n + tail) <= this.M.left - PADL - 6;
-    while (name.length > 3 && !fits(name)) name = name.slice(0, -2) + '…';
-    const t = el('text', { x: PADL, y: axisY + 14, 'font-size': 12, 'font-family': FONT, fill: MODEL_FG });
-    const lead = el('tspan', {}); lead.textContent = 'Show: '; t.appendChild(lead);
-    const nm = el('tspan', { fill: (g && g.color) || '#cccccc', 'font-weight': 650 }); nm.textContent = name; t.appendChild(nm);
-    const caret = el('tspan', {}); caret.textContent = ' ▾'; t.appendChild(caret);
-    if (more) { const m = el('tspan', { opacity: 0.7 }); m.textContent = ' · ' + more + ' more'; t.appendChild(m); }
-    t.setAttribute('style', 'cursor:pointer;user-select:none;');
-    t.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._openViewsMenu(t); });
-    svg.appendChild(t);
+    const active = !lensAll(lens);
+    // "no tags" sits LEFTMOST, the tags following in the USER'S order (the user 2026-08-25):
+    // the unions arrive ordered (viewTagUnion's one rule), so walking them IS the order; a
+    // selected name missing from the unions (a stale lens) appends last in the gray.
+    const chips = [];
+    if (active) {
+      if (lens.none) chips.push({ label: 'no tags', color: MODEL_FG, pick: 'none' });
+      const picked = Object.create(null);   // null-prototype: a tag named "constructor" must not read as picked
+      (lens.tags || []).forEach((n) => { picked[n] = true; });
+      for (const u of unions) {
+        if (!picked[u.name]) continue;
+        delete picked[u.name];
+        chips.push({ label: u.name, color: u.color || MODEL_FG, pick: { tag: u.name } });
+      }
+      for (const n of (lens.tags || [])) if (picked[n]) chips.push({ label: n, color: MODEL_FG, pick: { tag: n } });
+    }
+    const GAP = 8, BTNW = 28;   // the bar's flex gap; the icon button's measured box (14 glyph + 12 pad + 2 border)
+    const tailStr = more ? more + ' more' : '';
+    const chipW = (c) => 18 + this.labelWidth(c.label) + 6 + 8;   // pad+border + name + gap + ✕ (the 12px measure over-covers the 10.7px render)
+    const budget = this.M.left - PADL - (BTNW * 2 + GAP) - (tailStr ? GAP + this.labelWidth(tailStr) : 0);
+    let used = 0; const shown = [];
+    for (const c of chips) {
+      const w = GAP + chipW(c);
+      const restW = chips.length - shown.length - 1 > 0 ? GAP + this.labelWidth('+' + (chips.length - shown.length - 1)) : 0;
+      if (used + w + restW > budget) break;
+      shown.push(c); used += w;
+    }
+    const hidden = chips.length - shown.length;
+    const sig = JSON.stringify([active, shown, hidden, tailStr]);
+    if (sig === this._cornerSig) return;
+    this._cornerSig = sig;
+    const bar = this._cornerBar;
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
+    const btn = (title, glyph, open, on) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.title = title;
+      b.className = 'romp-tl-cbtn' + (on ? ' on' : '');
+      b.innerHTML = glyph;
+      b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); open(b); });
+      // the follow-up click would bubble to the document's menu-closer and shut the menu the same
+      // instant it opened (the click-and-hold bug, 2026-08-24). Swallow it here.
+      b.addEventListener('click', (e) => e.stopPropagation());
+      bar.appendChild(b);
+      return b;
+    };
+    // sliders: two horizontal rails with offset knobs — the display-options read
+    btn('timeline display options',
+      '<svg width="14" height="14" viewBox="0 0 14 14" fill="none">'
+      + '<line x1="1" y1="4" x2="13" y2="4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>'
+      + '<circle cx="9" cy="4" r="2.4" fill="#1e1e1e" stroke="currentColor" stroke-width="1.4"/>'
+      + '<line x1="1" y1="10" x2="13" y2="10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>'
+      + '<circle cx="4" cy="10" r="2.4" fill="#1e1e1e" stroke="currentColor" stroke-width="1.4"/></svg>',
+      (b) => this._openDisplayMenu(b), false);
+    // tag: the ONE shared glyph — the exact markup every other mount renders (tag-menu.ts, the feed)
+    btn('filter these lanes by tag',
+      '<svg width="14" height="14" viewBox="0 0 16 16" fill="none">'
+      + '<path d="M2 7.5 L7.5 2.5 H14 V9 L8.5 14 Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>'
+      + '<circle cx="11" cy="5.5" r="1.2" fill="currentColor"/></svg>',
+      (b) => this._openViewsMenu(b), active);
+    for (const c of shown) {
+      // each selected pick as its own chip: OUTLINE in its colour, ✕ dim and SEPARATE (the
+      // composer chip's read) — the ✕ unselects THAT pick, not the filter
+      const chip = document.createElement('span');
+      chip.className = 'romp-tl-chip';
+      chip.style.borderColor = c.color; chip.style.color = c.color;
+      // a span, not a text node: this runs on the DRAW path, which the node harnesses drive with
+      // a minimal DOM shim (menus open only on real input; draw runs in every headless test)
+      const lbl = document.createElement('span');
+      lbl.textContent = c.label;
+      chip.appendChild(lbl);
+      const x = document.createElement('span');
+      x.className = 'romp-tl-chipx';
+      x.textContent = '\u2715';
+      x.title = 'remove \u201c' + c.label + '\u201d from this timeline\u2019s filter';
+      x.addEventListener('pointerdown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const nv = JSON.parse(JSON.stringify(v));
+        nv.actives = Object.assign({}, nv.actives, { timeline: lensToggle(lens, c.pick) });
+        this._setViews(nv);
+      });
+      x.addEventListener('click', (e) => e.stopPropagation());
+      chip.appendChild(x);
+      bar.appendChild(chip);
+    }
+    const tail = (text, title) => {
+      const t = document.createElement('span');
+      t.className = 'romp-tl-ctail';
+      t.textContent = text; t.title = title;
+      t.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._openViewsMenu(t); });
+      t.addEventListener('click', (e) => e.stopPropagation());
+      bar.appendChild(t);
+    };
+    if (hidden > 0) tail('+' + hidden, hidden + ' more selected \u2014 open the tag filter');
+    // a filtered-out live session is always one glance away — and one CLICK away (the user
+    // 2026-08-24): the count opens the same views menu, so "what am I not seeing?" answers itself
+    if (more) tail(tailStr, 'live sessions outside this view \u2014 click to switch views, or un-hide via Sessions & tags\u2026');
   }
 
   _closeViewsMenu() { if (this._viewsMenu) { this._viewsMenu.remove(); this._viewsMenu = null; } }
   _closeViewsDialog() {
     if (!this._viewsDialog) return;
-    this._viewsDialog.remove(); this._viewsDialog = null;
+    this._viewsDialog.remove(); this._viewsDialog = null; this._viewsDialogBuild = null;
     if (this._viewsDialogKey) {   // the Escape hook dies with the dialog on EVERY close path, not just Escape
       try { this._viewsDialogKey.doc.removeEventListener('keydown', this._viewsDialogKey.fn); } catch (e) {}
       this._viewsDialogKey = null;
@@ -2424,31 +2908,72 @@ class TimelinePanel {
       const s = menu.createDiv();
       s.setAttribute('style', 'height:1px;margin:4px 6px;background:rgba(255,255,255,0.12);');
     };
-    const v = this._curViews();
-    const pick = (active) => { const nv = JSON.parse(JSON.stringify(v)); nv.active = active; this._setViews(nv); this._closeViewsMenu(); };
-    item('default', { current: !v.active || v.active === 'all' }).addEventListener('click', () => pick('all'));
-    for (const gr of v.groups || [])
-      item(gr.name, { dot: gr.color || MODEL_FG, current: v.active === gr.id }).addEventListener('click', () => pick(gr.id));
-    sep();
-    item('New group…', { dim: true }).addEventListener('click', () => {
-      const nv = JSON.parse(JSON.stringify(v));
-      const used = new Set((nv.groups || []).map((g) => g.color));
-      const color = (this._palette || []).find((c) => !used.has(c)) || (this._palette || [])[0] || '#1EA1EB';
-      const gr = { id: 'g' + Date.now().toString(36), name: 'group ' + ((nv.groups || []).length + 1), color, members: [] };
-      nv.groups = (nv.groups || []).concat([gr]);
-      nv.active = gr.id;                     // a new group opens ACTIVE so its checkboxes take effect live
-      this._setViews(nv);
-      this._closeViewsMenu();
-      this._openViewsDialog(gr.id);
-    });
-    item('Edit sessions…', { dim: true }).addEventListener('click', () => {
-      this._closeViewsMenu();
-      this._openViewsDialog(v.active !== 'all' ? v.active : null);
-    });
-    sep();
-    // the two timeline display prefs, finally reachable in every host (they lived only in the web
-    // gear, whose settingsSync never reached the VS Code timeline and which Obsidian has no way to
-    // open) — written to the host app's own romp:settings, the store the view already re-reads
+    // (the menu's scope caption retired 2026-08-25 — the user: the button's tooltip already says
+    // which surface this governs, so the menu opens straight onto its rows. The captioned-divider
+    // idiom itself lives on in the dialog's sections.)
+    // MULTI-SELECT (the user 2026-08-25): rows are TOGGLES on this surface's lens — All exclusive
+    // and a plain pick; (no tags) and every tag combine arbitrarily; the ✓ marks each selected row
+    // and the menu STAYS OPEN across toggles (a settings panel, not a command — the gear's rule),
+    // repainting in place. Tag rows stay NAME-KEYED (kernels are plumbing).
+    const build = () => {
+      // plain-DOM clear, NOT the Obsidian-only empty helper: the browser and VS Code hosts
+      // install just createEl/createDiv/createSpan (timeline-boot's three), so the repaint threw a
+      // TypeError and every tag-button press died before the menu appeared (the 2026-08-25
+      // unclickable corner button; timeline-tagbtn-click.test.ts executes this path under a
+      // three-helper host so an Obsidian-only call can never land again).
+      while (menu.firstChild) menu.removeChild(menu.firstChild);
+      const v = this._curViews();
+      const lens = timelineLens(v);
+      const apply = (nl, close) => {
+        const nv = JSON.parse(JSON.stringify(v));
+        nv.actives = Object.assign({}, nv.actives, { timeline: nl });
+        this._setViews(nv);
+        if (close) this._closeViewsMenu(); else build();
+      };
+      item('All', { current: lensAll(lens) }).addEventListener('click', () => apply({ all: true }, true));
+      item('(no tags)', { current: !lensAll(lens) && !!lens.none })
+        .addEventListener('click', () => apply(lensToggle(lens, 'none'), false));
+      for (const g of viewTagUnion(v))
+        item(g.name, { dot: g.color || MODEL_FG, current: !lensAll(lens) && (lens.tags || []).indexOf(g.name) >= 0 })
+          .addEventListener('click', () => apply(lensToggle(lens, { tag: g.name }), false));
+      sep();
+      item('Configure tags…', { dim: true }).addEventListener('click', () => {
+        this._closeViewsMenu();
+        this._openViewsDialog(null);
+      });
+    };
+    build();
+    const h = this._menuHost(anchorEl.getBoundingClientRect());
+    h.doc.body.appendChild(menu);
+    menu.style.left = Math.max(6, Math.min(Math.round(h.rect.left), (h.win.innerWidth || 9999) - 220)) + 'px';
+    menu.style.top = Math.round(menuTop(h.rect, menu.offsetHeight || 0, h.win.innerHeight || 9999)) + 'px';
+    this._viewsMenu = menu;
+  }
+
+  _openDisplayMenu(anchorEl) {
+    // the two timeline display prefs under their OWN button (the user 2026-08-25: they left the
+    // tags menu — filtering and display are different questions). Reachable in every host; written
+    // to the host app's own romp:settings, the store the view already re-reads.
+    const reopen = !!this._viewsMenu;
+    this._closeViewsMenu(); this._closeLaneMenu(); this._closeMetaMenu();
+    if (reopen) return;
+    const menu = document.body.createDiv();
+    menu.setAttribute('style', 'position:fixed;z-index:1001;min-width:180px;' + MENU_STYLE);
+    menu.addEventListener('click', (e) => e.stopPropagation());
+    const item = (label, opts) => {
+      const row = menu.createDiv();
+      row.setAttribute('style', 'padding:4px 22px 4px 8px;border-radius:4px;cursor:pointer;position:relative;white-space:nowrap;'
+        + (opts && opts.dim ? 'opacity:0.85;' : ''));
+      row.appendChild(document.createTextNode(label));
+      if (opts && opts.current) {
+        const c = row.createSpan({ text: '✓' });
+        c.setAttribute('style', MENU_CHECK_STYLE);
+      }
+      row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,0.09)'; });
+      row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+      return row;
+    };
+    // (no header — the user 2026-08-25: the menu is just its two entries)
     const flip = (key, cur) => {
       let s = {}; try { s = JSON.parse(localStorage.getItem('romp:settings') || '{}') || {}; } catch (e) {}
       s[key] = !cur;
@@ -2464,123 +2989,430 @@ class TimelinePanel {
       .addEventListener('click', () => flip('activeOnly', this._activeOnly));
     const h = this._menuHost(anchorEl.getBoundingClientRect());
     h.doc.body.appendChild(menu);
-    menu.style.left = Math.max(6, Math.min(Math.round(h.rect.left), (h.win.innerWidth || 9999) - 220)) + 'px';
+    menu.style.left = Math.max(6, Math.min(Math.round(h.rect.left), (h.win.innerWidth || 9999) - 200)) + 'px';
     menu.style.top = Math.round(menuTop(h.rect, menu.offsetHeight || 0, h.win.innerHeight || 9999)) + 'px';
-    this._viewsMenu = menu;
+    this._viewsMenu = menu;   // shares the views-menu slot: one corner menu open at a time
   }
 
-  // The sessions dialog: one checkbox per session. Editing a GROUP (gid) → checked means member;
-  // editing the all-view → checked means shown (unchecked = hidden from the timeline AND the chat
-  // strip: a background session). A centered card over the usual 0.55 dim, adopted into the topmost
-  // same-origin document like every timeline overlay — the whole dashboard dims on the web, the
-  // pane alone in a cross-origin host (VS Code), Obsidian's own window otherwise.
+  // The sessions & tags dialog (the user 2026-08-23; table form 2026-08-24, designed to the JLD
+  // display rules): a GRID — one row per session, columns [name | tag chips | + | feed | eye] — so
+  // the [+] column's alignment carries the table structure, and every convention matches the rest
+  // of romp (similarity = same meaning): the session NAME wears its identity colour (never a proxy
+  // dot), the "host:" prefix is quiet lowercase italic, a dead session is struck, interactive
+  // elements change on hover, and the whole card speaks the menu chrome. No instruction caption —
+  // the display explains itself. A SEARCH box (name or host) filters the rows, and the two bulk
+  // controls act on the FILTERED set (tag all, feed all), which is how a batch is selected. Opened
+  // WITH a tag id (New tag…) it adds that tag's identity header — name input, palette swatches,
+  // Delete — on top. An eye-off appears only on a HIDDEN session to un-hide it. A centered card
+  // over the usual 0.55 dim, adopted into the topmost same-origin document.
   _openViewsDialog(gid) {
     this._closeViewsDialog();
     const back = document.body.createDiv();
     back.setAttribute('style', 'position:fixed;inset:0;z-index:1002;background:rgba(0,0,0,0.55);'
       + 'display:flex;align-items:center;justify-content:center;');
     const card = back.createDiv();
-    card.setAttribute('style', 'width:min(430px,92vw);max-height:76vh;overflow:auto;padding:10px 12px;' + MENU_STYLE);
+    // the dialog is a FORM, not a menu: it reads at 13px (the page's standard reading size, the
+    // user 2026-08-25: the menu 12px read too small here) — sub-lines keep the one 0.82em scale.
+    // It sizes to the SCREEN (the user 2026-08-25, round two: 560px read cramped and made rows
+    // wrap for no reason): up to 90% of the viewport both axes — the big panels' family norm —
+    // capped at 1200px so a huge monitor doesn't stretch a form unreadably wide, with real
+    // breathing room inside the card's edges. The centered-card-over-dim treatment stands.
+    // the card's own declarations come AFTER the shared menu spec: MENU_STYLE opens with the
+    // MENU padding (4px), and in one style string the later declaration wins — with the paddings
+    // stated first the dialog had been rendering 4px edges all along, which IS the claustrophobia
+    // the user reported (2026-08-25); the 14px/22px in the source never applied.
+    card.setAttribute('style', MENU_STYLE + 'box-sizing:border-box;width:min(1200px,90vw);max-height:90vh;'
+      + 'overflow:hidden;display:flex;flex-direction:column;padding:22px 26px;font-size:13px;');
     card.addEventListener('click', (e) => e.stopPropagation());
+    // the open [+] menu's key rides the INSTANCE (this._tagAddFor: sid, or '*' for the bulk bar)
+    // so the shared join builder can close it from either surface — the dialog or the lane gear
+    if (this._tagAddFor === undefined) this._tagAddFor = null;
+    let query = '';                        // the search filter (name or host), survives repaints
+    const hover = (n, on, off) => {        // the one hover helper: interactive chrome changes colour
+      n.addEventListener('mouseenter', () => n.setAttribute('style', n.getAttribute('style') + on));
+      n.addEventListener('mouseleave', () => n.setAttribute('style', String(n.getAttribute('style')).replace(on, off)));
+    };
+    const nameParts = (s) => {             // ["host:" or null, bare name] — the sid's own colon marks federation
+      const i = String(s.id || '').indexOf(':');
+      const pre = i > 0 ? String(s.id).slice(0, i + 1) : null;
+      if (pre && s.name && s.name.startsWith(pre) && s.name.length > pre.length)
+        return [pre.toLowerCase(), s.name.slice(pre.length)];
+      return [null, s.name || String(s.id || '').slice(0, 8)];
+    };
     const build = () => {
       card.textContent = '';
       const v = this._curViews();
-      const gr = gid ? (v.groups || []).find((x) => x.id === gid) : null;
-      if (gid && !gr) { this._closeViewsDialog(); return; }   // the group was deleted elsewhere
+      // NAME-KEYED (user ruling 2026-08-24): whichever store's id opened this, the header is the
+      // tag's ONE identity — rename/recolor/delete fan out to every kernel defining the name
+      // (_editTagUnion), and no host prefix appears; kernels are plumbing.
+      const canEdit = typeof window !== 'undefined' && typeof window.__rompTimelineEditTag === 'function';
       const head = card.createDiv();
-      head.setAttribute('style', 'display:flex;align-items:center;gap:8px;margin:0 0 4px;');
-      if (gr) {
-        const nameIn = document.createElement('input');
-        nameIn.value = gr.name; nameIn.maxLength = 40;
-        nameIn.setAttribute('style', 'flex:1 1 auto;min-width:0;background:#1e1e1e;color:#ccc;'
-          + 'border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:3px 6px;font:inherit;');
-        nameIn.addEventListener('change', () => {
-          const nv = JSON.parse(JSON.stringify(this._curViews()));
-          const g2 = nv.groups.find((x) => x.id === gid); if (!g2) return;
-          g2.name = nameIn.value.slice(0, 40) || g2.name;
-          this._setViews(nv); build();
-        });
-        head.appendChild(nameIn);
-        const del = head.createSpan({ text: 'Delete' });
-        del.setAttribute('style', 'flex:0 0 auto;cursor:pointer;opacity:0.7;color:#F85B5A;');
-        del.addEventListener('click', () => {
-          const nv = JSON.parse(JSON.stringify(this._curViews()));
-          nv.groups = nv.groups.filter((x) => x.id !== gid);
-          if (nv.active === gid) nv.active = 'all';
-          this._setViews(nv); this._closeViewsDialog();
-        });
-      } else {
-        const ttl = head.createDiv({ text: 'Sessions' });
-        ttl.setAttribute('style', 'font-weight:650;');
+      head.setAttribute('style', 'display:flex;align-items:center;gap:8px;margin:0 0 8px;');
+      const ttl = head.createDiv({ text: 'Sessions & tags' });
+      ttl.setAttribute('style', 'font-weight:650;');
+      // the LOUD failure of the last routed edit (a down owner, a collision there) — dismissible
+      if (this._tagEditErr) {
+        const er = card.createDiv();
+        er.setAttribute('style', 'display:flex;align-items:center;gap:6px;margin:0 0 8px;padding:4px 8px;'
+          + 'border:1px solid #F85B5A;border-radius:5px;color:#F85B5A;font-size:0.88em;');
+        er.createSpan({ text: '⚠ ' + (this._tagEditErr.host ? this._tagEditErr.host + ': ' : '') + this._tagEditErr.error });
+        const ex = er.createSpan({ text: '✕' });
+        ex.setAttribute('style', 'margin-left:auto;cursor:pointer;opacity:0.7;');
+        ex.addEventListener('click', () => { this._tagEditErr = null; build(); });
       }
-      if (gr) {
-        const sw = card.createDiv();
-        sw.setAttribute('style', 'display:flex;gap:6px;margin:2px 0 6px;flex-wrap:wrap;');
-        for (const c of (this._palette && this._palette.length ? this._palette : [gr.color || '#1EA1EB'])) {
-          const d = sw.createSpan();
-          d.setAttribute('style', 'width:16px;height:16px;border-radius:50%;cursor:pointer;background:' + c + ';'
-            + (c === gr.color ? 'outline:2px solid #ffffff;outline-offset:1px;' : 'opacity:0.75;'));
-          d.addEventListener('click', () => {
-            const nv = JSON.parse(JSON.stringify(this._curViews()));
-            const g2 = nv.groups.find((x) => x.id === gid); if (!g2) return;
-            g2.color = c; this._setViews(nv); build();
-          });
-        }
-      }
-      const sub = card.createDiv({ text: gr ? 'Checked sessions are in this group. A session can be in several groups.'
-        : 'Every session joins the default group at birth. Unchecked sessions leave it — out of the timeline and the chat tabs until you view a group that has them.' });
-      sub.setAttribute('style', 'opacity:0.6;font-size:0.82em;margin:0 0 6px;');
-      for (const s of (this.data && this.data.sessions) || []) {
-        const row = card.createDiv();
-        row.setAttribute('style', 'display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:4px;cursor:pointer;');
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = gr ? (gr.members || []).indexOf(s.id) >= 0 : (v.hidden || []).indexOf(s.id) < 0;
-        cb.setAttribute('style', 'accent-color:#1EA1EB;margin:0;flex:0 0 auto;');
-        row.appendChild(cb);
-        const dot = row.createSpan();
-        dot.setAttribute('style', 'width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:' + (s.color || MODEL_FG) + ';');
-        const nm = row.createSpan({ text: s.name || s.id.slice(0, 8) });
-        nm.setAttribute('style', 'min-width:0;overflow:hidden;text-overflow:ellipsis;' + (s.live ? '' : 'opacity:0.55;'));
-        const st = row.createSpan({ text: s.live ? (s.model || '') : 'gone' });
-        st.setAttribute('style', 'margin-left:auto;flex:0 0 auto;opacity:0.5;font-size:0.82em;');
-        // The pool-builder's second switch (the user 2026-08-19, from the manager/worker experiment):
-        // a background worker usually wants BOTH edits — out of the default group AND off the feed —
-        // so the same row carries the lane gear's feed toggle. Reused machinery end to end (icon,
-        // optimistic _pendingFlags, _setSessionFlag); deliberately NOT auto-coupled to membership:
-        // hideFromFeed seals goals and gates the planner, an edit the user makes knowingly.
-        const ft = LANE_TOGGLES.find((t) => t.flag === 'hideFromFeed');
-        if (ft && s.live) {
-          const on = ft.enabled(s);
-          const fic = el('svg', { viewBox: '0 0 17 17', width: 14, height: 14 });
-          fic.setAttribute('style', 'flex:0 0 auto;cursor:pointer;' + (on ? '' : 'opacity:0.55;'));
-          fic.appendChild(ft.icon(!on, 8.5, 8.5, on ? ROMP_BLUE : MODEL_FG));
-          fic.addEventListener('click', (e) => {
-            e.stopPropagation();                       // the row toggle is membership; this is the feed
-            const next = ft.value(!on);
-            s.hideFromFeed = next;
-            (this._pendingFlags[s.id] = this._pendingFlags[s.id] || {}).hideFromFeed = next;
-            this._setSessionFlag(s, 'hideFromFeed', next);
-            this._reconcilePendingFlags();
-            build();
-          });
-          const tip = on ? 'its prompts make feed cards — click to mute (a pool worker usually wants this off)'
-                         : 'feed-muted: new prompts mint no cards — click to restore';
-          fic.addEventListener('mouseenter', () => { fic.setAttribute('title', tip); });
-          row.appendChild(fic);
-        }
-        const toggle = () => {
-          this._setViews(gr ? viewToggleMember(this._curViews(), gid, s.id)
-                            : viewToggleHidden(this._curViews(), s.id));
-          build();                                     // the dialog stays open and repaints in place
+      // ── TAGS — A TABLE (the user 2026-08-25 revision, superseding the chip cloud): each tag
+      // is a ROW — the tag itself in its normal pill rendering with NO ✕ on it, and to the side
+      // the actions: delete | rename | the color. The user's rationale: it reads clearly as
+      // deleting/renaming THE TAG. All at the dialog's own scale (the few-sizes rule); remote-
+      // homed tags still ride the v1 editTag route with its loud refusals. [+ New tag] is the
+      // table's FINAL ROW.
+      {
+        const capT = card.createDiv();
+        capT.setAttribute('style', 'display:flex;align-items:center;gap:6px;margin:4px 0;');
+        capT.createDiv().setAttribute('style', 'height:1px;flex:0 0 8px;background:rgba(255,255,255,0.12);');
+        const ct = capT.createSpan({ text: 'the tags' });
+        ct.setAttribute('style', 'font-size:0.82em;opacity:0.6;font-style:italic;white-space:nowrap;');
+        capT.createDiv().setAttribute('style', 'height:1px;flex:1;background:rgba(255,255,255,0.12);');
+        const tgrid = card.createDiv();
+        tgrid.setAttribute('style', 'display:grid;grid-template-columns:max-content max-content max-content 1fr;'
+          + 'column-gap:14px;row-gap:4px;align-items:center;margin:2px 0 6px;');
+        const action = (row, text, title) => {
+          const a = row.createSpan({ text });
+          a.setAttribute('style', 'cursor:pointer;opacity:0.7;color:#cccccc;');
+          a.setAttribute('title', title);
+          return a;
         };
-        cb.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
-        row.addEventListener('click', (e) => { if (e.target !== cb) toggle(); });
-        row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,0.07)'; });
-        row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+        for (const tg of viewTagUnion(v)) {
+          const editable = tg.localId || canEdit;
+          const tc = tg.color || MODEL_FG;
+          // the tag itself: the normal pill, NO ✕ — actions live beside it, never on it.
+          // DRAGGABLE (the user 2026-08-25): grab a pill to reorder the tags — the drop writes
+          // tagOrder (the union display order, viewer-side) AND re-sorts the local tags array to
+          // match (the natural store for local-only readers). The membership drag's discipline:
+          // pointer capture, an accent border cue that moves WITHOUT rebuilding mid-drag (the
+          // redraw-eats-pointer rule); the rebuild and the write happen on the drop. The rename
+          // input keeps the cell — no drag while editing.
+          const pillCell = tgrid.createDiv();
+          pillCell._tname = tg.name;
+          if (this._tagEditorFor !== tg.name || !editable) {
+            pillCell.style.cursor = 'grab';
+            pillCell.addEventListener('pointerdown', (e) => {
+              e.preventDefault();
+              const cells = Array.from(tgrid.children).filter((c) => c._tname);
+              const fromIdx = cells.indexOf(pillCell);
+              if (fromIdx < 0) return;
+              let toIdx = fromIdx;
+              try { pillCell.setPointerCapture(e.pointerId); } catch (e2) {}
+              pillCell.style.opacity = '0.45';
+              const clearCues = () => cells.forEach((c) => { c.style.borderTop = ''; c.style.borderBottom = ''; });
+              const onMove = (ev) => {
+                const ys = cells.map((c) => { const r = c.getBoundingClientRect(); return (r.top + r.bottom) / 2; });
+                let idx = ys.findIndex((y) => ev.clientY < y);
+                if (idx < 0) idx = cells.length - 1;
+                if (idx !== toIdx) {
+                  toIdx = idx;
+                  clearCues();
+                  if (toIdx !== fromIdx) cells[toIdx].style[toIdx > fromIdx ? 'borderBottom' : 'borderTop'] = '2px solid #9cd2ff';
+                }
+              };
+              const onUp = () => {
+                pillCell.removeEventListener('pointermove', onMove);
+                pillCell.removeEventListener('pointerup', onUp);
+                pillCell.removeEventListener('pointercancel', onUp);
+                pillCell.style.opacity = '';
+                clearCues();
+                if (toIdx === fromIdx) return;
+                const names = cells.map((c) => c._tname);
+                names.splice(toIdx, 0, names.splice(fromIdx, 1)[0]);
+                const nv = JSON.parse(JSON.stringify(this._curViews()));
+                nv.tagOrder = names;                       // the union display order, remote-homed names included
+                const pos = Object.create(null);           // null-prototype (the prototype-key name hazard)
+                names.forEach((n, i) => { pos[n] = i; });
+                nv.tags = viewTags(nv).slice().sort((a, b) =>
+                  ((a.name in pos) ? pos[a.name] : names.length) - ((b.name in pos) ? pos[b.name] : names.length));
+                delete nv.groups;
+                this._setViews(nv);
+                build();
+              };
+              pillCell.addEventListener('pointermove', onMove);
+              pillCell.addEventListener('pointerup', onUp);
+              pillCell.addEventListener('pointercancel', onUp);
+            });
+          }
+          if (this._tagEditorFor === tg.name && editable) {
+            const nameIn = document.createElement('input');
+            nameIn.value = tg.name; nameIn.maxLength = 40;
+            nameIn.setAttribute('style', 'width:130px;background:#1e1e1e;color:#ccc;'
+              + 'border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:2px 6px;font:inherit;');
+            nameIn.addEventListener('change', () => {
+              const nv2 = nameIn.value.slice(0, 40).trim();
+              this._tagEditorFor = null;
+              if (nv2 && nv2 !== tg.name) this._editTagUnion(tg, { rename: nv2 });
+              build();
+            });
+            nameIn.addEventListener('keydown', (e) => { if (e.key === 'Escape') { this._tagEditorFor = null; build(); } });
+            pillCell.appendChild(nameIn);
+            setTimeout(() => { try { nameIn.focus(); nameIn.select(); } catch (e) {} }, 0);
+          } else {
+            const pill = pillCell.createSpan({ text: tg.name });
+            pill.setAttribute('style', 'display:inline-flex;align-items:center;padding:2px 9px;'
+              + 'border-radius:10px;border:1px solid ' + tc + ';color:' + tc + ';background:transparent;font-weight:650;'
+              + (gid && tg.ids.indexOf(gid) >= 0 ? 'outline:1px solid rgba(255,255,255,0.25);outline-offset:2px;' : ''));
+          }
+          // delete — the destructive convention: dim at rest, red on hover
+          const del = tgrid.createDiv();
+          if (editable) {
+            const d = action(del, 'delete', 'DELETE the tag \u201c' + tg.name + '\u201d everywhere (members keep running, just untagged)');
+            d.addEventListener('mouseenter', () => { d.style.color = '#F85B5A'; d.style.opacity = '1'; });
+            d.addEventListener('mouseleave', () => { d.style.color = '#cccccc'; d.style.opacity = '0.7'; });
+            d.addEventListener('click', () => {
+              if (this._tagEditorFor === tg.name) this._tagEditorFor = null;
+              this._editTagUnion(tg, { delete: true });
+              build();
+            });
+          }
+          // rename — turns the pill into an input
+          const ren = tgrid.createDiv();
+          if (editable) {
+            const r = action(ren, 'rename', 'rename this tag (everywhere it is defined)');
+            r.addEventListener('mouseenter', () => { r.style.opacity = '1'; });
+            r.addEventListener('mouseleave', () => { r.style.opacity = '0.7'; });
+            r.addEventListener('click', () => { this._tagEditorFor = this._tagEditorFor === tg.name ? null : tg.name; build(); });
+          }
+          // the color — the identity-palette swatches inline in the row's last column
+          const colCell = tgrid.createDiv();
+          colCell.setAttribute('style', 'display:flex;gap:6px;align-items:center;flex-wrap:wrap;');
+          if (editable) {
+            for (const c of (this._palette && this._palette.length ? this._palette : [tc])) {
+              const sw = colCell.createSpan();
+              sw.setAttribute('style', 'width:14px;height:14px;border-radius:50%;cursor:pointer;background:' + c + ';'
+                + (c === tg.color ? 'outline:2px solid #ffffff;outline-offset:1px;' : 'opacity:0.7;'));
+              sw.addEventListener('click', () => { this._editTagUnion(tg, { color: c }); build(); });
+            }
+          }
+        }
+        // [+ New tag] — the table's final row, at the dialog's own scale
+        const ntRow = tgrid.createDiv();
+        ntRow.setAttribute('style', 'grid-column:1 / -1;');
+        const ntBtn = ntRow.createSpan({ text: '+ New tag' });
+        ntBtn.setAttribute('style', 'display:inline-flex;align-items:center;justify-content:center;padding:1px 9px;'
+          + 'border-radius:5px;border:1px solid rgba(255,255,255,0.25);color:#cccccc;opacity:0.7;cursor:pointer;background:transparent;');
+        hover(ntBtn, 'background:rgba(255,255,255,0.09);opacity:1;', 'background:transparent;opacity:0.7;');
+        ntBtn.addEventListener('click', () => {
+          const nv = JSON.parse(JSON.stringify(this._curViews()));
+          const used = new Set(viewTags(nv).map((t) => t.color));
+          const color = (this._palette || []).find((c) => !used.has(c)) || (this._palette || [])[0] || '#1EA1EB';
+          const tg = { id: 'g' + Date.now().toString(36), name: 'tag ' + (viewTags(nv).length + 1), color, members: [] };
+          nv.tags = viewTags(nv).concat([tg]); delete nv.groups;
+          this._tagEditorFor = tg.name;   // a new tag opens straight into its rename input
+          this._setViews(nv);
+          build();
+        });
       }
+      // ── PANE FILTERS — five rows (the user 2026-08-25 redesign, superseding the one-line
+      // strip): All surfaces, then Chat / Sessions / Outline / Feed — the pane names. Each row is
+      // the FULL lens vocabulary as toggle pills (All, no-tags, every tag), editing ONLY its
+      // surface; the All-surfaces row edits all four at once — the set-for-all promoted to a
+      // first-class row, the feed reached for real through the romp:feedTags-set echo its pane
+      // adopts. The feed row DISPLAYS the last state set from here (the echo is readable back);
+      // its own pane button may have moved it since — the hover says so.
+      {
+        const capF = card.createDiv();
+        capF.setAttribute('style', 'display:flex;align-items:center;gap:6px;margin:4px 0;');
+        capF.createDiv().setAttribute('style', 'height:1px;flex:0 0 8px;background:rgba(255,255,255,0.12);');
+        const cf = capF.createSpan({ text: 'pane filters — what each pane shows' });
+        cf.setAttribute('style', 'font-size:0.82em;opacity:0.6;font-style:italic;white-space:nowrap;');
+        capF.createDiv().setAttribute('style', 'height:1px;flex:1;background:rgba(255,255,255,0.12);');
+        const acts = v.actives || {};
+        const feedEcho = () => {
+          try { const e = JSON.parse(localStorage.getItem('romp:feedTags-set') || ''); return (e && e.lens) || { all: true }; } catch (e) { return { all: true }; }
+        };
+        const canonL = (l) => JSON.stringify({ n: !!(l && l.none), t: ((l && l.tags) || []).slice().sort() });
+        const lensFor = (key) => {
+          if (key === 'feed') return feedEcho();
+          if (key !== '*') return acts[key] || { all: true };
+          const four = [acts.chat || { all: true }, acts.timeline || { all: true }, acts.outline || { all: true }, feedEcho()];
+          return four.every((l) => canonL(l) === canonL(four[0])) ? four[0] : null;   // null = mixed
+        };
+        const applyFor = (key, lens) => {
+          if (key === '*' || key !== 'feed') {
+            const nv = JSON.parse(JSON.stringify(this._curViews()));
+            const upd = key === '*' ? { chat: lens, timeline: lens, outline: lens } : {};
+            if (key !== '*') upd[key] = lens;
+            nv.actives = Object.assign({}, nv.actives, upd);
+            this._setViews(nv);
+          }
+          if (key === '*' || key === 'feed') {
+            try { localStorage.setItem('romp:feedTags-set', JSON.stringify({ lens, t: Date.now() })); } catch (e) {}
+          }
+          build();
+        };
+        const rows = [['All surfaces', '*'], ['Chat', 'chat'], ['Sessions', 'timeline'], ['Outline', 'outline'], ['Feed', 'feed']];
+        for (const [label, key] of rows) {
+          const row = card.createDiv();
+          row.setAttribute('style', 'display:flex;align-items:center;gap:6px;margin:2px 0;flex-wrap:wrap;');
+          const lb = row.createSpan({ text: label });
+          lb.setAttribute('style', 'flex:0 0 88px;font-size:0.82em;opacity:0.6;font-style:italic;');
+          if (key === 'feed') lb.setAttribute('title', "as last set from this dialog — the feed pane's own filter button may have changed it since");
+          const lens = lensFor(key);
+          const mixed = lens === null;
+          const base = mixed ? { all: true } : lens;
+          const pill = (text, selected, color, apply) => {
+            const c2 = color || MODEL_FG;
+            const s2 = row.createSpan({ text });
+            s2.setAttribute('style', 'cursor:pointer;padding:1px 8px;border-radius:9px;font-size:0.82em;'
+              + 'border:1px solid ' + c2 + ';color:' + c2 + ';'
+              + (selected ? 'background:rgba(255,255,255,0.13);opacity:1;font-weight:650;' : 'background:transparent;opacity:0.6;'));
+            s2.addEventListener('mouseenter', () => { s2.style.opacity = '1'; });
+            s2.addEventListener('mouseleave', () => { if (!selected) s2.style.opacity = '0.6'; });
+            s2.addEventListener('click', apply);
+            return s2;
+          };
+          pill('All', !mixed && lensAll(base), null, () => applyFor(key, { all: true }));
+          pill('no tags', !mixed && !lensAll(base) && !!base.none, null, () => applyFor(key, lensToggle(base, 'none')));
+          for (const g of viewTagUnion(v))
+            pill(g.name, !mixed && !lensAll(base) && (base.tags || []).indexOf(g.name) >= 0, g.color || MODEL_FG,
+              () => applyFor(key, lensToggle(base, { tag: g.name })));
+          if (mixed) {
+            const mx = row.createSpan({ text: '(mixed)' });
+            mx.setAttribute('style', 'font-size:0.82em;opacity:0.5;font-style:italic;');
+            mx.setAttribute('title', 'the four panes currently hold different filters — picking here sets them all the same way');
+          }
+        }
+      }
+      // ── THE SESSIONS (the user 2026-08-25: another divider here, "to show that you're tagging
+      // sessions down there") — search, then the bulk 'tag all' on its OWN line, then the table
+      {
+        const capS = card.createDiv();
+        capS.setAttribute('style', 'display:flex;align-items:center;gap:6px;margin:4px 0;');
+        capS.createDiv().setAttribute('style', 'height:1px;flex:0 0 8px;background:rgba(255,255,255,0.12);');
+        const cs = capS.createSpan({ text: 'the sessions — tag them below' });
+        cs.setAttribute('style', 'font-size:0.82em;opacity:0.6;font-style:italic;white-space:nowrap;');
+        capS.createDiv().setAttribute('style', 'height:1px;flex:1;background:rgba(255,255,255,0.12);');
+      }
+      const bar = card.createDiv();
+      bar.setAttribute('style', 'display:flex;align-items:center;gap:8px;margin:0 0 6px;');
+      const q = document.createElement('input');
+      q.placeholder = 'search name or host…'; q.value = query;
+      q.setAttribute('style', 'flex:1 1 auto;min-width:0;background:#1e1e1e;color:#ccc;'
+        + 'border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:3px 8px;font:inherit;');
+      q.addEventListener('input', () => { query = q.value; renderRows(); });
+      bar.appendChild(q);
+      const btnStyle = 'flex:0 0 auto;cursor:pointer;padding:2px 8px;border-radius:5px;'
+        + 'border:1px solid rgba(255,255,255,0.25);color:#cccccc;background:transparent;font-size:0.9em;';
+      // 'tag all' on its OWN LINE, plain text (the user 2026-08-25: it surprised where it sat)
+      const bulkLine = card.createDiv();
+      bulkLine.setAttribute('style', 'margin:0 0 6px;');
+      const tagAll = bulkLine.createSpan({ text: 'tag all' });
+      tagAll.setAttribute('style', btnStyle);
+      hover(tagAll, 'background:rgba(255,255,255,0.09);', 'background:transparent;');
+      tagAll.setAttribute('title', 'add a tag to every session the search shows');
+      tagAll.addEventListener('click', () => { this._tagAddFor = this._tagAddFor === '*' ? null : '*'; renderRows(); });
+      // (the mute-feed-for-all control left with the feed column, the user 2026-08-25 — the
+      // per-session flag lives on in the lane gear)
+      const gridBox = card.createDiv();
+      // the TABLE scrolls within the modal (the user 2026-08-25) — header, scope, tags, and the
+      // bulk bar stay put; only the session rows pan (the .cmt-msgs overflow idiom family)
+      gridBox.setAttribute('style', 'flex:1 1 auto;min-height:0;overflow-y:auto;');
+      const renderRows = () => {
+        gridBox.textContent = '';
+        const needle = query.trim().toLowerCase();
+        // LIVE sessions only (the user 2026-08-25: the crossed-out ones shouldn't show here)
+        const rows = ((this.data && this.data.sessions) || []).filter((s) => s.live).filter((s) =>
+          !needle || String(s.name || s.id || '').toLowerCase().indexOf(needle) >= 0);
+        const grid = gridBox.createDiv();
+        // columns: name | + | tags (the user 2026-08-25 — the [+] sits in its OWN column between
+        // the session name and the tags; the feed column left the dialog, see below)
+        grid.setAttribute('style', 'display:grid;grid-template-columns:max-content max-content 1fr;'
+          + 'column-gap:10px;row-gap:3px;align-items:center;');
+        const addMenu = (rowIds) => {   // the [+] menu, per-row or bulk — the SHARED join builder, grid-spanning
+          const am = grid.createDiv();
+          am.setAttribute('style', 'grid-column:1 / -1;margin:2px 0 4px 8px;display:flex;gap:5px;flex-wrap:wrap;align-items:center;');
+          this._tagJoinMenu(am, rowIds, build);
+        };
+        if (this._tagAddFor === '*') addMenu(rows.map((s) => s.id));
+        for (const s of rows) {
+          const vv = this._curViews();
+          // NAME — the session's identity colour on the name itself (never a proxy dot), the
+          // "host:" prefix quiet lowercase italic. DRAGGABLE (the user 2026-08-25): grab a name to
+          // reorder — the drop writes the SHARED session order (session-order.json), the same store
+          // the tab-drag and lane-drag write, so all three surfaces reorder together. The insertion
+          // cue moves WITHOUT rebuilding mid-drag (the redraw-eats-pointer rule); the rebuild —
+          // and the persist — happen on the drop.
+          const nameCell = grid.createDiv();
+          nameCell.setAttribute('style', 'white-space:nowrap;cursor:grab;');
+          nameCell._sid = s.id;
+          nameCell.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            const cells = Array.from(grid.children).filter((c) => c._sid);
+            const fromIdx = cells.indexOf(nameCell);
+            if (fromIdx < 0) return;
+            let toIdx = fromIdx;
+            try { nameCell.setPointerCapture(e.pointerId); } catch (e2) {}
+            nameCell.style.opacity = '0.45';
+            const clearCues = () => cells.forEach((c) => { c.style.borderTop = ''; c.style.borderBottom = ''; });
+            const onMove = (ev) => {
+              const ys = cells.map((c) => { const r = c.getBoundingClientRect(); return (r.top + r.bottom) / 2; });
+              let idx = ys.findIndex((y) => ev.clientY < y);
+              if (idx < 0) idx = cells.length - 1;
+              if (idx !== toIdx) {
+                toIdx = idx;
+                clearCues();
+                if (toIdx !== fromIdx) cells[toIdx].style[toIdx > fromIdx ? 'borderBottom' : 'borderTop'] = '2px solid #9cd2ff';
+              }
+            };
+            const onUp = () => {
+              nameCell.removeEventListener('pointermove', onMove);
+              nameCell.removeEventListener('pointerup', onUp);
+              nameCell.removeEventListener('pointercancel', onUp);
+              nameCell.style.opacity = '';
+              clearCues();
+              if (toIdx === fromIdx) return;
+              const vis = cells.map((c) => c._sid);
+              vis.splice(toIdx, 0, vis.splice(fromIdx, 1)[0]);
+              const full = this._mergeVisibleOrder(vis);   // only the shown rows permute within the full order
+              this._applyOrderToData(full);                // optimistic — no snap-back before the next poll
+              this._persistOrder(full);                    // the shared store: tabs + lanes follow
+              renderRows();
+            };
+            nameCell.addEventListener('pointermove', onMove);
+            nameCell.addEventListener('pointerup', onUp);
+            nameCell.addEventListener('pointercancel', onUp);
+          });
+          const [hpre, bare] = nameParts(s);
+          if (hpre) {
+            const hp = nameCell.createSpan({ text: hpre });
+            hp.setAttribute('style', 'color:' + MODEL_FG + ';font-style:italic;font-size:0.88em;');
+          }
+          const nm = nameCell.createSpan({ text: bare });
+          nm.setAttribute('style', 'font-weight:650;color:' + (s.color || '#cccccc') + ';');   // rows are live-only now — no strike variant
+          // [+] — its own column between the name and the tags (the user 2026-08-25), wearing the
+          // standard button anatomy: a rounded RECTANGLE, not a circle
+          const plusCell = grid.createDiv();
+          const plus = plusCell.createSpan({ text: '+' });
+          plus.setAttribute('style', 'display:inline-flex;align-items:center;justify-content:center;padding:1px 7px;'
+            + 'border-radius:5px;border:1px solid rgba(255,255,255,0.25);color:#cccccc;opacity:0.7;cursor:pointer;background:transparent;');
+          hover(plus, 'background:rgba(255,255,255,0.09);opacity:1;', 'background:transparent;opacity:0.7;');
+          plus.setAttribute('title', 'add a tag');
+          plus.addEventListener('click', () => { this._tagAddFor = this._tagAddFor === s.id ? null : s.id; renderRows(); });
+          // TAGS — one solid chip per union tag holding this session (user ruling 2026-08-24:
+          // a tag is its NAME; kernels are plumbing — the twin dashed/solid render is gone), ✕ =
+          // remove-everywhere. The shared builder; the lane gear renders the identical editor.
+          const chips = grid.createDiv();
+          chips.setAttribute('style', 'display:flex;gap:5px;flex-wrap:wrap;align-items:center;min-width:0;');
+          this._tagChips(chips, s, build);
+          // (the FEED column left this dialog, the user 2026-08-25 — the hideFromFeed flag stays
+          // fully reachable per session via the lane gear's toggle, which was always its other
+          // home; the un-hide EYE retired earlier with the hidden set, 2026-08-24)
+          if (this._tagAddFor === s.id) addMenu([s.id]);
+        }
+      };
+      renderRows();
+      // a repaint mid-typing keeps the search box live: re-focus with the caret at the end
+      if (query) { q.focus(); try { q.setSelectionRange(q.value.length, q.value.length); } catch (e) {} }
     };
     build();
+    this._viewsDialogBuild = build;   // tagEditFailed repaints the open dialog with the refusal
     const h = this._menuHost({ left: 0, top: 0, bottom: 0, right: 0 });
     back.addEventListener('pointerdown', (e) => { if (e.target === back) this._closeViewsDialog(); });
     const onKey = (e) => { if (e.key === 'Escape') this._closeViewsDialog(); };
@@ -2628,6 +3460,32 @@ class TimelinePanel {
           this.draw();
           build();                                   // repaint states in place; the panel stays open
         });
+      }
+      // ── Tags (the user 2026-08-24: taggable from the gear too, not only the filter dialog) ──
+      // The SAME name-keyed editor the dialog rows carry — the shared builders, never a fork:
+      // one solid chip per tag holding this session (✕ = remove-everywhere), [+] to join an
+      // existing tag or mint one. Compact: one section, mechanics inline under it.
+      const div = menu.createDiv();
+      div.setAttribute('style', 'height:1px;margin:4px 6px;background:rgba(255,255,255,0.12);');
+      const trow = menu.createDiv();
+      trow.setAttribute('style', 'display:flex;gap:5px;flex-wrap:wrap;align-items:center;padding:4px 10px;');
+      const tlab = trow.createSpan({ text: 'Tags' });
+      tlab.setAttribute('style', 'opacity:0.6;font-size:0.82em;flex:0 0 auto;margin-right:2px;');
+      this._tagChips(trow, s, build);
+      const plus = trow.createSpan({ text: '+' });
+      plus.setAttribute('style', 'display:inline-flex;align-items:center;justify-content:center;padding:1px 7px;'
+        + 'border-radius:5px;border:1px solid rgba(255,255,255,0.25);color:#cccccc;opacity:0.7;cursor:pointer;font-size:0.85em;background:transparent;');
+      plus.addEventListener('mouseenter', () => { plus.style.background = 'rgba(255,255,255,0.09)'; plus.style.opacity = '1'; });
+      plus.addEventListener('mouseleave', () => { plus.style.background = 'transparent'; plus.style.opacity = '0.7'; });
+      plus.setAttribute('title', 'add a tag');
+      plus.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._tagAddFor = this._tagAddFor === s.id ? null : s.id; build();
+      });
+      if (this._tagAddFor === s.id) {
+        const am = menu.createDiv();
+        am.setAttribute('style', 'display:flex;gap:5px;flex-wrap:wrap;align-items:center;padding:2px 10px 6px 24px;');
+        this._tagJoinMenu(am, [s.id], build);
       }
     };
     build();
@@ -2801,14 +3659,27 @@ class TimelinePanel {
       data.messages.forEach((mm) => {
         const s1 = midStart[mm.toId + '|' + (mm.id || '')], s2 = midStart[mm.toId + '|' + (mm.dmid || '')];
         const st = (s1 != null && s2 != null) ? Math.min(s1, s2) : (s1 != null ? s1 : s2);
-        if (st != null) { mm.exec = st; mm.pending = false; }
+        if (st != null) { mm.exec = st; mm.pending = false; mm.hasExec = true; }   // a join IS exec knowledge — the hidden-counterpart stub color keys on hasExec
       });
     }
     const startAt = (t) => t.pending ? nowS : t.start;
     // LANE IDENTITY IS THE SID (data.turns + vidx + connectors all key by session.id, since two
     // live sessions can share a name and a rename keeps the id). `name` is display-only.
     const turnsOf = (sid) => data.turns[sid] || [];
-    const colorOf = (sid) => { const s = data.sessions.find((x) => x.id === sid); return s ? s.color : '#888'; };
+    // Owner-authoritative color (the user 2026-08-24, the gray-glyph fix): each session row rides
+    // its OWNER kernel's frame with the owner's color, but a message endpoint can spell the same
+    // session differently — bare on its home kernel's frame, host-prefixed after the merge, or
+    // prefixed with a THIRD kernel's name for it. Sids are uuids (globally unique), so on an exact
+    // miss the join retries by the bare sid tail — the one spelling every variant shares.
+    const colorOf = (sid) => {
+      let s = data.sessions.find((x) => x.id === sid);
+      if (!s && sid) {
+        const i = String(sid).indexOf(':');
+        const bare = i > 0 ? String(sid).slice(i + 1) : String(sid);
+        s = data.sessions.find((x) => x.id === bare || String(x.id).endsWith(':' + bare));
+      }
+      return s ? s.color : '#888';
+    };
 
     // A lane shows when it has activity intersecting THIS window — a turn bar or a message endpoint.
     // Normally a live session ALSO always gets a lane (even idle, so you can see who's running); with
@@ -2833,7 +3704,7 @@ class TimelinePanel {
     const active = (s) => (s.live && !this._activeOnly) || hasWork(s) || (s.live && !barsKnown(s));
     // the VIEW filter first (the user 2026-08-18): the active view decides who is even a candidate;
     // activeOnly then thins candidates. data.sessions stays complete for the sessions dialog.
-    const inView = (s) => viewVisible(this._curViews(), s.id);
+    const inView = (s) => { const v = this._curViews(); return lensVisible(timelineLens(v), viewTagUnion(v), s.id); };
     let vis = data.sessions.filter(inView).filter(active);
     // …but never hide EVERYONE: with every lane idle in this window the filter would blank the whole
     // band — which reads as broken (the loading rule), and leaves no row space to grab-drag back out
@@ -2931,7 +3802,7 @@ class TimelinePanel {
     for (let tk = Math.ceil(t0 / step) * step; tk <= t1; tk += step) {
       if (inGap(tk)) continue;
       svg.appendChild(el('line', { x1: x(tk), y1: M.top, x2: x(tk), y2: axisY, stroke: '#ffffff10', 'stroke-width': 1 }));
-      this._mc.font = '10px ' + FONT;
+      this._mc.font = '10px ' + this._fontFace();
       const hw = this._mc.measureText(clock(tk)).width / 2;
       if (!placeLabel(x(tk) - hw, x(tk) + hw)) continue;
       const tx = el('text', { x: x(tk), y: axisY + 14, 'text-anchor': 'middle', fill: 'var(--text-muted)', 'font-size': 10 }); tx.textContent = clock(tk); svg.appendChild(tx);
@@ -3236,6 +4107,9 @@ class TimelinePanel {
           this.hideTip();
           this._openLaneMenu(s, ghit);
         });
+        // same latent close-on-own-click as the views trigger (see _renderCornerBar): the gear's
+        // follow-up click must not reach the document's menu-closer
+        ghit.addEventListener('click', (e) => e.stopPropagation());
       }
       // DEAD lane → a "Clear" pill just right of the struck name (the user 2026-07-02). A dead session lingers
       // as a faded/struck lane while it's still in the activity window, with NONE of the live controls (no
@@ -3430,7 +4304,11 @@ class TimelinePanel {
 
     // obstacles for routing — at each event's process-start (a pending event rides `now` via execAt/startAt)
     const obstacles = [];
-    data.messages.forEach((mm) => { if (inWin(execAt(mm)) && vidx[mm.toId] != null) obstacles.push({ x: x(execAt(mm)), lane: vidx[mm.toId] }); });
+    // a THREAD endpoint draws at its comment square's x, not the mail time (fromThreadT/toThreadT,
+    // the user 2026-08-23) — sendX/landX are the drawn positions everywhere below
+    const sendXT = (mm) => mm.fromThreadT || mm.sent;
+    const landXT = (mm) => mm.toThreadT || execAt(mm);
+    data.messages.forEach((mm) => { if (inWin(landXT(mm)) && vidx[mm.toId] != null) obstacles.push({ x: x(landXT(mm)), lane: vidx[mm.toId] }); });
     vis.forEach((s, i) => turnsOf(s.id).forEach((t) => { if (inWin(startAt(t))) obstacles.push({ x: x(startAt(t)), lane: i }); }));
 
     // one connector per directed FLOW (A→B): a single line spanning the flow's first
@@ -3452,7 +4330,7 @@ class TimelinePanel {
     Object.keys(flows).forEach((k) => {
       const f = flows[k];
       const sLane = vidx[f.from], rLane = vidx[f.to];
-      const xs = x(Math.max(f.sent, t0)), ys = laneY(sLane), xe = x(f.exec), ye = laneY(rLane), col = colorOf(f.from);
+      const xs = x(Math.max(f.sent, t0)), ys = laneY(sLane), xe = x(f.exec), ye = laneY(rLane), col = colorOf(f.from);   // flows keep mail times: bands aggregate, squares are per-message
       const dir = (ys < ye) ? 1 : -1;
       const track = ye - dir * MSG_DROP;
       const xc = crossX(sLane, rLane, xs, xe, obstacles);
@@ -3466,15 +4344,145 @@ class TimelinePanel {
     // co-highlights both and shows the tooltip; clicking either jumps to where the message LANDED
     // (the recipient's transcript at exec). No longer separate hover/click targets.
     const msgUI = {};   // message index → { hl, dot }, shared across the line + dot passes
-    const msgHtml = (mm) => () => { const col = colorOf(mm.fromId); return '<div class="r"><span class="chip" style="background:' + col + '"></span><span class="who" style="color:' + col + '">' + esc(mm.from) + '</span><span class="ar">→</span><span class="who" style="color:' + colorOf(mm.toId) + '">' + esc(mm.to) + '</span>' + (mm.pending ? ' <span class="k">pending</span>' : '') + '<span class="t">' + clock(mm.sent) + (mm.pending ? ' → …' : ' → ' + clock(mm.exec)) + '</span></div>' + this.body(esc(mm.summary || mm.text || '')); };
+    // tooltip names resolve from the message ROW (the kernel serializes from/to display names),
+    // never from visible lanes — a stub whose counterpart has no lane still names both ends (the
+    // user 2026-08-24). A nameless row falls back to the raw id: information, not an empty span
+    // (the CLI's unmappable-member precedent).
+    const msgHtml = (mm) => () => { const col = colorOf(mm.fromId); return '<div class="r"><span class="chip" style="background:' + col + '"></span><span class="who" style="color:' + col + '">' + esc(mm.from || mm.fromId) + '</span><span class="ar">→</span><span class="who" style="color:' + colorOf(mm.toId) + '">' + esc(mm.to || mm.toId) + '</span>' + (mm.pending ? ' <span class="k">pending</span>' : '') + '<span class="t">' + clock(mm.sent) + (mm.pending ? ' → …' : ' → ' + clock(mm.exec)) + '</span></div>' + this.body(esc(mm.summary || mm.text || '')); };
     const msgNav = (mm) => () => { const an = this.nearestTurnAnchor(mm.toId, execAt(mm)); this._select(mm.toId); this.openChat((an && an.tid) || mm.toId, mm.id || (an && (an.uuid || an.replyUuid)), false, false, execAt(mm)); };   // land on the message's OWN postal card BY ID — the chat matches mm.id to the card's data-mid (the user 2026-06-20); nearest-turn uuid / time only as fallback
+    // OVERLAP HOVER (the user 2026-08-24): message marks stack — several exchanges on one pair, a
+    // stub riding another's track — and the topmost hit swallowed the hover, so the modal named ONE
+    // message where the cursor covered several. Resolve every message element under the point
+    // (elementsFromPoint walks the whole paint stack; every message hit and arrival dot carries its
+    // message index) and show them ALL: one modal, each message its own block, every unit lit
+    // together, oldest first. Capped so a pile-up stays a modal, not a wall. Environments without
+    // elementsFromPoint (bare-node tests, odd hosts) fall back to the hovered message alone —
+    // exactly the old behavior.
+    const MSG_TIP_CAP = 8;
+    const msgHoverSet = (e, selfI) => {
+      const found = new Set([selfI]);
+      try {
+        const doc = (this.svg && this.svg.ownerDocument) || document;
+        if (e && e.clientX != null && doc.elementsFromPoint)
+          for (const n of doc.elementsFromPoint(e.clientX, e.clientY))
+            if (n && n.__tlMsgI != null && data.messages[n.__tlMsgI]) found.add(n.__tlMsgI);
+      } catch (err) { /* fall back to the hovered message alone */ }
+      return Array.from(found).sort((a, b) => (data.messages[a].sent || 0) - (data.messages[b].sent || 0));
+    };
+    const msgSetHtml = (set) => set.slice(0, MSG_TIP_CAP).map((ix, k) =>
+      (k ? '<div style="margin-top:6px;border-top:1px solid #ffffff1f;padding-top:6px">' : '<div>')
+      + msgHtml(data.messages[ix])() + '</div>').join('')
+      + (set.length > MSG_TIP_CAP
+         ? '<div class="k" style="margin-top:4px">+' + (set.length - MSG_TIP_CAP) + ' more messages here</div>' : '');
+    const msgSetLight = (set, on) => set.forEach((ix) => {
+      const u = msgUI[ix];
+      if (!u) return;
+      if (u.hl) u.hl.setAttribute('opacity', (on || u.lit) ? '0.95' : '0');
+      if (u.dot) u.dot.setAttribute('r', (on || u.lit) ? DOT_R + 2 : DOT_R);
+    });
+    // ── HIDDEN-COUNTERPART STUBS (the user 2026-08-24; HORIZONTAL form later the same day — the
+    // angled diagonals fanned out of a busy lane like a starburst and read as noise): a message
+    // whose OTHER endpoint has no visible lane still shows on the lane it does touch, as a
+    // HORIZONTAL line spanning the message's whole flight, x(sent) → x(exec), on a fixed offset
+    // inside the band (clipped BY ARITHMETIC — this file has no
+    // clipPath, keep it that way). The CONVENTION carries the direction, not a slope: an INCOMING
+    // stub rides just ABOVE the lane line and ends at the arrival x, where the dot pass puts the
+    // arrival dot ON the lane — the dot IS the arrival mark; an OUTGOING stub rides just BELOW,
+    // and has NO dot (its recipient's lane is not here to land on — the dot pass never draws for a
+    // hidden recipient by construction). The offset is MSG_DROP, the same track height the full
+    // connectors approach a lane on, so a stub reads as a truncated connector, not a new mark.
+    // TWO-STATE STROKE, keyed on the exec EVENT, never a timer: mm.pending folds in the kernel's
+    // in-flight staleness window (MSG_INFLIGHT_MAX), so it is NOT the key. Exec knowledge is:
+    // hasExec (the logged exec event — kernel serialization, the federation upgrade, or the
+    // midStart join above) OR exec moved off its sent-time fallback (the kernel serializes
+    // exec = sent until a binder writes a real landing; _bind_message_execs' text-heuristic path
+    // binds exec without ever logging an event, so hasExec alone would miss it — and federation
+    // shifts sent and a fallback exec by the same offset, so the comparison survives rebasing).
+    // Exec known → SOLID, it arrived; none → DASHED, still in flight — the pending-connector
+    // idiom. The stroke COLOR is the sender's identity color, the full connectors' own resolution
+    // (the user 2026-08-24: the old state colors at stub alpha read as mud beside sender-colored
+    // connectors — working-yellow at 0.45 was a muddy orange). The faded 0.45 stays, keeping
+    // stubs subordinate to the work bars.
+    const STUB_W = 3;                // a hair over MSG_W0 — a band-edge stroke needs the weight to read
+    const stub = (mm, i, senderVisible) => {
+      const sid = senderVisible ? mm.fromId : mm.toId;
+      const ly = laneY(vidx[sid]);
+      // the LANDING x keys on arrival knowledge — the dash/fade's own event key — never the
+      // kernel's staleness-aged mm.pending: once the aging window flipped pending off, execAt
+      // collapsed to the exec=sent fallback and an un-arrived stub rendered as a ZERO-LENGTH
+      // floating point at the lane offset (the user 2026-08-24, dead-thread mail). Un-arrived
+      // mail spans sent → the LIVE EDGE, dashed, however old; a thread-anchor override is a real
+      // drawn position and keeps priority.
+      const arrived = mm.hasExec || mm.exec !== mm.sent;
+      const landT = arrived ? landXT(mm) : (mm.toThreadT || nowS);
+      let x1, y1, x2, y2;
+      if (senderVisible) {
+        // outgoing: BELOW the lane, the FULL flight span — send x to the landing x, clamped to the
+        // window by arithmetic. The old run cap bounded a 45° diagonal's rise; flattened it shrank
+        // every stub to a ~13px nub (the user 2026-08-24) — the span IS the feature.
+        if (!inWin(sendXT(mm))) return;
+        x1 = x(sendXT(mm)); y1 = ly + MSG_DROP;
+        x2 = Math.max(x1, x(Math.min(landT, t1))); y2 = y1;
+      } else {
+        // incoming: ABOVE the lane, the mirror — the full span into the landing x, the arrival dot
+        // on the lane just beneath it; an off-window send clamps to the window edge
+        if (!inWin(landT)) return;
+        x2 = x(landT); y2 = ly - MSG_DROP;
+        x1 = Math.min(x2, x(Math.max(sendXT(mm), t0))); y1 = y2;
+      }
+      if (x2 - x1 < 2) x2 = x1 + 2;   // a same-instant consume is real but must never render as a
+      //                                 floating point — two px keeps the mark a mark
+      // the RISER (the user 2026-08-24, third stub round): the vertical limb tying the track to the
+      // WORK BAR itself — the full connectors' elbow grammar as a half-elbow; without it the
+      // horizontal stubs read as floating lines. OUTGOING: bar → track at the SEND x (the early
+      // return above guarantees the true, unclamped x — the message visibly leaves the work).
+      // INCOMING: track → bar at the ARRIVAL x, meeting the arrival dot — only when the message
+      // actually ARRIVED: an un-arrived stub has no arrival to tie to, and a clamped/live-edge x
+      // would tie it to a false one, so the riser is skipped rather than drawn at a lie.
+      // ONE PATH per stub (the user 2026-08-24, round 4): riser + track as separate <line>s
+      // double-painted their overlap corner at the 0.45 alpha — a visibly darker joint — where the
+      // full connectors draw one <path> and read contiguous. Same idiom here: the half-elbow is a
+      // single stroke (round linejoin like theirs); a riser-less stub (un-arrived incoming — the
+      // 632 false-x guard) is simply a one-segment path.
+      const d = senderVisible
+        ? 'M ' + x1 + ' ' + ly + ' L ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y1
+        : (arrived ? 'M ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y1 + ' L ' + x2 + ' ' + ly
+                   : 'M ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y1);
+      const col = colorOf(mm.fromId);   // the SENDER's color — the full connectors' own resolution
+      const attrs = { d, fill: 'none', stroke: col, 'stroke-width': STUB_W, opacity: 0.45,
+                      'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'pointer-events': 'none' };
+      if (!arrived) attrs['stroke-dasharray'] = '1 4';   // in flight — the pending-connector dash (same key as the span)
+      svg.appendChild(el('path', attrs));
+      // same affordances as a full connector: own-color highlight overlay + wide transparent hit —
+      // the SAME path each, so highlight and hover cover the whole half-elbow as one unit —
+      // co-lit with the arrival dot (PASS 2 links via msgUI), tooltip + click → where it landed
+      const msgLit = dagOrHoverMsg(mm.id);
+      const hl = el('path', { d, fill: 'none', stroke: col, 'stroke-width': STUB_W + 3, opacity: msgLit ? 0.95 : 0,
+                              'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'pointer-events': 'none' });
+      svg.appendChild(hl);
+      const u = (msgUI[i] = { hl, dot: null, lit: msgLit });
+      const hit = el('path', { d, fill: 'none', stroke: 'transparent', 'stroke-width': MSG_HIT_W,
+                               'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
+      hit.style.cursor = 'pointer';
+      const mEnter = (e) => { u.hoverSet = msgHoverSet(e, i); msgSetLight(u.hoverSet, true); this.showTip(msgSetHtml(u.hoverSet), e); };
+      const mLeave = () => { msgSetLight(u.hoverSet || [i], false); u.hoverSet = null; this.hideTip(); };
+      hit.__tlMsgI = i;                            // the overlap resolver's key (msgHoverSet)
+      hit.__tlHoverIn = mEnter;                    // re-armable after a redraw rebuilds this stub (_rehover)
+      hit.addEventListener('mouseenter', mEnter);
+      hit.addEventListener('mousemove', (e) => this.moveTip(e));
+      hit.addEventListener('mouseleave', mLeave);
+      hit.addEventListener('click', msgNav(mm));
+      u.hit = hit;   // appended in PASS 3 with the connector hits, over the dots
+    };
     // PASS 1: connector line + highlight (drawn first so the dots sit on top).
     data.messages.forEach((mm, i) => {
-      if (vidx[mm.fromId] == null || vidx[mm.toId] == null) return;
-      if (execAt(mm) < t0 || mm.sent > t1) return;
+      const sVis = vidx[mm.fromId] != null, rVis = vidx[mm.toId] != null;
+      if (sVis !== rVis) { stub(mm, i, sVis); return; }   // exactly one endpoint visible → a band-edge stub
+      if (!sVis) return;                                  // both endpoints hidden → nothing to draw
+      if (landXT(mm) < t0 || sendXT(mm) > t1) return;
       const sLane = vidx[mm.fromId], rLane = vidx[mm.toId];
-      const offL = mm.sent < t0;   // sent BEFORE the visible window — only the delivery is in view
-      const xs = x(offL ? t0 : mm.sent), ys = laneY(sLane), xe = x(execAt(mm)), ye = laneY(rLane), col = colorOf(mm.fromId);
+      const offL = sendXT(mm) < t0;   // sent BEFORE the visible window — only the delivery is in view
+      const xs = x(offL ? t0 : sendXT(mm)), ys = laneY(sLane), xe = x(landXT(mm)), ye = laneY(rLane), col = colorOf(mm.fromId);
       const dir = (ys < ye) ? 1 : -1, track = ye - dir * MSG_DROP;
       const xc = crossX(sLane, rLane, xs, xe, obstacles);
       // An off-window send used to CLAMP to the left edge and hug the sender's lane all the way to the
@@ -3485,8 +4493,14 @@ class TimelinePanel {
                 : (xc > xs + 0.5) ? [{ x: xs, y: ys }, { x: xc, y: ys }, { x: xc, y: track }, { x: xe, y: track }, { x: xe, y: ye }]
                                   : [{ x: xs, y: ys }, { x: xs, y: track }, { x: xe, y: track }, { x: xe, y: ye }];
       const d = roundedPath(pts, CORNER);
-      const lineAttr = { d, fill: 'none', stroke: col, 'stroke-width': MSG_W0, opacity: mm.pending ? 0.4 : 0.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
-      if (mm.pending) lineAttr['stroke-dasharray'] = '1 4';
+      // dash + fade key on EXEC KNOWLEDGE — the stubs' exact event key (the user 2026-08-24: the
+      // connector dashed on the kernel's staleness-aged mm.pending, so the same stale message
+      // flipped solid/dashed whenever a lane filter toggled it between connector and stub form;
+      // exact events over time heuristics). mm.pending stays for what it truthfully says: execAt's
+      // live-edge x and the tooltip's "pending → …" wording.
+      const arrived = mm.hasExec || mm.exec !== mm.sent;
+      const lineAttr = { d, fill: 'none', stroke: col, 'stroke-width': MSG_W0, opacity: arrived ? 0.5 : 0.4, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+      if (!arrived) lineAttr['stroke-dasharray'] = '1 4';
       svg.appendChild(el('path', lineAttr));
       // A connector in the focused journey (DAG card hover) or the hovered subtree's delegation messages
       // lights EXACTLY like its native hover: the own-color highlight overlay at full strength — no white
@@ -3504,11 +4518,12 @@ class TimelinePanel {
       // and a wider stroke so a short vertical (an immediately-delivered message is almost ALL vertical)
       // is still an easy target.
       const hit = el('path', { d, fill: 'none', stroke: 'transparent', 'stroke-width': MSG_HIT_W, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }); hit.style.cursor = 'pointer';
-      const mEnter = (e) => { hl.setAttribute('opacity', '0.95'); if (u.dot) u.dot.setAttribute('r', DOT_R + 2); this.showTip(msgHtml(mm)(), e); };
+      const mEnter = (e) => { u.hoverSet = msgHoverSet(e, i); msgSetLight(u.hoverSet, true); this.showTip(msgSetHtml(u.hoverSet), e); };
+      hit.__tlMsgI = i;                            // the overlap resolver's key (msgHoverSet)
       hit.__tlHoverIn = mEnter;                    // re-armable after a redraw rebuilds this path (_rehover)
       hit.addEventListener('mouseenter', mEnter);
       hit.addEventListener('mousemove', (e) => this.moveTip(e));
-      hit.addEventListener('mouseleave', () => { hl.setAttribute('opacity', msgLit ? '0.95' : '0'); if (u.dot) u.dot.setAttribute('r', msgLit ? DOT_R + 2 : DOT_R); this.hideTip(); });
+      hit.addEventListener('mouseleave', () => { msgSetLight(u.hoverSet || [i], false); u.hoverSet = null; this.hideTip(); });
       hit.addEventListener('click', msgNav(mm));
       u.hit = hit;
     });
@@ -3516,13 +4531,20 @@ class TimelinePanel {
     // dot helper: optional onClick (deep-link) + optional linkedHl (co-light a connector on hover).
     // lit = cross-hover focus (feed-card hover / DAG journey): drawn GROWN in its own color — the same
     // growth the native hover applies, no white ring (the user 2026-07-17) — and mouseleave restores it.
-    const dot = (cx, cy, color, html, onClick, linkedHl, lit) => {
+    const dot = (cx, cy, color, html, onClick, linkedHl, lit, msgI) => {
       const c = el('circle', { cx, cy, r: lit ? DOT_R + 2 : DOT_R, fill: color, stroke: '#e8eef5', 'stroke-width': 0.75 }); c.style.cursor = onClick ? 'pointer' : 'default';   // thinner white border on EVERY dot — romp + user (the user 2026-06-23)
-      const dEnter = (e) => { c.setAttribute('r', DOT_R + 2); if (linkedHl) linkedHl.setAttribute('opacity', '0.95'); this.showTip(html(), e); };
+      // a MESSAGE dot (msgI) hovers as its whole overlap set — stacked arrivals on one lane x are
+      // the commonest pile-up of all; a non-message dot keeps the plain single tooltip
+      const dEnter = (msgI != null)
+        ? (e) => { const u0 = msgUI[msgI] || (msgUI[msgI] = { hl: linkedHl, dot: c, lit }); u0.hoverSet = msgHoverSet(e, msgI); msgSetLight(u0.hoverSet, true); c.setAttribute('r', DOT_R + 2); this.showTip(msgSetHtml(u0.hoverSet), e); }
+        : (e) => { c.setAttribute('r', DOT_R + 2); if (linkedHl) linkedHl.setAttribute('opacity', '0.95'); this.showTip(html(), e); };
       c.__tlHoverIn = dEnter;                      // re-armable after a redraw rebuilds this dot (_rehover)
+      if (msgI != null) c.__tlMsgI = msgI;         // the overlap resolver's key (msgHoverSet)
       c.addEventListener('mouseenter', dEnter);
       c.addEventListener('mousemove', (e) => this.moveTip(e));
-      c.addEventListener('mouseleave', () => { c.setAttribute('r', lit ? DOT_R + 2 : DOT_R); if (linkedHl) linkedHl.setAttribute('opacity', lit ? '0.95' : '0'); this.hideTip(); });
+      c.addEventListener('mouseleave', (msgI != null)
+        ? () => { const u0 = msgUI[msgI]; msgSetLight((u0 && u0.hoverSet) || [msgI], false); if (u0) u0.hoverSet = null; c.setAttribute('r', lit ? DOT_R + 2 : DOT_R); this.hideTip(); }
+        : () => { c.setAttribute('r', lit ? DOT_R + 2 : DOT_R); if (linkedHl) linkedHl.setAttribute('opacity', lit ? '0.95' : '0'); this.hideTip(); });
       if (onClick) c.addEventListener('click', onClick);
       svg.appendChild(c);
       return c;
@@ -3532,10 +4554,10 @@ class TimelinePanel {
     // co-highlight and share the click. A dot whose sender lane is off-screen has no connector but
     // is still its own hoverable/clickable target.
     data.messages.forEach((mm, i) => {
-      if (vidx[mm.toId] == null || !inWin(execAt(mm))) return;
+      if (vidx[mm.toId] == null || !inWin(landXT(mm))) return;
       const col = colorOf(mm.fromId), cy = laneY(vidx[mm.toId]);
       const u = msgUI[i];
-      const c = dot(x(execAt(mm)), cy, col, msgHtml(mm), msgNav(mm), u && u.hl, dagOrHoverMsg(mm.id));
+      const c = dot(x(landXT(mm)), cy, col, msgHtml(mm), msgNav(mm), u && u.hl, dagOrHoverMsg(mm.id), i);
       if (u) u.dot = c;
     });
 
@@ -3690,7 +4712,7 @@ class TimelinePanel {
 
     // 🔒 lock-to-now padlock at the now-edge (replaces the old toolbar checkbox, the user 2026-06-26)
     this._drawLockToggle(svg, lockCx, axisY);
-    this._drawViewsTrigger(svg, axisY);
+    this._renderCornerBar();
 
     // The svg is fully rebuilt above — restore the hover the rebuild just swallowed, so a tip under a
     // stationary cursor comes up at once instead of waiting for the next mouse move (see _rehover).
@@ -3808,4 +4830,4 @@ class TimelinePanel {
   body(s) { return s ? '<div class="b">' + s + '</div>' : ''; }
 }
 
-module.exports = { TimelinePanel, badgeFor, roundedPath, crossX, workAnchorOf, idleGaps, fmtSpan, dotLit, barLit, interpNow, shouldReanchorEdge, reanchorEdge, isFreshNowSample, barEndT, dragAxis, stripRompMarks, collapseRepeat, reqText, menuTop, offsetRect, viewVisible, viewLabel, viewMoreCount, viewToggleHidden, viewToggleMember };
+module.exports = { TimelinePanel, badgeFor, roundedPath, crossX, workAnchorOf, idleGaps, fmtSpan, dotLit, barLit, interpNow, shouldReanchorEdge, reanchorEdge, isFreshNowSample, barEndT, dragAxis, stripRompMarks, collapseRepeat, reqText, menuTop, offsetRect, viewVisible, viewLabel, viewMoreCount, viewToggleMember, viewTagUnion, lensAll, lensToggle, lensVisible, lensLabel, timelineLens };

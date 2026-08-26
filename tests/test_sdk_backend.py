@@ -183,12 +183,17 @@ class _ToolUseBlock:
 class _AssistantMessage:
     def __init__(self, content, model="claude-x", uuid="a1", stop_reason="end_turn"):
         self.content, self.model, self.uuid, self.stop_reason = content, model, uuid, stop_reason
+class _ToolResultBlock:
+    def __init__(self, tool_use_id, content="", is_error=False):
+        self.tool_use_id, self.content, self.is_error = tool_use_id, content, is_error
 class _UserMessage:
-    def __init__(self, content, uuid="u1"): self.content, self.uuid = content, uuid
+    def __init__(self, content, uuid="u1", tool_use_result=None):
+        self.content, self.uuid, self.tool_use_result = content, uuid, tool_use_result
 class _ResultMessage:
     uuid = "r1"
 # rename so type(...).__name__ matches what msg_to_atom checks
 _TextBlock.__name__ = "TextBlock"; _ToolUseBlock.__name__ = "ToolUseBlock"
+_ToolResultBlock.__name__ = "ToolResultBlock"
 _AssistantMessage.__name__ = "AssistantMessage"; _UserMessage.__name__ = "UserMessage"
 _ResultMessage.__name__ = "ResultMessage"
 
@@ -212,6 +217,50 @@ class LiveTail(unittest.TestCase):
         self.assertEqual(a["message"]["content"], [{"type": "text", "text": "hello"}])
         self.assertIsNone(sb.msg_to_atom(_ResultMessage(), "s", "f", 5))   # result has no renderable content
         self.assertIsNone(sb.msg_to_atom(_AssistantMessage([]), "s", "f", 5))  # empty content → None
+
+    def test_tool_result_atom_carries_the_structured_tooluseresult(self):
+        # The SDK's UserMessage exposes the record-level structured result (the CLI streams the
+        # transcript record's toolUseResult on the wire as `tool_use_result`; the SDK parser maps it
+        # onto UserMessage.tool_use_result — verified against claude-agent-sdk 0.2.132 / CLI 2.1.224).
+        # The live atom must carry it exactly like the file adapter's atom does, or a JUST-answered
+        # AskUserQuestion renders via the lossy regex scrape until the disk record is parsed, and
+        # Edit's diffRows lag a parse behind the stream.
+        tur = {"questions": ["Pick a color"], "answers": {"Pick a color": "Blue"}}
+        m = _UserMessage([_ToolResultBlock("t1", "answered")], tool_use_result=tur)
+        a = sb.msg_to_atom(m, "s", "f", 5)
+        self.assertEqual(a["type"], "user")
+        self.assertEqual(a["toolUseResult"], tur)
+        self.assertEqual(a["message"]["content"][0]["type"], "tool_result")
+
+    def test_string_tooluseresult_is_not_carried(self):
+        # A dismissed picker records toolUseResult as a plain STRING — dict form only, the same gate
+        # as the file adapter (no consumer reads the string form).
+        m = _UserMessage([_ToolResultBlock("t1", "dismissed", is_error=True)],
+                         tool_use_result="dismissed the questions")
+        a = sb.msg_to_atom(m, "s", "f", 5)
+        self.assertNotIn("toolUseResult", a)
+
+    def test_tooluseresult_without_a_tool_result_block_is_not_carried(self):
+        # The file adapter's other gate: only an atom that carries a tool_result block may carry the
+        # record-level dict — a text-only message never does.
+        m = _UserMessage([_TextBlock("hello")], tool_use_result={"x": 1})
+        a = sb.msg_to_atom(m, "s", "f", 5)
+        self.assertNotIn("toolUseResult", a)
+
+    def test_an_unconsumed_shape_is_not_carried(self):
+        # The consumed-keys gate: a Read result's dict embeds the WHOLE read file, and nothing
+        # reads it off the atom — carrying every dict held ~a fifth of transcript bytes in the
+        # parse cache by reference. Only the consumed shapes ride (answers, structuredPatch).
+        m = _UserMessage([_ToolResultBlock("t9", "file contents…")],
+                         tool_use_result={"type": "text", "file": {"content": "x" * 512}})
+        a = sb.msg_to_atom(m, "s", "f", 5)
+        self.assertNotIn("toolUseResult", a)
+
+    def test_the_consumed_key_set_cannot_drift_from_the_file_adapter_s(self):
+        # sdk_backend loads standalone (no event-model import), so the set is MIRRORED — this pin
+        # is what keeps the two halves widening together.
+        em2 = SourceFileLoader("romp_event_model_drift", os.path.join(BIN, "romp-event-model")).load_module()
+        self.assertEqual(sb.TUR_CONSUMED_KEYS, em2.TUR_CONSUMED_KEYS)
 
     def test_command_stdout_stream_becomes_a_turn_ENDING_assistant_atom(self):
         # the user 2026-07-02: client.set_model() makes the CLI stream its feedback as a UserMessage
@@ -1836,12 +1885,69 @@ class SpendRecord(unittest.TestCase):
         self.assertLessEqual(len(kept), 90)
         self.assertIn(self._today(), kept)
 
+    def test_by_sid_attribution_with_keyed_split(self):
+        # T100 (the nightly optimizer's accepted ask): key-billed cost PER SESSION. Two sids, one
+        # keyed and one login — the bucket totals stay whole, and each sid carries its own keyed
+        # dimension. Private synthetic sids (the goal-store fixture rule).
+        self.be._record_spend(0.02, {"input_tokens": 100, "output_tokens": 40}, keyed=True,
+                              sid="aaaa1111-spend-attr-1")
+        self.be._record_spend(0.03, {"input_tokens": 10, "output_tokens": 5}, keyed=False,
+                              sid="aaaa1111-spend-attr-2")
+        self.be._record_spend(0.05, {"input_tokens": 1, "output_tokens": 1}, keyed=True,
+                              sid="aaaa1111-spend-attr-1")
+        d = json.loads(self.p.read_text())["days"][self._today()]
+        self.assertAlmostEqual(d["usd"], 0.10)
+        by = d["bySid"]
+        s1, s2 = by["aaaa1111-spend-attr-1"], by["aaaa1111-spend-attr-2"]
+        self.assertAlmostEqual(s1["usd"], 0.07)
+        self.assertEqual((s1["turns"], s1["tok"]), (2, 142))
+        self.assertAlmostEqual(s1["key"]["usd"], 0.07, msg="the keyed split rides the sid — the optimizer's dimension")
+        self.assertEqual((s1["key"]["turns"], s1["key"]["tok"]), (2, 142))
+        self.assertAlmostEqual(s2["usd"], 0.03)
+        self.assertNotIn("key", s2, "a login-only sid carries no keyed split — its cost is dollars nobody is billed")
+        h = json.loads(self.p.read_text())["hours"][time.strftime("%Y-%m-%dT%H")]
+        self.assertAlmostEqual(h["bySid"]["aaaa1111-spend-attr-1"]["usd"], 0.07, msg="the hour buckets attribute too")
+
+    def test_legacy_rows_and_sidless_folds_stay_lossless(self):
+        # a pre-T100 bucket (no bySid) folds cleanly, and a sid-less fold never drops attribution
+        # already there (lossless legacy, the T18 discipline)
+        self.p.write_text(json.dumps({"days": {self._today(): {"usd": 1.0, "turns": 3}}}))
+        self.be._record_spend(0.02, keyed=True, sid="aaaa1111-spend-attr-3")
+        d = json.loads(self.p.read_text())["days"][self._today()]
+        self.assertAlmostEqual(d["usd"], 1.02)
+        self.assertAlmostEqual(d["bySid"]["aaaa1111-spend-attr-3"]["usd"], 0.02,
+                               msg="attribution begins mid-history without touching the legacy totals")
+        self.be._record_spend(0.01)   # a sid-less caller
+        d = json.loads(self.p.read_text())["days"][self._today()]
+        self.assertAlmostEqual(d["usd"], 1.03)
+        self.assertAlmostEqual(d["bySid"]["aaaa1111-spend-attr-3"]["usd"], 0.02,
+                               msg="the sid-less fold carried the existing bySid forward")
+
+    def test_by_sid_prunes_with_its_bucket(self):
+        # the maps live INSIDE the buckets, so the 90d prune takes them with it — no second ledger
+        # to sweep and no orphaned attribution
+        days = {"2020-04-%02d" % (i % 30 + 1): {"usd": 1, "turns": 1,
+                                                "bySid": {"aaaa1111-spend-attr-4": {"usd": 1, "turns": 1, "tok": 0}}}
+                for i in range(30)}
+        days.update({"2020-%02d-01" % (m + 1): {"usd": 1, "turns": 1} for m in range(12)})
+        days.update({"2021-%02d-01" % (m + 1): {"usd": 1, "turns": 1} for m in range(12)})
+        days.update({"2022-%02d-%02d" % (m + 1, d + 1): {"usd": 1, "turns": 1}
+                     for m in range(12) for d in range(4)})
+        self.assertGreater(len(days), 90, "the fixture really overflows the window")
+        self.p.write_text(json.dumps({"days": days}))
+        self.be._record_spend(0.01, sid="aaaa1111-spend-attr-5")
+        kept = json.loads(self.p.read_text())["days"]
+        self.assertLessEqual(len(kept), 90)
+        self.assertIn(self._today(), kept)
+        self.assertNotIn("2020-04-01", kept, "the oldest bucket left — and its bySid map with it, atomically")
+        self.assertIn("bySid", kept[self._today()])
+
     def test_result_message_records_and_the_kernel_serves_it(self):
         src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
                                 "kernel", "sdk_backend.py")).read()
-        self.assertIn("self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth)", src,
+        self.assertIn("self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth, sid=self.sid)", src,
                       "the settle folds THIS turn's DELTAS — cost AND tokens are cumulative per process — "
-                      "tagged with the session's own auth so the API sum stays honest on a mixed host")
+                      "tagged with the session's own auth AND its sid (T100: per-session attribution)")
         self.assertIn("self._last_cost_total = 0.0   # a fresh CLI process starts its cumulative cost at zero",
                       src, "each connect resets the watermark with its new process")
         self.assertIn("self._last_usage_totals = {}  # …and its cumulative token counters", src,

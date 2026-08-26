@@ -57,9 +57,9 @@ test("sending with a GOAL citation routes as an askFollowUp (reopen) and consume
   // the three routing branches live in routeUserMessage since the staged flush (2026-08-15) — ONE
   // owner for the live send and the staged release; deliver feeds it activeId as the sid
   assert.match(RENDER, /const cites = composerCitations\.get\(activeId\);/);
-  assert.match(RENDER, /routeUserMessage\(activeId, text, cites\);/);
-  assert.match(RENDER, /if \(goalCite\?\.itemId\) vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\);/);
-  assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text \}\); registerOptimistic\(sid, text\); \}/);
+  assert.match(RENDER, /routeUserMessage\(activeId, text, cites, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/);   // + the echo's thumbnail paths (2026-08-25)
+  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
+  assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
   assert.match(RENDER, /if \(cites\) \{ composerCitations\.delete\(activeId\); renderComposerChips\(activeId\); \}/);
 });
 
@@ -71,8 +71,8 @@ test("a citation follow-up carries its SID, so a reply to a REMOTE card reaches 
   // sid from the itemId, owns no such session, and hands it to tmux by uuid — dropped in silence. The card
   // still flashed to Working (the kernel's cardPredict fires before any of that) and snapped back on the
   // ok:false ack, so the only visible trace was a bounce.
-  assert.match(RENDER, /if \(goalCite\?\.itemId\) vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\);/);
-  assert.match(RENDER, /routeUserMessage\(activeId, text, cites\);/);   // deliver's sid IS the active session
+  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
+  assert.match(RENDER, /routeUserMessage\(activeId, text, cites, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/);   // deliver's sid IS the active session
   // every OTHER card-addressed op already routes this way — the citation follow-up was the lone omission
   assert.match(FEED, /type: "askClear", itemId: it\.itemId, sid: it\.sid/);
   assert.match(FEED, /type: "askFollowUp", itemId: tgt \? tgt\.itemId : fbId, title: tgt \? tgt\.title : fbTitle, text: txt, sid: fbSid/);
@@ -139,8 +139,13 @@ test("⌘-selecting another piece of text ADDS a context below the held ones (th
   assert.match(seeder, /else \{ list\.length = 0; idx = 0; \}/);
   // flavors never mix: any quote seed drops a goal chip (the send routes goal XOR quotes)
   assert.match(seeder, /\.filter\(\(c\) => !c\.itemId\)/);
-  // the second chip sits BELOW the first: the strip stacks (flex column), one chip per row
-  assert.match(CSS, /#composer-chips \{ flex: 1 1 100%; display: flex; flex-direction: column; align-items: flex-start/);
+  // chips wrap in rows and the Stage button rides the end of the LAST row — never alone on its own
+  // line (the user 2026-08-25, screenshot: the old column layout wrapped Stage beneath a wide chip)
+  assert.match(CSS, /#composer-chips \{ flex: 1 1 100%; display: flex; flex-flow: row wrap; align-items: center/);
+  // the room beside the last chip is GUARANTEED: every chip cedes the Stage button's footprint,
+  // ellipsizing sooner rather than pushing Stage to wrap; the edit pill (no Stage) keeps the full row
+  assert.match(CSS, /max-width: calc\(100% - 64px\);/);
+  assert.match(CSS, /\.composer-chip-edit \{ max-width: 100%; \}/);
   // Backspace-at-start eats the NEWEST chip first, one per press
   assert.match(RENDER, /list\.splice\(idx == null \? list\.length - 1 : idx, 1\);/);
   // the persisted state restores a LIST, and still accepts the pre-stack single-object form
@@ -197,11 +202,15 @@ test("closing a session clears its composer reply context — chip, draft, and e
 });
 
 test("quote chips send a plain message wrapped by quoteReplyBody — never askFollowUp (no goal to reopen)", () => {
-  assert.match(RENDER, /if \(goalCite\?\.itemId\) vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\);/);
-  assert.match(RENDER, /else if \(quoteCites\.length\) vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text: quoteReplyBody\(quoteCites, text\) \}\);/);
+  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
+  // the quote branch echoes the COMPOSED body — byte-identical to what lands, so the reconcile's
+  // includes() match is exact (the user 2026-08-23, whose quoted sends painted nothing until the
+  // kernel round-tripped while plain sends painted instantly)
+  assert.match(RENDER, /else if \(quoteCites\.length\) \{ const body = quoteReplyBody\(quoteCites, text\); vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text: body \}\); registerOptimistic\(sid, body, imgPaths\); \}/);
   // the wrap: one section per stacked chip (lead-in + the highlighted text as a markdown quote block), in
   // strip order, then the typed message — a single chip composes byte-identically to the pre-stack form
-  assert.match(RENDER, /return sections\.join\("\\n\\n"\) \+ "\\n\\n" \+ text;/);
+  // a context-only body (staged with an empty box) carries no dangling blank tail
+  assert.match(RENDER, /return text \? sections\.join\("\\n\\n"\) \+ "\\n\\n" \+ text : sections\.join\("\\n\\n"\);/);
   // the chip's audit preview shows the SAME composed body — the whole outgoing message, every stacked
   // quote, whichever chip was clicked — client-side (no /followup-preview fetch)
   assert.match(RENDER, /body\.textContent = quoteReplyBody\(cites\.filter\(\(c\) => c\.quote\), draft \|\| "\(your message\)"\);/);
@@ -209,18 +218,45 @@ test("quote chips send a plain message wrapped by quoteReplyBody — never askFo
   assert.match(RENDER, /mark\.textContent = cite\.quote \? "“" : "↩";/);
 });
 
-test("right-click Reply drops the auto-seeded quote chip — the quote is in the composer now, never sent twice", () => {
-  // the selection that opened the context menu also seeded a chip (selectionchange); quoting it into the
-  // composer text must consume THAT chip — the newest, the one this gesture made — or the send would wrap
-  // an already-quoted message again. Earlier stacked contexts stay.
-  assert.match(RENDER, /if \(list\?\.length && list\[list\.length - 1\]\.quote\) \{\s*\n\s*list\.pop\(\);/);
+test("context stages ALONE, and the chips strip carries the visible Stage button AFTER the chips", () => {
+  // the user 2026-08-23: nobody discovers ⌘⏎ on their own. Select a passage → the chip appears with
+  // a Stage button; press it (or ⌘⏎) with an EMPTY box and just the context stages — repeat, then
+  // one typed message flushes the whole run. The button lives in the chips strip, so it exists
+  // exactly while context is held and vanishes with it. MOVED 2026-08-24: it now sits immediately
+  // AFTER the context chip(s) it acts on — right-justified it floated detached and its meaning
+  // didn't read — so the DOM appends it after the cites loop and the CSS drops the absolute pin.
+  assert.match(RENDER, /if \(!typed && !\(composerCitations\.get\(activeId\) \|\| \[\]\)\.some\(\(c\) => c\.quote\)\) return;/,
+    "empty box + a quote chip is stageable; empty box + nothing is not");
+  assert.match(RENDER, /fireStage = \(\) => stageComposer\(\);/, "the strip's door into the composer closure");
+  assert.match(RENDER, /const st = el\("button", "composer-stage-btn"\) as HTMLButtonElement;/);
+  // DOM order: chips loop first, then the button — adjacency is the point of the move
+  const loop = RENDER.indexOf("cites.forEach((cite, i) => {");
+  const btn = RENDER.indexOf('el("button", "composer-stage-btn")');
+  assert.ok(loop >= 0 && btn > loop, "the Stage button is appended AFTER the context chips");
+  // neutral at rest (the user 2026-08-23): an accent outline beside the accent-blue chips read as
+  // already-pressed. Rest = the button family's dress; the accent appears only on hover.
+  assert.match(CSS, /\.composer-stage-btn \{ background: rgba\(255, 255, 255, 0\.06\);\n\s*border: 1px solid var\(--box-border\); color: var\(--dim\);/);
+  assert.match(CSS, /\.composer-stage-btn:hover \{ border-color: var\(--accent\); color: var\(--accent\); background: var\(--accent-wash\); \}/);   // the feed word-button hover (2026-08-25)
+  assert.doesNotMatch(CSS, /\.composer-stage-btn \{ position: absolute/,
+    "no absolute pin — the button flows in the strip, immediately after what it acts on");
+  assert.match(RENDER, /st\.title = "hold this context \(and anything typed\) for one combined send later — ⌘⏎ does the same";/);
+  assert.match(RENDER, /label\.textContent = s\.text \|\| "\(context only — sends with your message\)";/,
+    "a context-only staged row says what it is");
+});
+
+test("Quote is the chip, and only the chip — the in-box blockquote form is gone", () => {
+  // the user 2026-08-23, consolidating the three verbs by removal: selecting already seeds the chip,
+  // so the menu item just focuses the composer. No inserter, no chip dedup, nothing to double-send.
+  assert.doesNotMatch(RENDER, /quoteSelectionIntoComposer/);
+  assert.match(RENDER, /mk\("Quote", \(\) => \{ \(document\.getElementById\("composer-input"\) as HTMLTextAreaElement \| null\)\?\.focus\(\); \}\);/);
 });
 
 test("a VS Code EDITOR highlight seeds the same chip, labeled + wrapped with its file:lines origin (the user 2026-07-13)", () => {
   // the extension host posts editorSelection {text, src} on onDidChangeTextEditorSelection (see
   // vscode-extension/src editor-selection pins); the webview seeds the quote chip from it
-  assert.match(RENDER, /m\.type === "editorSelection" && typeof m\.text === "string" && m\.text\.trim\(\) && activeId/);
-  assert.match(RENDER, /seedEditorQuote\(activeId, m\.text, typeof m\.src === "string" \? m\.src : undefined\);/);
+  assert.match(RENDER, /m\.type === "editorSelection" && typeof m\.text === "string" && m\.text\.trim\(\)/);
+  // the FILE VIEWER posts this shape with a sid, which wins over activeId (file-view.test.ts pins that)
+  assert.match(RENDER, /seedEditorQuote\(to, m\.text, typeof m\.src === "string" \? m\.src : undefined\);/);
   // the editor's highlight owns ONE chip: a cursor move updates it in place, never wiping stacked
   // transcript quotes beside it; absent, it appends below them (the user 2026-08-04)
   assert.match(RENDER, /const i = list\.findIndex\(\(c\) => !!c\.src\);\s*\n\s*if \(i >= 0\) list\[i\] = chip; else list\.push\(chip\);/);

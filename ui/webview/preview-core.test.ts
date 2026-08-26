@@ -15,7 +15,7 @@ const PREVIEW = fs.readFileSync(path.join(UI, "preview.ts"), "utf8");
 const CHAT_CSS = fs.readFileSync(path.join(UI, "styles.css"), "utf8");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "bin", "romp-kernel"), "utf8");
 
-test("preview.ts: kind classification, kernel /file URL, and self-removing renders", () => {
+test("preview.ts: kind classification, kernel /file URL, and hide-but-heal unverified renders", () => {
   // the client's renderable-extension list must stay in step with the kernel's _PREVIEW_MIME
   assert.match(PREVIEW, /IMG_EXT = new Set\(\["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"\]\)/);
   assert.match(KERNEL, /_PREVIEW_MIME = dict\(_IMG_MIME, \*\*\{"\.pdf": "application\/pdf"\}\)/,
@@ -28,10 +28,11 @@ test("preview.ts: kind classification, kernel /file URL, and self-removing rende
   assert.match(PREVIEW, /"\/remote\/" \+ encodeURIComponent\(host\) \+ "\/file"/);
   // web dashboard only: the VS Code webview can't reach the kernel origin from an <img>
   assert.match(PREVIEW, /location\.protocol === "http:" \|\| location\.protocol === "https:"/);
-  // an UNVERIFIED render the kernel can't serve REMOVES ITSELF (no dead chips): img onerror, pdf HEAD
-  // probe. Kernel-VERIFIED paths keep a visible retry chip instead — chat-inline-preview.test.ts pins that.
-  assert.match(PREVIEW, /if \(!verified\) \{ box\.remove\(\); return; \}/);
-  assert.match(PREVIEW, /if \(!verified\) fetch\(fileUrl\(path, sid\), \{ method: "HEAD" \}\)\.then\(\(r\) => \{ if \(!r\.ok\) box\.remove\(\); \}\)\.catch\(\(\) => box\.remove\(\)\)/);
+  // an UNVERIFIED render the kernel can't serve HIDES itself but stays HEALABLE (2026-08-24; it
+  // used to remove itself permanently — no dead chips, but also no recovery until a send re-rendered
+  // the turn). Kernel-VERIFIED paths keep the visible retry chip — chat-inline-preview.test.ts.
+  assert.match(PREVIEW, /if \(!verified\) box\.style\.display = "none";/);
+  assert.match(PREVIEW, /box\.style\.display = "none"; failedPreviews\.set\(box, probe\);/);
   assert.match(KERNEL, /if p == "\/file":/, "the preview bytes endpoint exists");
   assert.match(KERNEL, /def do_HEAD\(self\):/, "HEAD probe for chips that can't self-verify like an <img>");
 });
@@ -47,11 +48,11 @@ test("chat: a mentioned image/PDF grows a FULL render at its mention, deduped an
   // (the user 2026-07-20: full renders replaced the 2026-07-08 thumbnails in the chat; the user
   // 2026-08-15: figures moved from a tail strip to the mentioning block —
   // chat-inline-preview.test.ts pins the placement shape)
-  assert.match(RENDER, /import \{ previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews \} from "\.\/preview";/);
+  assert.match(RENDER, /import \{ previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal \} from "\.\/preview";/);
   assert.match(RENDER, /if \(previewKind\(open\) && !previewable\.includes\(open\) && !\(skipThumbs && skipThumbs\.includes\(open\)\)\) \{/, "collected while linkifying — same detection, no second regex pass; an in-bubble image never re-renders");
   assert.match(RENDER, /if \(previewable\.length\) \{/, "both surfaces now — VS Code images ride the host data-URL flow");
   assert.match(RENDER, /previewable\.slice\(0, 4\)/, "capped so a directory listing doesn't wallpaper the chat");
-  assert.match(RENDER, /previewFull\(p, activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)/, "relative paths resolve against the ACTIVE session's cwd, as openPathLink; verified paths fail loudly");
+  assert.match(RENDER, /previewFull\(p, renderingOwnerSid \?\? activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)/, "URLs bake the OWNING session's id — a background build must never capture activeId; verified paths fail loudly");
 });
 
 test("the chat sheet carries the lightbox + preview styles (the feed sheet carries its own)", () => {
