@@ -6327,8 +6327,13 @@ class CompactSessionRoute(unittest.TestCase):
 class TmuxInject(unittest.TestCase):
     def test_tmux_send_sequence(self):
         calls = []
+        # An EMPTY prompt box (the box sits between the last two ─── rules): the send's clear reads it,
+        # finds nothing to kill, and goes straight to the paste. A capture the send cannot PARSE is a
+        # refusal now, so the fake has to answer like a real pane rather than with a bare "".
+        empty_box = "\n".join(["  an earlier reply", "─" * 40, km.PROMPT_GLYPH + " ", "─" * 40])
         real_run, real_sleep = km.subprocess.run, km.time.sleep
-        km.subprocess.run = lambda args, **k: calls.append(list(args)) or type("R", (), {"stdout": ""})()
+        km.subprocess.run = lambda args, **k: calls.append(list(args)) or type(
+            "R", (), {"stdout": empty_box if args[:2] == ["tmux", "capture-pane"] else "", "returncode": 0})()
         km.time.sleep = lambda s: None
         try:
             km._tmux_send("mysess", "hello world", _async=False)

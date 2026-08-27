@@ -12112,18 +12112,55 @@ def _picker_check(sid):
         time.sleep(0.5)
 
 
+# Ctrl+U kills ONE line of the CLI's input box, and a multi-line box takes TWO presses per line (the text,
+# then the emptied line itself), so the clear below presses until the box READS empty. Bounded so a box that
+# will not empty — a keystroke the pane never applies, a CLI that stopped honoring the binding — ends as a
+# refusal instead of a spin: 40 presses covers a 20-line draft, far past anything typed at a prompt.
+_CLEAR_KILL_PRESSES = 40
+# …and the outer bound is not the one that normally fires. A press that moves nothing means the binding
+# isn't landing, and pressing on cannot fix that — so two consecutive no-change presses end it. Two, not
+# one, because a single slow repaint is not evidence of a dead binding.
+_CLEAR_UNCHANGED_GIVE_UP = 2
+
+
 def _clear_pane_input(name):
-    """Select-all + delete the pane's input box. The romp composer and the tmux pane must agree on the
-    input: when a turn is INTERRUPTED (Esc), Claude Code RESTORES the in-progress prompt into the input —
-    invisible to the web composer — and our inject pastes by APPENDING, so Stop → type-and-send in the
-    composer concatenated the recalled prompt and the new message into ONE submission (the user
-    2026-06-19). Clearing first makes a paste REPLACE, never append. Ctrl+A selects the whole (possibly
-    multi-line) input in Claude Code >=2.1.18, Backspace deletes the selection — and BOTH are NO-OPS on an
-    already-empty input, so this is safe to send unconditionally before every paste (no regression to the
-    normal empty-input send)."""
+    """Empty the pane's input box, returning True ONLY when it is provably empty. The romp composer and the
+    tmux pane must agree on the input: when a turn is INTERRUPTED (Esc), Claude Code RESTORES the in-progress
+    prompt into the input — invisible to the web composer — and a paste APPENDS, so Stop → type-and-send in
+    the composer concatenated the recalled prompt and the new message into ONE submission (the user
+    2026-06-19). Clearing first makes a paste REPLACE, never append.
+
+    This used to send Ctrl+A + Backspace, on the understanding that Ctrl+A selects the whole input and
+    Backspace deletes the selection. Measured against Claude Code 2.1.223 (a scratch CLI in tmux, 2026-08-26)
+    that is NOT what happens: Ctrl+A does not select, and the Backspace deletes exactly ONE character — so
+    for two months the clear was a silent no-op on any non-empty input, and every composer send into a pane
+    holding text was concatenated onto it. The damage is worse than a cosmetic one: the joined submission
+    carries BOTH texts, so the delivered message never matches what romp echoed, and the CLI answers a
+    prompt the user never wrote. Ctrl+U measurably empties the box (the killed text stays in the CLI's own
+    kill ring — Ctrl+Y — so this destroys nothing the human cannot get back).
+
+    Verified EVENT-BASED per press (the box text changing), never a fixed sleep; an empty box costs one
+    capture and zero keystrokes, so the ordinary send is cheaper than it was before. False when the box
+    cannot be READ at all (no locatable prompt box) — the caller must not paste on a maybe — and false
+    once presses stop moving the box, which is the shape the Ctrl+A regression itself had."""
     if not name:
-        return
-    _TMUX.send_keys(name, "C-a", "BSpace")
+        return False
+    unchanged = 0
+    for _ in range(_CLEAR_KILL_PRESSES):
+        cap = _TMUX.capture(name, colour=True)
+        if _box_region(cap) is None:
+            return False                                            # can't see the box → can't claim it's clear
+        held = _box_text(cap)
+        if not held:
+            return True
+        _TMUX.send_keys(name, "C-u")
+        if _deliver_wait(lambda: _box_text(_TMUX.capture(name, colour=True)) != held, 1.0):
+            unchanged = 0
+        else:
+            unchanged += 1
+            if unchanged >= _CLEAR_UNCHANGED_GIVE_UP:
+                return False
+    return False
 
 
 def _interrupt(name, _async=True):
@@ -12137,7 +12174,9 @@ def _interrupt(name, _async=True):
     def go():
         _TMUX.send_keys(name, "Escape")
         time.sleep(0.15)                              # let Claude Code restore the recalled prompt before we wipe it
-        _clear_pane_input(name)
+        if not _clear_pane_input(name):               # loud, but nothing is pasted here — the next send's own
+            #                                           guard is what refuses to concatenate onto the leftover
+            sys.stderr.write("interrupt: %s still holds the recalled prompt after the input clear\n" % name)
     threading.Thread(target=go, daemon=True).start() if _async else go()
 
 
@@ -12339,8 +12378,15 @@ def _tmux_send(name, text, model_cmd=False, _async=True):
     def go():
         if _TMUX.pane_in_mode(name):
             _TMUX.send_keys(name, "-X", "cancel", t=2)              # exit copy-mode so paste+Enter land
-        _clear_pane_input(name)                                     # wipe any leftover (e.g. an interrupt-restored prompt) so the paste REPLACES, never appends
-        time.sleep(0.05)                                            # let the clear land before the paste
+        # Leftover in the box (an interrupt-restored prompt, or text typed straight into the terminal) must
+        # be GONE before the paste, which appends. Pasting anyway is not a lesser evil: the CLI receives the
+        # two texts joined, answers a prompt nobody wrote, and the delivered text no longer matches romp's
+        # echo — which is then indistinguishable from a lost send. So a clear that cannot finish REFUSES the
+        # send, loudly; the echo stays on screen and settles as never-delivered, which is the truth.
+        if not _clear_pane_input(name):
+            sys.stderr.write("tmux send: %s holds input that would not clear — NOT pasting, the message "
+                             "would have been concatenated onto it\n" % name)
+            return
         _TMUX.set_buffer(text)
         _TMUX.paste_buffer(name)                                    # bracketed (-p), delete buf (-d)
         paths = _injected_img_paths(text)
