@@ -10064,6 +10064,13 @@ const MODE_ICONS: Record<string, string> = {
   bypasspermissions: '<path d="M8 2 L13 4 V8 C13 11.4 10.8 13.2 8 14 C5.2 13.2 3 11.4 3 8 V4 Z"/><path d="M3.2 13 L12.8 3"/>',
   dontask: '<path d="M3 3.5 H13 V10 H8.5 L5.5 12.8 V10 H3 Z"/><path d="M3.2 12.6 L12.8 2.6"/>',
 };
+// the modes that REMOVE the gate rather than move it read in a red hue on the yatharth themes
+// (the user 2026-08-31) — CSS-scoped to .chat-theme-yatharth so classic renders untouched
+function riskyMode(mode: string | undefined): boolean {
+  const k = (mode || "").toLowerCase().replace(/[\u2019' -]/g, "");
+  return k === "bypasspermissions" || k === "bypass" || k === "dontask";
+}
+
 function modeIconSvg(mode: string | undefined): string {
   // accepts wire values AND display labels (metaButton receives prettyMode's text)
   const raw = (mode || "default").toLowerCase().replace(/[\u2019' -]/g, "");
@@ -10187,6 +10194,7 @@ function metaButton(kind: MetaKind, text: string, forSid?: string | null): HTMLE
     const ico = el("span", "meta-ico mode-ico");
     ico.innerHTML = modeIconSvg(text);   // refreshed by the sync loop below from st.mode
     btn.appendChild(ico);
+    btn.classList.toggle("mode-risky", riskyMode(text));   // kept live by the sync loop
   }
   const label = el("span", "meta-label");
   label.textContent = text;
@@ -10247,6 +10255,7 @@ function syncMetaControls(meta: HTMLElement, st: Status, forSid?: string | null)
     if (kind === "mode") {
       const ico = b.querySelector(".mode-ico") as HTMLElement | null;
       if (ico) ico.innerHTML = modeIconSvg(st.mode);
+      b.classList.toggle("mode-risky", riskyMode(st.mode));
     }
     // A switching MODEL shows animated dots, not the stale/premature name (the user 2026-07-03): the
     // server drives it (st.modelPending) — event-based, cleared the instant the new model actually lands —
@@ -10313,6 +10322,7 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
     item.tabIndex = 0;
     const rowIco = kind === "mode" ? el("span", "meta-ico mode-ico") : null;
     if (rowIco) rowIco.innerHTML = modeIconSvg(c.value);
+    if (kind === "mode" && riskyMode(c.value)) item.classList.add("mode-risky");
     // model/effort rows wear THEIR OWN rank color (the user 2026-08-31: a picker whose rows are
     // all default-gray codes nothing) — the same /models-fed color+tone the badges use
     if (kind === "model" || kind === "effort") {

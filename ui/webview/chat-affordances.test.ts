@@ -40,7 +40,7 @@ test("dot colors are decoupled from the session (no ring, absolute hues)", () =>
   assert.match(CSS, /\.dot\.ring \{[^}]*background: var\(--fg\)/, "assistant/thinking = the assistant text color (--fg)");
   assert.match(CSS, /\.dot\.green \{[^}]*background: var\(--check-bg\)/, "tool success = the blue ✓ disc (consistent with the feed)");
   assert.match(CSS, /\.dot\.err \{[^}]*background: var\(--err\)/, "tool error = red");
-  assert.match(CSS, /\.dot\.user \{ background: #2b6cef/, "your prompt = the bubble blue (#2b6cef)");
+  assert.match(CSS, /\.dot\.user \{ background: var\(--you\)/, "your prompt = the bubble blue (#2b6cef)");
 });
 
 test("a hard-blocked (API-error) tab carries a translucent red fill atop its dashed ring (the user 2026-06-18)", () => {

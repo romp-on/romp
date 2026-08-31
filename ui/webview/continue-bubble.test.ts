@@ -38,7 +38,7 @@ test("the row sheds the bubble, keeps the header when expanded, and the caret fl
   assert.match(CSS, /\.user-bubble\.nudge-collapsible \{ cursor: pointer; \}/);
   // the LIGHT BLUE box (the user 2026-08-18, superseding the bare row): blue = "from you", gray =
   // "from romp" — pale blue says "your gesture, standardized words", never posing as typed prose
-  assert.match(CSS, /\.user-bubble\.cont-row \{\s*\n\s*max-width: 72%;\s*\n\s*background: rgba\(43, 108, 239, 0\.16\); border: 1px solid rgba\(43, 108, 239, 0\.42\);/);
+  assert.match(CSS, /\.user-bubble\.cont-row \{\s*\n\s*max-width: 72%;\s*\n\s*background: color-mix\(in srgb, var\(--you\) 16%, transparent\); border: 1px solid color-mix\(in srgb, var\(--you\) 42%, transparent\);/);
   assert.match(CSS, /\.user-bubble\.cont-row \.cont-tri::before \{ content: "▸"; \}/);
   assert.match(CSS, /\.user-bubble\.cont-row\.expanded \.cont-tri::before \{ content: "▾"; \}/,
     "the same .expanded class the fold delegate flips also turns the caret");

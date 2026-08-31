@@ -152,6 +152,10 @@ body.scheme-solarized-dark {
      light text on dark; a LIGHT glow under the dark text on light — a dark halo around dark
      glyphs read as blur (the user 2026-08-31, off the live preview) */
   --text-halo: rgba(0, 0, 0, 0.75);
+  /* YOUR voice (the outgoing bubble, the rail's user dot, the comment marker): royal blue on
+     dark; the light theme wears a warm sienna from the page's own family instead (the user
+     2026-08-31: 'in family of the background colour, but darker/saturated' — not blue) */
+  --you: #2b6cef;
   /* Comment-highlight yellow (the user 2026-08-13): the marked passage reads like a highlighter
      stroke, DISTINCT from both the accent blue (selection/chrome) and the working-status yellow
      chip. Text-highlight use only — comment chrome (badge, buttons, chips) stays var(--accent). */
@@ -248,6 +252,7 @@ body.theme-light {
   --kbd-border: #D3C7B6;
   --overlay-05: rgba(0, 0, 0, 0.045);
   --overlay-10: rgba(0, 0, 0, 0.08);
+  --you: #A55A2A;   /* warm sienna — white text clears 5:1 */
   --text-halo: rgba(252, 249, 244, 0.85);
   --mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   --sans: "Space Grotesk", "Inter", var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, -apple-system, "Segoe UI", sans-serif));
@@ -1253,6 +1258,11 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   padding: 4px; box-shadow: var(--shadow-menu);
   font-family: var(--sans); font-size: 0.92em;
 }
+/* the gate-REMOVING modes (Bypass, Don't ask) read in the err red on the yatharth themes — the
+   glyph rides currentColor. Scoped to the yatharth class so classic renders untouched; ONE rule,
+   the sanctioned theme-scoped exception (the user 2026-08-31). */
+body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-item.mode-risky { color: var(--err); }
+
 /* the permission glyph beside its text (mode badge + mode picker rows, 2026-08-28) */
 .meta-ico { display: inline-flex; align-items: center; margin-right: 4px; vertical-align: -2px; }
 .meta-ico svg { display: block; }
@@ -1502,7 +1512,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    The blue is the OUTGOING-BUBBLE blue (#2b6cef, "yours"), deliberately not the romp accent. */
 .scroll-marks { position: fixed; z-index: 3; pointer-events: none; width: 12px; }
 .scroll-marks .scroll-mark { position: absolute; right: 1px; width: 8px; height: 2px;
-  border-radius: 1px; background: #2b6cef; opacity: 0.65;
+  border-radius: 1px; background: var(--you); opacity: 0.65;
   transition: top 180ms ease; }   /* history streaming in rescales the map — carried, not teleported */
 @media (prefers-reduced-motion: reduce) { .scroll-marks .scroll-mark { transition: none; } }
 .rail-day {
@@ -1552,7 +1562,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .dot.ring { background: var(--fg); border: none; }
 /* your prompt — the SAME royal/indigo blue as your message bubble (#2b6cef), so the dot matches your
    chat box (the user 2026-06-15). Distinct from the cyan ✓ success disc (--check-bg #1EA1EB). */
-.dot.user { background: #2b6cef; border: none; }
+.dot.user { background: var(--you); border: none; }
 /* a TAGGED (machine-sent under a label) prompt: the gray of its tag-bubble family, so the rail agrees
    with the bubble — it used to wear the blue "you typed this" dot (the identity-channel gap, 2026-08-18) */
 .dot.tag { background: #8a8f98; border: none; }
@@ -1591,7 +1601,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .turn-user:not(.injected) { display: flex; flex-direction: column; align-items: flex-end; }
 .user-bubble {
   max-width: 72%;
-  background: #2b6cef; border: 1px solid #2b6cef;
+  background: var(--you); border: 1px solid var(--you);
   border-radius: 14px; padding: 7px 12px; color: #ffffff;
   display: flow-root;   /* contain inner floats (e.g. image captions) */
 }
@@ -1647,6 +1657,11 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    ties this selector's specificity later in the sheet — the doubled form outranks it, so bubble
    links actually stay white instead of link-ink-on-saturated-fill (found 2026-09-02). */
 .user-bubble a, .user-bubble.md a { color: #fff; text-decoration: underline; text-underline-offset: 2px; }
+/* a quoted passage in YOUR bubble is the ASSISTANT's words (select-to-quote): the prose face
+   (mono in light), and a light tint readable on the saturated fill — var(--dim) grey sat at
+   ~2:1 there (the user 2026-08-31, on the light preview) */
+.user-bubble blockquote { color: rgba(255, 255, 255, 0.88); border-left-color: rgba(255, 255, 255, 0.40);
+  font-family: var(--font-prose); }
 .user-bubble :not(pre) > code { background: rgba(255, 255, 255, 0.2); color: #fff; }
 /* a slash COMMAND you sent (the user 2026-06-29): the "/cmd" token renders as a monospace KEYWORD chip inside
    the blue bubble — a darkened, outlined pill so it reads as a command, not prose. Args sit after it as text. */
@@ -1668,8 +1683,8 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* The chip's ink is the OUTGOING-BUBBLE blue on the chat's own ground (the user 2026-08-14: the --code-bg
    terracotta tint read as a stray red here) — the same #2b6cef as .user-bubble, so the gesture still reads
    as "yours" without the said-thing bubble. */
-.user-bubble.cmd-row .slash-cmd-chip { background: var(--bg); color: #2b6cef;
-  border-color: #2b6cef; }
+.user-bubble.cmd-row .slash-cmd-chip { background: var(--bg); color: var(--you);
+  border-color: var(--you); }
 .user-bubble.cmd-row .slash-cmd-args { color: var(--dim); }
 .user-bubble.cmd-row .nudge-gist, .user-bubble.cmd-row .nudge-caret { color: var(--dim); }
 .user-bubble.cmd-row .nudge-gist { margin-left: 8px; }
@@ -1682,7 +1697,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    spot and width cap as the bubbles it sits among; the ↩ Follow-up header itself is unchanged. */
 .user-bubble.cont-row {
   max-width: 72%;
-  background: rgba(43, 108, 239, 0.16); border: 1px solid rgba(43, 108, 239, 0.42);
+  background: color-mix(in srgb, var(--you) 16%, transparent); border: 1px solid color-mix(in srgb, var(--you) 42%, transparent);
   border-radius: 14px; padding: 7px 12px;
 }
 .user-bubble.cont-row .followup-tag { max-width: none; }
@@ -1733,7 +1748,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .queued-head .queued-icon { color: var(--accent); display: flex; }   /* wireframe hourglass in the accent blue */
 .queued-bubble {
   max-width: 72%; overflow-wrap: anywhere; display: flow-root;
-  background: rgba(43, 108, 239, 0.10); border: 1px dashed rgba(43, 108, 239, 0.65);
+  background: color-mix(in srgb, var(--you) 10%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 65%, transparent);
   border-radius: 14px; padding: 7px 12px; color: var(--fg); opacity: 0.85;
 }
 /* A CANCELABLE queued bubble carries an explicit ✕ (the user 2026-07-08 — the old whole-bubble click was
@@ -1754,7 +1769,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    (the user 2026-07-29). Dashed like the queued family (a send that never became a turn), red-edged like
    every "something went wrong" cue. The note + actions sit under the right-aligned bubble and are always
    visible — a loss notice is not a hover secret. Button sizes wear .msg-edit's clothes (one size). */
-.user-bubble.undelivered-bubble { background: rgba(43, 108, 239, 0.10); }
+.user-bubble.undelivered-bubble { background: color-mix(in srgb, var(--you) 10%, transparent); }
 .user-bubble.undelivered-bubble, .romp-bubble.undelivered-bubble {
   border: 1px dashed rgba(244, 135, 113, 0.65); opacity: 0.85;
 }
@@ -1882,9 +1897,9 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .turn-ask.answered { display: flex; flex-direction: column; align-items: flex-end; }
 .ask-card.ask-answered {
   max-width: 88%;
-  background: rgba(43, 108, 239, 0.10);
-  border-color: #2b6cef;
-  box-shadow: inset 3px 0 0 #2b6cef;
+  background: color-mix(in srgb, var(--you) 10%, transparent);
+  border-color: var(--you);
+  box-shadow: inset 3px 0 0 var(--you);
 }
 /* the "↳ You answered Claude's question" marker line atop the box */
 .ask-answered-tag { font-size: 0.72em; letter-spacing: 0.04em; font-weight: 700; color: #6da0ff; margin-bottom: 6px; }

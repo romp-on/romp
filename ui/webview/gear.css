@@ -138,7 +138,7 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 .ra-chart { margin: 6px 0 10px; min-height: 120px; }
 .ra-empty { color: var(--text-muted, #9aa0a6); text-align: center; padding: 40px 0; }
 .ra-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 8px; }
-.ra-li { display: inline-flex; align-items: center; gap: 5px; color: #bcc1c7; font-size: 11px; }
+.ra-li { display: inline-flex; align-items: center; gap: 5px; color: var(--text-soft, #bcc1c7); font-size: 11px; }
 .ra-li b { color: var(--text-bright, #e8eaed); font-weight: 600; }
 .ra-sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: 0 0 auto; }
 .ra-note { color: var(--text-muted, #9aa0a6); font-size: 11px; border-top: 1px solid var(--hairline, #3a3a3a); padding-top: 7px; }

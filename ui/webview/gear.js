@@ -936,17 +936,17 @@ function initGear(post) {
     var segs = raSegments(), judgeTot = segs.reduce(function (a, s) { return a + raVal(s); }, 0);
     var maxV = Math.max(sessTot, judgeTot, 1);
     var W = 480, H = 250, top = 24, bot = 30, chartH = H - top - bot, baseY = top + chartH, barW = 92, cx1 = W * 0.30, cx2 = W * 0.70;
-    function rect(x, y, w, h, fill, title) { return '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + Math.max(h, 0) + '" fill="' + fill + '" rx="2"><title>' + raEsc(title) + '</title></rect>'; }
+    function rect(x, y, w, h, fill, title) { return '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + Math.max(h, 0) + '" style="fill:' + fill + '" rx="2"><title>' + raEsc(title) + '</title></rect>'; }
     var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
-    svg += '<line x1="6" y1="' + baseY + '" x2="' + (W - 6) + '" y2="' + baseY + '" stroke="#3a3a3a"/>';
+    svg += '<line x1="6" y1="' + baseY + '" x2="' + (W - 6) + '" y2="' + baseY + '" style="stroke:var(--hairline, #3a3a3a)"/>';
     var sh = sessTot / maxV * chartH;
-    svg += rect(cx1 - barW / 2, baseY - sh, barW, sh, '#7d8590', 'sessions · ' + fmtTok(sess.in) + ' in / ' + fmtTok(sess.out || 0) + ' out · ' + fmtUsd(sess.cost || 0));
-    svg += '<text x="' + cx1 + '" y="' + (baseY - sh - 6) + '" text-anchor="middle" fill="#ddd" font-size="12">' + raFmt(sessTot) + '</text>';
-    svg += '<text x="' + cx1 + '" y="' + (baseY + 18) + '" text-anchor="middle" fill="#9aa0a6" font-size="12">Sessions</text>';
+    svg += rect(cx1 - barW / 2, baseY - sh, barW, sh, 'var(--text-faint, #7d8590)', 'sessions · ' + fmtTok(sess.in) + ' in / ' + fmtTok(sess.out || 0) + ' out · ' + fmtUsd(sess.cost || 0));
+    svg += '<text x="' + cx1 + '" y="' + (baseY - sh - 6) + '" text-anchor="middle" style="fill:var(--text-bright, #ddd)" font-size="12">' + raFmt(sessTot) + '</text>';
+    svg += '<text x="' + cx1 + '" y="' + (baseY + 18) + '" text-anchor="middle" style="fill:var(--text-muted, #9aa0a6)" font-size="12">Sessions</text>';
     var cum = 0; segs.forEach(function (s) { var st = raVal(s), h = st / maxV * chartH, y = baseY - cum - h; cum += h;
       svg += rect(cx2 - barW / 2, y, barW, h, s.color, s.label + ' · ' + fmtTok(s.in) + ' in / ' + fmtTok(s.out) + ' out · ' + s.calls + ' calls · ' + fmtUsd(s.cost || 0)); });
-    svg += '<text x="' + cx2 + '" y="' + (baseY - cum - 6) + '" text-anchor="middle" fill="#ddd" font-size="12">' + raFmt(judgeTot) + '</text>';
-    svg += '<text x="' + cx2 + '" y="' + (baseY + 18) + '" text-anchor="middle" fill="#9aa0a6" font-size="12">Judges</text>';
+    svg += '<text x="' + cx2 + '" y="' + (baseY - cum - 6) + '" text-anchor="middle" style="fill:var(--text-bright, #ddd)" font-size="12">' + raFmt(judgeTot) + '</text>';
+    svg += '<text x="' + cx2 + '" y="' + (baseY + 18) + '" text-anchor="middle" style="fill:var(--text-muted, #9aa0a6)" font-size="12">Judges</text>';
     svg += '</svg>'; raChart.innerHTML = svg;
     var lg = segs.map(function (s) { return '<span class=ra-li><span class=ra-sw style="background:' + s.color + '"></span>' + raEsc(s.label) + ' <b>' + raFmt(raVal(s)) + '</b></span>'; }).join('');
     raLegend.innerHTML = '<span class=ra-li><span class="ra-sw" style="background:#7d8590"></span>sessions <b>' + raFmt(sessTot) + '</b></span>' + lg;

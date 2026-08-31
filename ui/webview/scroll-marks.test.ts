@@ -59,7 +59,7 @@ test("positions are proportional and pure scrolls do no DOM work", () => {
 
 test("passive chrome in the user's own blue", () => {
   assert.match(CSS, /\.scroll-marks \{ position: fixed; z-index: 3; pointer-events: none; width: 12px; \}/);
-  assert.match(CSS, /background: #2b6cef; opacity: 0\.65;/, "the outgoing-bubble blue, never the romp accent");
+  assert.match(CSS, /background: var\(--you\); opacity: 0\.65;/, "the outgoing-bubble blue, never the romp accent");
 });
 
 test("marks translate EVENT indices to DISPLAY UNITS before asking the frame", () => {

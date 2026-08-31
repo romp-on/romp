@@ -57,6 +57,6 @@ test("a free-text answer matching no option renders as an 'Other' row with the v
 
 test("the answered box is styled as a blue, right-aligned 'your reply' box", () => {
   assert.match(CSS, /\.turn-ask\.answered \{[^}]*align-items: flex-end/);
-  assert.match(CSS, /\.ask-card\.ask-answered \{[^}]*#2b6cef/);
+  assert.match(CSS, /\.ask-card\.ask-answered \{[^}]*var\(--you\)/);
   assert.match(CSS, /\.ask-answered-tag \{/);
 });

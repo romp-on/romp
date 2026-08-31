@@ -78,6 +78,10 @@
      light text on dark; a LIGHT glow under the dark text on light — a dark halo around dark
      glyphs read as blur (the user 2026-08-31, off the live preview) */
   --text-halo: rgba(0, 0, 0, 0.75);
+  /* YOUR voice (the outgoing bubble, the rail's user dot, the comment marker): royal blue on
+     dark; the light theme wears a warm sienna from the page's own family instead (the user
+     2026-08-31: 'in family of the background colour, but darker/saturated' — not blue) */
+  --you: #2b6cef;
   --st-working-bg: #e0b020; --st-working-fg: #332600;  /* the WORKING yellow — mirrors styles.css, same trap
                        as --err: .fask-stallbtn and .fask-interrupting referenced these while they lived only
                        in styles.css, so the "filled yellow so the stall is noticed" chip rendered as a quiet
@@ -182,6 +186,7 @@ body.theme-light {
   --kbd-border: #D3C7B6;
   --overlay-05: rgba(0, 0, 0, 0.045);
   --overlay-10: rgba(0, 0, 0, 0.08);
+  --you: #A55A2A;   /* warm sienna — white text clears 5:1 */
   --text-halo: rgba(252, 249, 244, 0.85);
   --mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   --sans: "Space Grotesk", "Inter", var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, -apple-system, "Segoe UI", sans-serif));

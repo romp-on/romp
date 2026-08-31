@@ -36,6 +36,6 @@ test("no edit/delete/fork affordances — a gesture is not a rewindable message"
 test("the gesture chip's ink is the outgoing-bubble blue on the chat's own ground", () => {
   // the user 2026-08-14: the --code-bg terracotta tint read as a stray red — the chip now borrows
   // .user-bubble's #2b6cef for border + text so the gesture still reads as "yours" without the bubble
-  assert.match(CSS, /\.user-bubble\.cmd-row \.slash-cmd-chip \{ background: var\(--bg\); color: #2b6cef;/);
-  assert.match(CSS, /\.user-bubble\.cmd-row \.slash-cmd-chip \{[^}]*border-color: #2b6cef/);
+  assert.match(CSS, /\.user-bubble\.cmd-row \.slash-cmd-chip \{ background: var\(--bg\); color: var\(--you\);/);
+  assert.match(CSS, /\.user-bubble\.cmd-row \.slash-cmd-chip \{[^}]*border-color: var\(--you\)/);
 });
