@@ -70,3 +70,29 @@ test("the anchor re-query uses the same selectors as the first lookup", () => {
   const both = RENDER.split("data-mids~=").length - 1;
   assert.ok(both >= 2, "data-mids must be in BOTH the initial query and the post-re-render re-query");
 });
+
+test("a delta with NO base at all is a desync too — every delta path asks for the full frame", () => {
+  // the lost-first-frame class (the user 2026-09-02): the full session frame landed before the bundle's
+  // message listener existed, so the pane holds nothing while the kernel volunteers only deltas. Each
+  // delta shape must ask for the base instead of silently returning (the old `if (!s) return;`).
+  const chatTailFn = RENDER.slice(RENDER.indexOf("function chatTail(msg"), RENDER.indexOf("function statusOnly(msg"));
+  assert.match(chatTailFn, /if \(!s\) \{[\s\S]{0,900}?requestFullSession\(msg\.id\);\s*\n\s*return;\s*\n\s*\}/,
+    "chatTail: no base → ask, don't wait forever");
+  const updateFn = RENDER.slice(RENDER.indexOf("function update(msg"), RENDER.indexOf("function chatTail(msg"));
+  assert.match(updateFn, /if \(!s\) \{ requestFullSession\(msg\.id\); return; \}/, "update: same");
+  const statusFn = RENDER.slice(RENDER.indexOf("function statusOnly(msg"), RENDER.indexOf("function statusOnly(msg") + 400);
+  assert.match(statusFn, /if \(!s\) \{ requestFullSession\(msg\.id\); return; \}/, "statusOnly: same");
+});
+
+test("a reconnect clears parked asks — a dead socket's pending needFull can never gag the new one", () => {
+  assert.match(RENDER, /window\.addEventListener\("romp:wsup", \(\) => awaitingFull\.clear\(\)\);/);
+});
+
+test("the kernel's ready branch resets the client's WHOLE chat base before its push", () => {
+  const i = KERNEL.indexOf('msg.get("type") == "ready"');
+  assert.ok(i > 0);
+  const body = KERNEL.slice(i, i + 1600);
+  assert.ok(body.includes("_client_reset_chat_base(client)"), "ready = the renderer holds nothing");
+  assert.ok(body.indexOf("_client_reset_chat_base(client)") < body.indexOf("_push_one(client)"),
+    "…reset first, so the push that follows is full frames");
+});

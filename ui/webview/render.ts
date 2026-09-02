@@ -5373,6 +5373,28 @@ window.addEventListener("keydown", (e) => {
     if (focusComposerOrAsk()) e.preventDefault();   // the picker card if one's up, else the message box
   }
 });
+// SELECT → TYPE → ⌘⏎ (the user 2026-09-02): a transcript selection already seeded the reply chip
+// (selectionchange), so the natural next act is just TYPING — the first printable keystroke drops
+// the cursor into the message box with the chip attached, no mouse round-trip, and ⌘⏎ stages as
+// ever. (Not selection-gated: a printable keystroke nobody claimed means "type" from anywhere —
+// the same two-state default as bare-area Enter above.) Bubble phase on window = every capture
+// handler (shell chords, overlays) and element handler (live-ask card, focused tab, slash menu)
+// has already spoken; we take only keystrokes nobody claimed. NEVER preventDefault: focusing
+// during keydown lets the NATIVE keystroke insert into the newly focused box, so the composer's
+// own input bookkeeping (draft, slash menu) sees ordinary typing.
+window.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;   // chords are not typing (shift stays: capitals)
+  if (e.isComposing || e.keyCode === 229) return;   // IME mid-composition — a focus steal aborts the composition
+  if (e.key.length !== 1 || e.key === " ") return;  // printable only; Space stays a toggle/scroll key
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  if (!ta || ta.disabled || document.activeElement === ta) return;   // no box / read-only session / already typing (covers key repeat)
+  if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
+  if (activeId && liveAsks.has(activeId)) return;   // digits belong to the live-ask card's number keys
+  if (ctxMenuEl || document.querySelector(".picker-overlay")) return;   // an open menu / #picker / #confirm owns the keys
+  if (document.getElementById("romp-fileview") || document.getElementById("romp-filebrowse")
+      || document.getElementById("romp-lightbox")) return;   // full-pane surfaces own their keys
+  ta.focus({ preventScroll: true });   // the native keystroke lands in the box; the chip survives (a collapse never clears it)
+});
 // Cmd/Ctrl+O and Cmd/Ctrl+Shift+O — the in-PAGE fallback, from anywhere including the composer, the
 // way Obsidian's quick switcher opens over the editor (the user 2026-08-08). Inside the romp shell
 // this handler STANDS DOWN: the shell owns both combos (palette-main.ts — plain O is the session jump
@@ -11676,7 +11698,7 @@ function upsert(msg: any) {
 function update(msg: any) {
   retryCmtCreates(String(msg.id || ""));   // ditto for the delta path (T106)
   const s = sessions.get(msg.id);
-  if (!s) return;
+  if (!s) { requestFullSession(msg.id); return; }   // a delta with no base is PROOF of desync (see chatTail)
   s.events = msg.events || s.events;
   const before = awaitKey(s.status);
   s.status = msg.status || s.status;
@@ -11715,10 +11737,23 @@ function requestFullSession(id: string): void {
   awaitingFull.add(id);
   vscodeApi?.postMessage({ type: "needFull", id });
 }
+// A reconnect mints a FRESH kernel-side client (its echat starts empty, so full frames are already
+// guaranteed) — but an ask parked against the dead socket would gag the new socket's repair path
+// forever (awaitingFull only clears when the reply lands, and the dead socket's never will).
+window.addEventListener("romp:wsup", () => awaitingFull.clear());
 
 function chatTail(msg: any) {
   const s = sessions.get(msg.id);
-  if (!s) return;                                  // no base yet → ignore; a full session must arrive first
+  if (!s) {
+    // A delta for a session we hold NO base for is PROOF of desync, not noise to ignore: the full
+    // frame was sent while this document had no message listener yet (the pusher fires from the
+    // moment the socket opens; the 1.4MB bundle can still be evaluating), and the kernel's echat
+    // advances on SEND — so deltas are all it will ever volunteer, and the tab sat on the
+    // « opening … » placeholder forever (the user 2026-09-02; a duplicated browser tab won the
+    // race via cached bundles, a reload only sometimes). Ask for the base instead of waiting.
+    requestFullSession(msg.id);
+    return;
+  }
   // msg.from is a GLOBAL transcript index; the resident events are the tail [headFrom, …) → map to local.
   const from = (msg.from | 0) - (s.headFrom || 0);
   // The kernel's coordinate space ends at ITS OWN events — our injected optimistic tail is not in it.
@@ -11875,7 +11910,7 @@ function awaitKey(st: Status | undefined): string {
 
 function statusOnly(msg: any) {
   const s = sessions.get(msg.id);
-  if (!s) return;
+  if (!s) { requestFullSession(msg.id); return; }   // a delta with no base is PROOF of desync (see chatTail)
   const before = awaitKey(s.status);
   s.status = msg.status || s.status;
   renderTabs();                          // status-only push → repaint the chip; order is untouched

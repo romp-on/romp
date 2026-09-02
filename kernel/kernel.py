@@ -24900,6 +24900,19 @@ def _dedup_sig(msg, s):
     return s
 
 
+def _client_reset_chat_base(client):
+    """Forget every session tail we believe this client holds. Both suppressors must go: the echat
+    entries (their absence is what routes _send_chat down its full-session path) AND the ("chat", sid)
+    dedup slots (_DEDUP_REPOST_S would otherwise eat the re-send as unchanged for 60s). The needFull
+    handler does this per-sid; `ready` does it for the whole client — a renderer that just evaluated
+    holds NOTHING, whatever this socket was sent before its listener existed (the stuck-« opening … »
+    class, the user 2026-09-02)."""
+    client.get("echat", {}).clear()
+    snt = client.get("sent", {})
+    for k in [k for k in snt if isinstance(k, tuple) and k and k[0] == "chat"]:
+        snt.pop(k, None)
+
+
 def _send_client(c, key, msg, pre=None, sig=None):
     """Send a payload to ONE client only if it differs from what that client last received (per-client
     dedup, key = the slot e.g. ("chat", sid)) — so the periodic push re-sends nothing when unchanged.
@@ -32398,6 +32411,16 @@ class Handler(BaseHTTPRequestHandler):
             _mark_views_dirty()
             return
         if msg and msg.get("type") == "ready":
+            # `ready` = the render bundle JUST evaluated, so this renderer holds NOTHING — but this
+            # socket may already have been served: the pusher fires from the moment the WS opens
+            # (the inline shim dials during HTML parse), while the 1.4MB bundle can still be
+            # downloading/evaluating, so the first full session frames can land in a document with
+            # no message listener and vanish. echat then believes the client holds those tails and
+            # every later push is a delta the client drops — the tab stuck on « opening … » until
+            # its socket died (the user 2026-09-02; duplicating the browser tab always recovered
+            # because cached bundles win the race). Same repair as needFull above, client-wide;
+            # ready is posted once per renderer life, so this cannot loop.
+            _client_reset_chat_base(client)
             self._push_one(client)
             # Push the SHARED, STABLE tab order so the UI honors it on connect/reload. Without this
             # the webview only learns the order from a live drag, loses it on every reload, and falls
