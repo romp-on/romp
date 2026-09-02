@@ -164,3 +164,21 @@ test("gear.css carries the modal styling for every pane that hosts it", () => {
     assert.ok(GEAR_CSS.includes(sel), `gear.css must style ${sel}`);
   assert.ok(KERNEL.includes("/dist/gear.css"), "the kernel feed page must link the extracted stylesheet");
 });
+
+test("one tooltip per settings row: the Account row's live status is NOT a second rs-sub", () => {
+  // the rs-sub CSS floats EVERY rs-sub in a hovered row at the same top:100% box, so a second one
+  // stacks a second bordered popover — the 2026-09-02 "weird double tooltip" (even empty it painted
+  // a box). #rs-login-state is a live inline status, not a description: it wears rs-note.
+  assert.ok(GEAR.includes("id=rs-login-state class=rs-note"), "the login status line is an inline note");
+  const billing = GEAR.slice(GEAR.indexOf("id=rs-billing"), GEAR.indexOf(">Sessions<"));
+  assert.equal((billing.match(/class=rs-sub/g) || []).length, 1, "the Account row keeps ONE description popover");
+  assert.ok(GEAR_CSS.includes("#rsettings .rs-note {") && GEAR_CSS.includes("#rsettings .rs-note:empty { display: none; }"),
+    "rs-note is inline, hidden while it has nothing to say");
+  // native titles never stack on the row popover: the picker buttons speak through aria-label, and
+  // the description stands down while a picker dropdown is open or the 'mixed' mark is hovered
+  assert.doesNotMatch(GEAR, /id=rs-cmap-btn type=button title=/);
+  assert.doesNotMatch(GEAR, /id=rs-pal-btn type=button title=/);
+  assert.ok(GEAR.includes("aria-label='Pick the recency colormap'") && GEAR.includes("aria-label='Pick the session palette'"));
+  assert.ok(GEAR_CSS.includes("#rsettings .rs-row:has(#rs-cmap-list:not([hidden])) .rs-sub"), "open cmap menu owns the row");
+  assert.ok(GEAR_CSS.includes("#rsettings .rs-row:has(.rs-mixed:hover) .rs-sub { display: none; }"), "the mixed mark's title stands alone");
+});

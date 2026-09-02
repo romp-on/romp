@@ -59,6 +59,16 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
   margin-top: 2px; color: var(--text-soft, #cdd3da); font-size: 0.92em; line-height: 1.35; background: var(--input-bg, #1b1b1c); border: 1px solid var(--hairline, #3a3a3a);
   border-radius: 6px; padding: 6px 9px; box-shadow: 0 4px 14px #000000aa; pointer-events: none; }
 #rsettings .rs-sub code { background: #0d0d0d; border-radius: 3px; padding: 0 3px; }
+/* an inline live status beside a control (the login flow's "starting…") — visible when non-empty,
+   never a popover (as an rs-sub it doubled the Account row's tooltip, 2026-09-02) */
+#rsettings .rs-note { color: var(--text-muted, #9aa0a6); font-size: 0.92em; }
+#rsettings .rs-note:empty { display: none; }
+/* ONE tooltip at a time: while a picker dropdown is open, or the pointer is on the tri-state
+   'mixed' mark (whose own title names the differing hosts), the row's description stands down —
+   otherwise the native tooltip and the description popover stack (2026-09-02) */
+#rsettings .rs-row:has(#rs-cmap-list:not([hidden])) .rs-sub,
+#rsettings .rs-row:has(#rs-pal-list:not([hidden])) .rs-sub,
+#rsettings .rs-row:has(.rs-mixed:hover) .rs-sub { display: none; }
 /* A setting whose value differs between the connected machines: the checkbox goes tri-state, and this
    says so in words beside the label, because an indeterminate box alone is easy to read straight past.
    Label size, section grey — the hover line names which machines. */
@@ -109,7 +119,7 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 #rsettings kbd { display: inline-block; background: var(--kbd-bg, #1c1c1f); border: 1px solid var(--kbd-border, #3d3d42); border-bottom-width: 2px;
   border-radius: 4px; padding: 1px 6px; font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #e6e6e6; }
 /* token-usage analytics: a button in the gear panel opens a centered modal with the chart. */
-.ra-openbtn { margin-top: 8px; width: 100%; background: #2d2d2f; border: 1px solid var(--hairline, #3a3a3a); border-radius: 6px;
+.ra-openbtn { margin-top: 8px; width: 100%; background: var(--btn-bg, #2d2d2f); border: 1px solid var(--hairline, #3a3a3a); border-radius: 6px;
   color: var(--text-soft, #cdd3da); font: 600 12px/1.4 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; padding: 7px; cursor: pointer;
   transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease, transform 0.08s ease; }
 .ra-openbtn:active { transform: scale(0.96); }

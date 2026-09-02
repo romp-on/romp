@@ -55,7 +55,10 @@ var GEAR_HTML =
   '<span class=rs-sub id=rs-login-acct>…</span>' +
   "<div id=rs-login-flow style='margin-top:6px'>" +
   "<button id=rs-login-btn type=button style='cursor:pointer;background:var(--btn-bg, #2a2a2a);color:var(--fg, #ccc);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:3px 10px'>Log in to Claude Code</button>" +
-  "<span id=rs-login-state class=rs-sub style='margin-left:8px'></span>" +
+  // rs-note, NOT rs-sub: this is a live inline status ("starting the login flow…"), not the row's
+  // description — as an rs-sub it floated a SECOND hover popover under the Account row, stacked on
+  // rs-login-acct's (the user 2026-09-02, "weird double tooltip"; even empty it painted a box)
+  "<span id=rs-login-state class=rs-note style='margin-left:8px'></span>" +
   '</div></span></div>' +
   '<div class=rs-sec>Sessions</div>' +
   "<div class='rs-row' style='cursor:default'><span style='flex:1 1 auto'><b>Default directory</b>" +
@@ -133,11 +136,11 @@ var GEAR_HTML =
   '</span></div>' +
   "<div class='rs-row rs-sep' style='cursor:default'><span style='flex:1 1 auto'><b>Colormap</b>" +
   '<span class=rs-sub>One ramp for the whole dashboard — feed recency, usage, and context bars. Brightest = newest / highest.</span>' +
-  "<div id=rs-cmap><button id=rs-cmap-btn type=button title='Pick the recency colormap'></button>" +
+  "<div id=rs-cmap><button id=rs-cmap-btn type=button aria-label='Pick the recency colormap'></button>" +
   '<div id=rs-cmap-list hidden></div></div></span></div>' +
   "<div class='rs-row rs-sep' style='cursor:default'><span style='flex:1 1 auto'><b>Session colors</b>" +
   '<span class=rs-sub>The palette sessions draw their identity color from — tabs, cards, lanes. Switching recolors every session to the same slot in the new set.</span>' +
-  "<div id=rs-pal><button id=rs-pal-btn type=button title='Pick the session palette'></button>" +
+  "<div id=rs-pal><button id=rs-pal-btn type=button aria-label='Pick the session palette'></button>" +
   '<div id=rs-pal-list hidden></div></div></span></div>' +
   '<div class=rs-sec>Keyboard shortcuts</div>' + SHORTCUT_ROWS +
   '<div class=rs-sec>Judges</div>' +

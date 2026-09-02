@@ -11092,8 +11092,9 @@ function renderComposerFiles(id: string | null): void {
   if (sendBtn) {
     const held = !!id && sendOnShip.has(id);
     sendBtn.classList.toggle("send-held", held);
-    if (held) sendBtn.setAttribute("title", "sends when the upload finishes");
-    else if (sendBtn.getAttribute("title") === "sends when the upload finishes") sendBtn.removeAttribute("title");
+    // through the styled tip, not a native title: the button already wears setTip("Send (Enter)"),
+    // and a native title beside it showed BOTH boxes while a hold was armed (2026-09-02)
+    setTip(sendBtn, held ? "Send (Enter)\nsends when the upload finishes" : "Send (Enter)");
   }
   strip.replaceChildren();
   const paths = (id ? composerFiles.get(id) : undefined) || [];

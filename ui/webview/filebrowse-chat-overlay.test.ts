@@ -39,3 +39,10 @@ test("the overlay geometry: pane-filling, viewer stays one layer above, scroll l
   const vz = Number((CHAT.match(/#romp-fileview \{[^}]*z-index: (\d+)/s) || [])[1]);
   assert.ok(vz > 890, "the viewer's backdrop sits above the browser (got " + vz + ")");
 });
+
+test("the overlay stays GIANT; the LISTING reads at a centered measure on wide panes", () => {
+  // the 2026-08-24 ruling stands (fixed inset-0 over the whole chat area) — the 2026-09-02 fix caps
+  // only the rows' measure: full-width rows put a file's size ~800px from its name on desktop.
+  // min(720px, 100%) keeps narrow panes and phones pixel-identical.
+  assert.match(CHAT, /\.fb-list \{[^}]*width: min\(720px, 100%\); margin-inline: auto; \}/);
+});

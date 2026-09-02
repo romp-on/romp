@@ -1638,7 +1638,10 @@ body.filebrowse-open { overflow: hidden; }
 .fb-crumb:hover { color: var(--accent); text-decoration: underline; }
 .fb-crumb:last-child { color: var(--fg); }
 .fb-crumb-sep { margin: 0 3px; opacity: 0.6; }
-.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
+/* the overlay still takes the whole pane (the user 2026-08-24 ruling) — but the LISTING reads at a
+   centered 720px measure on a wide pane (the user 2026-09-02: full-width rows put a file's size
+   ~800px from its name); 100% wins on narrow panes/phones, pixel-identical to before */
+.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; width: min(720px, 100%); margin-inline: auto; }
 /* compact one-line rows (progressive disclosure): marker + name, size right-aligned on files; mtime
    and the full path live in the row's hover title */
 .fb-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; cursor: pointer;

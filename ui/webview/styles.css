@@ -2539,10 +2539,14 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .picker-dir-hint.bad { color: #e5484d; }
 /* folder completions: Tab walks into one, so a path is assembled without a modal or a native dialog */
 .picker-dir-menu {
-  position: absolute; left: 14px; right: 14px; top: calc(100% - 4px); z-index: 6;
-  max-height: 216px; overflow-y: auto;
+  /* a completion LIST, not a table: capped to the one-column dropdown measure instead of the full
+     900px picker (the user 2026-09-02, "ridiculously large on desktop"). calc(100% - 28px) is
+     byte-identical to the old left+right-14px geometry on any picker ≤548px — a phone keeps
+     today's layout exactly; the dropdown wears the shared menu vocabulary while here. */
+  position: absolute; left: 14px; width: min(520px, calc(100% - 28px)); top: calc(100% - 4px); z-index: 6;
+  max-height: min(216px, 40vh); overflow-y: auto;
   background: var(--vscode-editorWidget-background, #252526);
-  border: 1px solid var(--box-border); border-radius: 6px; box-shadow: 0 8px 24px #000000aa;
+  border: 1px solid var(--box-border); border-radius: var(--radius-menu); box-shadow: var(--shadow-menu);
 }
 .picker-dir-row {
   padding: 4px 10px; cursor: pointer;
@@ -3314,7 +3318,10 @@ body.filebrowse-open { overflow: hidden; }
 .fb-crumb:hover { color: var(--accent); text-decoration: underline; }
 .fb-crumb:last-child { color: var(--fg); }
 .fb-crumb-sep { margin: 0 3px; opacity: 0.6; }
-.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
+/* the overlay still takes the whole pane (the user 2026-08-24 ruling) — but the LISTING reads at a
+   centered 720px measure on a wide pane (the user 2026-09-02: full-width rows put a file's size
+   ~800px from its name); 100% wins on narrow panes/phones, pixel-identical to before */
+.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; width: min(720px, 100%); margin-inline: auto; }
 .fb-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; cursor: pointer;
   font-size: 0.86em; }
 .fb-row:hover, .fb-row.active { background: var(--menu-hover); }

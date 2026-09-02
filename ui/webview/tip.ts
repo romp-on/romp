@@ -98,6 +98,9 @@ function wireDismiss(): void {
 export function wireTip(anchor: HTMLElement, render: (el: HTMLElement) => void, opts?: TipOpts): void {
   wireDismiss();
   const a = anchor as any;
+  // a styled tip REPLACES the native one — never both. Stripped here (not just in setTip) so every
+  // rich tip gets it, and on every re-wire, since surfaces re-title anchors on each push (2026-09-02).
+  anchor.removeAttribute("title");
   a._rompTipRender = render; a._rompTipOpts = opts;
   if (a._rompTipWired) return;
   a._rompTipWired = true;

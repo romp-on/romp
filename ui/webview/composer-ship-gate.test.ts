@@ -78,6 +78,8 @@ test("the ack attaches to the composer that SHIPPED the file, not whatever tab i
 
 test("a held send is visible on the button and always inspectable", () => {
   assert.match(RENDER, /sendBtn\.classList\.toggle\("send-held", held\);/);
-  assert.match(RENDER, /"sends when the upload finishes"/);
+  // inspectable through the ONE styled tip: a native title beside the button's setTip showed two
+  // stacked tooltip boxes while a hold was armed (2026-09-02)
+  assert.match(RENDER, /setTip\(sendBtn, held \? "Send \(Enter\)\\nsends when the upload finishes" : "Send \(Enter\)"\);/);
   assert.match(CSS, /#composer-send\.send-held \{ opacity: 0\.45; \}/);
 });

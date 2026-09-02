@@ -222,3 +222,12 @@ test("a new question drops the old verdict, so no answer ever describes another 
   assert.match(RENDER, /if \(out\.type === "dirCompletions"\) out\.host = host;/,
     "federation stamps a remote answer with the machine that gave it");
 });
+
+test("the completion dropdown is a LIST, not the picker's full 900px (the user 2026-09-02)", () => {
+  // width min(520px, calc(100% - 28px)) = the one-column dropdown measure on desktop, and
+  // byte-identical to the old left+right-14px geometry on any picker ≤548px (phones unchanged)
+  assert.match(STYLES, /\.picker-dir-menu \{[\s\S]{0,900}?width: min\(520px, calc\(100% - 28px\)\);/);
+  assert.match(STYLES, /\.picker-dir-menu \{[\s\S]{0,900}?max-height: min\(216px, 40vh\);/);
+  assert.match(STYLES, /\.picker-dir-menu \{[\s\S]{0,900}?border-radius: var\(--radius-menu\); box-shadow: var\(--shadow-menu\);/,
+    "the dropdown wears the shared menu vocabulary");
+});
