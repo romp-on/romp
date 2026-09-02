@@ -806,6 +806,45 @@ class LiveTail(unittest.TestCase):
         s.client = _Client({"percentage": 88, "model": "claude-opus-4-8"})
         asyncio.run(s._do_refresh_context())
         self.assertEqual(s._ctx_pct(), 88, "tracks the live value across turns")
+        self.assertFalse(s._ctx_over, "88% is inside the window — no overflow flag")
+
+        # the CLI documents percentage as "0-100+": past 100 the tokens exceed the CURRENT model's
+        # window (a 1M→200k model switch does this instantly). The battery stays clamped at 100,
+        # but the overflow is surfaced (ctxOver) instead of clamped into a silent, wrong-looking
+        # 100% (the user 2026-09-02, who switched models and read the full battery as a bug).
+        s.client = _Client({"percentage": 147, "model": "claude-haiku-4-5"})
+        asyncio.run(s._do_refresh_context())
+        self.assertEqual(s._ctx_pct(), 100, "the gauge value itself stays clamped")
+        self.assertTrue(s._ctx_over, "…but the overflow is news, not noise")
+        self.assertTrue(s.snapshot()["ctxOver"], "the snapshot ships it to the statusline")
+        self.assertTrue(sb.read_reg(d, sid).get("liveCtxOver"),
+                        "persisted beside liveCtx so a dormant/restarted session keeps saying so")
+        s.client = _Client({"percentage": 61, "model": "claude-haiku-4-5"})
+        asyncio.run(s._do_refresh_context())
+        self.assertFalse(s._ctx_over, "dropping back inside the window clears the flag")
+        self.assertFalse(sb.read_reg(d, sid).get("liveCtxOver"))
+
+    def test_context_refresh_queued_when_one_is_in_flight(self):
+        """A model/effort switch can ask for a context refresh while the turn-end refresh is still in
+        flight. The in-flight guard used to DROP that call silently, leaving the old model's percentage
+        standing until the next turn (the user 2026-09-02) — now it queues exactly one rerun, so the
+        number reflects the newest world."""
+        import asyncio
+        be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
+        s = sb.SdkSession(be, {"sid": "11111111-2222-3333-4444-555555555555", "name": "n", "cwd": "/tmp"})
+
+        class _Counting:
+            def __init__(self): self.calls = 0
+            async def get_context_usage(self): self.calls += 1; return {"percentage": 40}
+        s.client = _Counting()
+        s._ctx_refreshing = True                       # a refresh is mid-flight
+        asyncio.run(s._do_refresh_context())
+        self.assertEqual(s.client.calls, 0, "the guarded call never races the in-flight one")
+        self.assertTrue(s._ctx_refresh_again, "…but it is REMEMBERED, not dropped")
+        s._ctx_refreshing = False
+        asyncio.run(s._do_refresh_context())           # the in-flight one finishing runs the queued ask
+        self.assertEqual(s.client.calls, 2, "the queued rerun fires after the live refresh lands")
+        self.assertFalse(s._ctx_refresh_again, "the queue holds ONE rerun, not a storm")
 
     def test_assistant_model_sets_badge_but_synthetic_does_not_corrupt_it(self):
         """The model 'doesn't show' mid-conversation (the user 2026-06-24): injected/synthetic assistant turns

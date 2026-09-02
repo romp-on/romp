@@ -6182,6 +6182,18 @@ class ViewBuilder(unittest.TestCase):
         self.assertEqual(st["state"], "needsInput", "permission -> the needs-input chip (renamed 2026-08-15)")
         self.assertEqual(st["model"], "Opus 4.8")
         self.assertEqual(st["ctx"], "20")
+        self.assertFalse(st["ctxOver"], "tmux sessions never report a window overflow")
+
+    def test_chat_status_carries_ctx_overflow(self):
+        """The context % is clamped at 100 kernel-side; ctxOver carries the CLI's '100+' truth (tokens
+        exceed the CURRENT model's window, e.g. right after a 1M→200k model switch) so the battery says
+        'over this model's window' instead of a silent 100% (the user 2026-09-02)."""
+        km._tmux_sessions = lambda: {SID: {"state": "working", "since": NOW - 5, "model": "Haiku 4.5",
+                                           "effort": "max", "context": 100, "compactPct": None,
+                                           "color": None, "ctxOver": True}}
+        st = km.build_session(SID, NOW)["status"]
+        self.assertEqual(st["ctx"], "100")
+        self.assertTrue(st["ctxOver"], "the overflow flag rides beside the clamped %")
 
 
 class CrossPane(unittest.TestCase):

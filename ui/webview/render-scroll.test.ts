@@ -22,8 +22,21 @@ test("upsert tells append from fork by transcript OVERLAP, not the first uuid (s
 test("a content refresh appends (preserves scroll); only a fork drops the DOM", () => {
   assert.match(RENDER, /if \(forked\) \{[\s\S]{0,120}?v\.el\.remove\(\)/,
     "the cached DOM is dropped only on a fork, not on every push");
-  assert.match(RENDER, /if \(existed && !forked\) \{\s*appendActive\(\);/,
+  assert.match(RENDER, /if \(existed && !forked && !firstBuild\) \{\s*appendActive\(\);/,
     "a refresh of the active tab appends instead of snapping to the bottom");
+});
+
+test("a placeholder's first content-bearing build LANDS (bottom), it does not append (top)", () => {
+  // A fork's provisional tab and a revive's stub hold zero events; the payload that fills them used
+  // to route down the append path, whose overflow gate read the one-line placeholder as "not at
+  // bottom" and left the whole arriving history at scrollTop 0 — with the never-yank rule then
+  // holding the top forever (the user 2026-09-02: an opened/forked session sat at the top after its
+  // context loaded). First build = prev had NO events and the payload brings some → showActive →
+  // landActive pins the bottom exactly like a brand-new tab.
+  assert.match(RENDER, /const firstBuild = !!\(existed && prev && !prev\.events\.length && msg\.events && msg\.events\.length\);/,
+    "first build = the view's zero-event placeholder filling with its first real events");
+  assert.match(RENDER, /if \(msg\.id === activeId && !\(existed && !forked && !firstBuild\)\) \{/,
+    "the land branch's scroll capture covers the first build too");
 });
 
 test("a rebuild NEVER snaps a scrolled-up reader to the bottom — it captures + restores their anchor", () => {

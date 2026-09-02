@@ -10393,6 +10393,8 @@ class Sessions:
                                 "connected": bool(st.get("connected")),   # SDK handshake up → the opening-chip override stands down (fresh sessions have no transcript yet)
                                 "spawning": bool(st.get("spawning")),   # spawn/handshake in flight NOW — the ONLY window the opening chip covers (a dormant created session must read ready, the user 2026-08-13)
                                 "context": ctx if isinstance(ctx, (int, float)) else None, "compactPct": None,
+                                "ctxOver": bool(st.get("ctxOver")),   # context% is CLAMPED at 100 — this says the CLI
+                                #   reported 100+ (tokens exceed the CURRENT model's window, e.g. after a 1M→200k switch)
                                 "ctxTokens": st.get("ctxTokens"),   # raw totalTokens (SDK only) — the
                                 #   compaction-suggestion thresholds key on true tokens (2026-08-30)
                                 "fast": st.get("fast", ""),   # fast-mode state from the CLI's init ("on"/"off"/"cooldown"; "" = unknown → no badge)
@@ -20236,6 +20238,10 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                   "modelPending": _model_pending_now(sid, tm),   # switching-dots on the model badge until the pick lands, from EITHER surface (the user 2026-07-03)
                   "effortPending": bool(tm.get("effortPending")),   # switching-dots on the effort badge while the /effort reconnect applies (SDK-only; the user 2026-07-06)
                   "ctx": str(tm["context"]) if tm["context"] is not None else "",
+                  # the % above is clamped at 100 — ctxOver says the CLI reported 100+ (tokens exceed
+                  # the CURRENT model's window, e.g. right after a 1M→200k model switch), so the
+                  # battery can say "over this model's window" instead of a silent 100% (2026-09-02)
+                  "ctxOver": bool(tm.get("ctxOver")),
                   # model name + effort tinted on the GLOBAL colormap by capability/effort rank (the user
                   # 2026-07-02): the statusline meta buttons just apply these (mirrors ctxColor). None = default.
                   "modelColor": _model_color(tm["model"], cm.stops_for(_colormap())),
@@ -27384,12 +27390,16 @@ _CHAT_MOBILE_CSS = (
     "#tabbar #tabs{display:none}"                       # the wrapping multi-row tab strip
     "#tabbar-resize{display:none}"                      # nothing to resize under the mobile header
     "#mhdr{display:flex;align-items:stretch;gap:6px;width:100%}"
+    # the chip's surfaces read the chrome tokens where the dark value is byte-identical
+    # (--btn-bg → #2a2a2a, --hairline → #3a3a3a — the #mlist pattern below), so the light theme
+    # re-skins them for free; the text colors have no byte-identical token and take light-block
+    # overrides instead (the user 2026-09-02: the chip stayed a dark slab on the light chat page)
     "#mcur{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:8px;cursor:pointer;"
-    "background:#2a2a2a;color:#dddddd;border:1px solid #3a3a3a;border-radius:6px;padding:7px 10px;"
+    "background:var(--btn-bg,#2a2a2a);color:#dddddd;border:1px solid var(--hairline,#3a3a3a);border-radius:6px;padding:7px 10px;"
     "font:600 13px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}"
     # colored session: the identity color reads as the NAME (bold) on the same grey chip as the +/madd
     # button, with a hairline color border, not the color as a fill (the user 2026-07-22).
-    "#mcur.colored{background:#2a2a2a;color:var(--cbg);border-color:var(--cbg)}"
+    "#mcur.colored{background:var(--btn-bg,#2a2a2a);color:var(--cbg);border-color:var(--cbg)}"
     "#mcur .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700}"
     # the working cue is the SAME gold status dot desktop uses (the tab's .tab-dot), not a text bullet
     "#mcur .wd{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--st-working-bg,#e0b020)}"
@@ -27397,7 +27407,7 @@ _CHAT_MOBILE_CSS = (
     "#mcur .cv{flex:0 0 auto;opacity:.6;font-size:11px}"
     "#mtag-slot{flex:0 0 auto;display:flex;align-items:center;gap:5px}"   # T161: the tag control's slot, sized by the shared button's own inline metrics
     "#madd{flex:0 0 auto;width:36px;display:flex;align-items:center;justify-content:center;cursor:pointer;"
-    "background:#2a2a2a;color:#bbbbbb;border:1px solid #3a3a3a;border-radius:6px;font-size:16px;line-height:1}"
+    "background:var(--btn-bg,#2a2a2a);color:#bbbbbb;border:1px solid var(--hairline,#3a3a3a);border-radius:6px;font-size:16px;line-height:1}"
     # the mobile session picker IS a dropdown (T226 review): its card + hairline read the menu tokens
     # (dark: --menu-bg → #252526 and --hairline → #3a3a3a, byte-identical to the literals they replace)
     "#mlist{display:none;position:absolute;left:8px;right:8px;top:100%;margin-top:4px;z-index:200;"
@@ -27411,6 +27421,11 @@ _CHAT_MOBILE_CSS = (
     "body.theme-light .mrow .nm{color:var(--menu-fg)}"
     "body.theme-light .mrow .mclose{color:var(--text-muted)}"
     "body.theme-light .mrow.active{background:var(--accent-wash)}"
+    # the trigger chip's text tiers (its surfaces already re-skin through --btn-bg/--hairline above);
+    # the .colored restatement outweighs the plain override so the identity color keeps the name
+    "body.theme-light #mcur{color:var(--menu-fg)}"
+    "body.theme-light #mcur.colored{color:var(--cbg)}"
+    "body.theme-light #madd{color:var(--text-muted)}"
     ".mrow{display:flex;align-items:center;gap:9px;padding:10px 12px;cursor:pointer;"
     "border-bottom:1px solid #ffffff12;font:600 13px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}"
     ".mrow:last-child{border-bottom:0}"
@@ -29238,7 +29253,11 @@ _LANDING_MOBILE_JS = """
 function fit(){try{var vv=window.visualViewport;
 var coarse=window.matchMedia&&matchMedia('(pointer: coarse)').matches;
 var h=(!coarse||!vv)?window.innerHeight:Math.round(vv.height*(vv.scale||1));
-if(h)document.documentElement.style.setProperty('--app-h',h+'px');}catch(e){}}
+if(h)document.documentElement.style.setProperty('--app-h',h+'px');
+// iOS ignores interactive-widget and reveals a focused input by SCROLLING this overflow:hidden page
+// (a UA scroll bypasses the clamp) — the shell then sits a keyboard-height up until dragged back
+// (the user 2026-09-02). The layout must never scroll: undo any stray offset on the same events.
+if(window.scrollY||document.documentElement.scrollTop)window.scrollTo(0,0);}catch(e){}}
 fit();window.addEventListener('resize',fit);window.addEventListener('orientationchange',fit);
 // iOS Safari collapses/expands its toolbars AS YOU SCROLL, and the visible height changes with them
 // without a window resize; the visual viewport's own scroll event is where that settles. pageshow covers
@@ -29773,7 +29792,17 @@ def _landing():
             # safe-area padding-bottom became a dead slab below the Chat/Feed/Timeline labels; cover also drew
             # the top edge under the status bar with no top inset (clipped chat tab bar). The default viewport
             # auto-insets clear of the status bar AND the nav bar and zeroes every env() inset.
-            "<meta name=viewport content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'>"
+            # interactive-widget=resizes-content (the user 2026-09-02, whose composer tap scrolled the
+            # whole page up behind the keyboard): without it browsers default to resizes-visual — the
+            # soft keyboard PANS the visual viewport while innerHeight stands still, so the UA slides
+            # the shell up to reveal the input and fit() (below) re-lays the shrunken --app-h into a
+            # window whose visible band now starts a keyboard-height down; the composer ends up
+            # off-screen until the user drags it back. With resizes-content the LAYOUT viewport
+            # shrinks (innerHeight, 100dvh and vv.height agree, offsetTop stays 0), the iframes
+            # shrink with --app-h, and the flex-footer composer lands right above the keyboard.
+            # Android Chrome 108+ honors it; engines that don't (iOS Safari) ignore the token and
+            # keep today's behavior plus fit()'s stray-scroll reset.
+            "<meta name=viewport content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,interactive-widget=resizes-content'>"
             # …EXCEPT installed on an iOS home screen (plans/ios-app.md; the user 2026-08-07): standalone
             # mode has no browser chrome keeping #mtabs off the home indicator, and iOS only populates
             # env(safe-area-inset-*) under cover. navigator.standalone is iOS-only and standalone-only,
@@ -29895,6 +29924,12 @@ def _landing():
             # the rail's network (⧉) action opens a shell-native popover anchored by the rail to manage
             # federated remote kernels (attach a host from ~/.ssh/config, see status, detach).
             ".rail-act.on{color:var(--accent)}"   # the network icon glows accent-blue while a remote is connected
+            # the master bell says OFF the way every other bell in the app does — a slash through
+            # the glyph (the feed card bell, the timeline lane bell) — never color alone: the light
+            # theme's rail recolor happened to equalize the two colors and on/off rendered
+            # pixel-identical (the user 2026-09-02)
+            ".bell-slash{display:none}"
+            "#rail-bell:not(.on) .bell-slash,#mbell:not(.on) .bell-slash{display:block}"
             # Per-node fleet colour on the network glyph (the user 2026-07-29). The nodes carry their own
             # fill, so they override the icon's currentColor: accent = connected and on this build,
             # grey = attached but not answering (romp is dialing), red = needs you (drift, no kernel, or
@@ -30344,9 +30379,13 @@ def _landing():
             "body.theme-light .pane-rail{background:#E7DED2;border-top-color:#DCD2C4}"
             "body.theme-light .rail-btn{color:#5D574E}"
             "body.theme-light .rail-btn:hover{color:#C2410C;background:rgba(0,0,0,0.05)}"
-            "body.theme-light .rail-btn.on{background:rgba(194,65,12,0.10);border-color:rgba(194,65,12,0.35)}"
+            "body.theme-light .rail-btn.on{color:var(--accent);background:rgba(194,65,12,0.10);border-color:rgba(194,65,12,0.35)}"
             "body.theme-light .rail-act{color:#5D574E}"
             "body.theme-light .rail-act:hover{color:#1F1E1D;background:rgba(0,0,0,0.06)}"
+            # the light rail recolors above outspecify the bare `.on` rules ((0,2,1) beats (0,2,0)),
+            # which silenced the bell's and the network glyph's on-state entirely in the light theme
+            # (the user 2026-09-02) — restate `.on` at the winning specificity
+            "body.theme-light .rail-act.on{color:var(--accent)}"
             "body.theme-light .gv{background:linear-gradient(90deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gh{background:linear-gradient(180deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gv::after,body.theme-light .gh::after{background:rgba(0,0,0,0.22)}"
@@ -30459,7 +30498,8 @@ def _landing():
             "<svg viewBox='0 0 16 16' width='18' height='18'>"
             "<path d='M8 2 C5.7 2 4.3 3.8 4.3 6.2 L4.3 9 L3 11.2 L13 11.2 L11.7 9 L11.7 6.2 C11.7 3.8 10.3 2 8 2 Z'"
             " fill='none' stroke='currentColor' stroke-width='1.2' stroke-linejoin='round'/>"
-            "<path d='M6.5 13 A1.7 1.7 0 0 0 9.5 13' fill='none' stroke='currentColor' stroke-width='1.2'/></svg></div>"
+            "<path d='M6.5 13 A1.7 1.7 0 0 0 9.5 13' fill='none' stroke='currentColor' stroke-width='1.2'/>"
+            "<line class='bell-slash' x1='2.8' y1='2.2' x2='13.2' y2='13.8' stroke='currentColor' stroke-width='1.2' stroke-linecap='round'/></svg></div>"
             "<div class=rail-act id=rail-gear data-keycmd=settings.open title=Settings aria-label=Settings>⛭</div>"   # ⛭ (gear-without-hub): the bigger, bolder gear the user prefers (restored 2026-06-29)
             "</div>"   # /.rail-acts
             "</div>"   # /.pane-rail (bottom bar)
@@ -30501,7 +30541,8 @@ def _landing():
             "<svg viewBox='0 0 16 16' width='18' height='18'>"
             "<path d='M8 2 C5.7 2 4.3 3.8 4.3 6.2 L4.3 9 L3 11.2 L13 11.2 L11.7 9 L11.7 6.2 C11.7 3.8 10.3 2 8 2 Z'"
             " fill='none' stroke='currentColor' stroke-width='1.2' stroke-linejoin='round'/>"
-            "<path d='M6.5 13 A1.7 1.7 0 0 0 9.5 13' fill='none' stroke='currentColor' stroke-width='1.2'/></svg></button>"
+            "<path d='M6.5 13 A1.7 1.7 0 0 0 9.5 13' fill='none' stroke='currentColor' stroke-width='1.2'/>"
+            "<line class='bell-slash' x1='2.8' y1='2.2' x2='13.2' y2='13.8' stroke='currentColor' stroke-width='1.2' stroke-linecap='round'/></svg></button>"
             # settings wears the desktop rail's OWN gear glyph, ⛭ (U+26ED), not the outlined star it had.
             "<button class=mact data-act=settings data-keycmd=settings.open aria-label=Settings title=Settings>⛭</button>"
             "</nav>"

@@ -34,6 +34,12 @@
                        the await-paused outline rendered with NO border at all (the user 2026-07-02) */
   --accent: #9cd2ff;  /* the romp accent (CLAUDE.md Design) — feed.css has its OWN :root, so selected-state
                        chrome here needs it defined locally or var(--accent) silently falls back */
+  --link: var(--vscode-textLink-foreground, #4daafc);  /* hyperlink ink — mirrors styles.css (one token
+                       for every rendered link; the light block re-inks it) */
+  /* the hljs syntax palette, as tokens — mirrors styles.css byte-for-byte (one treatment, two
+     sheets; file-view.test.ts pins the two identical). Raw hexes here were dark-only. */
+  --hl-fg: #d8c6a8; --hl-kw: #c98a6a; --hl-str: #9fb878; --hl-num: #d4a36a;
+  --hl-cmt: #6f6a5f; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;
   --accent-fg: #0c1a2e;  /* dark text ON the accent (CLAUDE.md) — for the reverse-highlight on a selected toggle */
   --accent-wash: rgba(156, 210, 255, 0.12);  /* THE faint accent wash — mirrors styles.css; one alpha
                        behind every selected/hovered accent chrome */
@@ -132,6 +138,9 @@ body.theme-light {
                             its clay accent (what the timeline's PAL_LIGHT already drew) */
   --code-fg: #8C4A00;
   --code-bg: rgba(180, 83, 9, 0.08);
+  --link: #1D63A8;   /* inked cobalt — clearly clickable, clearly not the error red (5.2:1 on the page) */
+  --hl-fg: #3E3A35; --hl-kw: #A03509; --hl-str: #47720F; --hl-num: #915C0B;
+  --hl-cmt: #6E675C; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
   --err: #B02A1C;
@@ -196,7 +205,7 @@ body.theme-light {
   --vscode-menu-selectionBackground: #F3E0D5;
   --vscode-menu-selectionForeground: #1F1E1D;
   --vscode-scrollbarSlider-background: rgba(90, 84, 74, 0.35);
-  --vscode-textLink-foreground: #B24A28;
+  --vscode-textLink-foreground: #1D63A8;
   --vscode-button-background: #C2410C;
   --vscode-button-foreground: #FFF8F2;
   --vscode-button-hoverBackground: #A93A0B;
@@ -1361,7 +1370,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 #romp-fileview { position: fixed; inset: 0; z-index: 1200; background: var(--overlay-dim);
   display: flex; align-items: center; justify-content: center; }
 .fileview { width: 95%; height: 95%; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--bg, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: var(--radius-modal);
+  background: var(--bg, #1e1e1e); border: 1px solid var(--box-border); border-radius: var(--radius-modal);
   box-shadow: var(--shadow-modal); }
 body.fileview-open { overflow: hidden; }
 .fileview-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
@@ -1401,7 +1410,7 @@ a.fileview-btn[hidden] { display: none; }
 .fileview-pre code { background: none; padding: 0; font: inherit; }
 /* a refusal explains itself in place, in the kernel's own words (too large — with the size and the
    cap; not a text file; not found) over the path it was asked for. Never a blank pane. */
-.fileview-err { padding: 18px 14px; font-size: 0.86em; color: #e0a030; }
+.fileview-err { padding: 18px 14px; font-size: 0.86em; color: var(--warn); }
 .fileview-err-hint { margin-top: 6px; color: var(--dim); font-size: 0.92em;
   font-family: var(--mono, ui-monospace, monospace); word-break: break-all; }
 /* the way out of a refusal: when the file exists but cannot render (413/415), the kernel's words are
@@ -1457,7 +1466,7 @@ a.fileview-btn[hidden] { display: none; }
 .fileview-md li { margin: 0.2em 0; }
 .fileview-md strong { color: var(--fg); font-weight: 600; }
 .fileview-md em { font-style: italic; }
-.fileview-md a { color: var(--vscode-textLink-foreground, #4daafc); text-decoration: none; }
+.fileview-md a { color: var(--link); text-decoration: none; }
 .fileview-md a:hover { text-decoration: underline; }
 .fileview-md blockquote { margin: 0.5em 0; padding-left: 12px;
   border-left: 2px solid var(--box-border); color: var(--dim); }
@@ -1478,7 +1487,7 @@ a.fileview-btn[hidden] { display: none; }
 }
 .fileview-md table { border-collapse: collapse; margin: 0.6em 0; }
 .fileview-md th, .fileview-md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
-.fileview-md th { background: rgba(255, 255, 255, 0.03); }
+.fileview-md th { background: var(--box-bg, rgba(255, 255, 255, 0.03)); }
 .fileview-md img { max-width: 100%; }
 
 /* ── the viewer's image + PDF bodies (a .png used to open as line-numbered mojibake). The <img>
@@ -1496,17 +1505,17 @@ a.fileview-btn[hidden] { display: none; }
    The hljs token palette, mirrored from styles.css (one treatment, two sheets — the .romp-acted
    precedent: each page loads only its own sheet). The viewer wraps every token in .hljs-* spans, and
    until this block landed the feed sheet had NO rules for them, so highlighting rendered colorless. */
-.hljs { color: #d8c6a8; background: transparent; }
-.hljs-keyword, .hljs-built_in, .hljs-literal, .hljs-type { color: #c98a6a; }
-.hljs-string, .hljs-attr, .hljs-regexp { color: #9fb878; }
-.hljs-number { color: #d4a36a; }
-.hljs-comment, .hljs-quote { color: #6f6a5f; font-style: italic; }
-.hljs-title, .hljs-title.function_, .hljs-section { color: #e1c08d; }
-.hljs-name, .hljs-tag { color: #c98a6a; }
-.hljs-params, .hljs-variable, .hljs-property { color: #d8c6a8; }
-.hljs-meta { color: #9a8f7a; }
-.hljs-attribute { color: #cdaf7e; }
-.hljs-addition { color: #9fb878; }
+.hljs { color: var(--hl-fg); background: transparent; }
+.hljs-keyword, .hljs-built_in, .hljs-literal, .hljs-type { color: var(--hl-kw); }
+.hljs-string, .hljs-attr, .hljs-regexp { color: var(--hl-str); }
+.hljs-number { color: var(--hl-num); }
+.hljs-comment, .hljs-quote { color: var(--hl-cmt); font-style: italic; }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--hl-title); }
+.hljs-name, .hljs-tag { color: var(--hl-kw); }
+.hljs-params, .hljs-variable, .hljs-property { color: var(--hl-fg); }
+.hljs-meta { color: var(--hl-meta); }
+.hljs-attribute { color: var(--hl-attr); }
+.hljs-addition { color: var(--hl-str); }
 .hljs-deletion { color: var(--err); }
 
 /* the "host:" prefix on a federated session's name — see styles.css (one treatment, two sheets) */
@@ -1629,8 +1638,8 @@ body.filebrowse-open { overflow: hidden; }
    and the full path live in the row's hover title */
 .fb-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; cursor: pointer;
   font-size: 0.86em; }
-.fb-row:hover, .fb-row.active { background: rgba(255, 255, 255, 0.07); }
-.fb-row.active { outline: 1px solid rgba(156, 210, 255, 0.35); outline-offset: -1px; }
+.fb-row:hover, .fb-row.active { background: var(--menu-hover); }
+.fb-row.active { outline: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: -1px; }
 .fb-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-family: var(--mono, ui-monospace, monospace); }
 .fb-dir .fb-name { color: var(--accent); }
@@ -1662,7 +1671,7 @@ body.filebrowse-open { overflow: hidden; }
   background: var(--bg, #1e1e1e); color: var(--fg);
   font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
   white-space: pre; tab-size: 4; }
-.fileview-editor:focus { box-shadow: inset 0 0 0 1px rgba(156, 210, 255, 0.35); }
+.fileview-editor:focus { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
 
 /* usage-limit banner (2026-08-18): analysis paused on a usage limit says so above the columns —
    loud but compact, one line + (Fable only) the switch-to-Opus action. Neutral card chrome, never

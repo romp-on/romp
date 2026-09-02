@@ -1679,7 +1679,11 @@ class SdkSession:
         _lt0 = reg.get("liveCtxTokens")           # raw totalTokens from the same get_context_usage payload —
         self._ctx_tokens: int | None = (int(_lt0) if isinstance(_lt0, (int, float)) else None)   # the kernel's
         #   compaction-suggestion thresholds key on true tokens, window-independent (2026-08-30)
+        self._ctx_over = bool(reg.get("liveCtxOver"))   # the CLI's percentage ran past 100 (tokens exceed the
+        #   CURRENT model's window — a 1M→200k model switch does this instantly); the battery caps at 100 but
+        #   says so instead of presenting a silent full battery (the user 2026-09-02)
         self._ctx_refreshing = False             # one get_context_usage control request in flight at a time
+        self._ctx_refresh_again = False          # a refresh asked for WHILE one was in flight → run once more
         self._usage_refreshing = False           # one get_usage control request in flight at a time
         self.retrying = False                        # an api_retry storm (API rate-limit/overload) is stalling the turn → 'retrying', not 'working'
         self.retry_count = 0                          # api_retry backoff attempts in the CURRENT storm; → the live 'attempt N' + the 'Recovered after N retries' note, reset each turn
@@ -2118,7 +2122,13 @@ class SdkSession:
         window from peak prompt sizes (the user 2026-06-24: the SDK read 14% where tmux read 3% on a 1M-context
         model — a wrong-window guess). Updates the live % + model and persists both (so a dormant / restarted
         session keeps showing them). Cheap; guarded so only one is in flight."""
-        if not self.client or self._ctx_refreshing:
+        if not self.client:
+            return
+        if self._ctx_refreshing:
+            # a model/effort switch can land while the turn-end refresh is mid-flight; DROPPING this
+            # call left the old model's percentage standing until the next turn (the user 2026-09-02,
+            # who watched the battery misreport right after a switch) — queue exactly one rerun
+            self._ctx_refresh_again = True
             return
         self._ctx_refreshing = True
         try:
@@ -2132,6 +2142,14 @@ class SdkSession:
         changed = False
         pct = cu.get("percentage")
         if isinstance(pct, (int, float)):
+            # the CLI documents percentage as "0-100+": past 100 the tokens exceed the CURRENT
+            # model's window (a 1M→200k model switch does this instantly, and the next turn
+            # compacts or refuses). The clamp below is right for every gauge, but the overflow is
+            # NEWS — _ctx_over lets the battery say "over this model's window" instead of a
+            # silent, wrong-looking 100% (the user 2026-09-02).
+            over = round(pct) > 100
+            if over != self._ctx_over:
+                self._ctx_over, changed = over, True
             v = max(0, min(100, round(pct)))
             if v != self._ctx:
                 self._ctx, changed = v, True
@@ -2149,6 +2167,7 @@ class SdkSession:
         upd["modelPending"] = bool(self._model_pending)
         if self._ctx is not None:
             upd["liveCtx"] = self._ctx
+            upd["liveCtxOver"] = self._ctx_over
         if self._ctx_tokens is not None:
             upd["liveCtxTokens"] = self._ctx_tokens
         if upd:
@@ -2162,6 +2181,11 @@ class SdkSession:
         # change waited for the backstop.)
         if changed:
             self.backend._poke()
+        if self._ctx_refresh_again:
+            # someone asked while this refresh was in flight (their answer may predate their event —
+            # e.g. a model switch mid-refresh): run once more so the number reflects the newest world
+            self._ctx_refresh_again = False
+            await self._do_refresh_context()
 
     def _adopt_fast_state(self, d) -> bool:
         """Adopt fast-mode truth from a CLI payload that carries it. The per-turn init message and the
@@ -3732,6 +3756,8 @@ class SdkSession:
                 #   (a key found via apiKeyHelper bills the key while `auth` still reads login)
                 "authPending": bool(self._auth_pending),   # an /auth switch reconnecting → badge dots
                 "mode": self.perm_mode, "ctx": self._ctx_pct(), "ctxTokens": self._ctx_tokens,
+                "ctxOver": self._ctx_over,   # the % above is CLAMPED — true when the CLI reported 100+
+                #   (tokens exceed the current model's window, e.g. right after a 1M→200k switch)
                 "summary": "",
                 "connected": bool(self.client),   # the SDK handshake is up (set at connect, cleared at
                 #   teardown) — the "this session is OPEN" event for a transcript-less fresh session:
@@ -6296,6 +6322,7 @@ class SdkBackend:
                     "fast": reg.get("liveFast", ""),
                     "fastReason": reg.get("liveFastReason", ""),
                     "ctx": lc if isinstance(lc, (int, float)) else "",
+                    "ctxOver": bool(reg.get("liveCtxOver")),   # persisted beside liveCtx — same survival
                     "ctxTokens": (int(reg["liveCtxTokens"])
                                   if isinstance(reg.get("liveCtxTokens"), (int, float)) else None),
                     "summary": ""}

@@ -60,30 +60,40 @@ function langExt(ext: string): Extension[] {
   }
 }
 
-// The dashboard's own look and nothing more: the panel palette from styles.css, the accent
-// (#9cd2ff) only where the app already uses it (selection, matches, focus cues), the mono stack
-// and 13px the viewer's read mode already renders — no new fonts, no new sizes (the font-size
-// rule; and like the timeline, an adopted style must DECLARE font-family, never inherit a host's).
-const rompTheme = EditorView.theme({
-  "&": { height: "100%", fontSize: "13px", backgroundColor: "var(--bg, #1e1e1e)", color: "var(--fg, #d4d4d4)" },
-  ".cm-content": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", caretColor: "var(--fg, #d4d4d4)" },
-  ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", overflow: "auto" },
-  "&.cm-focused": { outline: "none" },
-  ".cm-gutters": { backgroundColor: "var(--bg, #1e1e1e)", color: "var(--dim, #8a8f98)", border: "none",
-    borderRight: "1px solid rgba(255, 255, 255, 0.08)" },
-  ".cm-activeLine": { backgroundColor: "rgba(255, 255, 255, 0.04)" },
-  ".cm-activeLineGutter": { backgroundColor: "rgba(255, 255, 255, 0.04)" },
-  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(156, 210, 255, 0.22)" },
-  ".cm-selectionMatch": { backgroundColor: "rgba(156, 210, 255, 0.14)" },
-  ".cm-matchingBracket": { backgroundColor: "rgba(156, 210, 255, 0.18)", outline: "1px solid rgba(156, 210, 255, 0.4)" },
-  ".cm-cursor": { borderLeftColor: "var(--fg, #d4d4d4)" },
-  // the search panel wears the shared menu vocabulary (one dropdown skin, 2026-08-09)
-  ".cm-panels": { backgroundColor: "#252526", color: "var(--fg, #d4d4d4)",
-    borderTop: "1px solid rgba(255, 255, 255, 0.12)" },
-  ".cm-panel.cm-search input, .cm-panel.cm-search button": {
-    fontFamily: "inherit", fontSize: "12px", background: "var(--bg, #1e1e1e)",
-    color: "var(--fg, #d4d4d4)", border: "1px solid rgba(255, 255, 255, 0.12)", borderRadius: "4px" },
-}, { dark: true });
+// The dashboard's own look and nothing more: the panel palette from styles.css, the accent only
+// where the app already uses it (selection, matches, focus cues — via color-mix over var(--accent),
+// which resolves to the dark literal rgba(156,210,255,…) washes exactly), the mono stack and 13px
+// the viewer's read mode already renders — no new fonts, no new sizes (the font-size rule; and like
+// the timeline, an adopted style must DECLARE font-family, never inherit a host's). Built per mount,
+// not per module: `dark` is a CodeMirror-side branch (its base theme for panels/popups), so it must
+// read the LIVE body class — a module-load constant froze the first theme forever (and was
+// hardcoded { dark: true }, which kept the search panel near-black under body.theme-light — the
+// user 2026-09-02, "the file editor looked black").
+function rompTheme(): Extension {
+  const light = typeof document !== "undefined" && document.body.classList.contains("theme-light");
+  return EditorView.theme({
+    "&": { height: "100%", fontSize: "13px", backgroundColor: "var(--bg, #1e1e1e)", color: "var(--fg, #d4d4d4)" },
+    ".cm-content": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", caretColor: "var(--fg, #d4d4d4)" },
+    ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", overflow: "auto" },
+    "&.cm-focused": { outline: "none" },
+    ".cm-gutters": { backgroundColor: "var(--bg, #1e1e1e)", color: "var(--dim, #8a8f98)", border: "none",
+      borderRight: "1px solid var(--hairline, #3a3a3a)" },
+    ".cm-activeLine": { backgroundColor: "var(--overlay-05, rgba(255, 255, 255, 0.06))" },
+    ".cm-activeLineGutter": { backgroundColor: "var(--overlay-05, rgba(255, 255, 255, 0.06))" },
+    ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+      backgroundColor: "color-mix(in srgb, var(--accent, #9cd2ff) 22%, transparent)" },
+    ".cm-selectionMatch": { backgroundColor: "color-mix(in srgb, var(--accent, #9cd2ff) 14%, transparent)" },
+    ".cm-matchingBracket": { backgroundColor: "color-mix(in srgb, var(--accent, #9cd2ff) 18%, transparent)",
+      outline: "1px solid color-mix(in srgb, var(--accent, #9cd2ff) 40%, transparent)" },
+    ".cm-cursor": { borderLeftColor: "var(--fg, #d4d4d4)" },
+    // the search panel wears the shared menu vocabulary (one dropdown skin, 2026-08-09)
+    ".cm-panels": { backgroundColor: "var(--surface-raised, #252526)", color: "var(--fg, #d4d4d4)",
+      borderTop: "1px solid var(--box-border, rgba(255, 255, 255, 0.12))" },
+    ".cm-panel.cm-search input, .cm-panel.cm-search button": {
+      fontFamily: "inherit", fontSize: "12px", background: "var(--bg, #1e1e1e)",
+      color: "var(--fg, #d4d4d4)", border: "1px solid var(--box-border, rgba(255, 255, 255, 0.12))", borderRadius: "4px" },
+  }, { dark: !light });
+}
 
 export interface EditorHandle {
   value(): string;
@@ -112,7 +122,7 @@ export function mount(host: HTMLElement, opts: MountOpts): EditorHandle {
         highlightSelectionMatches(),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         ...langExt(opts.ext),
-        rompTheme,
+        rompTheme(),
         keymap.of([
           { key: "Mod-s", run: () => { opts.onSave(); return true; } },
           ...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap,

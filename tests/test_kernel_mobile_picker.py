@@ -56,6 +56,22 @@ class MobilePickerClickSafe(unittest.TestCase):
         self.assertIn(".mrow.ph::after{content:'syncing", km._CHAT_MOBILE_CSS)
         self.assertIn(".mrow.pending::after{content:'opening", km._CHAT_MOBILE_CSS)
 
+    def test_the_trigger_chip_wears_the_chrome_tokens_and_a_light_skin(self):
+        """The #mcur/#madd chip is the one mobile surface that never joined the token migration: raw
+        #2a2a2a/#3a3a3a in this inline sheet outranked everything styles.css could say, so the chip sat
+        as a dark slab on the light chat page (the user 2026-09-02). Surfaces ride tokens whose dark
+        value is byte-identical to the old literals; text tiers take light-block overrides, with the
+        .colored restatement keeping the identity color on the name."""
+        css = km._CHAT_MOBILE_CSS
+        self.assertNotIn("background:#2a2a2a", css, "no raw chip surface left — tokens with dark fallbacks")
+        self.assertNotIn("border:1px solid #3a3a3a", css)
+        self.assertEqual(css.count("background:var(--btn-bg,#2a2a2a)"), 3, "chip, colored chip, and +")
+        self.assertEqual(css.count("border:1px solid var(--hairline,#3a3a3a)"), 3,
+                         "chip + the '+' + the #mlist card share the one hairline")
+        self.assertIn("body.theme-light #mcur{color:var(--menu-fg)}", css)
+        self.assertIn("body.theme-light #mcur.colored{color:var(--cbg)}", css)
+        self.assertIn("body.theme-light #madd{color:var(--text-muted)}", css)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -160,19 +160,25 @@ test("langFor maps known extensions and returns null rather than guessing", () =
 // two sheets — the .romp-acted precedent). This pins every rule in both and catches drift.
 test("the hljs token palette lives in feed.css too, identical to the chat's", () => {
   const STYLES = CHAT_CSS;
+  // tokenized 2026-09-02 (the light theme re-inks the same names; theme-parity.test.ts holds the
+  // token set + its contrast in both themes) — the dark :root values are the exact hexes these
+  // rules always carried: fg #d8c6a8, kw #c98a6a, str #9fb878, num #d4a36a, cmt #6f6a5f,
+  // title #e1c08d, meta #9a8f7a, attr #cdaf7e
   const rules = [
-    /\.hljs \{ color: #d8c6a8; background: transparent; \}/,
-    /\.hljs-keyword, \.hljs-built_in, \.hljs-literal, \.hljs-type \{ color: #c98a6a; \}/,
-    /\.hljs-string, \.hljs-attr, \.hljs-regexp \{ color: #9fb878; \}/,
-    /\.hljs-number \{ color: #d4a36a; \}/,
-    /\.hljs-comment, \.hljs-quote \{ color: #6f6a5f; font-style: italic; \}/,
-    /\.hljs-title, \.hljs-title\.function_, \.hljs-section \{ color: #e1c08d; \}/,
-    /\.hljs-name, \.hljs-tag \{ color: #c98a6a; \}/,
-    /\.hljs-params, \.hljs-variable, \.hljs-property \{ color: #d8c6a8; \}/,
-    /\.hljs-meta \{ color: #9a8f7a; \}/,
-    /\.hljs-attribute \{ color: #cdaf7e; \}/,
-    /\.hljs-addition \{ color: #9fb878; \}/,
+    /\.hljs \{ color: var\(--hl-fg\); background: transparent; \}/,
+    /\.hljs-keyword, \.hljs-built_in, \.hljs-literal, \.hljs-type \{ color: var\(--hl-kw\); \}/,
+    /\.hljs-string, \.hljs-attr, \.hljs-regexp \{ color: var\(--hl-str\); \}/,
+    /\.hljs-number \{ color: var\(--hl-num\); \}/,
+    /\.hljs-comment, \.hljs-quote \{ color: var\(--hl-cmt\); font-style: italic; \}/,
+    /\.hljs-title, \.hljs-title\.function_, \.hljs-section \{ color: var\(--hl-title\); \}/,
+    /\.hljs-name, \.hljs-tag \{ color: var\(--hl-kw\); \}/,
+    /\.hljs-params, \.hljs-variable, \.hljs-property \{ color: var\(--hl-fg\); \}/,
+    /\.hljs-meta \{ color: var\(--hl-meta\); \}/,
+    /\.hljs-attribute \{ color: var\(--hl-attr\); \}/,
+    /\.hljs-addition \{ color: var\(--hl-str\); \}/,
     /\.hljs-deletion \{ color: var\(--err\); \}/,
+    /--hl-fg: #d8c6a8; --hl-kw: #c98a6a; --hl-str: #9fb878; --hl-num: #d4a36a;/,
+    /--hl-cmt: #6f6a5f; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;/,
   ];
   for (const r of rules) {
     assert.match(FEED_CSS, r, "feed.css is missing a palette rule: " + r.source);

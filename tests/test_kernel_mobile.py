@@ -223,12 +223,25 @@ class LandingShell(unittest.TestCase):
         # that branch, so the 2026-06-17 regression cannot recur through it.
         html = km._landing()
         self.assertIn("<meta name=viewport content='width=device-width,initial-scale=1,"
-                      "maximum-scale=1,user-scalable=no'>", html)     # the static meta: no cover
+                      "maximum-scale=1,user-scalable=no,interactive-widget=resizes-content'>", html)   # the static meta: no cover
         self.assertEqual(html.count("viewport-fit=cover"), 1)         # exactly the runtime flip…
         self.assertIn("if(navigator.standalone)", html)               # …behind the iOS-standalone gate
         self.assertLess(html.index("if(navigator.standalone)"), html.index("viewport-fit=cover"))
         self.assertIn("100dvh", html)            # still address-bar-aware
         self.assertIn("user-scalable=no", html)  # pinch-zoom governance preserved alongside the change
+
+    def test_keyboard_shrinks_content_and_never_strands_a_scroll(self):
+        """The composer tap used to scroll the whole shell up behind the soft keyboard (the user
+        2026-09-02): the viewport's default mode is resizes-visual — the keyboard PANS the visual
+        viewport while innerHeight stands still, the UA slides the page up to reveal the input, and
+        fit() re-lays the shrunken --app-h top-anchored into a window whose visible band starts a
+        keyboard-height down; the composer sat off-screen until dragged back. Two halves, both
+        pinned: interactive-widget=resizes-content makes engines that honor it (Android Chrome)
+        SHRINK the layout viewport instead of panning, and fit() undoes the stray page offset iOS
+        still forces (a UA input-reveal scroll bypasses overflow:hidden)."""
+        self.assertIn("interactive-widget=resizes-content", km._landing())
+        self.assertIn("if(window.scrollY||document.documentElement.scrollTop)window.scrollTo(0,0);",
+                      km._LANDING_MOBILE_JS)
 
     def test_bottom_bar_has_no_safe_area_padding(self):
         # The user 2026-06-19 (Firefox/Android): the bar showed a dead slab below the labels in PORTRAIT
@@ -331,11 +344,13 @@ class ChatSessionPicker(unittest.TestCase):
 
     def test_current_session_title_is_bold_color_on_the_grey_chip(self):
         # the user 2026-07-22: the mobile current-session title reads as the identity color in BOLD on the
-        # SAME grey chip as the +/madd button (#2a2a2a), with a hairline color border, not the color as a fill.
+        # SAME grey chip as the +/madd button, with a hairline color border, not the color as a fill.
+        # (The chip grey rides --btn-bg since 2026-09-02 — dark value byte-identical to the old #2a2a2a
+        # literal, and the light theme re-skins it; see test_kernel_mobile_picker's token test.)
         css = km._CHAT_MOBILE_CSS
-        self.assertIn("#mcur.colored{background:#2a2a2a;color:var(--cbg);border-color:var(--cbg)}", css)
+        self.assertIn("#mcur.colored{background:var(--btn-bg,#2a2a2a);color:var(--cbg);border-color:var(--cbg)}", css)
         self.assertIn("#madd{flex:0 0 auto", css)                    # ...and the + button is that same grey
-        self.assertIn("background:#2a2a2a;color:#bbbbbb", css)       # (the shared chip grey)
+        self.assertIn("background:var(--btn-bg,#2a2a2a);color:#bbbbbb", css)   # (the shared chip grey)
         self.assertIn("white-space:nowrap;font-weight:700}", css)   # the .nm name span is bold
 
     def test_no_pane_focus_ring_on_mobile(self):

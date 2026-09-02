@@ -103,5 +103,11 @@ test("edit arming stays the kernel's verdict: UTF-8-only and the ns mtime anchor
 test("the editor declares its font and reuses the panel palette — no new fonts or sizes", () => {
   assert.match(CHUNK, /fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace"/);
   assert.match(CHUNK, /fontSize: "13px"/);
-  assert.match(CHUNK, /rgba\(156, 210, 255, 0\.22\)/, "selection wears the romp accent, nothing new");
+  assert.match(CHUNK, /color-mix\(in srgb, var\(--accent, #9cd2ff\) 22%, transparent\)/,
+    "selection wears the romp accent, nothing new (via the token, so the light theme re-inks it)");
+  // and the CodeMirror-side dark branch (its base theme for panels/popups) reads the LIVE body
+  // class per mount — hardcoded { dark: true } kept the search panel near-black under
+  // body.theme-light (the user 2026-09-02)
+  assert.match(CHUNK, /document\.body\.classList\.contains\("theme-light"\)/);
+  assert.match(CHUNK, /\{ dark: !light \}/);
 });

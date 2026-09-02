@@ -545,6 +545,15 @@ class RailBell(unittest.TestCase):
         # the rail bell paints its states exactly like the mobile one
         self.assertIn(".rail-acts #rail-bell.on{color:var(--accent)}", page)
         self.assertIn(".rail-acts #rail-bell.busy{opacity:.45}", page)
+        # the on-state must survive the light theme, whose .rail-act recolor outspecifies the bare
+        # `.on` rule — with no light restatement on and off rendered pixel-identical there (the
+        # user 2026-09-02)
+        self.assertIn("body.theme-light .rail-act.on{color:var(--accent)}", page)
+        # …and OFF reads as a slashed bell — the app's one bell-off idiom (feed card bell, timeline
+        # lane bell) — never a color difference alone
+        self.assertEqual(page.count("class='bell-slash'"), 2, "both bells carry the slash glyph")
+        self.assertIn(".bell-slash{display:none}", page)
+        self.assertIn("#rail-bell:not(.on) .bell-slash,#mbell:not(.on) .bell-slash{display:block}", page)
 
     def test_the_bell_is_the_master_switch_not_a_device_toggle(self):
         _, body = _serve_get("/", headers={"X-Romp-Token": km.TOKEN})

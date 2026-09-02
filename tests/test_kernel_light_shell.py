@@ -56,9 +56,13 @@ class LightShell(unittest.TestCase):
         self.assertIn("rgba(0,0,0,0.14)", self.html)
 
     def test_rail_toggle_on_goes_clay(self):
+        # color restated too (2026-09-02): the light .rail-btn recolor outspecifies the bare
+        # `.rail-btn.on`, so without it a selected toggle's TEXT stayed the resting grey
         self.assertIn(
-            "body.theme-light .rail-btn.on{background:rgba(194,65,12,0.10);border-color:rgba(194,65,12,0.35)}",
+            "body.theme-light .rail-btn.on{color:var(--accent);background:rgba(194,65,12,0.10);border-color:rgba(194,65,12,0.35)}",
             self.html)
+        # same clash, the icon row: the bell's / network glyph's on-state was silenced entirely
+        self.assertIn("body.theme-light .rail-act.on{color:var(--accent)}", self.html)
 
     def test_banner_css_strings_carry_light_blocks(self):
         for css in (km._STALE_CSS, km._UPD_CSS, km._RDRIFT_CSS):

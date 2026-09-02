@@ -63,6 +63,15 @@ const PAIRS: Array<[string, string, number]> = [
   ["--st-working-fg", "--st-working-bg", 3],
   ["--st-ready-fg", "--st-ready-bg", 3],
   ["--st-blocked-fg", "--st-blocked-bg", 3],
+  ["--link", "--bg", 4.5],          // hyperlink ink (2026-09-02: the light theme's first link ink sat on --err)
+  ["--hl-fg", "--bg", 4.5],         // the hljs syntax palette (tokenized 2026-09-02; was dark-only raw hex)
+  ["--hl-kw", "--bg", 4.5],
+  ["--hl-str", "--bg", 4.5],
+  ["--hl-num", "--bg", 4.5],
+  ["--hl-cmt", "--bg", 3],          // comments are deliberately quiet — the dark set sits just above 3
+  ["--hl-title", "--bg", 4.5],
+  ["--hl-meta", "--bg", 4.5],
+  ["--hl-attr", "--bg", 4.5],
 ];
 
 for (const sheet of ["styles.css", "feed.css"]) {
@@ -95,7 +104,7 @@ for (const sheet of ["styles.css", "feed.css"]) {
       }
       // a skip must be loud (PR #763 item 6): pin how many pairs actually ran per sheet/theme —
       // grow these numbers when PAIRS grows, never let them silently shrink
-      const expected = sheet === "styles.css" ? PAIRS.length : 10;   // feed's :root holds a deliberate subset
+      const expected = sheet === "styles.css" ? PAIRS.length : 19;   // feed's :root holds a deliberate subset
       assert.ok(evaluated >= expected,
         `${sheet} ${name}: only ${evaluated}/${expected} contrast pairs evaluated — silent skip`);
     }

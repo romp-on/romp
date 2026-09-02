@@ -71,6 +71,17 @@ body.scheme-solarized-dark {
   --check-bg: #1EA1EB;
   --code-fg: #e1c08d;
   --code-bg: rgba(217, 119, 87, 0.10);
+  /* hyperlink ink — ONE token for every rendered link (.md a, .fileview-md a, .tool-file).
+     Dark follows the editor's own link color, as those rules always did; the light block re-inks
+     it (its textLink stand-in #B24A28 sat a hair off --err #B02A1C, so links read as errors —
+     the user 2026-09-02). Mirrored in feed.css (own :root). */
+  --link: var(--vscode-textLink-foreground, #4daafc);
+  /* the hljs syntax palette, as tokens (2026-09-02): dark values are the exact warm-dark set the
+     viewer always had, byte-for-byte; the light block re-inks the same names for the cream ground
+     (as raw hexes the palette was dark-only — pale tan on #F1EAE2). Mirrored in feed.css (own
+     :root) — the viewer mounts in both documents, and file-view.test.ts pins the two identical. */
+  --hl-fg: #d8c6a8; --hl-kw: #c98a6a; --hl-str: #9fb878; --hl-num: #d4a36a;
+  --hl-cmt: #6f6a5f; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;
   --box-bg: rgba(255, 255, 255, 0.03);
   --box-border: var(--vscode-editorHoverWidget-border, rgba(255, 255, 255, 0.12));
   /* the feed's button hairline, MIRRORED byte-equal from feed.css --card-border (T141: the chat's
@@ -193,6 +204,9 @@ body.theme-light {
                             its clay accent (what the timeline's PAL_LIGHT already drew) */
   --code-fg: #8C4A00;
   --code-bg: rgba(180, 83, 9, 0.08);
+  --link: #1D63A8;   /* inked cobalt — clearly clickable, clearly not the error red (5.2:1 on the page) */
+  --hl-fg: #3E3A35; --hl-kw: #A03509; --hl-str: #47720F; --hl-num: #915C0B;
+  --hl-cmt: #6E675C; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
   --err: #B02A1C;
@@ -257,7 +271,7 @@ body.theme-light {
   --vscode-menu-selectionBackground: #F3E0D5;
   --vscode-menu-selectionForeground: #1F1E1D;
   --vscode-scrollbarSlider-background: rgba(90, 84, 74, 0.35);
-  --vscode-textLink-foreground: #B24A28;
+  --vscode-textLink-foreground: #1D63A8;
   --vscode-button-background: #C2410C;
   --vscode-button-foreground: #FFF8F2;
   --vscode-button-hoverBackground: #A93A0B;
@@ -1629,8 +1643,10 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* pending-rewind overlay: turns after an edited message belong to the branch being abandoned — they
    dim until the kernel's rewound payload replaces them (reconcileRewind retires the flag then). */
 .turn.rewound { opacity: 0.35; transition: opacity 0.2s ease; }
-/* white-on-blue legibility for inner markdown */
-.user-bubble a { color: #fff; text-decoration: underline; text-underline-offset: 2px; }
+/* white-on-blue legibility for inner markdown. The bubble ELEMENT also wears .md, and `.md a`
+   ties this selector's specificity later in the sheet — the doubled form outranks it, so bubble
+   links actually stay white instead of link-ink-on-saturated-fill (found 2026-09-02). */
+.user-bubble a, .user-bubble.md a { color: #fff; text-decoration: underline; text-underline-offset: 2px; }
 .user-bubble :not(pre) > code { background: rgba(255, 255, 255, 0.2); color: #fff; }
 /* a slash COMMAND you sent (the user 2026-06-29): the "/cmd" token renders as a monospace KEYWORD chip inside
    the blue bubble — a darkened, outlined pill so it reads as a command, not prose. Args sit after it as text. */
@@ -2087,7 +2103,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* clickable file name → opens the real file in the editor */
 .tool-file {
   font-family: var(--mono); font-size: 0.92em;
-  color: var(--vscode-textLink-foreground, #4daafc); cursor: pointer;
+  color: var(--link); cursor: pointer;
   text-decoration: underline dotted; text-underline-offset: 2px;   /* persistent link affordance */
 }
 .tool-file:hover { text-decoration: underline; }
@@ -2281,7 +2297,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .md li { margin: 0.2em 0; }
 .md strong { color: var(--vscode-foreground, #fff); font-weight: 600; }
 .md em { font-style: italic; }
-.md a { color: var(--vscode-textLink-foreground, #4daafc); text-decoration: none; }
+.md a { color: var(--link); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 .md blockquote { margin: 0.5em 0; padding-left: 12px; border-left: 2px solid var(--box-border); color: var(--dim); }
 .md hr { border: none; border-top: 1px solid var(--box-border); margin: 1em 0; }
@@ -2324,20 +2340,20 @@ pre.has-copy:hover .code-copy, .code-copy:focus-visible { opacity: 0.9; }
 @media (hover: none) { .code-copy { opacity: 0.8; } }   /* touch: no hover state, so keep it visible */
 .md table { border-collapse: collapse; margin: 0.6em 0; }
 .md th, .md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
-.md th { background: rgba(255, 255, 255, 0.03); }
+.md th { background: var(--box-bg); }
 
-/* ---------- syntax highlighting (warm, restrained) ---------- */
-.hljs { color: #d8c6a8; background: transparent; }
-.hljs-keyword, .hljs-built_in, .hljs-literal, .hljs-type { color: #c98a6a; }
-.hljs-string, .hljs-attr, .hljs-regexp { color: #9fb878; }
-.hljs-number { color: #d4a36a; }
-.hljs-comment, .hljs-quote { color: #6f6a5f; font-style: italic; }
-.hljs-title, .hljs-title.function_, .hljs-section { color: #e1c08d; }
-.hljs-name, .hljs-tag { color: #c98a6a; }
-.hljs-params, .hljs-variable, .hljs-property { color: #d8c6a8; }
-.hljs-meta { color: #9a8f7a; }
-.hljs-attribute { color: #cdaf7e; }
-.hljs-addition { color: #9fb878; }
+/* ---------- syntax highlighting (warm, restrained; values are the --hl-* tokens) ---------- */
+.hljs { color: var(--hl-fg); background: transparent; }
+.hljs-keyword, .hljs-built_in, .hljs-literal, .hljs-type { color: var(--hl-kw); }
+.hljs-string, .hljs-attr, .hljs-regexp { color: var(--hl-str); }
+.hljs-number { color: var(--hl-num); }
+.hljs-comment, .hljs-quote { color: var(--hl-cmt); font-style: italic; }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--hl-title); }
+.hljs-name, .hljs-tag { color: var(--hl-kw); }
+.hljs-params, .hljs-variable, .hljs-property { color: var(--hl-fg); }
+.hljs-meta { color: var(--hl-meta); }
+.hljs-attribute { color: var(--hl-attr); }
+.hljs-addition { color: var(--hl-str); }
 .hljs-deletion { color: var(--err); }
 
 /* scrollbars */
@@ -3216,7 +3232,7 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 #romp-fileview { position: fixed; inset: 0; z-index: 1200; background: var(--overlay-dim);
   display: flex; align-items: center; justify-content: center; }
 .fileview { width: 95%; height: 95%; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--bg, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: var(--radius-modal);
+  background: var(--bg, #1e1e1e); border: 1px solid var(--box-border); border-radius: var(--radius-modal);
   box-shadow: var(--shadow-modal); }
 body.fileview-open { overflow: hidden; }
 .fileview-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
@@ -3256,7 +3272,7 @@ a.fileview-btn[hidden] { display: none; }
   background: var(--bg, #1e1e1e); color: var(--fg);
   font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
   white-space: pre; tab-size: 4; }
-.fileview-editor:focus { box-shadow: inset 0 0 0 1px rgba(156, 210, 255, 0.35); }
+.fileview-editor:focus { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
 /* the directory half of the title is the click into the file BROWSER (feed pane) — mirrored in
    feed.css so the viewer behaves identically wherever it mounts */
 .fileview-dir-link { cursor: pointer; }
@@ -3285,8 +3301,8 @@ body.filebrowse-open { overflow: hidden; }
 .fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
 .fb-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; cursor: pointer;
   font-size: 0.86em; }
-.fb-row:hover, .fb-row.active { background: rgba(255, 255, 255, 0.07); }
-.fb-row.active { outline: 1px solid rgba(156, 210, 255, 0.35); outline-offset: -1px; }
+.fb-row:hover, .fb-row.active { background: var(--menu-hover); }
+.fb-row.active { outline: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: -1px; }
 .fb-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-family: var(--mono, ui-monospace, monospace); }
 .fb-dir .fb-name { color: var(--accent); }
@@ -3309,7 +3325,7 @@ body.filebrowse-open { overflow: hidden; }
 .fileview-pre code { background: none; padding: 0; font: inherit; }
 /* a refusal explains itself in place, in the kernel's own words (too large — with the size and the
    cap; not a text file; not found) over the path it was asked for. Never a blank pane. */
-.fileview-err { padding: 18px 14px; font-size: 0.86em; color: #e0a030; }
+.fileview-err { padding: 18px 14px; font-size: 0.86em; color: var(--warn); }
 .fileview-err-hint { margin-top: 6px; color: var(--dim); font-size: 0.92em;
   font-family: var(--mono, ui-monospace, monospace); word-break: break-all; }
 /* the way out of a refusal: when the file exists but cannot render (413/415), the kernel's words are
@@ -3365,7 +3381,7 @@ body.filebrowse-open { overflow: hidden; }
 .fileview-md li { margin: 0.2em 0; }
 .fileview-md strong { color: var(--fg); font-weight: 600; }
 .fileview-md em { font-style: italic; }
-.fileview-md a { color: var(--vscode-textLink-foreground, #4daafc); text-decoration: none; }
+.fileview-md a { color: var(--link); text-decoration: none; }
 .fileview-md a:hover { text-decoration: underline; }
 .fileview-md blockquote { margin: 0.5em 0; padding-left: 12px;
   border-left: 2px solid var(--box-border); color: var(--dim); }
@@ -3386,7 +3402,7 @@ body.filebrowse-open { overflow: hidden; }
 }
 .fileview-md table { border-collapse: collapse; margin: 0.6em 0; }
 .fileview-md th, .fileview-md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
-.fileview-md th { background: rgba(255, 255, 255, 0.03); }
+.fileview-md th { background: var(--box-bg); }
 .fileview-md img { max-width: 100%; }
 
 /* ── the viewer's image + PDF bodies (a .png used to open as line-numbered mojibake). The <img>
@@ -3409,4 +3425,4 @@ body.filebrowse-open { overflow: hidden; }
 /* the supporting-span highlight (T218): the sentence the summary rests on, painted via the CSS
    Custom Highlight API (no DOM surgery — the turn list re-renders constantly). Accent-tinted like
    the focus family, never a status colour. */
-::highlight(cite-span) { background-color: rgba(156, 210, 255, 0.30); color: #ffffff; }
+::highlight(cite-span) { background-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text-bright); }
