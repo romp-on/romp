@@ -209,3 +209,13 @@ test("the px type set is CLOSED: chrome sizes come from the pinned set, like the
     assert.deepEqual(strays, [], name + " px sizes outside the set");
   }
 });
+
+test("the bubble's inner-markdown overrides OUTRANK .md — the doubled-selector guard", () => {
+  // the bubble element itself wears .md, so a plain `.user-bubble X` (0,1,1) ties `.md X` and
+  // loses on source order — links rendered link-ink-on-saturated-fill and the quote tint fell to
+  // var(--dim) grey at ~2:1 (found 2026-09-02). The doubled form (0,2,1) is the guard; a new
+  // inner-markdown override on the bubble must carry it too.
+  assert.match(CHAT, /\.user-bubble a, \.user-bubble\.md a \{ color: #fff;/, "bubble links stay white");
+  assert.match(CHAT, /\.user-bubble blockquote, \.user-bubble\.md blockquote \{ color: rgba\(255, 255, 255, 0\.88\);/,
+    "the quoted-assistant tint actually lands");
+});

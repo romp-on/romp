@@ -1659,8 +1659,9 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .user-bubble a, .user-bubble.md a { color: #fff; text-decoration: underline; text-underline-offset: 2px; }
 /* a quoted passage in YOUR bubble is the ASSISTANT's words (select-to-quote): the prose face
    (mono in light), and a light tint readable on the saturated fill — var(--dim) grey sat at
-   ~2:1 there (the user 2026-08-31, on the light preview) */
-.user-bubble blockquote { color: rgba(255, 255, 255, 0.88); border-left-color: rgba(255, 255, 255, 0.40);
+   ~2:1 there (the user 2026-08-31, on the light preview). Doubled selector for the same reason
+   as the links above: `.md blockquote` ties it later in the sheet and was silently winning. */
+.user-bubble blockquote, .user-bubble.md blockquote { color: rgba(255, 255, 255, 0.88); border-left-color: rgba(255, 255, 255, 0.40);
   font-family: var(--font-prose); }
 .user-bubble :not(pre) > code { background: rgba(255, 255, 255, 0.2); color: #fff; }
 /* a slash COMMAND you sent (the user 2026-06-29): the "/cmd" token renders as a monospace KEYWORD chip inside
