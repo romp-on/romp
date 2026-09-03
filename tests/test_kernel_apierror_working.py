@@ -23,7 +23,9 @@ km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_modu
 
 class ApiErrorWorking(unittest.TestCase):
     def test_api_error_carries_a_tooLong_flag(self):
-        src = inspect.getsource(km._api_error)
+        # the classification lives in _api_error_scan since the tail-window split — _api_error is now the
+        # widening driver around it, so read the pair rather than pinning which half holds the flag
+        src = inspect.getsource(km._api_error) + inspect.getsource(km._api_error_scan)
         self.assertIn('"tooLong": "too long" in text.lower()', src)
 
     def test_only_on_you_errors_floor_the_card_to_needs_input(self):
@@ -41,7 +43,8 @@ class ApiErrorWorking(unittest.TestCase):
     def test_spend_cap_is_classified_and_floors_like_tooLong(self):
         # a monthly spend cap is on you (raise it) AND never auto-retried — classified in _api_error, floored
         # to needs-input, and badged with the raise-your-cap guidance (the user 2026-07-14).
-        self.assertIn('"spendLimit": _is_spend_limit(text)', inspect.getsource(km._api_error))
+        self.assertIn('"spendLimit": _is_spend_limit(text)',
+                      inspect.getsource(km._api_error) + inspect.getsource(km._api_error_scan))
         bf = inspect.getsource(km.build_feed)
         self.assertIn('"spendLimit": bool(aerr.get("spendLimit"))', bf)
         self.assertIn("monthly spend limit — raise it at claude.ai/settings/usage", bf)
