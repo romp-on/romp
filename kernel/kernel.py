@@ -17495,7 +17495,7 @@ def _api_error(path):
         # TAIL-FIRST: the pusher calls this per session per push, and the old whole-file read cost
         # O(transcript) on EVERY append — the same unamortized shape the assembly fold retired for the
         # event-model parse, left behind here. Widen 4x until a pass reports it saw the deciding record.
-        win = _API_ERR_TAIL_WINDOW
+        win = max(1, _API_ERR_TAIL_WINDOW)   # a knob of 0 or less would never widen (0*4 stays 0): clamp, don't spin
         while True:
             start = size - win if win < size else 0
             err, decided = _api_error_scan(path, start)

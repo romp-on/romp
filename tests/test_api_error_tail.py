@@ -4,7 +4,7 @@ whole transcript on every append.
 
 Why it mattered: the pusher calls _api_error per session per push, and its (mtime,size) cache is busted by
 every append — so a working session's whole transcript was re-read and re-json-decoded per push cycle. On a
-live 11-session fleet with 20-116MB transcripts that was ~two thirds of the kernel's entire CPU (py-spy: 88%
+live 11-session install with 20-116MB transcripts that was ~two thirds of the kernel's entire CPU (py-spy: 88%
 of kernel CPU in Thread-5 (_pusher), 9 of 12 samples inside _api_error / raw_decode / read_text), which
 starved the pusher and left every pane visibly stale. This is the same unamortized whole-file shape the
 assembly fold retired for the event-model parse; _api_error was left behind on the same hot path.
@@ -162,6 +162,67 @@ class ApiErrorTailWindow(unittest.TestCase):
         self.assertTrue(km._api_error_scan(p, 0)[1])
         p2 = self._write([_filler(1)])
         self.assertFalse(km._api_error_scan(p2, 0)[1])
+
+    # ── the READ itself is partial: the property every differential above is blind to ──
+    def _windowed_starts(self, recs, window):
+        """Run _api_error with `window` and return (the byte offset each scan pass started at, the answer,
+        the path). The offsets are the only evidence that the read is partial: every differential assertion
+        above also holds against a scan that always starts at byte 0, i.e. with the speedup silently gone."""
+        p = self._write(recs)
+        starts = []
+        real = km._api_error_scan
+
+        def recording(path, start):
+            starts.append(start)
+            if len(starts) > 64:
+                raise AssertionError("the widen loop is not terminating: %r" % starts[:8])
+            return real(path, start)
+        saved = km._API_ERR_TAIL_WINDOW
+        km._api_error_scan = recording
+        try:
+            km._API_ERR_TAIL_WINDOW = window
+            km._api_err_cache.clear()
+            got = km._api_error(p)
+        finally:
+            km._api_error_scan = real
+            km._API_ERR_TAIL_WINDOW = saved
+        return starts, got, p
+
+    def test_a_decided_tail_is_read_once_from_a_nonzero_offset(self):
+        recs = [_filler(i) for i in range(200)] + [_err_rec()]
+        starts, got, p = self._windowed_starts(recs, window=1024)
+        self.assertEqual(len(starts), 1, "one pass must settle a decided tail: %r" % starts)
+        self.assertGreater(starts[0], 0, "the pass must start inside the file, never at byte 0")
+        self.assertIsNotNone(got)
+        self.assertEqual(got, km._api_error_scan(p, 0)[0])
+
+    def test_widening_reads_strictly_earlier_offsets_until_the_deciding_record(self):
+        recs = [_err_rec()] + [_filler(i) for i in range(400)]
+        starts, got, p = self._windowed_starts(recs, window=64)
+        self.assertGreater(len(starts), 1, "the deciding record sits far from EOF, so the window must widen")
+        self.assertEqual(starts, sorted(set(starts), reverse=True), "each widen must start strictly earlier")
+        self.assertIsNotNone(got)
+        self.assertEqual(got, km._api_error_scan(p, 0)[0])
+
+    def test_a_verdict_from_a_mid_file_window_equals_the_whole_file(self):
+        # the window covers just the last three records: a non-None answer, refusal included, from a start > 0
+        recs = [_prompt_rec() for _ in range(50)] + [_err_rec(), _filler(1), _refusal_rec()]
+        tail = sum(len(json.dumps(r)) + 1 for r in recs[-3:])
+        starts, got, p = self._windowed_starts(recs, window=tail + 8)
+        self.assertEqual(len(starts), 1, starts)
+        self.assertGreater(starts[0], 0)
+        self.assertIsNotNone(got)
+        self.assertTrue(got["refusal"], "the refusal record inside the window still marks the episode")
+        self.assertEqual(got, km._api_error_scan(p, 0)[0])
+
+    def test_a_non_positive_window_knob_still_terminates_and_answers(self):
+        # ROMP_API_ERR_TAIL_WINDOW set to 0 or less must not spin the pusher forever (0*4 is 0): the driver
+        # clamps to one byte and widens from there. The recorder above turns a spin into a failure, not a hang.
+        for bad in (0, -7):
+            starts, got, p = self._windowed_starts([_prompt_rec(), _err_rec()], window=bad)
+            self.assertGreater(len(starts), 1, "window %d must widen, not spin in place" % bad)
+            self.assertIsNotNone(got, "window %d" % bad)
+            self.assertEqual(got, km._api_error_scan(p, 0)[0])
 
     # ── unchanged edges ──
     def test_missing_file_is_none(self):
