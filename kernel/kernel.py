@@ -17375,6 +17375,102 @@ def _spend_dialog_showing(pane):
             and ("What do you want to do?" in pane or "Enter to confirm" in pane))
 
 
+# _api_error's scan window. Its answer depends ONLY on the records from the LAST DECIDING one
+# onward, so the scan starts near the TAIL and widens until it provably saw one — a session's whole
+# transcript is re-read only when its tail genuinely carries no verdict. Overridable for tests.
+_API_ERR_TAIL_WINDOW = int(os.environ.get("ROMP_API_ERR_TAIL_WINDOW", "262144"))
+
+
+def _api_error_scan(path, start):
+    """One pass of _api_error's classification from byte `start` to EOF → (err, decided).
+
+    The loop is _api_error's original whole-file scan, UNCHANGED (one dedent) except that each of its
+    three `err = ...` sites now also sets `decided`. That flag is the window's own proof of sufficiency:
+    True iff this pass saw a record that ASSIGNS the verdict (an isApiErrorMessage assistant record,
+    fresh assistant output, or a genuine user prompt) — exactly the record the whole-file scan's result
+    depends on, since everything before it is overwritten. False means the window started too late and
+    the caller must widen; True means this window's answer IS the whole file's answer.
+
+    A non-zero `start` lands mid-line, so the first partial line is dropped. model_refusal_* records
+    land a few records AFTER the error they annotate and only mutate an err already set, so they need no
+    special handling: with their error out of window nothing is assigned, and the caller widens."""
+    err = None
+    decided = False
+    with open(path, errors="replace") as f:
+        if start > 0:
+            f.seek(start)
+            f.readline()                          # the window cut this line in half — drop it
+        for line in f:
+            if '"type"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            t = o.get("type")
+            if t == "assistant":
+                msg = o.get("message") or {}
+                c = msg.get("content")
+                if o.get("isApiErrorMessage"):
+                    text = (" ".join(b.get("text", "") for b in c
+                                     if isinstance(b, dict) and b.get("type") == "text").strip()
+                            if isinstance(c, list) else (c.strip() if isinstance(c, str) else ""))
+                    # "prompt is too long" is NOT a transient API error (the user 2026-06-29): it means the
+                    # context needs compacting → it's on YOU. Flag it so it (and only it) blocks; other API
+                    # errors are transient (auto-retry recovers them) and stay in Working.
+                    decided = True
+                    err = {"text": text, "status": o.get("apiErrorStatus"),
+                           "category": o.get("error") or "unknown",
+                           # the error RECORD's identity — a new failed attempt writes a new record,
+                           # so this uuid IS the error episode (one auto-retry per episode, apiRetry)
+                           "uuid": o.get("uuid"),
+                           "tooLong": "too long" in text.lower(),
+                           # a spend cap is on YOU (raise it), like tooLong — but ALSO stops the
+                           # auto-retry entirely (no reset to wait out); see _auto_pause_on_spend_limit
+                           "spendLimit": _is_spend_limit(text),
+                           # a model's own allowance is spent — on YOU too (switch model / add
+                           # credits), and the auto-retry keeps running only because the window does
+                           # eventually reset; see _is_model_limit
+                           "modelLimit": _is_model_limit(text),
+                           # a dead credential (no login / refused key) — on YOU, never auto-retried;
+                           # see _is_auth_error (per-session auth, the user 2026-08-08)
+                           "authErr": _is_auth_error(text),
+                           # the error's parent = the refused/failed USER message — kept so the
+                           # system model_refusal_* record below can link itself to THIS episode
+                           "parentUuid": o.get("parentUuid"),
+                           # a safeguards refusal is deterministic on the same input — on YOU
+                           # (rewrite the ask or drop the thread), never auto-retried; see
+                           # _is_refusal_text, and the system-record event path below (the user
+                           # 2026-08-15, after one refused prompt drew 12 auto-retries in ~6min)
+                           "refusal": _is_refusal_text(text)}
+                elif (isinstance(c, list) and any(isinstance(b, dict)
+                        and b.get("type") in ("text", "tool_use", "thinking") for b in c)) \
+                        or (isinstance(c, str) and c.strip()):
+                    decided = True
+                    err = None                            # fresh assistant output → recovered
+            elif t == "user":
+                c = (o.get("message") or {}).get("content")
+                is_tool_result = isinstance(c, list) and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result" for b in c)
+                if not is_tool_result:                    # a genuine prompt (e.g. a retry) clears it
+                    decided = True
+                    err = None
+            elif t == "system" and o.get("subtype") in ("model_refusal_no_fallback",
+                                                        "model_refusal_fallback"):
+                # The CLI's structured refusal record — the EXACT event behind _is_refusal_text's
+                # wording check (so a future CLI rephrase still classifies). It lands a few records
+                # AFTER the assistant error it explains (queue-operation / file-history-snapshot
+                # lines sit between; none of those clears err), linked by parentUuid: the refusal
+                # record and the error BOTH carry the refused user message's uuid as parentUuid.
+                # Deliberately NOT refusedUserMessageUuid — observed diverging from the episode's
+                # parent in 2 of 13 refusal records of one storm — and deliberately not
+                # record-alone: the CLI also omits this record for some refusal errors, which is
+                # why the text signature above stays co-equal rather than a legacy fallback.
+                if err is not None and o.get("parentUuid") == err.get("parentUuid"):
+                    err["refusal"] = True
+    return err, decided
+
+
 def _api_error(path):
     """If the session is sitting BLOCKED on an API error right now, the error; else None. Claude Code
     writes every API failure to the transcript as an assistant record with top-level
@@ -17387,79 +17483,25 @@ def _api_error(path):
     try:
         st = os.stat(path)
         key = (st.st_mtime, st.st_size)
+        size = st.st_size
     except OSError:
         key = None
+        size = 0
     hit = _api_err_cache.get(path)
     if hit is not None and key is not None and hit[0] == key:
         return hit[1]
     err = None
     try:
-        with open(path, errors="replace") as f:
-            for line in f:
-                if '"type"' not in line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except Exception:
-                    continue
-                t = o.get("type")
-                if t == "assistant":
-                    msg = o.get("message") or {}
-                    c = msg.get("content")
-                    if o.get("isApiErrorMessage"):
-                        text = (" ".join(b.get("text", "") for b in c
-                                         if isinstance(b, dict) and b.get("type") == "text").strip()
-                                if isinstance(c, list) else (c.strip() if isinstance(c, str) else ""))
-                        # "prompt is too long" is NOT a transient API error (the user 2026-06-29): it means the
-                        # context needs compacting → it's on YOU. Flag it so it (and only it) blocks; other API
-                        # errors are transient (auto-retry recovers them) and stay in Working.
-                        err = {"text": text, "status": o.get("apiErrorStatus"),
-                               "category": o.get("error") or "unknown",
-                               # the error RECORD's identity — a new failed attempt writes a new record,
-                               # so this uuid IS the error episode (one auto-retry per episode, apiRetry)
-                               "uuid": o.get("uuid"),
-                               "tooLong": "too long" in text.lower(),
-                               # a spend cap is on YOU (raise it), like tooLong — but ALSO stops the
-                               # auto-retry entirely (no reset to wait out); see _auto_pause_on_spend_limit
-                               "spendLimit": _is_spend_limit(text),
-                               # a model's own allowance is spent — on YOU too (switch model / add
-                               # credits), and the auto-retry keeps running only because the window does
-                               # eventually reset; see _is_model_limit
-                               "modelLimit": _is_model_limit(text),
-                               # a dead credential (no login / refused key) — on YOU, never auto-retried;
-                               # see _is_auth_error (per-session auth, the user 2026-08-08)
-                               "authErr": _is_auth_error(text),
-                               # the error's parent = the refused/failed USER message — kept so the
-                               # system model_refusal_* record below can link itself to THIS episode
-                               "parentUuid": o.get("parentUuid"),
-                               # a safeguards refusal is deterministic on the same input — on YOU
-                               # (rewrite the ask or drop the thread), never auto-retried; see
-                               # _is_refusal_text, and the system-record event path below (the user
-                               # 2026-08-15, after one refused prompt drew 12 auto-retries in ~6min)
-                               "refusal": _is_refusal_text(text)}
-                    elif (isinstance(c, list) and any(isinstance(b, dict)
-                            and b.get("type") in ("text", "tool_use", "thinking") for b in c)) \
-                            or (isinstance(c, str) and c.strip()):
-                        err = None                            # fresh assistant output → recovered
-                elif t == "user":
-                    c = (o.get("message") or {}).get("content")
-                    is_tool_result = isinstance(c, list) and any(
-                        isinstance(b, dict) and b.get("type") == "tool_result" for b in c)
-                    if not is_tool_result:                    # a genuine prompt (e.g. a retry) clears it
-                        err = None
-                elif t == "system" and o.get("subtype") in ("model_refusal_no_fallback",
-                                                            "model_refusal_fallback"):
-                    # The CLI's structured refusal record — the EXACT event behind _is_refusal_text's
-                    # wording check (so a future CLI rephrase still classifies). It lands a few records
-                    # AFTER the assistant error it explains (queue-operation / file-history-snapshot
-                    # lines sit between; none of those clears err), linked by parentUuid: the refusal
-                    # record and the error BOTH carry the refused user message's uuid as parentUuid.
-                    # Deliberately NOT refusedUserMessageUuid — observed diverging from the episode's
-                    # parent in 2 of 13 refusal records of one storm — and deliberately not
-                    # record-alone: the CLI also omits this record for some refusal errors, which is
-                    # why the text signature above stays co-equal rather than a legacy fallback.
-                    if err is not None and o.get("parentUuid") == err.get("parentUuid"):
-                        err["refusal"] = True
+        # TAIL-FIRST: the pusher calls this per session per push, and the old whole-file read cost
+        # O(transcript) on EVERY append — the same unamortized shape the assembly fold retired for the
+        # event-model parse, left behind here. Widen 4x until a pass reports it saw the deciding record.
+        win = _API_ERR_TAIL_WINDOW
+        while True:
+            start = size - win if win < size else 0
+            err, decided = _api_error_scan(path, start)
+            if decided or start <= 0:
+                break
+            win *= 4
     except OSError:
         return None
     if key is not None:
