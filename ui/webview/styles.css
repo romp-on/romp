@@ -154,7 +154,7 @@ body.scheme-solarized-dark {
   --text-halo: rgba(0, 0, 0, 0.75);
   /* YOUR voice (the outgoing bubble, the rail's user dot, the comment marker): royal blue on
      dark; the light theme wears a warm sienna from the page's own family instead (the user
-     2026-08-31: 'in family of the background colour, but darker/saturated' — not blue) */
+     2026-08-31, who wanted a darker, more saturated color from the page's own family, not blue) */
   --you: #2b6cef;
   /* Comment-highlight yellow (the user 2026-08-13): the marked passage reads like a highlighter
      stroke, DISTINCT from both the accent blue (selection/chrome) and the working-status yellow
@@ -2540,7 +2540,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 /* folder completions: Tab walks into one, so a path is assembled without a modal or a native dialog */
 .picker-dir-menu {
   /* a completion LIST, not a table: capped to the one-column dropdown measure instead of the full
-     900px picker (the user 2026-09-02, "ridiculously large on desktop"). calc(100% - 28px) is
+     900px picker (the user 2026-09-02, who found it far too large on desktop). calc(100% - 28px) is
      byte-identical to the old left+right-14px geometry on any picker ≤548px — a phone keeps
      today's layout exactly; the dropdown wears the shared menu vocabulary while here. */
   position: absolute; left: 14px; width: min(520px, calc(100% - 28px)); top: calc(100% - 4px); z-index: 6;

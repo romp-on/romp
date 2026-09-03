@@ -300,6 +300,10 @@ test("an unclaimed printable keystroke drops the cursor into the composer — na
   assert.match(block, /if \(e\.key\.length !== 1 \|\| e\.key === " "\) return;/);
   assert.match(block, /if \(!ta \|\| ta\.disabled \|\| document\.activeElement === ta\) return;/);
   assert.match(block, /if \(isTypingTarget\(e\.target\) \|\| isTypingTarget\(document\.activeElement\)\) return;/);
+  // the pane's own modals and meta menus own their keys, and a dropdown's type-ahead is typing: a
+  // letter typed in the settings modal must never land in the hidden draft (review 2026-09-02)
+  assert.match(block, /document\.querySelector\("#rsettings:not\(\[hidden\]\), #ra-back:not\(\[hidden\]\), #rkeys-back, \.meta-menu"\)/);
+  assert.match(RENDER, /elm\.tagName === "SELECT"/, "SELECT is a typing target");
   assert.match(block, /if \(activeId && liveAsks\.has\(activeId\)\) return;/);
   assert.match(block, /if \(ctxMenuEl \|\| document\.querySelector\("\.picker-overlay"\)\) return;/);
   assert.match(block, /romp-fileview[\s\S]*romp-filebrowse[\s\S]*romp-lightbox/);

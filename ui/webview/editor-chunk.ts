@@ -68,7 +68,7 @@ function langExt(ext: string): Extension[] {
 // not per module: `dark` is a CodeMirror-side branch (its base theme for panels/popups), so it must
 // read the LIVE body class — a module-load constant froze the first theme forever (and was
 // hardcoded { dark: true }, which kept the search panel near-black under body.theme-light — the
-// user 2026-09-02, "the file editor looked black").
+// user 2026-09-02, who saw a near-black file editor).
 function rompTheme(): Extension {
   const light = typeof document !== "undefined" && document.body.classList.contains("theme-light");
   return EditorView.theme({

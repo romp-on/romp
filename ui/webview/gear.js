@@ -57,7 +57,7 @@ var GEAR_HTML =
   "<button id=rs-login-btn type=button style='cursor:pointer;background:var(--btn-bg, #2a2a2a);color:var(--fg, #ccc);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:3px 10px'>Log in to Claude Code</button>" +
   // rs-note, NOT rs-sub: this is a live inline status ("starting the login flow…"), not the row's
   // description — as an rs-sub it floated a SECOND hover popover under the Account row, stacked on
-  // rs-login-acct's (the user 2026-09-02, "weird double tooltip"; even empty it painted a box)
+  // rs-login-acct's (the user 2026-09-02, who saw two tooltips stacked; even empty it painted a box)
   "<span id=rs-login-state class=rs-note style='margin-left:8px'></span>" +
   '</div></span></div>' +
   '<div class=rs-sec>Sessions</div>' +

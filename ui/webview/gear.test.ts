@@ -167,7 +167,7 @@ test("gear.css carries the modal styling for every pane that hosts it", () => {
 
 test("one tooltip per settings row: the Account row's live status is NOT a second rs-sub", () => {
   // the rs-sub CSS floats EVERY rs-sub in a hovered row at the same top:100% box, so a second one
-  // stacks a second bordered popover — the 2026-09-02 "weird double tooltip" (even empty it painted
+  // stacks a second bordered popover — the 2026-09-02 stacked double tooltip (even empty it painted
   // a box). #rs-login-state is a live inline status, not a description: it wears rs-note.
   assert.ok(GEAR.includes("id=rs-login-state class=rs-note"), "the login status line is an inline note");
   const billing = GEAR.slice(GEAR.indexOf("id=rs-billing"), GEAR.indexOf(">Sessions<"));

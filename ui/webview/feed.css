@@ -80,7 +80,7 @@
   --text-halo: rgba(0, 0, 0, 0.75);
   /* YOUR voice (the outgoing bubble, the rail's user dot, the comment marker): royal blue on
      dark; the light theme wears a warm sienna from the page's own family instead (the user
-     2026-08-31: 'in family of the background colour, but darker/saturated' — not blue) */
+     2026-08-31, who wanted a darker, more saturated color from the page's own family, not blue) */
   --you: #2b6cef;
   --st-working-bg: #e0b020; --st-working-fg: #332600;  /* the WORKING yellow — mirrors styles.css, same trap
                        as --err: .fask-stallbtn and .fask-interrupting referenced these while they lived only

@@ -5328,7 +5328,7 @@ const NAV_SCROLL_STEP = 60;
 function isTypingTarget(t: EventTarget | null): boolean {
   const elm = t as HTMLElement | null;
   if (!elm || typeof elm.tagName !== "string") return false;
-  return elm.tagName === "TEXTAREA" || elm.tagName === "INPUT" || elm.isContentEditable === true;
+  return elm.tagName === "TEXTAREA" || elm.tagName === "INPUT" || elm.tagName === "SELECT" || elm.isContentEditable === true;   // SELECT: type-ahead in a dropdown is typing too
 }
 window.addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
@@ -5393,6 +5393,7 @@ window.addEventListener("keydown", (e) => {
   if (ctxMenuEl || document.querySelector(".picker-overlay")) return;   // an open menu / #picker / #confirm owns the keys
   if (document.getElementById("romp-fileview") || document.getElementById("romp-filebrowse")
       || document.getElementById("romp-lightbox")) return;   // full-pane surfaces own their keys
+  if (document.querySelector("#rsettings:not([hidden]), #ra-back:not([hidden]), #rkeys-back, .meta-menu")) return;   // the pane's own modals + meta menus own their keys (a letter typed there must never land in the draft)
   ta.focus({ preventScroll: true });   // the native keystroke lands in the box; the chip survives (a collapse never clears it)
 });
 // Cmd/Ctrl+O and Cmd/Ctrl+Shift+O — the in-PAGE fallback, from anywhere including the composer, the
