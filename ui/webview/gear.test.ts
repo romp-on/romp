@@ -220,3 +220,11 @@ test("one tooltip per settings row: the Account row's live status is NOT a secon
   assert.ok(GEAR_CSS.includes("#rsettings .rs-row:has(#rs-cmap-list:not([hidden])) .rs-sub"), "open cmap menu owns the row");
   assert.ok(GEAR_CSS.includes("#rsettings .rs-row:has(.rs-mixed:hover) .rs-sub { display: none; }"), "the mixed mark's title stands alone");
 });
+
+test("the analytics legend swatch matches its bar (PR #886 review: they split in classic)", () => {
+  // the sessions BAR moved to var(--text-faint, #7d8590) while the legend swatch stayed a literal —
+  // dark resolves --text-faint to #6e7681, so bar and legend no longer agreed in classic
+  assert.ok(GEAR.includes('"ra-sw" style="background:var(--text-faint, #7d8590)"'),
+    "the legend swatch reads the same token as the bar it explains");
+  assert.doesNotMatch(GEAR, /"ra-sw" style="background:#7d8590"/);
+});

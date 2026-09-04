@@ -1622,10 +1622,16 @@ a.fileview-btn[hidden] { display: none; }
 .fask-bellbtn.on { visibility: visible; opacity: 0.85; color: var(--accent); }
 
 /* ── the file BROWSER (file-browse.ts) ── the viewer's sibling overlay, one z layer BENEATH it
-   so a file opened from a listing overlays the listing and closing the file returns to it. Same
-   pane-takeover reasoning as .fileview; body.filebrowse-open stops the cards scrolling behind it. */
-.filebrowse { position: fixed; inset: 0; z-index: 890; display: flex; flex-direction: column;
-  background: var(--bg, #1e1e1e); }
+   so a file opened from a listing overlays the listing and closing the file returns to it. The
+   pane takeover it wore was superseded 2026-09-04 (the user found it odd once the listing was
+   capped): the viewer's centered-card treatment now, the id on the BACKDROP (every open/close
+   check looks it up); body.filebrowse-open stops the cards scrolling behind it. Height caps in
+   px/%, never vh (in a pane iframe vh is the pane — the cap must lose to 95% on short panes). */
+#romp-filebrowse { position: fixed; inset: 0; z-index: 890; background: var(--overlay-dim);
+  display: flex; align-items: center; justify-content: center; }
+.filebrowse { width: min(720px, 95%); height: min(760px, 95%); display: flex; flex-direction: column;
+  overflow: hidden; background: var(--bg, #1e1e1e); border: 1px solid var(--box-border);
+  border-radius: var(--radius-modal); box-shadow: var(--shadow-modal); }
 body.filebrowse-open { overflow: hidden; }
 .fb-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
   padding: 7px 10px; border-bottom: 1px solid var(--box-border); }
@@ -1638,10 +1644,7 @@ body.filebrowse-open { overflow: hidden; }
 .fb-crumb:hover { color: var(--accent); text-decoration: underline; }
 .fb-crumb:last-child { color: var(--fg); }
 .fb-crumb-sep { margin: 0 3px; opacity: 0.6; }
-/* the overlay still takes the whole pane (the user 2026-08-24 ruling) — but the LISTING reads at a
-   centered 720px measure on a wide pane (the user 2026-09-02: full-width rows put a file's size
-   ~800px from its name); 100% wins on narrow panes/phones, pixel-identical to before */
-.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; width: min(720px, 100%); margin-inline: auto; }
+.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
 /* compact one-line rows (progressive disclosure): marker + name, size right-aligned on files; mtime
    and the full path live in the row's hover title */
 .fb-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; cursor: pointer;

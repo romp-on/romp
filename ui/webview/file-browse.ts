@@ -110,8 +110,14 @@ export function openFileBrowse(path: string, sid?: string | null): void {
   const hb = document.getElementById("fb-hidden");
   if (hb) { hb.classList.remove("on"); hb.setAttribute("aria-pressed", "false"); }
   if (!had) {
+    // the id rides the BACKDROP — every open/close/topmost check looks up #romp-filebrowse, and
+    // the outermost element is what closeFileBrowse removes. The card inside is the viewer's
+    // treatment (the user 2026-09-04, superseding the 2026-08-24 pane takeover): centered over
+    // the dim, backdrop click closes (the lightbox contract — content clicks never do).
+    const wrap = el("div", "");
+    wrap.id = "romp-filebrowse";
+    wrap.onclick = (ev) => { if (ev.target === wrap) closeFileBrowse(); };
     const box = el("div", "filebrowse");
-    box.id = "romp-filebrowse";
     document.body.classList.add("filebrowse-open");
 
     const bar = el("div", "fb-bar");
@@ -138,7 +144,8 @@ export function openFileBrowse(path: string, sid?: string | null): void {
     const list = el("div", "fb-list");
     list.id = "fb-list";
     box.appendChild(bar); box.appendChild(list);
-    document.body.appendChild(box);
+    wrap.appendChild(box);
+    document.body.appendChild(wrap);
 
     // ONE click listener on the stable list root — rows are rebuilt per navigation, so per-row
     // listeners are exactly the destroyed-mid-click bug (ui/CLAUDE.md); the crumbs delegate the

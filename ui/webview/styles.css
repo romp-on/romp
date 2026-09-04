@@ -1678,7 +1678,15 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    as the links above: `.md blockquote` ties it later in the sheet and was silently winning. */
 .user-bubble blockquote, .user-bubble.md blockquote { color: rgba(255, 255, 255, 0.88); border-left-color: rgba(255, 255, 255, 0.40);
   font-family: var(--font-prose); }
-.user-bubble :not(pre) > code { background: rgba(255, 255, 255, 0.2); color: #fff; }
+.user-bubble :not(pre) > code, .user-bubble.md :not(pre) > code { background: rgba(255, 255, 255, 0.2); color: #fff; }
+/* fenced code in YOUR bubble sits in a PAGE-colored well: the hljs palette is tuned for the page
+   ground in each theme, and on the saturated fill its inks read as stray reds (the user 2026-09-04,
+   whose light bubbles showed red text). Bold joins the white family — .md's near-page text tones
+   are unreadable on the fill. All doubled: the bubble element wears .md, which ties bare selectors. */
+.user-bubble pre, .user-bubble.md pre { background: var(--bg); }
+.user-bubble strong, .user-bubble.md strong { color: #fff; }
+.user-bubble h1, .user-bubble h2, .user-bubble h3, .user-bubble h4,
+.user-bubble.md h1, .user-bubble.md h2, .user-bubble.md h3, .user-bubble.md h4 { color: #fff; }
 /* a slash COMMAND you sent (the user 2026-06-29): the "/cmd" token renders as a monospace KEYWORD chip inside
    the blue bubble — a darkened, outlined pill so it reads as a command, not prose. Args sit after it as text. */
 .slash-cmd-chip {
@@ -2678,11 +2686,11 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
    it; render.ts measures its bottom against #content's edge (the composer growing moves it). Below
    toasts/seek (60), above the transcript. */
 #jump-bottom {
-  position: fixed; left: 50%; transform: translateX(-50%); z-index: 40;
+  position: fixed; left: 14px; z-index: 40;   /* bottom-LEFT (the user 2026-09-03; it sat centered and went unnoticed — they were still clicking in + End) */
   width: 40px; height: 22px; border-radius: var(--radius-pill); cursor: pointer; padding: 0;   /* a short PILL, wider than tall, hugging the bottom (the user 2026-08-31, revising the circle) */
   display: flex; align-items: center; justify-content: center;
   background: var(--vscode-menu-background, var(--surface-raised)); color: var(--dim);
-  border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: var(--shadow-toast);
+  border: 1px solid var(--menu-border); box-shadow: var(--shadow-toast);   /* the raw white-alpha border vanished on the light page — cream on cream */
 }
 #jump-bottom:hover { border-color: var(--accent); color: var(--accent); }
 #jump-bottom[hidden] { display: none; }   /* author display:flex defeats [hidden] — the login-modal lesson */
@@ -3315,14 +3323,20 @@ a.fileview-btn[hidden] { display: none; }
 
 /* ── the file BROWSER (file-browse.ts) in the CHAT document ── the 642 move made the browser
    pane-local here, but its overlay dress lived only in feed.css, so it mounted as unstyled block
-   flow at the document bottom, below the composer (the user 2026-08-24, near-verbatim: "totally
-   messed up — showing at the bottom"). This block MIRRORS feed.css's (the .romp-acted precedent:
-   the two pages load different sheets, so shared overlays are declared in both — a test pins the
-   pair equal). The browser fills the pane (fixed inset-0), sits one z layer BENEATH the viewer
-   (890 < 1200) so a file opened from a listing overlays it, and body.filebrowse-open locks the
-   thread's scroll while open. */
-.filebrowse { position: fixed; inset: 0; z-index: 890; display: flex; flex-direction: column;
-  background: var(--bg, #1e1e1e); }
+   flow at the document bottom, below the composer (the user 2026-08-24, who found it broken at
+   the page bottom). This block MIRRORS feed.css's (the .romp-acted precedent: the two pages load
+   different sheets, so shared overlays are declared in both — a test pins the pair equal). The
+   browser WORE the whole pane through 2026-09-04, when the user found the takeover odd once the
+   listing was capped — it presents like the file viewer now: a centered card over the dimmed
+   backdrop (the id rides the BACKDROP: every open/close check looks it up), one z layer BENEATH
+   the viewer (890 < 1200) so a file opened from a listing overlays it, and body.filebrowse-open
+   locks the thread's scroll while open. Height caps in px/%, never vh — in a pane iframe vh IS
+   the pane, so a vh cap would beat 95% on the short panes it exists to protect. */
+#romp-filebrowse { position: fixed; inset: 0; z-index: 890; background: var(--overlay-dim);
+  display: flex; align-items: center; justify-content: center; }
+.filebrowse { width: min(720px, 95%); height: min(760px, 95%); display: flex; flex-direction: column;
+  overflow: hidden; background: var(--bg, #1e1e1e); border: 1px solid var(--box-border);
+  border-radius: var(--radius-modal); box-shadow: var(--shadow-modal); }
 body.filebrowse-open { overflow: hidden; }
 .fb-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
   padding: 7px 10px; border-bottom: 1px solid var(--box-border); }
@@ -3333,10 +3347,7 @@ body.filebrowse-open { overflow: hidden; }
 .fb-crumb:hover { color: var(--accent); text-decoration: underline; }
 .fb-crumb:last-child { color: var(--fg); }
 .fb-crumb-sep { margin: 0 3px; opacity: 0.6; }
-/* the overlay still takes the whole pane (the user 2026-08-24 ruling) — but the LISTING reads at a
-   centered 720px measure on a wide pane (the user 2026-09-02: full-width rows put a file's size
-   ~800px from its name); 100% wins on narrow panes/phones, pixel-identical to before */
-.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; width: min(720px, 100%); margin-inline: auto; }
+.fb-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
 .fb-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; cursor: pointer;
   font-size: 0.86em; }
 .fb-row:hover, .fb-row.active { background: var(--menu-hover); }

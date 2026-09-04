@@ -2710,6 +2710,12 @@ class SdkSession:
         finally:
             self._ctx_refreshing = False
         if not isinstance(cu, dict):
+            # a queued ask survives THIS attempt's outcome: this early return used to sit before the
+            # rerun tail, so a failed/None payload dropped a switch-time ask on the floor and the old
+            # model's number stood until the next turn (PR #886 review) — same tail, both exits
+            if self._ctx_refresh_again:
+                self._ctx_refresh_again = False
+                await self._do_refresh_context()
             return
         changed = False
         pct = cu.get("percentage")

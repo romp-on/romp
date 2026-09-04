@@ -1102,7 +1102,7 @@ function initGear(post) {
     svg += '<text x="' + cx2 + '" y="' + (baseY + 18) + '" text-anchor="middle" style="fill:var(--text-muted, #9aa0a6)" font-size="12">Judges</text>';
     svg += '</svg>'; raChart.innerHTML = svg;
     var lg = segs.map(function (s) { return '<span class=ra-li><span class=ra-sw style="background:' + s.color + '"></span>' + raEsc(s.label) + ' <b>' + raFmt(raVal(s)) + '</b></span>'; }).join('');
-    raLegend.innerHTML = '<span class=ra-li><span class="ra-sw" style="background:#7d8590"></span>sessions <b>' + raFmt(sessTot) + '</b></span>' + lg;
+    raLegend.innerHTML = '<span class=ra-li><span class="ra-sw" style="background:var(--text-faint, #7d8590)"></span>sessions <b>' + raFmt(sessTot) + '</b></span>' + lg;   // the swatch matches its bar (PR #886 review: the bar moved to --text-faint and they split in classic)
     var ratio = sessTot ? (judgeTot / sessTot * 100) : 0;
     raNote.textContent = 'last ' + raState.periodLabel + ' · judges = ' + (sessTot ? ratio.toFixed(1) : '0') + '% of session ' + (raCost() ? 'cost' : 'tokens') + ' · combined ' + raFmt(sessTot + judgeTot); }
   function raFetch() { raState.loading = true; raRender();
