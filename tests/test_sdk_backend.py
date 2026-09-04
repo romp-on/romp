@@ -859,6 +859,28 @@ class LiveTail(unittest.TestCase):
         self.assertEqual(s.client.calls, 2, "the queued rerun fires after the live refresh lands")
         self.assertFalse(s._ctx_refresh_again, "the queue holds ONE rerun, not a storm")
 
+    def test_queued_refresh_survives_a_failed_attempt(self):
+        """PR #886 review: the early return on a failed/None payload sat BEFORE the rerun tail, so a
+        switch-time ask queued behind a refresh that then errored was dropped on the floor — the old
+        model's number stood until the next turn. The rerun fires however the attempt ended."""
+        import asyncio
+        be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
+        s = sb.SdkSession(be, {"sid": "11111111-2222-3333-4444-555555555555", "name": "n", "cwd": "/tmp"})
+
+        class _FailThenWork:
+            def __init__(self): self.calls = 0
+            async def get_context_usage(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("control channel hiccup")
+                return {"percentage": 40}
+        s.client = _FailThenWork()
+        s._ctx_refresh_again = True                    # an ask queued while the failing one was in flight
+        asyncio.run(s._do_refresh_context())           # attempt 1 fails; the queued rerun must still run
+        self.assertEqual(s.client.calls, 2, "the queued ask reruns even when the attempt it waited on failed")
+        self.assertEqual(s._ctx_pct(), 40, "…and the rerun's answer lands")
+        self.assertFalse(s._ctx_refresh_again)
+
     def test_assistant_model_sets_badge_but_synthetic_does_not_corrupt_it(self):
         """The model 'doesn't show' mid-conversation (the user 2026-06-24): injected/synthetic assistant turns
         carry model='<synthetic>', which an unguarded assign wrote straight onto the statusline + timeline

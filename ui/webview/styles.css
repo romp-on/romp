@@ -2678,11 +2678,11 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
    it; render.ts measures its bottom against #content's edge (the composer growing moves it). Below
    toasts/seek (60), above the transcript. */
 #jump-bottom {
-  position: fixed; left: 50%; transform: translateX(-50%); z-index: 40;
+  position: fixed; left: 14px; z-index: 40;   /* bottom-LEFT (the user 2026-09-03; it sat centered and went unnoticed — they were still clicking in + End) */
   width: 40px; height: 22px; border-radius: var(--radius-pill); cursor: pointer; padding: 0;   /* a short PILL, wider than tall, hugging the bottom (the user 2026-08-31, revising the circle) */
   display: flex; align-items: center; justify-content: center;
   background: var(--vscode-menu-background, var(--surface-raised)); color: var(--dim);
-  border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: var(--shadow-toast);
+  border: 1px solid var(--menu-border); box-shadow: var(--shadow-toast);   /* the raw white-alpha border vanished on the light page — cream on cream */
 }
 #jump-bottom:hover { border-color: var(--accent); color: var(--accent); }
 #jump-bottom[hidden] { display: none; }   /* author display:flex defeats [hidden] — the login-modal lesson */

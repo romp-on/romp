@@ -9226,8 +9226,8 @@ if (typeof ResizeObserver === "function") {
 // ResizeObserver below (the composer growing moves that edge) — event-based, no polling.
 const jumpBtn = document.createElement("button");
 jumpBtn.id = "jump-bottom";
-jumpBtn.title = "jump to newest — then follow new content";
-jumpBtn.setAttribute("aria-label", "jump to newest");
+jumpBtn.setAttribute("aria-label", "go to bottom");
+setTip(jumpBtn, "go to bottom — then follow new content");   // the user 2026-09-03's word for it, in the one styled tip
 jumpBtn.hidden = true;
 jumpBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"'
   + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'

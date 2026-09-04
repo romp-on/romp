@@ -40,7 +40,13 @@ test("the send gate stays byte-intact — the chip is the sanctioned mover, send
 });
 
 test("the chip wears the menu-card vocabulary and survives [hidden] against its own display:flex", () => {
-  assert.match(CSS, /#jump-bottom \{\s*\n\s*position: fixed; left: 50%; transform: translateX\(-50%\);/);
+  // bottom-LEFT (the user 2026-09-03: the centered pill went unnoticed — they were still clicking
+  // into the transcript and hitting End), and the border reads through the menu token: the raw
+  // white-alpha it wore vanished on the light page (cream on cream)
+  assert.match(CSS, /#jump-bottom \{\s*\n\s*position: fixed; left: 14px;/);
+  assert.match(CSS, /#jump-bottom \{[\s\S]{0,700}?border: 1px solid var\(--menu-border\);/);
+  assert.match(RENDER, /setTip\(jumpBtn, "go to bottom — then follow new content"\);/,
+    "the tooltip says what the user asked it to say, in the one styled tip");
   assert.match(CSS, /#jump-bottom\[hidden\] \{ display: none; \}/);
   assert.match(CSS, /#jump-bottom:hover \{ border-color: var\(--accent\); color: var\(--accent\); \}/);
   // the phone target WIDENS, never heightens — the compact pill is the ask (the user 2026-08-31)
