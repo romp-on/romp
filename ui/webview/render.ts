@@ -10398,19 +10398,23 @@ function prettyMode(m: string | undefined): string {
     case "auto": return "Auto";
     case "dontask": return "Don’t ask";
     case "bypasspermissions": return "Bypass";
-    case "sandboxed": return "Sandboxed";   // a Codex session's fixed posture (workspace-write)
+    case "sandboxed": return "Sandboxed";
     default: return "Normal";   // default / normal / unknown
   }
 }
+const CODEX_MODE_CHOICES: MetaChoice[] = [
+  { label: "Sandboxed", value: "sandboxed", sub: "commands stay sandboxed; escalation is denied" },
+  { label: "Auto", value: "auto", sub: "Codex reviews escalations; manual requests are denied" },
+];
 const META_CHOICES: Record<MetaKind, MetaChoice[]> = {
   mode: MODE_CHOICES, model: MODEL_CHOICES, effort: EFFORT_CHOICES, fast: FAST_CHOICES,
 };
 // The choices a menu offers depend on the session's BACKEND: a Codex session speaks Codex's
 // vocabulary (its own model list, the four efforts it accepts) — never Claude's, whose aliases
-// the codex backend refuses (docs/codex.md). Mode/fast never reach here for codex (see the
-// toggleMetaMenu guard / the fast badge's report gate).
+// the codex backend refuses (docs/codex.md). Codex modes use its own approval reviewer.
 function metaChoices(kind: MetaKind, st: Status): MetaChoice[] {
   if (st.backend === "codex") {
+    if (kind === "mode") return CODEX_MODE_CHOICES;
     if (kind === "model") return CODEX_MODEL_CHOICES;
     if (kind === "effort") return CODEX_EFFORT_CHOICES;
   }
@@ -10574,9 +10578,6 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
   // slash command there would answer the prompt instead (host guards this too)
   if (status.state === "needsInput" || status.state === "awaiting") return;
   const s = { status };
-  // a Codex session's mode is fixed (sandboxed, plans/codex-backend.md phase 1) — the badge is
-  // informational, and opening Claude's permission-mode cycle under it would offer four no-ops
-  if (kind === "mode" && s.status.backend === "codex") return;
   const menu = el("div", "meta-menu");
   menu.dataset.kind = kind;
   const pickValue = (value: string, floating = false) => {

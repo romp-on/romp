@@ -21,7 +21,7 @@ Shape of the machine:
   loudly, the moment a session tries to run (the 2026-07-28 rule: never a silent non-start).
 
 Everything Claude-only returns its documented empty value and the kernel stays loud about it:
-set_fast/set_mode/set_auth/stop_task/rewind_files → False, on_ask → False, current_ask → None.
+set_fast/set_auth/stop_task/rewind_files → False, on_ask → False, current_ask → None.
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ from pathlib import Path
 
 HERE = Path(os.path.dirname(os.path.realpath(__file__)))
 _events = SourceFileLoader("romp_codex_events", str(HERE / "codex_events.py")).load_module()
+_runtime = SourceFileLoader("romp_codex_runtime", str(HERE / "codex_runtime.py")).load_module()
 
 SDK_PIN = "openai-codex==0.144.4"     # bin/romp-codex-setup installs exactly this into codexvenv
 SETUP_HINT = ("Session not created: the Codex backend isn't installed. "
@@ -53,15 +54,34 @@ LOGIN_HINT = "Codex isn't logged in on this machine — run: codex login"
 # metadata directories remain writable (documented in docs/codex.md) rather than carrying misleading
 # read-only entries that its arbitrary-process sandbox ignores.
 WORKSPACE_PERMISSION = "romp_workspace"
-_WORKSPACE_PROFILE_OVERRIDE = (
-    'permissions.romp_workspace={ filesystem = { ":minimal" = "read", '
-    '":workspace_roots" = { "." = "write" } }, network = { enabled = true } }')
+
+
+def _workspace_profile_override(runtime_reads=()):
+    entries = ['":minimal" = "read"', '":workspace_roots" = { "." = "write" }']
+    entries.extend('%s = "read"' % json.dumps(str(path), ensure_ascii=False)
+                   for path in runtime_reads)
+    return ('permissions.romp_workspace={ filesystem = { %s }, '
+            'network = { enabled = true } }') % ", ".join(entries)
+
+
+_WORKSPACE_PROFILE_OVERRIDE = _workspace_profile_override()
 # 0.144.4 rejects any custom [permissions] table unless default_permissions is also selected.
 # Selecting it globally is a defense in depth; thread/resume/turn still name it explicitly.
 CODEX_CONFIG_OVERRIDES = (_WORKSPACE_PROFILE_OVERRIDE,
                           'default_permissions="romp_workspace"')
 TURN_SANDBOX = None   # explicit smoke-only legacy override (for hosts unable to run the sandbox)
-APPROVAL_POLICY = "never"
+APPROVAL_POLICY = "never"  # default: existing sessions remain sandboxed
+MODES = ("sandboxed", "auto")
+
+
+def _approval_params(mode="sandboxed"):
+    if mode == "auto":
+        return {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"}
+    if mode != "sandboxed":
+        raise ValueError("Unsupported Codex mode: %s" % mode)
+    # Reset the reviewer as well: thread/resume otherwise inherits a previous Auto selection.
+    return {"approvalPolicy": APPROVAL_POLICY, "approvalsReviewer": "user"}
+
 # romp effort names → Codex ReasoningEffort. Identity for the shared four; max/ultracode are
 # Claude-only knobs and set_effort refuses them (False → the kernel warns instead of pretending).
 EFFORTS = ("low", "medium", "high", "xhigh")
@@ -123,13 +143,29 @@ def _execution_permissions(cwd, thread_start=False):
     return {"permissions": WORKSPACE_PERMISSION, "runtimeWorkspaceRoots": [root]}
 
 
-def _codex_config(config_cls, codex_bin):
-    """Build the pinned SDK launch config in one testable place.
+def _codex_config(config_cls, codex_bin, state_dir=None):
+    """Launch ROMP's managed CLI, with its matching helpers, independently of PATH.
 
-    In 0.144.4, custom profiles are process config while each thread/turn supplies its runtime root.
+    An explicit executable remains available for callers testing another runtime.
     """
+    extra = {}
+    if codex_bin is None:
+        exe = _runtime.runtime_path(state_dir)
+        codex_bin = str(exe)
+    exe = Path(codex_bin).resolve()
+    package = exe.parent.parent if exe.parent.name == "bin" else exe.parent
+    helpers = package / "codex-path"
+    if helpers.is_dir():
+        extra["env"] = {"PATH": str(helpers) + os.pathsep + os.environ.get("PATH", os.defpath)}
+    # bwrap re-enters Codex to apply seccomp before launching the requested command.
+    # :minimal covers OS runtime files, not an installation in the user's state directory.
+    # Expose only the executable and known packaged assets, never its containing state/home dir.
+    assets = (exe.parent / "codex-code-mode-host", package / "codex-package.json",
+              package / "codex-resources", helpers)
+    reads = tuple(dict.fromkeys([exe, *(path.resolve() for path in assets if path.exists())]))
+    overrides = (_workspace_profile_override(reads), *CODEX_CONFIG_OVERRIDES[1:])
     return config_cls(codex_bin=codex_bin, client_name="romp",
-                      config_overrides=CODEX_CONFIG_OVERRIDES)
+                      config_overrides=overrides, **extra)
 
 
 def ensure_codex_sdk(state_dir):
@@ -197,6 +233,8 @@ class _Session:
         self.cwd = cwd
         self.model = model
         self.effort = effort
+        self.mode = "sandboxed"
+        self.mode_lock = threading.Lock()  # guards policy changes against an in-flight turn
         self.color = color            # identity bg — also in names/<sid> (fields 3/4), the shared store
         self.dead = False
         self.state = "waiting"        # waiting | working (the two states this backend can know)
@@ -280,6 +318,11 @@ class CodexBackend:
                     continue
                 s = _Session(sid, r["tid"], r.get("name", ""), r.get("cwd", ""),
                              r.get("model", ""), r.get("effort", ""), r.get("color", ""))
+                saved_mode = r.get("mode", "sandboxed")
+                if saved_mode in MODES:
+                    s.mode = saved_mode
+                else:
+                    self.log("unknown Codex mode in registry; retaining sandboxed mode")
                 s.dead = bool(r.get("dead"))
                 queue_entries = self._registry_queue_entries(sid, r.get("queue"))
                 s.queue = [entry["text"] for entry in queue_entries]
@@ -341,7 +384,7 @@ class CodexBackend:
             if len(s.queue_ids) != len(s.queue):
                 raise RuntimeError("Codex in-memory queue identity invariant failed for %s" % s.sid)
             return {"tid": s.tid, "name": s.name, "cwd": s.cwd,
-                    "model": s.model, "effort": s.effort, "dead": s.dead,
+                    "model": s.model, "effort": s.effort, "mode": s.mode, "dead": s.dead,
                     "queue": [{"id": entry_id, "text": text}
                               for entry_id, text in zip(s.queue_ids, s.queue)],
                     "note": s.note, "color": s.color,
@@ -396,7 +439,7 @@ class CodexBackend:
         its session RLock through this transaction, so same-process snapshots cannot commit out of
         order. Snapshotting still happens before the registry lock, so no reverse lock edge exists.
         """
-        allowed = {"tid", "name", "cwd", "model", "effort", "dead", "note", "color",
+        allowed = {"tid", "name", "cwd", "model", "effort", "mode", "dead", "note", "color",
                    "launchError"}
         fields = set(fields)
         unknown = fields - allowed
@@ -479,8 +522,8 @@ class CodexBackend:
                     if not ensure_codex_sdk(self.state):
                         raise RuntimeError(SETUP_HINT)
                     from openai_codex.client import CodexClient, CodexConfig
-                    cfg = _codex_config(CodexConfig, self.codex_bin)
-                    candidate = CodexClient(config=cfg)
+                    cfg = _codex_config(CodexConfig, self.codex_bin, self.state)
+                    candidate = CodexClient(config=cfg, approval_handler=self._handle_approval)
                     candidate.start()
                     candidate.initialize()
                 self._check_auth(candidate)
@@ -535,6 +578,30 @@ class CodexBackend:
             # If it was invalidated between _get_client and turn/start, use a deliberately stale
             # sentinel. The worker then sees the generation mismatch and rebuilds automatically.
             return self._client_generation if self._client is client else -1
+
+    def _handle_approval(self, method, params):
+        """Never inherit the SDK's permissive default for requests routed to the client.
+
+        Auto review happens inside Codex. A request reaching this callback needs a human,
+        but the pinned SDK invokes it on its single reader thread. Waiting for UI input
+        here would stall responses and notifications for every session, including interrupts.
+        Decline supported requests immediately and make the limitation visible.
+        """
+        text = ("Codex requested input or manual approval that romp cannot handle yet. "
+                "The request was declined; no permission was granted.")
+        self.log("manual Codex request declined: %s" % method)
+        try:
+            self.notify("chat", {"type": "warn", "text": text})
+        except Exception:
+            pass  # a disconnected UI must never turn a denial into an approval
+        if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+            return {"decision": "decline"}
+        if method == "item/permissions/requestApproval":
+            return {"permissions": {}, "scope": "turn"}
+        if method == "item/tool/requestUserInput":
+            return {"answers": {}}
+        # Unknown reply schemas must fail the transport rather than accidentally grant access.
+        raise RuntimeError("Unsupported Codex server request: %s" % method)
 
     def _check_auth(self, client):
         """A missing `codex login` must surface as text on the session, not as a hung turn."""
@@ -646,7 +713,7 @@ class CodexBackend:
                 if s.dead:
                     continue
                 row = {"state": s.state, "model": s.model, "effort": s.effort,
-                       "mode": "sandboxed", "since": s.since, "context": None,
+                       "mode": s.mode, "since": s.since, "context": None,
                        "compactPct": None, "backend": "codex", "name": s.name,
                        "cwd": s.cwd, "color": s.color or None}
             with s.norm_lock:
@@ -762,7 +829,29 @@ class CodexBackend:
         return self._catalog
 
     def set_mode(self, sid, mode):
-        return False   # phase 1 pins approval never + the custom permission profile; no live knob
+        s = self._session(sid)
+        if not s or mode not in MODES or not s.mode_lock.acquire(blocking=False):
+            return False
+        try:
+            with s.lock:
+                if s.dead:
+                    return False
+                previous = s.mode
+                s.mode = mode
+                try:
+                    self._save_registry(s, fields=("mode",))
+                except BaseException:
+                    s.mode = previous
+                    raise
+                s.change_generation += 1
+                queued = bool(s.queue)
+            if queued:
+                self._ensure_worker(s)
+                s.kick.set()
+        finally:
+            s.mode_lock.release()
+        self.push_session(sid)
+        return True
 
     def set_effort(self, sid, value):
         s = self._session(sid)
@@ -857,7 +946,7 @@ class CodexBackend:
             #                                retry mint a duplicate live "web" (the v1.3.12 audit)
             return sid
         try:
-            resp = c.thread_start({"cwd": cwd, "approvalPolicy": APPROVAL_POLICY,
+            resp = c.thread_start({"cwd": cwd, **_approval_params(),
                                    **_execution_permissions(cwd, thread_start=True)})
             tid = resp.thread.id
             model = getattr(resp, "model", "") or ""
@@ -1046,7 +1135,7 @@ class CodexBackend:
             tid, cwd = s.tid, s.cwd
             create = tid.startswith("pending-") or tid.startswith("failed-")
         if create:
-            resp = c.thread_start({"cwd": cwd, "approvalPolicy": APPROVAL_POLICY,
+            resp = c.thread_start({"cwd": cwd, **_approval_params(s.mode),
                                    **_execution_permissions(cwd, thread_start=True)})
             with s.lock:
                 if s.dead:
@@ -1099,7 +1188,8 @@ class CodexBackend:
                              % (s.sid, e))
             self.push()
             return True
-        c.thread_resume(tid, {"cwd": cwd, **_execution_permissions(cwd, thread_start=True)})
+        c.thread_resume(tid, {"cwd": cwd, **_approval_params(s.mode),
+                              **_execution_permissions(cwd, thread_start=True)})
         with s.lock:
             if s.dead:
                 return False
@@ -1182,6 +1272,12 @@ class CodexBackend:
                     s.worker = None
 
     def _run_turn(self, s):
+        # Mode changes take effect between turns. Nonblocking set_mode refuses while this
+        # lock is held, including thread preparation and the turn/start acknowledgement gap.
+        with s.mode_lock:
+            return self._run_turn_in_mode(s)
+
+    def _run_turn_in_mode(self, s):
         c = self._get_client()
         if c is None:
             try:
@@ -1218,7 +1314,7 @@ class CodexBackend:
                 raise RuntimeError("Codex in-memory queue identity invariant failed for %s" % s.sid)
             if not batch:
                 return True
-            params = {"approvalPolicy": APPROVAL_POLICY, "cwd": s.cwd,
+            params = {**_approval_params(s.mode), "cwd": s.cwd,
                       **_execution_permissions(s.cwd)}
             if s.model:
                 params["model"] = s.model

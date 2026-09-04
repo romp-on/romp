@@ -5,7 +5,8 @@ Deliberately not named test_* : it needs a `codex login` on the machine and bill
 to the logged-in account, so CI never runs it. Run by hand when validating the backend against a
 new Codex release:
 
-    uv run --with 'openai-codex==0.144.4' python tests/smoke_codex_live.py
+    romp-codex-setup
+    ROMP_SMOKE_MODEL=gpt-6-astra ROMP_SMOKE_EFFORT=low ROMP_SMOKE_MODE=auto python3 tests/smoke_codex_live.py
 
 Exercises the seams the unit tests fake: a real turn's notification stream materializing the
 transcript (items → tokenUsage → completed), the parse of that file into ended turns, live
@@ -23,6 +24,8 @@ from pathlib import Path
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 
+RUNTIME_STATE = Path(os.environ.get("ROMP_STATE_DIR") or
+                     str(Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "romp"))
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 cb = SourceFileLoader("romp_codex_backend_live", os.path.join(ROOT, "kernel", "codex_backend.py")).load_module()
@@ -42,17 +45,18 @@ def until(fn, timeout, step=0.25, what=""):
 def main():
     state = Path(tempfile.mkdtemp(prefix="romp-codex-smoke-state-"))
     workdir = Path(tempfile.mkdtemp(prefix="romp-codex-smoke-cwd-"))
-    codex_bin = os.path.expanduser("~/.local/bin/codex")
     if os.environ.get("ROMP_SMOKE_SANDBOX") == "danger-full-access":
         # Boxes whose kernel restricts unprivileged user namespaces can't run Codex's bwrap
         # sandbox at all (bwrap: setting up uid map: Permission denied) — every command/patch
         # fails. This override exercises the SAME protocol machinery without the sandbox; the
         # shipped default stays romp's custom profile with one runtime workspace root.
-        # Fix the box for sandboxed operation:
-        #   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0   (+ persist in sysctl.d)
         cb.TURN_SANDBOX = {"type": "dangerFullAccess"}
         print("(sandbox override: dangerFullAccess — bwrap unavailable on this box)")
-    be = cb.CodexBackend(str(state), codex_bin=(codex_bin if os.path.exists(codex_bin) else None))
+    if not cb.ensure_codex_sdk(RUNTIME_STATE):
+        print("SMOKE SKIPPED: run romp-codex-setup first")
+        return 2
+    runtime = cb._runtime.runtime_path(RUNTIME_STATE)
+    be = cb.CodexBackend(str(state), codex_bin=str(runtime))
     if not be.available():
         print("SMOKE SKIPPED: %s" % (be._client_err or "codex backend unavailable"))
         return 2
@@ -62,6 +66,14 @@ def main():
     err = be.launch_error(sid)
     assert not err, "spawn launch_error: %r" % err
     print("   sid=%s tid=%s model=%s" % (sid, be._sessions[sid].tid, be._sessions[sid].model))
+    mode = os.environ.get("ROMP_SMOKE_MODE", "sandboxed")
+    assert be.set_mode(sid, mode), "unsupported smoke mode: %s" % mode
+    model = os.environ.get("ROMP_SMOKE_MODEL")
+    effort = os.environ.get("ROMP_SMOKE_EFFORT")
+    if model:
+        assert be.set_model(sid, model), "unsupported smoke model: %s" % model
+    if effort:
+        assert be.set_effort(sid, effort), "unsupported smoke effort: %s" % effort
 
     print("== turn 1: file-writing task")
     be.send(sid, "Create a file named hello.txt in the current directory containing exactly "
@@ -81,7 +93,8 @@ def main():
     if settles[-1].get("message", {}).get("usage"):
         print("   usage on settle: %s" % settles[-1]["message"]["usage"])
     hello = workdir / "hello.txt"
-    print("   hello.txt exists: %s (%r)" % (hello.exists(), hello.read_text().strip() if hello.exists() else ""))
+    assert hello.is_file() and hello.read_text().strip() == "hello from codex", "file-writing turn failed"
+    print("   hello.txt has the expected content")
     ctx = be.live_sessions()[sid]["context"]
     print("   context%%: %s" % ctx)
 
@@ -98,7 +111,13 @@ def main():
     assert until(lambda: be.live_sessions()[sid]["state"] == "working", 60, what="turn 2 start")
     # wait for the sleep command's tool_use to MATERIALIZE (the command is genuinely running),
     # then cut it — a fixed grace raced turns that settled early (a sandbox-refused sleep)
-    assert until(lambda: "sleep 300" in path.read_text(), 90, what="sleep tool_use record")
+    def sleep_started():
+        for record in map(json.loads, path.read_text().splitlines()):
+            for block in record.get("message", {}).get("content", []):
+                if block.get("type") == "tool_use" and "sleep 300" in json.dumps(block.get("input", {})):
+                    return True
+        return False
+    assert until(sleep_started, 90, what="sleep tool_use record")
     assert be.live_sessions()[sid]["state"] == "working", "turn settled before interrupt"
     assert be.interrupt(sid), "interrupt refused"
     assert until(lambda: be.live_sessions()[sid]["state"] == "waiting", 120, what="turn 2 settle")

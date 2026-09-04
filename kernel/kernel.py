@@ -9719,7 +9719,8 @@ def _codex():
                     jd.STATE, notify=_send_to_app,
                     poke=_wake_kernel, push=_pusher_wake.set,
                     push_session=_push_session_now,
-                    codex_bin=shutil.which("codex"),   # None → the SDK's bundled binary resolver
+                    # Let the backend choose ROMP's managed runtime and helpers.
+                    # A separately installed CLI on PATH may use a different protocol.
                     log=lambda m: sys.stderr.write("codex-backend: %s\n" % m))
             except Exception:
                 sys.stderr.write("codex-backend unavailable: %s\n" % traceback.format_exc())
@@ -10658,9 +10659,11 @@ def _drive(msg, client):
         # mode only through the shift+tab cycle, so Bypass — which the picker offers on SDK sessions —
         # has no keystroke there. Without this the badge just sat on the old mode with no reason given.
         if not be.set_mode(sid, str(msg["value"])):
-            client["send"](json.dumps({"type": "warn",
-                                       "text": "A terminal session can only reach the modes in its "
-                                               "shift+tab cycle — Normal, Accept, Auto, Plan."}))
+            text = ("Codex mode changes require an idle session. Choose Sandboxed or Auto "
+                    "after the current turn finishes." if be is _codex_backend else
+                    "A terminal session can only reach the modes in its "
+                    "shift+tab cycle — Normal, Accept, Auto, Plan.")
+            client["send"](json.dumps({"type": "warn", "text": text}))
         _push_soon()
     elif t == "setAuth" and msg.get("value") in ("login", "key"):
         # per-session billing (login vs the manager env's API key) — SDK-only, applied via reconnect

@@ -19,8 +19,18 @@ Codex sessions need, once per machine:
 
         romp-codex-setup
 
-    This provisions a dedicated, pinned venv under romp's state dir (it never
-    touches your system Python) and bundles the Codex binary.
+    This installs Python SDK **0.144.4** in a dedicated venv and Codex runtime
+    **0.153.3** under `codex-runtime/0.153.3/` in ROMP's state directory.
+    The runtime comes from OpenAI's official release wheels, pinned by SHA-256,
+    with its sandbox and code-mode helpers. Linux and macOS, x86-64 and ARM64,
+    are supported. Neither system Python nor the SDK's own dependency is replaced.
+    Sessions explicitly use this managed runtime even if another `codex` is on
+    PATH. Your existing CLI remains available for `codex login`.
+
+    Rerun setup to install the runtime when upgrading from an older ROMP version.
+    Restart the ROMP kernel after setup if its Codex backend is already running.
+    A missing or incomplete runtime produces a setup error; ROMP does not fall
+    back to an older SDK runtime or a CLI from PATH.
 
 2. **A Codex login:**
 
@@ -67,35 +77,64 @@ Honest caveats while this is new:
   default model — a `gpt-*` value in `~/.local/state/romp/judge-model` is
   honored where the plan permits).
 
+## Approval modes
+
+Click the session's mode badge in the chat status line to choose **Sandboxed** or
+**Auto** while the session is idle. The choice is saved per session and restored
+when the kernel restarts. Existing and new sessions default to Sandboxed.
+
+- **Sandboxed:** commands stay within the workspace permission profile;
+  requests to execute outside it are denied.
+- **Auto:** the same sandbox stays enabled. Codex's own automatic reviewer
+  evaluates escalation requests (`on-request` with `auto_review`); ROMP does not
+  approve them itself. A reviewer refusal remains a refusal. Requests routed
+  back to ROMP for manual approval are declined with a warning because the
+  current SDK cannot wait for a UI answer without blocking its shared reader.
+
+Change modes between turns; an in-flight turn retains the mode it started with.
+Auto may allow a reviewed command to run outside the sandbox, so it has a wider
+execution scope than Sandboxed. It does not disable AppArmor or modify host
+security settings. It also cannot repair a runtime that fails before a thread
+starts, and reviewer availability is determined by Codex and your account.
+If the API says a model needs a newer Codex, select a compatible model from the
+model picker or update ROMP's pinned runtime; Auto cannot fix a model/runtime
+version mismatch. Runtime 0.153.3 supports Astra, but the host must also support
+sandbox creation as described below.
+
 ## Sandboxing
 
 Codex runs its commands inside its own Linux sandbox (bubblewrap). Every
 thread and turn selects romp's custom `romp_workspace` permission profile
 and supplies exactly that session's working directory in
 `runtimeWorkspaceRoots`. The profile permits only Codex's minimal runtime
-files plus that workspace, so other user files on the host are not readable.
-Network remains enabled so git and web work keep working.
+files, the selected Codex executable and its packaged helpers, plus that
+workspace. Runtime assets are read-only; unrelated user files and the containing
+ROMP state directory are not exposed. Codex needs its own executable inside the
+sandbox to apply seccomp before starting a command. Network remains enabled so
+git and web work keep working.
 
-There is an important pinned-runtime limitation: Codex 0.144.4 does not enforce
-narrower child rules against arbitrary processes inside a custom writable root.
-A shell command can therefore still modify `.git`, `.agents`, and `.codex`.
-The built-in `:workspace` profile enforces the metadata masks, but also grants
-read access to the whole host; romp currently chooses user-file
-confidentiality and documents this
-remaining metadata-integrity gap rather than silently restoring host-wide
-reads. Two host notes:
+The current profile grants write access to the entire workspace, including
+`.git`, `.agents`, and `.codex`. Metadata protection needs narrower filesystem
+rules; it is not provided by this profile. Two host notes:
 
-- The sandbox needs **unprivileged user namespaces**. Some images (notably
-  newer GCP Ubuntu) restrict them; every command then fails visibly with
-  `bwrap: … Permission denied`. To enable:
+- On Linux, install the distribution's **bubblewrap** package. Codex 0.153.3
+  prefers a compatible system `bwrap` from PATH over its bundled helper.
+  Ubuntu 24.04 can additionally require its standard **bwrap-userns-restrict**
+  AppArmor profile, supplied by `apparmor-profiles`. That confined profile lets
+  `/usr/bin/bwrap` create the sandbox and denies capabilities to its children;
+  AppArmor and the global unprivileged-user-namespace restriction stay enabled.
+  Have the host administrator review and load that profile as appropriate;
+  see [Codex's Linux prerequisites](https://learn.chatgpt.com/docs/sandboxing#prerequisites).
+  ROMP setup does not change host security policy automatically.
 
-        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+  Without a working helper, startup can fail while loading instructions with
+  `bwrap: … Permission denied` or `Failed RTM_NEWADDR: Operation not permitted`.
+  Auto review cannot repair this earlier initialization stage. The legacy
+  Landlock fallback cannot enforce this profile's restricted host reads.
 
-    (persist it in `/etc/sysctl.d/` to survive reboots).
-
-- There is no permission-prompt flow yet (approvals are pinned off; the
-  sandbox is the guardrail). Codex approval prompts surfacing as romp's
-  needs-you cards is planned.
+- Manual approval prompts are not yet interactive in ROMP. Auto mode uses
+  Codex's reviewer; a manual request that reaches ROMP is declined, never
+  silently accepted. Interactive needs-you approval cards remain planned.
 
 ## What works, what's coming
 

@@ -1,7 +1,6 @@
 // A CODEX session's statusline menus speak Codex's vocabulary (docs/codex.md): the model/effort
-// pickers read the /models payload's codex section, the fixed sandbox mode shows as an
-// informational badge (no Claude permission-cycle menu opens under it), and the mode label says
-// "Sandboxed" instead of falling through to "Normal". Source-pin over render.ts, the same style
+// pickers read the /models payload's codex section, and its mode picker offers Sandboxed and
+// Auto without exposing unsupported Claude modes. Source-pin over render.ts, the same style
 // as picker-backend.test.ts.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
@@ -28,7 +27,10 @@ test("menu construction picks the choice list by the session's backend", () => {
   assert.match(TIMELINE, /\? \(kind === 'model' \? CODEX_MODEL_CHOICES : CODEX_EFFORT_CHOICES\)/);
 });
 
-test("a codex session's fixed mode is informational: no permission-cycle menu, a Sandboxed label", () => {
-  assert.match(RENDER, /if \(kind === "mode" && s\.status\.backend === "codex"\) return;/);
+test("Codex offers only its supported modes and opens the mode picker", () => {
+  const choices = RENDER.match(/const CODEX_MODE_CHOICES: MetaChoice\[\] = \[([\s\S]*?)\n\];/)![1];
+  assert.deepEqual([...choices.matchAll(/value: "([^"]+)"/g)].map(m => m[1]), ["sandboxed", "auto"]);
+  assert.match(RENDER, /if \(kind === "mode"\) return CODEX_MODE_CHOICES;/);
+  assert.doesNotMatch(RENDER, /if \(kind === "mode" && s\.status\.backend === "codex"\) return;/);
   assert.match(RENDER, /case "sandboxed": return "Sandboxed";/);
 });

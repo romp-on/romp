@@ -201,6 +201,22 @@ class HeadlessRoutes(unittest.TestCase):
         self.assertFalse(resp.get("ok"))
 
 
+class CodexRuntimeSelection(unittest.TestCase):
+    def test_path_codex_does_not_override_managed_runtime(self):
+        fake_mod = mock.Mock()
+        fake_loader = mock.Mock()
+        fake_loader.load_module.return_value = fake_mod
+        with mock.patch.object(km, "_codex_backend", None), \
+             mock.patch.object(km, "SourceFileLoader", return_value=fake_loader), \
+             mock.patch.object(km.shutil, "which", return_value="/TESTBIN/codex"):
+            backend = km._codex()
+            self.assertIs(backend, fake_mod.CodexBackend.return_value)
+            self.assertIs(km._codex(), backend)
+        fake_mod.CodexBackend.assert_called_once()
+        self.assertIsNone(fake_mod.CodexBackend.call_args.kwargs.get("codex_bin"),
+                          "the backend must resolve its managed runtime even when codex is on PATH")
+
+
 class SdkSingleFlight(unittest.TestCase):
     """Concurrent _sdk() calls must construct exactly ONE backend. The 2026-07-06 storm: the eager
     boot thread + handler threads each passed the unlocked `if _sdk_backend is None` check and built

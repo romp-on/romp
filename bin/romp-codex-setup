@@ -5,8 +5,8 @@
 # state dir ($STATE/codexvenv) and the kernel adds its site-packages to sys.path (ensure_codex_sdk in
 # kernel/codex_backend.py) — never the system python. The package is PINNED: `codex app-server`
 # self-describes as experimental, so upgrades are deliberate (bump the pin here and in
-# kernel/codex_backend.py SDK_PIN together). openai-codex bundles its own codex binary via the
-# openai-codex-cli-bin dependency, so no separate CLI install is required — though a machine still
+# kernel/codex_backend.py SDK_PIN together). kernel/codex_runtime.py separately pins the CLI
+# and its release hashes; the SDK dependency stays intact. No global CLI install is required, but a machine still
 # needs `codex login` once before sessions can run. Idempotent; other backends are unaffected.
 set -euo pipefail
 STATE="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"
@@ -71,16 +71,16 @@ v = getattr(m, "__version__", "?")
 print("romp-codex-setup: openai-codex %s ready (python %s)" % (v, ".".join(map(str, sys.version_info[:3]))))
 PY
 
-# Expose the BUNDLED codex CLI (2026-08-14 proofread finding): openai-codex ships the binary
-# INSIDE the venv (site-packages/codex_cli_bin/bin/codex) with no entry point on PATH — so
-# `codex login`, the very next setup step, was command-not-found on any machine without a
-# separate CLI install. An existing `codex` on PATH is respected (never clobbered); otherwise
-# the bundled one is symlinked to ~/.local/bin/codex, the spot the judges and `romp engine`
-# already probe.
+# Install the separately pinned official CLI wheel without replacing the SDK's own dependency.
+# The helper stages and verifies the complete package before publishing it under the state dir.
+_INSTALLER="$("$PY" -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().parents[1] / "kernel/codex_runtime.py")' "${BASH_SOURCE[0]}")"
+_bundled="$("$VENV/bin/python" "$_INSTALLER" "$STATE")"
+echo "romp-codex-setup: $("$_bundled" --version) ready"
+
+# Expose the managed CLI for login only if the user has no existing CLI on PATH.
 if command -v codex >/dev/null 2>&1; then
     echo "romp-codex-setup: codex CLI already on PATH ($(command -v codex)) — leaving it be"
 else
-    _bundled="$(ls -d "$VENV"/lib/python3.*/site-packages/codex_cli_bin/bin/codex 2>/dev/null | head -n1 || true)"
     if [ -n "$_bundled" ] && [ -x "$_bundled" ]; then
         mkdir -p "$HOME/.local/bin"
         ln -sf "$_bundled" "$HOME/.local/bin/codex"
@@ -90,9 +90,9 @@ else
             *) echo "romp-codex-setup: note — ~/.local/bin isn't on this shell's PATH; add it, or call ~/.local/bin/codex directly" ;;
         esac
     else
-        echo "romp-codex-setup: warning — no bundled codex binary found in the venv; install the CLI yourself (npm i -g @openai/codex) before \`codex login\`" >&2
+        echo "romp-codex-setup: warning — managed Codex runtime is unavailable; rerun romp-codex-setup before \`codex login\`" >&2
     fi
 fi
 
 echo "romp-codex-setup: done. If this machine hasn't logged in yet, run: codex login"
-echo "romp-codex-setup: no restart needed — the kernel and judges pick this up automatically."
+echo "romp-codex-setup: restart the ROMP kernel to use the updated runtime in an already-running backend."
