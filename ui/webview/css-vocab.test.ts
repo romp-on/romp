@@ -110,6 +110,7 @@ test("centered modals wear ONE card (CLAUDE.md): --radius-modal 10px + --shadow-
     [".picker-box", CHAT, "styles.css"], [".fileview", CHAT, "styles.css"],
     [".fileview", FEED, "feed.css"], [".fconfirm-box", FEED, "feed.css"],
     [".feed-modal-inner", FEED, "feed.css"], [".pickdlg-box", FEED, "feed.css"],
+    [".filebrowse", CHAT, "styles.css"], [".filebrowse", FEED, "feed.css"],   // a card since 2026-09-04
   ] as const) {
     // regex, not indexOf: a selector may have a second (e.g. mobile) rule that skips the box chrome
     const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -218,4 +219,11 @@ test("the bubble's inner-markdown overrides OUTRANK .md — the doubled-selector
   assert.match(CHAT, /\.user-bubble a, \.user-bubble\.md a \{ color: #fff;/, "bubble links stay white");
   assert.match(CHAT, /\.user-bubble blockquote, \.user-bubble\.md blockquote \{ color: rgba\(255, 255, 255, 0\.88\);/,
     "the quoted-assistant tint actually lands");
+  // the third hit of the same trap (the user 2026-09-04, red text in their light bubbles): inline
+  // code fell to .md's page code-ink on the saturated fill, fenced code wore the page-tuned hljs
+  // palette on the wrong ground, and bold fell to the near-page text tone
+  assert.match(CHAT, /\.user-bubble :not\(pre\) > code, \.user-bubble\.md :not\(pre\) > code \{ background: rgba\(255, 255, 255, 0\.2\); color: #fff; \}/);
+  assert.match(CHAT, /\.user-bubble pre, \.user-bubble\.md pre \{ background: var\(--bg\); \}/,
+    "fenced code sits in a page-colored well, where the hljs palette is correct in both themes");
+  assert.match(CHAT, /\.user-bubble strong, \.user-bubble\.md strong \{ color: #fff; \}/);
 });

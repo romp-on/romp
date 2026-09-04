@@ -14,12 +14,17 @@ const FEED = web("feed.ts");
 const FEED_CSS = web("feed.css");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
 
-test("the browser is the viewer's sibling overlay, one z layer BENEATH it", () => {
+test("the browser is the viewer's sibling MODAL, one z layer BENEATH it", () => {
   // beneath by design: a file opened from a listing overlays the listing, and closing it returns
-  // there (the viewer is a MODAL since 2026-08-15 — its backdrop, not a pane fill, draws above)
-  assert.match(FEED_CSS, /\.filebrowse \{ position: fixed; inset: 0; z-index: 890;/);
+  // there (the viewer is a MODAL since 2026-08-15). The browser joined the same centered-card
+  // treatment 2026-09-04 (the user, superseding the 2026-08-24 pane takeover they came to find
+  // odd): backdrop wears the id + the dim, the card wears the modal vocabulary.
+  assert.match(FEED_CSS, /#romp-filebrowse \{ position: fixed; inset: 0; z-index: 890; background: var\(--overlay-dim\);/);
+  assert.match(FEED_CSS, /\.filebrowse \{ width: min\(720px, 95%\); height: min\(760px, 95%\);/);
   assert.match(FEED_CSS, /#romp-fileview \{ position: fixed; inset: 0; z-index: 1200;/);
-  assert.match(BROWSE, /box\.id = "romp-filebrowse";/);
+  assert.match(BROWSE, /wrap\.id = "romp-filebrowse";/);
+  assert.match(BROWSE, /wrap\.onclick = \(ev\) => \{ if \(ev\.target === wrap\) closeFileBrowse\(\); \};/,
+    "backdrop clicks close; content clicks never do (the lightbox contract)");
   assert.match(BROWSE, /document\.body\.classList\.add\("filebrowse-open"\);/);
 });
 
