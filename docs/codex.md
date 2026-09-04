@@ -21,6 +21,8 @@ Codex sessions need, once per machine:
 
     This provisions a dedicated, pinned venv under romp's state dir (it never
     touches your system Python) and bundles the Codex binary.
+    Sessions use that SDK-bundled runtime even if another `codex` is on PATH.
+    Your existing CLI remains available for `codex login`.
 
 2. **A Codex login:**
 

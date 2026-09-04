@@ -42,7 +42,6 @@ def until(fn, timeout, step=0.25, what=""):
 def main():
     state = Path(tempfile.mkdtemp(prefix="romp-codex-smoke-state-"))
     workdir = Path(tempfile.mkdtemp(prefix="romp-codex-smoke-cwd-"))
-    codex_bin = os.path.expanduser("~/.local/bin/codex")
     if os.environ.get("ROMP_SMOKE_SANDBOX") == "danger-full-access":
         # Boxes whose kernel restricts unprivileged user namespaces can't run Codex's bwrap
         # sandbox at all (bwrap: setting up uid map: Permission denied) — every command/patch
@@ -52,7 +51,7 @@ def main():
         #   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0   (+ persist in sysctl.d)
         cb.TURN_SANDBOX = {"type": "dangerFullAccess"}
         print("(sandbox override: dangerFullAccess — bwrap unavailable on this box)")
-    be = cb.CodexBackend(str(state), codex_bin=(codex_bin if os.path.exists(codex_bin) else None))
+    be = cb.CodexBackend(str(state))
     if not be.available():
         print("SMOKE SKIPPED: %s" % (be._client_err or "codex backend unavailable"))
         return 2

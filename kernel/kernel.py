@@ -9719,7 +9719,8 @@ def _codex():
                     jd.STATE, notify=_send_to_app,
                     poke=_wake_kernel, push=_pusher_wake.set,
                     push_session=_push_session_now,
-                    codex_bin=shutil.which("codex"),   # None → the SDK's bundled binary resolver
+                    # Keep the app-server runtime paired with the installed SDK.
+                    # A separately installed CLI on PATH may use a different protocol.
                     log=lambda m: sys.stderr.write("codex-backend: %s\n" % m))
             except Exception:
                 sys.stderr.write("codex-backend unavailable: %s\n" % traceback.format_exc())
