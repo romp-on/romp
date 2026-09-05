@@ -5562,8 +5562,10 @@ def _auto_nudge_tick(now, tmux, run_dead_wait=True):
     ending romp cannot observe (kind=job). Behind the toggle it was unreachable: a kind=job stamp stood 17
     hours over nothing pending because this tick returned before its goal walk. So the walk runs in
     WAKE-ONLY mode when nudges are off — same session gates, only the awaiting branch of the goal loop —
-    the way _interrupt_block_tick runs every push independent of the toggle. The plain nudge, the
-    compaction suggestion, the debt ladder and the dormant-owner sweep keep the toggle as before."""
+    the way _interrupt_block_tick runs every push independent of the toggle; and in that mode a due
+    dead-man INJECTS NOTHING (the user said no unprompted messages): it files the stamp's lift instead,
+    the row the orphan lift files (see _wake_goal). The plain nudge, the compaction suggestion, the debt
+    ladder and the dormant-owner sweep keep the toggle as before."""
     on = _auto_nudge_on()
     nudged = dict(_auto_nudge_data().get("nudged", {}))   # {gid: {count, lastTurnId}}
     alive = list(_alive_sessions(now, tmux))
@@ -6344,7 +6346,7 @@ def _file_wake_answer(store, sid, gid, now):
     return False
 
 
-def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, tmux):
+def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, tmux, wake_only=False):
     """The AWAITING branch of _auto_nudge_session's goal walk — one stamped top goal. The stamp is a
     judged wait, so the plain status nudge stays off; but a wait is not an exemption from the ladder
     (the user 2026-08-11): fire the check-in past the backstop, track its outcome through the same record
@@ -6361,7 +6363,17 @@ def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, tmux):
                 what made the one-shot design terminal).
       silent    no response within the same window (from the FIRE, rec["at"]) → _mark_nudge_failed(wake=True):
                 the block rides the normal ladder to Needs-you. A failed/moot record re-arms only on a
-                genuinely NEW stamp episode (anchor newer than the one that failed)."""
+                genuinely NEW stamp episode (anchor newer than the one that failed).
+    `wake_only` (auto-nudge OFF, 2026-09-05): the user turned unprompted messages off, so the due
+    dead-man injects NOTHING. It files instead the row _lift_spent_awaiting's orphan branch files — a
+    romp/awaiting LIFT at the stamp's anchor: romp withdraws a wait it can no longer vouch for, the
+    card returns to plain Working (the same shape every other stalled card wears with nudges off,
+    nothing hidden behind a claimed wait), and the lift row re-nominates the closer's filed-since
+    gate so the next audited turn can re-stamp a still-real wait. No block: every procedural block
+    copy asserts something untrue here (a check-in that got no answer, a follow-up, a dead session),
+    and the lift is the one existing filing whose words hold. Once per stamp by construction — the
+    lifted stamp no longer reads as a stamp, so this branch is never re-entered for it — and the
+    in-flight/outcome legs above still run for a wake that fired while nudges were on."""
     at, why = stamp[0], stamp[1]
     kind = stamp[2] if len(stamp) > 2 else None
     if tmux.get(sid) is None:
@@ -6432,6 +6444,7 @@ def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, tmux):
     _defer = _revivers_pending(sid, store, turns, gid)
     if _defer and not _nudge_deferred_ok(gid, _defer, now, sid):
         return False
+    _fresh = None
     try:
         # last-moment fresh-store re-read (the judges run concurrently with this tick): the wake's whole
         # justification is "the stamp stands and the goal is open" — re-key on the store as written
@@ -6441,6 +6454,22 @@ def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, tmux):
             return False
     except Exception:
         pass
+    if wake_only:
+        # AUTO-NUDGE OFF: no injection (docstring). File the orphan branch's lift on the FRESH store
+        # (a judge pass holding the tick's snapshot across its model call would otherwise be
+        # clobbered), on the node that carries THIS stamp; an unreadable fresh store files nothing
+        # and the next tick re-asks — never a write off stale evidence.
+        if _fresh is None:
+            return False
+        _sn = next((n for n in _fresh.get("nodes", {}).values()
+                    if n.get("awaitingWhy") and n.get("awaitingAt") == at and not n.get("rolledUp")), None)
+        if _sn is None or not jd.record_verdict(_fresh, _sn, "romp", "awaiting", at, lift=True):
+            return False
+        jd.rollup_status(_fresh, False)
+        jd.save_goals(sid, _fresh)
+        _mark_views_dirty()
+        _drop_auto_nudge_rec(gid)                    # the spent episode's residue goes with the wait
+        return True
     Sessions.backend_for(sid).send(sid, _followup_body(gid, None, AWAITING_BACKSTOP_TEXT,
                                                        injected=True, auto=True, wake=True))
     _nudge_deferred_ok(gid, "", now, sid)            # the hold is over — drop any deferral record
@@ -7004,8 +7033,9 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None, wake_only
     failures per session (see the tick's loop). Mutates `nudged` (the tick's in-memory mirror);
     returns True when it fired a nudge or stamped a failure — the tick pushes once at the end.
     `wake_only` (auto-nudge OFF, 2026-09-05): the same session gates, but the goal loop takes only
-    its awaiting branch — the dead-man wake and its outcome leg — and never the plain nudge, the
-    stall escalation or the debt reminder (see the tick's docstring).
+    its awaiting branch — the dead-man (which then files a lift, never an injection) and the wake
+    outcome leg — and never the plain nudge, the stall escalation or the debt reminder (see the
+    tick's and _wake_goal's docstrings).
     Same-tick fires COALESCE: every goal due this tick goes out as ONE bundled message (see
     _nudge_bundle_body), after a last-moment store re-read drops any goal the judges resolved
     while the tick was deciding (_nudge_fire_list — the user 2026-07-24). After the goal walk,
@@ -7156,7 +7186,7 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None, wake_only
             # done / block / user reply / a peer's answer superseding the stamp). But a wait is not an
             # exemption from the ladder (the user 2026-08-11): past the backstop the goal takes a WAKE —
             # same records, same response gates, same escalation, its own copy (see _wake_goal).
-            fired = _wake_goal(sid, gid, _stamp, nudged, turns, store, now, lt, tmux) or fired
+            fired = _wake_goal(sid, gid, _stamp, nudged, turns, store, now, lt, tmux, wake_only) or fired
             continue
         if wake_only:
             continue                                 # auto-nudge OFF: the dead-man was the whole errand

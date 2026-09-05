@@ -10,9 +10,12 @@ _all_outstanding_delegated (its children complete, the top carrying a courier `h
 that exists to suppress the plain status nudge for peer work — a job/agents/task/timer wait is the
 session's OWN wait, not delegated work. The toggle governs the nudge (an injected status check the
 user opted out of); the dead-man is the reachability floor every Working card is promised, so it
-runs from the pusher's tick regardless, the way _interrupt_block_tick does. It fires once per stamp
-episode (the shared `nudged` ledger's wake record), never again per tick. SYNTHETIC fixtures only;
-a PRIVATE sid (goal-store fixture rule)."""
+runs from the pusher's tick regardless, the way _interrupt_block_tick does — but with nudges OFF it
+injects NOTHING (romp interrupts only when the human is the bottleneck, and the user said no
+unprompted messages): it files the stamp's lift, the exact row the orphan lift files, so the card
+returns to plain Working and the closer is re-nominated. With nudges ON the injected check-in is
+unchanged. Either way it acts once per stamp episode (the wake record / the lifted stamp), never
+again per tick. SYNTHETIC fixtures only; a PRIVATE sid (goal-store fixture rule)."""
 import json
 import os
 import tempfile
@@ -135,30 +138,42 @@ class _Base(unittest.TestCase):
     def _wakes(self):
         return [b for _s, b in self.fb.sent if km.AWAITING_BACKSTOP_TEXT in b]
 
+    def _node(self):
+        return jd.load_goals(SID)["nodes"][self.gid]
+
+    def _lifts(self):
+        return [e for e in self._node().get("log") or [] if e.get("kind") == "awaiting" and e.get("lift")]
+
 
 class DeadmanIgnoresTheToggle(_Base):
-    def test_a_7h_job_stamp_on_an_all_delegated_top_fires_with_nudges_off(self):
+    def test_a_7h_job_stamp_on_an_all_delegated_top_files_a_lift_and_injects_nothing(self):
         self._toggle(False)
         self._seed(kind="job", age=7 * H)
         self._tick()
-        self.assertEqual(len(self._wakes()), 1, "the dead-man is the reachability floor, not a nudge feature")
-        rec = km._auto_nudge_data()["nudged"][self.gid]
-        self.assertTrue(rec.get("wake"), "…recorded as a wake episode in the shared ledger")
-        self.assertEqual(rec.get("anchor"), NOW - 7 * H)
+        self.assertEqual(self.fb.sent, [], "nudges off: no unprompted message, whatever the clock says")
+        self.assertIsNone(self._node().get("awaitingWhy"), "the wait romp cannot vouch for is withdrawn")
+        row = self._lifts()[-1]
+        self.assertEqual((row.get("src"), row.get("ev_t")), ("romp", NOW - 7 * H),
+                         "the orphan lift's exact row: romp/awaiting/lift at the stamp's anchor")
+        self.assertEqual(jd.load_goals(SID)["status"].get(self.gid, "working"), "working",
+                         "no block — every procedural block copy would misstate what happened")
+        self.assertNotIn(self.gid, km._auto_nudge_data()["nudged"], "no injection → no wake record")
 
-    def test_a_second_cycle_does_not_fire_again(self):
+    def test_a_second_cycle_does_not_file_again(self):
         self._toggle(False)
         self._seed(kind="job", age=7 * H)
         self._tick()
         self._tick(NOW + 5)
         self._tick(NOW + 60)
-        self.assertEqual(len(self._wakes()), 1, "once per stamp episode — keyed on the wake record, never per build")
+        self.assertEqual(len(self._lifts()), 1, "once per stamp — the lifted stamp no longer reads as one")
+        self.assertEqual(self.fb.sent, [])
 
     def test_a_5h_stamp_is_still_patient(self):
         self._toggle(False)
         self._seed(kind="job", age=5 * H)
         self._tick()
         self.assertEqual(self.fb.sent, [], "the 6h constant stands")
+        self.assertIsNotNone(self._node().get("awaitingWhy"), "…and nothing is filed either")
 
     def test_the_toggle_still_governs_the_plain_nudge(self):
         # an unstamped working top with nudges off: nothing fires — the opt-out is the nudge's
@@ -169,21 +184,37 @@ class DeadmanIgnoresTheToggle(_Base):
 
     def test_the_kinds_take_the_same_path(self):
         for kind in ("agents", "task", "timer"):
-            self.fb.sent.clear()
             self._toggle(False)
             self._seed(kind=kind, age=7 * H)
             self._tick()
-            self.assertEqual(len(self._wakes()), 1, "kind=%s is the session's own wait" % kind)
+            self.assertEqual(len(self._lifts()), 1, "kind=%s is the session's own wait" % kind)
+            self.assertEqual(self.fb.sent, [])
 
 
-class OwnWaitOutranksTheDelegatedGate(_Base):
+class NudgesOnKeepTheCheckIn(_Base):
     def test_with_nudges_on_the_all_delegated_top_still_takes_its_wake(self):
         self._toggle(True)
         self._seed(kind="job", age=7 * H)
         self._tick()
-        self.assertEqual(len(self._wakes()), 1)
+        self.assertEqual(len(self._wakes()), 1, "nudges on: today's injected check-in, unchanged")
+        self.assertIsNotNone(self._node().get("awaitingWhy"), "the check-in is the action — the stamp stands")
+        self.assertEqual(self._lifts(), [])
+        rec = km._auto_nudge_data()["nudged"][self.gid]
+        self.assertTrue(rec.get("wake"), "…recorded as a wake episode in the shared ledger")
+        self.assertEqual(rec.get("anchor"), NOW - 7 * H)
         self.assertNotIn(self.gid, km._auto_nudge_data().get("walkGates", {}),
                          "the walk reached the goal — no all-delegated hold is journaled for it")
+
+    def test_a_second_cycle_is_silent_with_nudges_on(self):
+        self._toggle(True)
+        self._seed(kind="job", age=7 * H)
+        self._tick()
+        self._tick(NOW + 5)
+        self._tick(NOW + 60)
+        self.assertEqual(len(self._wakes()), 1, "once per stamp episode — keyed on the wake record")
+
+
+class OwnWaitOutranksTheDelegatedGate(_Base):
 
     def test_a_peer_stamp_keeps_the_gate(self):
         # a peer wait IS the delegated shape the gate exists for — it stays behind it

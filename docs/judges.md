@@ -433,8 +433,8 @@ permission/API-error floors: one interrupt at a time, the present event first.
   death) retires its wait as an event, with no clock at all. A task/job stamp
   whose launches the planner placed under another card lifts the same way once
   the session's live registry is empty and the last in-harness item ended after
-  the stamp. The wake runs from the pusher whether or not auto-nudge is on: the
-  toggle scopes the nudge, not the dead-man.
+  the stamp. The dead-man runs from the pusher whether or not auto-nudge is on;
+  with it off, a due wait files its lift (no injected check-in) instead.
 
 ## Where responsibilities overlap
 
