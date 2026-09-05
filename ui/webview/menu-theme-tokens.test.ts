@@ -114,6 +114,9 @@ const SURFACES: Array<[string, string]> = [
   ["feed.css .feed-sessmenu .fsm-row:hover", FEED.slice(FEED.indexOf("\n.feed-sessmenu .fsm-row:hover {"), FEED.indexOf("}", FEED.indexOf("\n.feed-sessmenu .fsm-row:hover {")))],
   ["styles.css .ctx-swatch.sel", CHAT.slice(CHAT.indexOf("\n.ctx-swatch.sel {"), CHAT.indexOf("}", CHAT.indexOf("\n.ctx-swatch.sel {")))],
   ["kernel.py mobile session picker (#mlist)", KERNEL.slice(KERNEL.indexOf('"#mlist{display:none;'), KERNEL.indexOf('".mrow.ph'))],
+  // the shell's bell popover (2026-09-05): rows + switch pills + the test button, up to the status-red
+  // refusal line (a STATUS colour, outside the menu vocabulary by the CLAUDE.md accent/status split)
+  ["kernel.py bell popover (#rbell-pop)", KERNEL.slice(KERNEL.indexOf('"#rbell-back{'), KERNEL.indexOf('"#rbp-test-out.bad{'))],
   ["tag-menu.ts openTagMenu", slice(MENU, "export function openTagMenu", "export function tagMenuButton")],
   ["timeline menuStyleFor/menuCheckStyleFor", slice(TIMELINE, "const menuStyleFor", "let MENU_STYLE")],
 ];
@@ -207,3 +210,34 @@ test("the sheets' reference menu rules wear the tokens too — one card, one hov
   assert.match(mob, /border:1px solid var\(--hairline,#3a3a3a\)/, "#mlist hairline (dark #3a3a3a byte-identical)");
   assert.match(KERNEL, /body\.theme-light #mlist\{/, "the light block re-skins the mobile picker");
 });
+
+test("the shell DEFINES the menu tokens (it loads no sheet) and the bell popover reads them with the dark fallbacks", () => {
+  // the shell's two theme blocks resolve the tokens to the SAME values the sheets' blocks do —
+  // dark byte-for-byte the CLAUDE.md literals, light the cream card — so the popover is one more
+  // wearer of the one vocabulary, not a third skin (2026-09-05)
+  const dark = KERNEL.slice(KERNEL.indexOf('":root{--menu-bg:'), KERNEL.indexOf('}"', KERNEL.indexOf('":root{--menu-bg:')));
+  for (const [tok, val] of Object.entries(DARK)) {
+    if (tok === "--menu-ring" || tok === "--check-ring") continue;          // the popover draws no swatch grid
+    assert.ok(norm(dark).includes(norm(`${tok}:${innermostOf(val)}`)), `shell :root ${tok} = ${innermostOf(val)}`);
+  }
+  const light = KERNEL.slice(KERNEL.indexOf('"body.theme-light{--menu-bg:'), KERNEL.indexOf('}"', KERNEL.indexOf('"body.theme-light{--menu-bg:')));
+  for (const [tok, val] of Object.entries(LIGHT)) {
+    if (tok === "--menu-ring" || tok === "--check-ring") continue;
+    assert.ok(norm(light).includes(norm(`${tok}:${val}`)), `shell body.theme-light ${tok} = ${val}`);
+  }
+  const pop = KERNEL.slice(KERNEL.indexOf('"#rbell-pop{'), KERNEL.indexOf('"#rbp-test-out.bad{'));
+  assert.match(pop, /background:var\(--menu-bg,#252526\)/, "popover card");
+  assert.match(pop, /color:var\(--menu-fg,#cccccc\)/, "popover text");
+  assert.match(pop, /border:1px solid var\(--menu-border,rgba\(255,255,255,0\.12\)\)/, "popover hairline");
+  assert.match(pop, /border-radius:var\(--radius-menu,6px\)/, "popover radius");
+  assert.match(pop, /box-shadow:var\(--shadow-menu,0 4px 12px rgba\(0,0,0,0\.35\)\)/, "popover shadow");
+  assert.match(pop, /background:var\(--menu-hover,rgba\(255,255,255,0\.09\)\)/, "row hover");
+  // fallback parity, the same check the inline menus get: every fallback IS the dark token value
+  const GEOMETRY: Record<string, string> = { "--radius-menu": "6px", "--shadow-menu": "0 4px 12px rgba(0, 0, 0, 0.35)" };
+  for (const m of pop.matchAll(/var\((--menu-[\w-]+|--check-bg|--radius-menu|--shadow-menu),\s*((?:[^()]|\([^()]*\))*)\)/g)) {
+    const tok: string = m[1], fb = m[2];
+    const want = GEOMETRY[tok] ?? innermostOf(DARK[tok as keyof typeof DARK]);
+    assert.equal(norm(fb), norm(want), `${tok} fallback ${fb} must equal the dark token value ${want}`);
+  }
+});
+function innermostOf(v: string): string { const m = v.startsWith("var(") ? v.match(/,\s*(.+)\)\s*$/) : null; return m ? m[1] : v; }

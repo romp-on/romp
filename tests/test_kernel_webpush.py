@@ -528,9 +528,11 @@ class LandingRevealPins(unittest.TestCase):
 
 
 class RailBell(unittest.TestCase):
-    """The desktop rail carries the same bell as the mobile tab bar (the user 2026-08-08), and the
-    pair is the MASTER notification switch (the user 2026-08-09): on = every task notifies unless
-    its own bell mutes it, with the device push subscription a best-effort leg on top."""
+    """The desktop rail carries the same bell as the mobile tab bar (the user 2026-08-08). Since
+    2026-09-05 the pair OPENS THE POPOVER (tests/test_kernel_notify_popover.py) whose rows are the
+    switches: the kernel-wide master (the user 2026-08-09's model: on = every task notifies unless
+    its own bell mutes it) and this device's push subscription, pulled apart so a phone turning
+    itself off no longer silences every device."""
 
     def test_shell_serves_both_bells_and_one_flow_drives_them(self):
         status, body = _serve_get("/", headers={"X-Romp-Token": km.TOKEN})
@@ -555,22 +557,29 @@ class RailBell(unittest.TestCase):
         self.assertIn(".bell-slash{display:none}", page)
         self.assertIn("#rail-bell:not(.on) .bell-slash,#mbell:not(.on) .bell-slash{display:block}", page)
 
-    def test_the_bell_is_the_master_switch_not_a_device_toggle(self):
+    def test_the_bell_opens_the_popover_whose_rows_are_the_switches(self):
+        # (2026-09-05: was "the bell is the master switch, not a device toggle" — the tap now opens
+        # the popover, and the All-devices row is the master while This-device is the subscription)
         _, body = _serve_get("/", headers={"X-Romp-Token": km.TOKEN})
         page = body.decode()
-        # kernel-authoritative paint: state comes from GET /notify-all at boot and the shell WS
-        # push on every toggle — never from this device's push subscription
+        # kernel-authoritative paint of the master: GET /notify-all at boot and the shell WS push
+        # on every toggle, so every dashboard's row agrees
         self.assertIn("fetch('/notify-all')", page)
         self.assertIn("window.__rompNotifyAllPaint", page)
         self.assertIn("m.type==='notifyAll'", page, "the shell WS repaints every open dashboard")
         self.assertIn("post('/notify-all',{on:want})", page)
+        self.assertIn("id=rbell-pop", page)
+        self.assertIn("data-act=all", page)
+        self.assertIn("data-act=dev", page)
         # the bell shows everywhere — the master matters even where the Push API is missing (the
-        # kernel box still gets osascript, other devices still buzz); only the subscribe leg gates
+        # kernel box still gets osascript, other devices still buzz); only the device row gates
         self.assertNotIn("('Notification' in window))return", page,
                          "the old whole-bell capability bail is gone")
         self.assertIn("var canPush=", page)
         # the permission ask still runs in the tap's own stack (iOS voids the gesture across awaits)
         self.assertIn("Notification.requestPermission():null", page)
+        # the glyph is THIS device's truth now: master AND subscribed (tests/test_kernel_notify_popover.py)
+        self.assertIn("var lit=isOn&&(canPush?devOn:true)", page)
 
 
 class MasterBellRoute(unittest.TestCase):

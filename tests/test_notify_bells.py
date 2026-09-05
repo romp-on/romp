@@ -307,7 +307,10 @@ class NotifyWiring(unittest.TestCase):
         self.assertIn("_fired = _feed_notifications(feed)", self.src)
         self.assertIn("for _t, _b, _sid in _fired:", self.src)
         self.assertIn("_system_notify(_t, _b)", self.src)
-        self.assertIn("_push_forward([{", self.src)   # trusted peers hear the same transition
+        # trusted peers hear the same transition — since 2026-09-05 the events that BUZZED here
+        # (`_buzzed`: the fired list minus those that yielded to a turn-finished push for the same
+        # turn end, tests/test_kernel_notify_popover.py), never a list built from a second diff
+        self.assertIn("_push_forward(_buzzed)", self.src)
 
 
 if __name__ == "__main__":

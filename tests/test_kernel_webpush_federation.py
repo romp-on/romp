@@ -263,11 +263,15 @@ class FederatedReveal(unittest.TestCase):
 class ForwardWiring(unittest.TestCase):
     def test_the_forward_rides_the_same_fired_events(self):
         # the one choke point: the forward consumes the SAME _feed_notifications result the bells
-        # and local pushes consumed — never a second diff that could disagree
+        # and local pushes consumed — never a second diff that could disagree. Since 2026-09-05
+        # (the one-buzz-per-turn-end rule, tests/test_kernel_notify_popover.py) the forward carries
+        # the events that BUZZED here — `_buzzed`, the fired list minus the ones that yielded to a
+        # turn-finished push — so a peer's phone hears each turn end once, exactly like ours.
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("_fired = _feed_notifications(feed)", src)
-        self.assertIn('_push_forward([{"title": _t, "body": _b, "sid": _sid} for _t, _b, _sid in _fired])',
-                      src)
+        self.assertIn('_buzzed.append({"title": _t, "body": _b, "sid": _sid})', src)
+        self.assertIn("_push_forward(_buzzed)", src)
+        self.assertNotIn("_push_forward([{", src, "no second list is built from a second diff")
 
 
 if __name__ == "__main__":

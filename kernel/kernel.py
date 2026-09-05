@@ -3104,6 +3104,15 @@ def _set_session_flag(sid, flag, value):
 # whose card left the feed are pruned on write (the card is gone; a fresh card is a fresh id), so
 # the file tracks the live feed instead of growing forever.
 NOTIFY_ALL_KEY = "*"
+# "*turns" is the SECOND reserved key (2026-09-05): the kernel-wide "also when a turn finishes" switch
+# behind the bell popover. It lives in this file rather than a sibling on purpose — it is read on the
+# same fire path as the master (both gate one push), so one cached read answers both; it rides the
+# same atomic write, the same mtime cache, and the same `__ncards__` watch that busts the feed sig
+# and repaints every dashboard when either flips. Off by default, and a real key only while on
+# (the master's own delete-on-off discipline). A card id can never collide with it: ids are
+# "<sid>:<node>" and the sid is a uuid.
+NOTIFY_TURNS_KEY = "*turns"
+_NOTIFY_RESERVED = frozenset((NOTIFY_ALL_KEY, NOTIFY_TURNS_KEY))
 _notify_cards_cache = {}   # str(path) -> ((mtime_ns,size), dict)
 
 
@@ -3137,6 +3146,22 @@ def _set_notify_all(value):
         cur[NOTIFY_ALL_KEY] = True
     else:
         cur.pop(NOTIFY_ALL_KEY, None)
+    _atomic_write(jd.STATE / "notify-cards.json", json.dumps(cur, sort_keys=True))
+
+
+def _notify_turns_on():
+    """The turn-finished switch (bell popover, 2026-09-05): on = every session's turn end buzzes the
+    subscribed phones — gated by the master at the FIRE (see _turn_notify_tick), never here, so the
+    popover can show the row's own state while the master is off."""
+    return bool(_notify_cards().get(NOTIFY_TURNS_KEY))
+
+
+def _set_notify_turns(value):
+    cur = dict(_notify_cards())                      # copy: never mutate the cached dict in place
+    if value:
+        cur[NOTIFY_TURNS_KEY] = True
+    else:
+        cur.pop(NOTIFY_TURNS_KEY, None)
     _atomic_write(jd.STATE / "notify-cards.json", json.dumps(cur, sort_keys=True))
 
 
@@ -3193,11 +3218,12 @@ def _set_notify_session(sid, value):
 def _prune_notify_cards(live_ids):
     """Drop armed ids whose card is no longer in the feed (cleared/archived — the id never comes back).
     Called from the feed-diff detector, so the write happens only on the event of a card leaving.
-    The master key is not a card and never prunes; values are kept as stored (False = a mute)."""
+    The reserved keys (the master, the turn-finished switch) are not cards and never prune; values
+    are kept as stored (False = a mute)."""
     cur = _notify_cards()
-    gone = [i for i in cur if i not in live_ids and i != NOTIFY_ALL_KEY]
+    gone = [i for i in cur if i not in live_ids and i not in _NOTIFY_RESERVED]
     if gone:
-        kept = {i: cur[i] for i in cur if i in live_ids or i == NOTIFY_ALL_KEY}
+        kept = {i: cur[i] for i in cur if i in live_ids or i in _NOTIFY_RESERVED}
         _atomic_write(jd.STATE / "notify-cards.json", json.dumps(kept, sort_keys=True))
 
 
@@ -29499,14 +29525,23 @@ def _cached_feed(now, tmux, sig, connect=False):
     _built_feed[:] = [sig, feed, time.time(), started]
     _badge = _needs_you_count(feed)
     _fired = _feed_notifications(feed)                    # armed bells: fresh builds are the transition event
+    _buzzed = []
     for _t, _b, _sid in _fired:
         _system_notify(_t, _b)
+        # ONE phone buzz per session per turn end (the 2026-09-05 rule, see _buzz_claim): a card
+        # moving because its session just stopped shares that stop with the turn-finished push —
+        # whichever of the two files first buzzes, the other yields. The desktop notice above and
+        # the badge below are not the buzz and never yield.
+        if not _buzz_claim(_sid, _turn_end_key(_sid), "bell"):
+            continue
         _push_notify(_t, _b, _sid, _badge)                # same events to subscribed phones (plans/ios-app.md)
-    if _fired:
+        _buzzed.append({"title": _t, "body": _b, "sid": _sid})
+    if _buzzed:
         # …and to trusted peers' devices (plans/federated-push.md): the phone subscribed at the
         # always-on box must buzz for THIS kernel's cards too — which kernel detected an event is
-        # romp's business, never the user's.
-        _push_forward([{"title": _t, "body": _b, "sid": _sid} for _t, _b, _sid in _fired])
+        # romp's business, never the user's. Only what buzzed HERE travels, so a peer's phone
+        # hears each turn end once too.
+        _push_forward(_buzzed)
     _badge_push(_badge)                                   # app-icon count for installed shells (proposal 3)
     return feed
 
@@ -29718,10 +29753,17 @@ def _vapid_auth(endpoint):
     return "vapid t=%s.%s, k=%s" % (signing.decode(), _b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big")), pub)
 
 
-def _push_send_one(sub, payload):
-    """POST one encrypted notification to one subscription. Returns False only when the push
-    service says the subscription is DEAD (404/410 — the sole prune signal, per the plan); a
-    network blip keeps it."""
+_PUSH_DEAD_STATUSES = (404, 410)   # the push service's "this subscription is gone" — the sole prune signal
+
+
+def _push_post(sub, payload):
+    """POST one encrypted notification to one subscription and report what the push service SAID:
+    (status, detail). status is the HTTP status (a 2xx = accepted — Apple/Google answer 201), or 0
+    when the request never got an answer (DNS, timeout, TLS), with the error in detail. Never
+    raises on the network path: the caller decides what an outcome means — _push_send_one turns
+    it into keep/prune for the fan-out, /push/test hands it to the user verbatim (2026-09-05, the
+    popover's test button: before it, every failure short of a dead subscription was swallowed as
+    success and a phone that never buzzed had nothing to show for it)."""
     import urllib.request, urllib.error
     req = urllib.request.Request(
         sub["endpoint"], method="POST",
@@ -29729,12 +29771,50 @@ def _push_send_one(sub, payload):
         headers={"Authorization": _vapid_auth(sub["endpoint"]),
                  "Content-Encoding": "aes128gcm", "TTL": "86400", "Urgency": "high"})
     try:
-        urllib.request.urlopen(req, timeout=10).read()
-        return True
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+            return int(r.status or 200), str(r.reason or "accepted")
     except urllib.error.HTTPError as e:
-        return e.code not in (404, 410)
-    except Exception:
-        return True
+        try:
+            body = e.read().decode("utf-8", "replace").strip()
+        except Exception:
+            body = ""
+        detail = str(e.reason or "")
+        if body:
+            detail = ("%s: %s" % (detail, body[:200])) if detail else body[:200]
+        return int(e.code), detail or ("HTTP %d" % e.code)
+    except Exception as e:
+        return 0, ("%s: %s" % (type(e).__name__, e)).strip(": ")
+
+
+def _push_send_one(sub, payload):
+    """POST one encrypted notification to one subscription. Returns False only when the push
+    service says the subscription is DEAD (404/410 — the sole prune signal, per the plan); a
+    network blip keeps it. Built on _push_post, which keeps the status for the callers that need
+    it; the fan-out only needs keep-or-prune."""
+    status, _detail = _push_post(sub, payload)
+    return status not in _PUSH_DEAD_STATUSES
+
+
+def _push_test(endpoint):
+    """The popover's "Send a test notification" (2026-09-05): ONE plain notification to ONE
+    subscription — the asking device's — and the push service's answer back to it as
+    {ok, status, detail}. Synchronous on purpose: the whole point is to show the user what the
+    service said. An endpoint nobody subscribed answers ok:false with the reason (the shell shows
+    it under the button); a dead subscription (404/410) is pruned exactly as the fan-out would
+    prune it, and the detail says so. Raises RuntimeError when the crypto dependency is missing —
+    the route turns that into the same loud 500 /push/subscribe gives."""
+    sub = _push_subs().get(str(endpoint or ""))
+    if not sub:
+        return {"ok": False, "status": 0, "detail": "this device isn't subscribed yet"}
+    _vapid_keys()                                          # RuntimeError without cryptography → the route's 500
+    payload = json.dumps({"title": "romp", "body": "Test notification — this device is set up."}).encode()
+    status, detail = _push_post(sub, payload)
+    ok = 200 <= status < 300
+    if status in _PUSH_DEAD_STATUSES:
+        _del_push_sub(sub["endpoint"])
+        detail = "%s — the push service says this subscription is gone, so it was removed; turn This device off and on again" % detail
+    return {"ok": ok, "status": status, "detail": detail}
 
 
 def _push_notify(title, body, sid="", badge=None):
@@ -29803,6 +29883,94 @@ def _push_forward(events):
                 pass                               # one unreachable peer must not block the rest
 
     threading.Thread(target=run, daemon=True).start()
+
+
+# ── the turn-finished push (the bell popover's third row, 2026-09-05) ─────────────────────────────
+# With the master AND the turn switch on, every session's turn end buzzes the subscribed phones:
+# {title: the session's name, body: the first line of what it said, sid}. The EVENT is the session's
+# recorded settle — the Stop hook's `lastStopAt` stamp (SDK sessions) or the states/ 'waiting'/'idle'
+# transition the Stop hook writes (tmux) — read per pusher cycle, which the very same settle wakes
+# (/tick, the backend's poke). No timer, no transcript-mtime inference. The first sight of a session
+# is a silent baseline (existing state is status, not news — the _NOTIFY_PREV policy), and a session
+# the user muted (its own bell off) stays quiet here too: the master's "on unless muted" model.
+#
+# ONE BUZZ PER TURN END (the no-double-buzz rule): a turn that ends by asking a question also moves
+# its card into needs_input a few seconds later, once the judges rule — a bell event. Both writers
+# claim (sid, turn-end key) through _buzz_claim; whoever files first buzzes and the other yields.
+# Within one cycle the feed builds before this tick, so when the judges have already ruled the more
+# informative bell event wins; across cycles the turn push usually lands first and the later bell
+# event yields on the phone (the desktop notice and the badge still fire — they are not the buzz).
+# Bell events never yield to EACH OTHER: two cards of one session moving in one build buzz twice,
+# exactly as before this rule existed.
+_TURN_PREV = {}      # sid -> turn-end key at the last tick; absent = baseline pending
+_PUSH_BUZZED = {}    # sid -> (turn-end key, "turn"|"bell") of the last phone buzz filed for it
+_TURN_BODY_CAP = 120
+
+
+def _turn_end_key(sid):
+    """The session's newest TURN-END as an opaque key, 0 when there is no settle evidence. Like
+    _settle_event_key, the Stop hook's lastStopAt is primary; the fallback is stricter — only a
+    STOPPED states/ transition ('waiting'/'idle') counts, because _last_state also moves when a
+    turn STARTS and a start must never read as an end here."""
+    try:
+        t = int((_thread_reg(sid) or {}).get("lastStopAt") or 0)
+    except Exception:
+        t = 0
+    if t:
+        return t
+    val, vt = _last_state(sid)
+    return (vt or 0) if val in ("waiting", "idle") else 0
+
+
+def _buzz_claim(sid, key, kind):
+    """File a phone buzz for (sid, key) from `kind` ("turn" | "bell"). True = go ahead; False = a
+    buzz for this same turn end already went out and this one yields. A bell event yields only to a
+    TURN claim (bell events never suppress each other); a turn push yields to any claim. A sid-less
+    event (a card with no session) has nothing to share a turn with and always passes."""
+    if not sid:
+        return True
+    cur = _PUSH_BUZZED.get(sid)
+    if cur is not None and cur[0] == key and (kind == "turn" or cur[1] == "turn"):
+        return False
+    if cur is None or cur[0] != key or kind == "turn":
+        _PUSH_BUZZED[sid] = (key, kind)
+    return True
+
+
+def _first_line(text, cap=_TURN_BODY_CAP):
+    """The first non-empty line of a reply, clipped to `cap` characters with an ellipsis."""
+    for line in str(text or "").splitlines():
+        s = line.strip()
+        if s:
+            return s if len(s) <= cap else s[:cap - 1].rstrip() + "…"
+    return ""
+
+
+def _turn_notify_tick(now, tmux):
+    """One pusher-cycle pass over the live sessions: a session whose turn-end key MOVED since the
+    last pass finished a turn. Fires only with both switches on and the session unmuted; every
+    sighting advances the memo regardless, so switching the row on later never replays old ends."""
+    fired = []
+    for s in _alive_sessions(now, tmux):
+        sid = str(s.get("sid") or "")
+        if not sid:
+            continue
+        key = _turn_end_key(sid)
+        prev = _TURN_PREV.get(sid)
+        _TURN_PREV[sid] = key
+        if prev is None or key == prev or not key:
+            continue                                     # baseline / nothing new / no settle evidence
+        if not (_notify_all_on() and _notify_turns_on() and _notify_session_effective(sid)):
+            continue
+        if not _buzz_claim(sid, key, "turn"):
+            continue                                     # a bell event already buzzed for this turn end
+        body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
+        title = str(s.get("name") or _name_of(sid) or sid[:8])
+        _push_notify(title, body, sid)                   # badge omitted: the count rides its own push
+        fired.append({"title": title, "body": body, "sid": sid})
+    if fired:
+        _push_forward(fired)                             # peers' phones hear it too, the bell-event way
+    return fired
 
 
 # The whole service worker. Push delivery ONLY — deliberately NO fetch handler: romp is useless
@@ -30050,6 +30218,10 @@ def _pusher_cycle_jobs(now, tmux, any_client):
         sys.stderr.write("pending-ops: %s\n" % traceback.format_exc())   # never behind a judge pass (2026-09-03)
     if any_client:
         _push_all(tmux=tmux)
+    try:                                  # the turn-finished push (bell popover): AFTER the feed build above,
+        _turn_notify_tick(now, tmux)      # so a bell event the same settle produced files its buzz first
+    except Exception:
+        sys.stderr.write("turn-notify: %s\n" % traceback.format_exc())
     # (the WS keepalive lives on its own _heartbeat thread — NOT here — so a slow push can't starve it)
     try:                                  # EXACT retraction first: dispatches returned → the stamp is spent,
         _lift_spent_awaiting(now, tmux)   # so the nudge tick below never wakes a wait that already ended
@@ -31095,8 +31267,10 @@ else{var ru=document.getElementById('ru-back');
 if(ru&&ru.classList.contains('on')&&window.__rompUsageClose){window.__rompUsageClose();closed=true;}
 else{var er=document.getElementById('rerr-back');
 if(er&&!er.hidden&&window.__rompCloseErrs){window.__rompCloseErrs();closed=true;}
+else{var bp=document.getElementById('rbell-back');
+if(bp&&!bp.hidden&&window.__rompCloseBellPop){window.__rompCloseBellPop();closed=true;}
 else{var nt=document.getElementById('rnet-back');
-if(nt&&!nt.hidden&&window.__rompCloseNet){window.__rompCloseNet();closed=true;}}}}
+if(nt&&!nt.hidden&&window.__rompCloseNet){window.__rompCloseNet();closed=true;}}}}}
 if(closed){e.preventDefault();e.stopPropagation();}}
 document.addEventListener('keydown',onEsc,true);
 ['f-chat','f-fleet','f-feed','f-timeline'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
@@ -32300,6 +32474,7 @@ else if(m&&m.type==='badge'&&'setAppBadge' in navigator){
 try{(m.n?navigator.setAppBadge(m.n):navigator.clearAppBadge())['catch'](function(e){});}catch(e){}}
 // the master bell toggled somewhere (this tab included) — repaint ours from the kernel's word
 else if(m&&m.type==='notifyAll'&&window.__rompNotifyAllPaint)window.__rompNotifyAllPaint(!!m.on);
+else if(m&&m.type==='notifyTurns'&&window.__rompNotifyTurnsPaint)window.__rompNotifyTurnsPaint(!!m.on);
 // the boot check found a newer romp release — raise the update banner on every open dashboard
 else if(m&&m.type==='updateAvail'&&window.__rompUpdateOffer)window.__rompUpdateOffer(m.cur||'',m.tag||'',m.drift||'',m.boot||'',m.state||'');};
 ws.onclose=function(){setTimeout(shellWS,2000);};}catch(e){}}
@@ -32309,37 +32484,64 @@ var last='chat';try{var s=localStorage.getItem(KT);if(s&&F[s])last=s;}catch(e){}
 """
 
 
-# The bell in the bottom bar's action cluster / mobile tab bar: the MASTER notification switch
-# (the user 2026-08-09, who expected the bottom-right bell to turn notifications on for every task,
-# with per-item bells as the way to mute some — not a switch that arms nothing by itself). ON = the
-# kernel arms every card by default (notify-cards.json "*", POST /notify-all) and the session/card
-# bells read as mutes; the same tap also opts THIS device into the web pushes where the Push API
-# exists (plans/ios-app.md proposal 2 — on iOS that means the installed home-screen app), so one
-# gesture buys the arming and the delivery together. The bell paints from the KERNEL's state (GET
-# /notify-all at boot, a {type:'notifyAll'} shell push on every toggle) — never from the device
-# subscription, so every device's bell agrees. The push-subscribe leg is best-effort ON TOP of the
-# master flip: a denied permission lands in the Log but leaves notifications on (the kernel box
-# still speaks, other devices still buzz). Notification.requestPermission runs synchronously in the
-# tap (iOS voids the gesture across an await), which is why it is kicked off BEFORE the /notify-all
-# round-trip rather than chained after it.
+# The bell in the bottom bar's action cluster / mobile tab bar opens the NOTIFICATION POPOVER
+# (2026-09-05). Before it, one tap did two jobs at once: it flipped the kernel-wide master switch
+# (the user 2026-08-09's model — on = every task notifies, the session/card bells read as mutes;
+# notify-cards.json "*", POST /notify-all) AND subscribed or unsubscribed THIS device's Web Push
+# (plans/ios-app.md proposal 2) — so turning the bell off on a phone silenced every device, a denied
+# permission left the master on with only a Log line to show for it, and nothing ever told the user
+# whether the push service had accepted a subscription at all. The popover pulls the two apart as
+# rows — "All devices" (the master, kernel-authoritative: GET /notify-all at boot, a {type:'notifyAll'}
+# shell push on every toggle so every dashboard agrees) and "This device" (this browser's
+# subscription; Notification.requestPermission still runs synchronously in the tap's own stack
+# because iOS voids the gesture across an await) — adds the turn-finished switch (/notify-turns,
+# its own {type:'notifyTurns'} push), and a test button that POSTs /push/test with this device's
+# endpoint and shows the push service's answer as one sentence under itself. The bell GLYPH now
+# reflects this device: lit only when the master is on AND this browser is subscribed; a browser
+# with no Push API has no subscription half to reflect, so the master alone paints it there. The
+# tooltip names which half is off. Where push is blocked or unavailable the This-device row is
+# disabled and its sub-line says why and how to fix it — never a silent no-op.
 _LANDING_PUSH_JS = """
 (function(){var bells=[].slice.call(document.querySelectorAll('#mbell,#rail-bell'));if(!bells.length)return;
 bells.forEach(function(b){b.hidden=false;});
 var canPush=('serviceWorker' in navigator)&&('PushManager' in window)&&('Notification' in window);
-var isOn=false,busy=false;
-function paint(){bells.forEach(function(b){b.classList.toggle('on',isOn);
-var t=isOn?'Notifications on for every task — tap to turn off':'Notify when any task needs you or completes';
-b.setAttribute('title',t);b.setAttribute('aria-label',t);});}
-window.__rompNotifyAllPaint=function(on){isOn=!!on;paint();};   // the shell WS repaints every open dashboard on a toggle
+var back=document.getElementById('rbell-back'),pop=document.getElementById('rbell-pop');if(!back||!pop)return;
+var rows={};['all','dev','turns'].forEach(function(k){rows[k]=pop.querySelector('[data-act='+k+']');});
+var devSubEl=document.getElementById('rbp-dev-sub'),testBtn=document.getElementById('rbp-test'),testOut=document.getElementById('rbp-test-out');
+var isOn=false,turnsOn=false,devOn=false,busy={};
+function perm(){return canPush?Notification.permission:'';}
+function sw(k,on,ok){var r=rows[k];if(!r)return;r.classList.toggle('off',!ok);r.setAttribute('aria-checked',on?'true':'false');
+r.setAttribute('aria-disabled',ok?'false':'true');var s=r.querySelector('.rbp-sw');if(s)s.classList.toggle('on',!!on);}
+function paint(){
+var devOk=canPush&&perm()!=='denied';
+var lit=isOn&&(canPush?devOn:true);   // the glyph is THIS device's truth: master AND its subscription
+var t;
+if(lit)t='Notifications on — tap for options';
+else if(!isOn&&canPush&&!devOn)t='Notifications off — for all devices, and on this device';
+else if(!isOn)t='Notifications off for all devices';
+else t='Notifications off on this device';
+bells.forEach(function(b){b.classList.toggle('on',lit);b.setAttribute('title',t);b.setAttribute('aria-label',t);});
+sw('all',isOn,true);sw('dev',devOn,devOk);sw('turns',turnsOn,true);
+var sub;
+if(!canPush)sub="Push isn't available in this browser. On iPhone, add romp to the Home Screen first and open it from there.";
+else if(perm()==='denied')sub="Notifications are blocked for this site. On iPhone: Settings, then Notifications, then Romp. In a desktop browser: the site permission beside the address.";
+else if(devOn)sub="This browser gets a notification when a session needs you or finishes.";
+else sub="Turn on to get them on this device.";
+if(devSubEl)devSubEl.textContent=sub;}
+window.__rompNotifyAllPaint=function(on){isOn=!!on;paint();};     // the shell WS repaints every open dashboard on a toggle
+window.__rompNotifyTurnsPaint=function(on){turnsOn=!!on;paint();};
 fetch('/notify-all').then(function(r){return r.json();}).then(function(d){isOn=!!(d&&d.on);paint();}).catch(function(e){});
-function sub(){return navigator.serviceWorker.getRegistration('/').then(function(r){return r?r.pushManager.getSubscription():null;});}
+fetch('/notify-turns').then(function(r){return r.json();}).then(function(d){turnsOn=!!(d&&d.on);paint();}).catch(function(e){});
+function sub(){if(!canPush)return Promise.resolve(null);
+return navigator.serviceWorker.getRegistration('/').then(function(r){return r?r.pushManager.getSubscription():null;}).catch(function(e){return null;});}
+sub().then(function(s){devOn=!!s;paint();});
 function fail(e){try{window.__rompNotify&&window.__rompNotify('error','Notifications: '+((e&&e.message)||e));}catch(err){}}
 function post(path,obj){return fetch(path,{method:'POST',body:JSON.stringify(obj)}).then(function(r){
-if(!r.ok)return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));});});}
+if(!r.ok)return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));});
+return r.json().catch(function(){return {};});});}
 function b64u(s){var raw=atob((s+'==='.slice((s.length+3)%4)).replace(/-/g,'+').replace(/_/g,'/'));
 var a=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)a[i]=raw.charCodeAt(i);return a;}
-function done(){busy=false;bells.forEach(function(b){b.classList.remove('busy');});}
-function devSub(perm){return perm.then(function(p){
+function devSubscribe(permP){return permP.then(function(p){
 if(p!=='granted')throw new Error('push not allowed on this device');
 return navigator.serviceWorker.register('/sw.js');
 }).then(function(){return fetch('/push/vapid-key').then(function(r){
@@ -32347,18 +32549,36 @@ if(!r.ok)return r.text().then(function(t){throw new Error(t||'no server key');})
 }).then(function(k){return navigator.serviceWorker.ready.then(function(reg){
 return reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64u(k.key)});});
 }).then(function(s){return post('/push/subscribe',s.toJSON());});}
-function devUnsub(){return sub().then(function(s){var ep=s?s.endpoint:'';
+function devUnsubscribe(){return sub().then(function(s){var ep=s?s.endpoint:'';
 return (s?s.unsubscribe():Promise.resolve()).then(function(){return ep?post('/push/unsubscribe',{endpoint:ep}):null;});});}
-bells.forEach(function(bl){bl.addEventListener('click',function(){
-if(busy)return;busy=true;bells.forEach(function(b){b.classList.add('busy');});   // acknowledge the tap before any round-trip
-var want=!isOn;
-var perm=(want&&canPush)?Notification.requestPermission():null;   // in the tap's own stack, before any await
-post('/notify-all',{on:want}).then(function(){
-isOn=want;paint();                       // the master flipped — the bell says so even if the push leg fails below
-if(!canPush)return;
-return want?devSub(perm):devUnsub();
-}).then(function(){done();},function(e){fail(e);done();});
-});});
+function place(anchor){var r=anchor.getBoundingClientRect();   // beside the rail bell / above the tab bar: both sit at the bottom edge
+pop.style.bottom=Math.max(8,window.innerHeight-r.top+6)+'px';pop.style.right=Math.max(8,window.innerWidth-r.right)+'px';}
+function open(anchor){place(anchor);back.hidden=false;}
+function close(){back.hidden=true;}
+window.__rompCloseBellPop=close;                                  // Escape (the shell's shared chain) closes it like every panel
+back.addEventListener('click',function(e){if(e.target===back)close();});   // an outside tap: the backdrop is everything outside the card
+bells.forEach(function(bl){bl.addEventListener('click',function(){if(!back.hidden){close();return;}open(bl);});});
+function setBusy(k,on){busy[k]=on;var r=rows[k];if(r)r.classList.toggle('busy',on);}   // acknowledge the tap before any round-trip
+pop.addEventListener('click',function(e){var el=e.target;
+while(el&&el!==pop&&!(el.getAttribute&&el.getAttribute('data-act')))el=el.parentNode;
+if(!el||el===pop)return;var act=el.getAttribute('data-act');
+if(act==='all'){if(busy.all)return;setBusy('all',true);var want=!isOn;
+post('/notify-all',{on:want}).then(function(){isOn=want;paint();},fail).then(function(){setBusy('all',false);});}
+else if(act==='dev'){if(busy.dev||el.classList.contains('off'))return;setBusy('dev',true);var wantD=!devOn;
+var perm0=(wantD&&canPush)?Notification.requestPermission():null;   // in the tap's own stack, before any await
+(wantD?devSubscribe(perm0):devUnsubscribe()).then(function(){devOn=wantD;},function(e){fail(e);return sub().then(function(s){devOn=!!s;});})
+.then(function(){setBusy('dev',false);paint();});}
+else if(act==='turns'){if(busy.turns)return;setBusy('turns',true);var wantT=!turnsOn;
+post('/notify-turns',{on:wantT}).then(function(){turnsOn=wantT;paint();},fail).then(function(){setBusy('turns',false);});}
+else if(act==='test'){if(!testBtn||testBtn.disabled)return;testBtn.disabled=true;var label=testBtn.textContent;testBtn.textContent='Sending…';
+testOut.className='rbp-sub';testOut.textContent='';
+sub().then(function(s){if(!s)return {ok:false,status:0,detail:'',nosub:true};return post('/push/test',{endpoint:s.endpoint});}).then(function(d){
+var ok=!!(d&&d.ok);testOut.classList.toggle('bad',!ok);
+testOut.textContent=ok?'The push service accepted it.':(d&&d.nosub?"This device isn't subscribed yet.":
+(d&&d.status?('The push service refused it: '+d.status+' '+(d.detail||'')+'.'):('Could not reach the push service: '+((d&&d.detail)||'no answer')+'.')));
+},function(e){testOut.classList.add('bad');testOut.textContent='Test failed: '+((e&&e.message)||e)+'.';})
+.then(function(){testBtn.disabled=false;testBtn.textContent=label;});}
+});
 })();
 // Landing a push tap on the session that fired (the user 2026-08-08). Two arrivals:
 //  - live window: the SW focused us and posted {romp:'pushReveal',sid} — relay a focus straight
@@ -32809,6 +33029,11 @@ def _landing():
             "<meta name=theme-color id=meta-theme content='#1e1e1e'>"
             "<link rel=icon type=image/svg+xml href=/media/romp-swirl-glyph.svg><title>Romp</title><style>"
             ":root{--accent:#9cd2ff;--accent-fg:#0c1a2e}"
+            # The menu vocabulary's tokens (CLAUDE.md "Menus and dropdowns wear ONE vocabulary"), defined
+            # HERE because the shell loads no sheet: the bell popover reads them, with the same dark
+            # literals as var() fallbacks in its rules. Byte-equal to styles.css's :root values.
+            ":root{--menu-bg:#252526;--menu-fg:#cccccc;--menu-border:rgba(255,255,255,0.12);--menu-hover:rgba(255,255,255,0.09);"
+            "--radius-menu:6px;--shadow-menu:0 4px 12px rgba(0,0,0,0.35);--check-bg:#1EA1EB}"
             # Inter loads PER DOCUMENT (2026-08-27, PR-730 review): the shell names 'Inter' in every
             # sans stack below, but @font-face never crosses an iframe boundary — without these two
             # rules the panes rendered Inter while the shell around them silently kept the system
@@ -32915,6 +33140,40 @@ def _landing():
             # pixel-identical (the user 2026-09-02)
             ".bell-slash{display:none}"
             "#rail-bell:not(.on) .bell-slash,#mbell:not(.on) .bell-slash{display:block}"
+            # ── the bell popover (2026-09-05): the bell's tap opens this instead of flipping anything.
+            # The house menu dress through the menu TOKENS (defined in the shell's :root / theme-light
+            # blocks), each with its dark literal as the var() fallback (menu-theme-tokens.test.ts
+            # bans a raw hex anywhere else). Anchored by _LANDING_PUSH_JS at open time — bottom/right
+            # measured from the tapped bell — so it sits beside the rail bell on desktop and above the
+            # tab bar on a phone; the transparent full-window backdrop is what catches an outside tap
+            # (a tap on an iframe never reaches this document otherwise). z 205: above the network
+            # panel (200), below the Log (210) — the Escape chain closes topmost first. Global scope on
+            # purpose: the bell state rules further down sit inside the mobile media block.
+            "#rbell-back{position:fixed;inset:0;z-index:205;background:transparent}#rbell-back[hidden]{display:none}"
+            "#rbell-pop{position:fixed;width:min(320px,calc(100vw - 16px));box-sizing:border-box;padding:4px;"
+            "background:var(--menu-bg,#252526);color:var(--menu-fg,#cccccc);border:1px solid var(--menu-border,rgba(255,255,255,0.12));"
+            "border-radius:var(--radius-menu,6px);box-shadow:var(--shadow-menu,0 4px 12px rgba(0,0,0,0.35));"
+            "font:12px/1.45 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;text-align:left}"
+            ".rbp-row{display:flex;flex-direction:column;gap:2px;padding:7px 10px;border-radius:4px;cursor:pointer;user-select:none;"
+            "-webkit-tap-highlight-color:transparent}"
+            ".rbp-row:hover{background:var(--menu-hover,rgba(255,255,255,0.09))}"
+            ".rbp-row.off{opacity:.55;cursor:default}.rbp-row.off:hover{background:none}"   # a switch that cannot be flipped here
+            ".rbp-row.busy{opacity:.55}"                                                     # the tap's acknowledgement
+            ".rbp-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:600}"
+            ".rbp-sub{font-size:0.82em;opacity:.6}"                                          # every sub-line: one size, one weight
+            ".rbp-sw{flex:0 0 auto;width:26px;height:14px;border-radius:7px;background:rgba(127,127,127,0.35);position:relative;"
+            "transition:background .15s}"
+            ".rbp-sw::after{content:'';position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;"
+            "background:var(--menu-fg,#cccccc);transition:transform .15s}"
+            ".rbp-sw.on{background:var(--accent)}.rbp-sw.on::after{background:var(--accent-fg);transform:translateX(12px)}"
+            ".rbp-div{height:1px;background:var(--menu-border,rgba(255,255,255,0.12));margin:3px 6px}"
+            ".rbp-act{cursor:default}.rbp-act:hover{background:none}"
+            "#rbp-test{display:block;width:100%;box-sizing:border-box;background:none;border:1px solid var(--menu-border,rgba(255,255,255,0.12));"
+            "border-radius:4px;color:var(--menu-fg,#cccccc);font:inherit;font-weight:600;padding:5px 10px;cursor:pointer;text-align:left}"
+            "#rbp-test:hover{background:var(--menu-hover,rgba(255,255,255,0.09))}"
+            "#rbp-test[disabled]{opacity:.55;cursor:default}"
+            "#rbp-test-out{padding-top:4px}#rbp-test-out:empty{display:none}"
+            "#rbp-test-out.bad{color:#e5484d;opacity:1}"    # a refusal is a STATUS, so it wears the status red, not the accent
             # Per-node fleet colour on the network glyph (the user 2026-07-29). The nodes carry their own
             # fill, so they override the icon's currentColor: accent = connected and on this build,
             # grey = attached but not answering (romp is dialing), red = needs you (drift, no kernel, or
@@ -33354,6 +33613,10 @@ def _landing():
             # so the dark rendering is byte-identical. Accent goes clay (#C2410C) via the same --accent var
             # every accent consumer already reads.
             "body.theme-light{--accent:#C2410C;--accent-fg:#FFF8F2;background:#F1EAE2}"
+            # the light theme's menu tokens — the values styles.css's body.theme-light block resolves
+            # them to, so the bell popover is the same cream card every other menu is
+            "body.theme-light{--menu-bg:#FBF6EF;--menu-fg:#1F1E1D;--menu-border:rgba(0,0,0,0.12);--menu-hover:rgba(0,0,0,0.06);"
+            "--shadow-menu:0 4px 12px rgba(31,26,20,0.16);--check-bg:#C2410C}"
             # the html element keeps its dark background otherwise (body.theme-light can't reach an
             # ancestor without :has); body covers the viewport, but paint the canvas right too
             "html:has(> body.theme-light){background:#F1EAE2}"
@@ -33411,7 +33674,24 @@ def _landing():
             "</style></head><body class='po-chat po-feed po-timeline'>"
             + _THEME_READER +
             "<div id=romp-boot>" + _loader_inner() + "</div>"
-            # the notification popover (hidden until the bell is clicked; backdrop click closes). No
+            # the bell popover (2026-09-05; driven by _LANDING_PUSH_JS): the two switches that ONE bell
+            # tap used to flip together — the kernel-wide master and this device's push subscription —
+            # as separate rows, plus the turn-finished switch and a test button that shows the push
+            # service's answer. Sub-lines are the one-sentence "why"; the This-device sub-line is
+            # rewritten by the JS to say what this browser can and cannot do. Hidden until the bell is
+            # tapped; the transparent backdrop closes it, as does Escape (_LANDING_ESC_JS).
+            "<div id=rbell-back hidden><div id=rbell-pop role=dialog aria-label='Notification settings'>"
+            "<div class=rbp-row data-act=all role=switch aria-checked=false><div class=rbp-head>All devices<span class=rbp-sw></span></div>"
+            "<div class=rbp-sub>Arms every device, and the desktop of every machine you've attached.</div></div>"
+            "<div class=rbp-row data-act=dev role=switch aria-checked=false><div class=rbp-head>This device<span class=rbp-sw></span></div>"
+            "<div class=rbp-sub id=rbp-dev-sub>Turn on to get them on this device.</div></div>"
+            "<div class=rbp-row data-act=turns role=switch aria-checked=false><div class=rbp-head>Also when a turn finishes<span class=rbp-sw></span></div>"
+            "<div class=rbp-sub>Buzzes every time any session finishes a turn. With many sessions running, that is a lot of buzzing.</div></div>"
+            "<div class=rbp-div></div>"
+            "<div class='rbp-row rbp-act'><button id=rbp-test data-act=test>Send a test notification</button>"
+            "<div class=rbp-sub id=rbp-test-out></div></div>"
+            "</div></div>"
+            # the Log popover (hidden until the triangle is clicked; backdrop click closes). No
             # Reload button (the user 2026-07-27: redundant next to the rail's own restart/refresh —
             # and a dead page is one browser-refresh away regardless).
             "<div id=rerr-back hidden><div id=rerr-panel>"
@@ -34332,6 +34612,10 @@ class Handler(BaseHTTPRequestHandler):
                 # blocks on you or completes, unless its session/card bell mutes it. The shell
                 # paints the bottom-right bell from this at boot.
                 return self._send(200, json.dumps({"on": _notify_all_on()}), "application/json", cache="no-cache")
+            if p == "/notify-turns":
+                # the popover's turn-finished switch (2026-09-05): its OWN state, ungated by the
+                # master, so the row can show what it is set to while the master is off
+                return self._send(200, json.dumps({"on": _notify_turns_on()}), "application/json", cache="no-cache")
             if p == "/push/vapid-key":
                 # the public key the shell subscribes with (applicationServerKey). Gated like every
                 # page fetch; the 500 carries the missing-package message for the bell to surface.
@@ -34482,6 +34766,32 @@ class Handler(BaseHTTPRequestHandler):
                 _mark_views_dirty()
                 _send_to_app("shell", {"type": "notifyAll", "on": _on})
                 return self._send(200, json.dumps({"ok": True, "on": _on}), "application/json")
+            if u.path == "/notify-turns":
+                # the popover's turn-finished switch (2026-09-05): kernel-authoritative like the
+                # master, its own shell push so every open dashboard's row agrees. No dirty mark —
+                # the feed carries nothing that reads it.
+                try:
+                    _on = bool(json.loads(raw_body or b"{}").get("on"))
+                except (ValueError, AttributeError):
+                    return self._send(400, "bad json", "text/plain")
+                _set_notify_turns(_on)
+                _send_to_app("shell", {"type": "notifyTurns", "on": _on})
+                return self._send(200, json.dumps({"ok": True, "on": _on}), "application/json")
+            if u.path == "/push/test":
+                # the popover's test button (2026-09-05): one notification to THIS device's
+                # subscription, the push service's answer back verbatim — {ok, status, detail}.
+                # Missing crypto is the same loud 500 the subscribe route gives.
+                try:
+                    _ep = str(json.loads(raw_body or b"{}").get("endpoint") or "")
+                except (ValueError, AttributeError):
+                    return self._send(400, "bad json", "text/plain")
+                if not _ep:
+                    return self._send(400, "missing endpoint", "text/plain")
+                try:
+                    _res = _push_test(_ep)
+                except RuntimeError as e:
+                    return self._send(500, str(e), "text/plain")
+                return self._send(200, json.dumps(_res), "application/json")
             if u.path == "/push/subscribe":
                 # A device opting into the bell pushes (plans/ios-app.md proposal 2): body is the
                 # browser's own PushSubscription JSON, stored keyed by endpoint — so re-subscribing
