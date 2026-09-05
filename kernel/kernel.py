@@ -5553,10 +5553,18 @@ def _auto_nudge_tick(now, tmux, run_dead_wait=True):
     has an orphaned 'working' top goal, AND whose latest turn the closer has already classified (so 'working'
     is its considered verdict — a turn that ended by asking YOU a question is never nudged), inject the follow-up. RE-ARMS per stall episode, not once-ever: a goal is nudged again
     once a NEW GENUINE (work/user, not the agent's own nudge-response) ended turn leaves it still working, with
-    a count that climbs each fire (surfaced on the timeline; no cap — the warning is the alert). A no-op unless
-    the user turned it on."""
-    if not _auto_nudge_on():
-        return
+    a count that climbs each fire (surfaced on the timeline; no cap — the warning is the alert). The NUDGE legs
+    are a no-op unless the user turned it on.
+
+    THE AWAITING DEAD-MAN RUNS REGARDLESS OF THE TOGGLE (2026-09-05). The toggle is the user opting out of
+    injected status checks; the 6h wake in _wake_goal is the reachability floor every Working card is
+    promised (the 2026-08-22 rule: nudged/woken until it lands) and the ONLY mechanism for a wait whose
+    ending romp cannot observe (kind=job). Behind the toggle it was unreachable: a kind=job stamp stood 17
+    hours over nothing pending because this tick returned before its goal walk. So the walk runs in
+    WAKE-ONLY mode when nudges are off — same session gates, only the awaiting branch of the goal loop —
+    the way _interrupt_block_tick runs every push independent of the toggle. The plain nudge, the
+    compaction suggestion, the debt ladder and the dormant-owner sweep keep the toggle as before."""
+    on = _auto_nudge_on()
     nudged = dict(_auto_nudge_data().get("nudged", {}))   # {gid: {count, lastTurnId}}
     alive = list(_alive_sessions(now, tmux))
     alive_ids = {s["sid"] for s in alive}
@@ -5569,7 +5577,7 @@ def _auto_nudge_tick(now, tmux, run_dead_wait=True):
         # ticks over two days before anyone noticed; every session after the bad one in the
         # iteration lost its nudges. The failure still logs loudly, per session.
         try:
-            r = _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids)
+            r = _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids, wake_only=not on)
             fired = (r is True) or fired
             # the walk->sweep handoff journal (the user 2026-08-24): a session gate names itself as
             # the return value; the sweep owns gate-held records by the GATE'S CLASS, never by age
@@ -5580,13 +5588,15 @@ def _auto_nudge_tick(now, tmux, run_dead_wait=True):
             # the compaction suggestion rides the same walk (contract at _compact_suggest_tick).
             # Deliberately INSIDE the auto-nudge toggle: a user who turned injected follow-ups
             # off has said no unprompted messages, and this is exactly that class.
-            fired = _compact_suggest_tick(s["sid"], tmux.get(s["sid"]), now) or fired
+            if on:
+                fired = _compact_suggest_tick(s["sid"], tmux.get(s["sid"]), now) or fired
         except Exception:
             sys.stderr.write("auto-nudge (session %s): %s\n"
                              % (s.get("sid") or "?", traceback.format_exc()))
     try:
-        _debt_backstop_tick(now)                       # reminder outcomes for debtors the walk can't reach
-        if run_dead_wait:
+        if on:
+            _debt_backstop_tick(now)                   # reminder outcomes for debtors the walk can't reach
+        if run_dead_wait and on:
             # THE DEATH TRANSITION HAS ONE OBSERVER: _dead_wait_sweep's prev-swap (_PREV_ALIVE)
             # is a lock-free read-modify-write, safe only because exactly one caller — the
             # pusher's periodic tick — ever runs it. setAutoNudge's WS-handler tick passes
@@ -5727,6 +5737,25 @@ def _lift_ev_t(nd, now):
     return nd.get("awaitingAt") or now
 
 
+def _bg_ended_after(every, tombs, sp, anchor, now):
+    """Did some in-harness background item END after `anchor`? The watermark for the dispatch-less
+    task/job lift in _lift_spent_awaiting: the registry says nothing runs NOW, and this says the
+    emptiness ARRIVED after the stamp — so the stamp stood over live work that has since ended, rather
+    than over a world already empty when the judge stamped (a wait on something outside the harness).
+    Every source is a recorded event, never a clock: a task's terminal record (`endT`), a Monitor's
+    recorded ceiling passing (its kill moment — em._bg_expired, deadline past the anchor), a launch-
+    ledger stop tombstone (`at`; a TaskStop suppresses the notification the transcript would pair), or
+    the CLI respawn `sp` that killed everything the stamp could have watched."""
+    if sp > anchor:
+        return True
+    for t in every:
+        if (t.get("endT") or 0) > anchor:
+            return True
+        if t.get("status") == "running" and em._bg_expired(t, now) and (t.get("deadline") or 0) > anchor:
+            return True
+    return any((e.get("at") or 0) > anchor for e in tombs if isinstance(e, dict))
+
+
 def _stamp_written_at(nd):
     """WHEN the awaiting stamp was written — the ownership horizon for the time-window fallback below.
 
@@ -5841,6 +5870,9 @@ def _lift_spent_awaiting(now, tmux):
             reg_ids = ({str(t.get("toolUseId") or "") for t in snap.get("bgTasks") or []
                         if isinstance(t, dict)} if "bgTasks" in snap else None)
             sp = _sdk_spawned_at(sid) or 0
+            # the launch ledger's stop tombstones (sdk_backend's bgLedgerEnded): a TaskStop suppresses
+            # the task notification, so the transcript never learns the Monitor ended — the hook did
+            tombs = ((_thread_reg(sid).get("bgLedgerEnded") or []) if reg_ids is not None else [])
             if not every and reg_ids is None:
                 if changed:
                     jd.rollup_status(store, False)
@@ -5887,21 +5919,37 @@ def _lift_spent_awaiting(now, tmux):
                     elif born <= (t.get("t") or 0) <= horizon:
                         own.append(t)
                 if not own:                           # nothing dispatched → not a background wait; leave it
-                    # …EXCEPT a kind=agents stamp standing over an authoritatively EMPTY lifecycle
-                    # set with no live subagents and nothing running in the transcript (the user
-                    # 2026-08-24): an agents-kind wait ends with task notifications, and with no
-                    # dispatch recorded ANYWHERE no such event can ever arrive — the shape a closer
-                    # mints when it misreads peer sessions as agents, orphaned for good the moment a
-                    # restart clears the world it described. Same evidence-postdates-anchor rule as
-                    # every lift: the (re)spawn must be newer than the stamp's anchor.
-                    if (nd.get("awaitingKind") == "agents" and reg_ids is not None and not reg_ids
-                            and not snap.get("subagents") and not running
-                            and (sp > (nd.get("awaitingAt") or 0)
-                                 # …or the transcript itself shows NOTHING running at all (2026-08-25
-                                 # audit): the closer stamped agents over a world with zero live
-                                 # dispatches — the misread-peer-as-agents shape needs no respawn to
-                                 # prove the notification can never arrive; the pairing already did
-                                 or not any(t.get("status") == "running" for t in every))):
+                    # …EXCEPT a stamp standing over an authoritatively EMPTY in-harness world: the
+                    # backend's lifecycle set present and empty, no live subagents, nothing running in
+                    # the transcript. Two shapes, one writer:
+                    #  - kind=agents (the user 2026-08-24): an agents-kind wait ends with task
+                    #    notifications, and with no dispatch recorded ANYWHERE no such event can ever
+                    #    arrive — the shape a closer mints when it misreads peer sessions as agents,
+                    #    orphaned for good the moment a restart clears the world it described. Same
+                    #    evidence-postdates-anchor rule as every lift: the (re)spawn must be newer than
+                    #    the stamp's anchor — or the transcript itself shows NOTHING running at all
+                    #    (2026-08-25 audit: the misread-peer-as-agents shape needs no respawn to prove
+                    #    the notification can never arrive; the pairing already did).
+                    #  - kind=task/job (2026-09-05): a closer stamped a top kind=job for a Monitor plus
+                    #    a background command the session ITSELF was running, the planner placed both
+                    #    launches on a sibling top, and this skip kept the stamp 17 hours over an empty
+                    #    registry with nothing pending anywhere (the wake below it never reached it —
+                    #    nudges off, top all-delegated). The deciding event is the LAST in-harness item
+                    #    ENDING after the stamp (_bg_ended_after: a terminal record, a Monitor's recorded
+                    #    ceiling, the launch ledger's stop tombstone, or the CLI respawn that killed
+                    #    everything) — a world already empty when the judge stamped is a wait on
+                    #    something the registry cannot see (a CI run), and stays the dead-man's. An
+                    #    ARMED kernel watch for this sid (a PR watch) is a carrier still running: its
+                    #    delivery is the ending, so the stamp stands. The owned-dispatch job rule below
+                    #    ("the watcher dying is the carrier going") is untouched: it needs a dispatch of
+                    #    the goal's OWN to protect, and this branch has none.
+                    _kind, _anchor0 = nd.get("awaitingKind"), nd.get("awaitingAt") or 0
+                    _empty = reg_ids is not None and not reg_ids and not snap.get("subagents") and not running
+                    if _empty and (
+                            (_kind == "agents"
+                             and (sp > _anchor0 or not any(t.get("status") == "running" for t in every)))
+                            or (_kind in ("task", "job") and not _kernel_watch_armed(sid)
+                                and _bg_ended_after(every, tombs, sp, _anchor0, now))):
                         if jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True):
                             changed = True
                             _drop_auto_nudge_rec(top)
@@ -6950,11 +6998,14 @@ def _nudge_response_ready(turns, store, rec, gid, now):
     return True, resp
 
 
-def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None):
+def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None, wake_only=False):
     """One session's slice of the auto-nudge tick: the session-level gates, then the fire/stamp
     walk over its still-'working' top goals. Split from _auto_nudge_tick so the tick isolates
     failures per session (see the tick's loop). Mutates `nudged` (the tick's in-memory mirror);
     returns True when it fired a nudge or stamped a failure — the tick pushes once at the end.
+    `wake_only` (auto-nudge OFF, 2026-09-05): the same session gates, but the goal loop takes only
+    its awaiting branch — the dead-man wake and its outcome leg — and never the plain nudge, the
+    stall escalation or the debt reminder (see the tick's docstring).
     Same-tick fires COALESCE: every goal due this tick goes out as ONE bundled message (see
     _nudge_bundle_body), after a last-moment store re-read drops any goal the judges resolved
     while the tick was deciding (_nudge_fire_list — the user 2026-07-24). After the goal walk,
@@ -7081,14 +7132,23 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None):
             continue                                 # top-level, live goals only
         if status.get(gid, "working") != "working":
             continue                                 # blocked/completed → the session resolved it; not orphaned
-        if _all_outstanding_delegated(nodes, gid):
-            _put_walk_gate(gid, "all-delegated", now)   # a wake record here is walk-unreachable → the sweep owns it
-            continue                                 # all open work handed to peers → nothing for THIS session
-        if sid in waitfor and nd.get("t", 0) <= waitfor[sid]["since"]:
-            _put_walk_gate(gid, "awaiting-peer", now)   # same: journaled so the sweep can evaluate its outcome
-            continue                                 # awaiting a live peer's reply to a question this goal predates
-        _pop_walk_gate(gid)                          # the walk reaches this goal — any per-goal hold is over
         _stamp = _goal_awaiting_stamp_full(nodes, gid, _kids, answered_at=_peer_answered(sid))
+        # THE SESSION'S OWN WAIT OUTRANKS THE PEER GATES (2026-09-05): the two skips below exist to
+        # suppress the plain status nudge for work that is a PEER's — all open leaves delegated, or
+        # a question to a live peer this goal predates. A job/agents/task/timer stamp is not that: it
+        # is a wait the session itself set running, and its dead-man (the wake branch below) is its
+        # only reviver — behind these gates a kind=job stamp on a top whose children had completed
+        # under a courier handoff stood 17 hours. A peer-kind or kindless stamp (which may well be a
+        # peer wait — the enum postdates it) keeps the gates, exactly as before.
+        _own_wait = bool(_stamp) and _stamp[2] in ("job", "agents", "task", "timer")
+        if not _own_wait:
+            if _all_outstanding_delegated(nodes, gid):
+                _put_walk_gate(gid, "all-delegated", now)   # a wake record here is walk-unreachable → the sweep owns it
+                continue                             # all open work handed to peers → nothing for THIS session
+            if sid in waitfor and nd.get("t", 0) <= waitfor[sid]["since"]:
+                _put_walk_gate(gid, "awaiting-peer", now)   # same: journaled so the sweep can evaluate its outcome
+                continue                             # awaiting a live peer's reply to a question this goal predates
+        _pop_walk_gate(gid)                          # the walk reaches this goal — any per-goal hold is over
         if _stamp:
             # The judge's durable ⏳ stamp (closer awaiting verdict): the goal's latest audited turn ended
             # waiting on async work it dispatched — not a stall, so the status nudge stays off. Restart-
@@ -7098,6 +7158,8 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None):
             # same records, same response gates, same escalation, its own copy (see _wake_goal).
             fired = _wake_goal(sid, gid, _stamp, nudged, turns, store, now, lt, tmux) or fired
             continue
+        if wake_only:
+            continue                                 # auto-nudge OFF: the dead-man was the whole errand
         # PARK GATE (the user 2026-08-30, the parked-tick round): a goal whose record holds the full
         # memo pair is PARKED — the ruling already said this exact world doesn't warrant a fire — so
         # it must not be re-evaluated (or logged) at every pass: 98.5% of a day's nudge-events rows
@@ -7394,7 +7456,7 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None):
                          ev_t=recent_ts)             # it survived (the 2026-08-25 instrumentation)
         nudged[gid] = {"count": count, "lastTurnId": arm_id}   # mirror in-memory for the rest of this tick
         fired = True
-    if not fired:
+    if not fired and not wake_only:
         # DEBT REMINDER (the user 2026-07-26): this idle session asked for nothing itself, but it may
         # OWE a reply that is silently parking a peer ("Awaiting <us>" on their cards, which the goal
         # nudge deliberately skips). Same gates as the goal nudge (we only reach here idle, judged,
@@ -13757,6 +13819,15 @@ def _pr_watches_load():
         # boot re-arm (the reconnect-intent precedent): fresh counters, poll immediately
         for r in _pr_watches:
             r["_next"], r["_fails"], r["_busy"] = 0, 0, False
+
+
+def _kernel_watch_armed(sid):
+    """Is the kernel itself still watching something FOR this session — an armed PR watch whose
+    delivery will end the session's wait? The awaiting-stamp lift asks before retiring a job/task
+    stamp over an empty in-harness registry: a kernel-side carrier is exactly the external wait
+    whose ending IS observable (the watch's mail), so the stamp stands while it is armed."""
+    with _pr_watch_lock:
+        return any(str(r.get("sid")) == str(sid) for r in _pr_watches)
 
 
 def _pr_watches_save():
@@ -30067,8 +30138,9 @@ def _pusher_cycle_jobs(now, tmux, any_client):
         _deferral_sweep_tick(now)         # the walk, independent of the nudge toggle (the stall/swirl
     except Exception:                     # surfaces read these records regardless)
         sys.stderr.write("deferral-sweep: %s\n" % traceback.format_exc())
-    try:                                  # Auto Nudge runs server-side even with no browser open (cheap when
-        _auto_nudge_tick(now, tmux)       # off); the awaiting WAKE rides its goal walk (see _wake_goal)
+    try:                                  # Auto Nudge runs server-side even with no browser open; the awaiting
+        _auto_nudge_tick(now, tmux)       # WAKE rides its goal walk (see _wake_goal) and runs even when the
+    #                                       nudge is OFF — the toggle scopes the nudge legs, not the dead-man
     except Exception:
         sys.stderr.write("auto-nudge: %s\n" % traceback.format_exc())
     try:                                  # Interrupt → Blocked runs EVERY push, independent of the nudge toggle

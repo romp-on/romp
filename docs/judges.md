@@ -430,7 +430,11 @@ permission/API-error floors: one interrupt at a time, the present event first.
   cross-host peers, legacy kindless stamps, hung-forever agents/tasks, and
   prose-declared timer check-backs; every observable ending (a notification
   pairing, the restart epoch, a tool's declared deadline, a peer's answer or
-  death) retires its wait as an event, with no clock at all.
+  death) retires its wait as an event, with no clock at all. A task/job stamp
+  whose launches the planner placed under another card lifts the same way once
+  the session's live registry is empty and the last in-harness item ended after
+  the stamp. The wake runs from the pusher whether or not auto-nudge is on: the
+  toggle scopes the nudge, not the dead-man.
 
 ## Where responsibilities overlap
 

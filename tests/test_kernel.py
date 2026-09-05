@@ -3166,7 +3166,7 @@ class ViewBuilder(unittest.TestCase):
         km._write_auto_nudge({"enabled": True, "nudged": {}})
         seen = []
 
-        def boom(s, now, tmux, nudged, waitfor, alive_ids=None):
+        def boom(s, now, tmux, nudged, waitfor, alive_ids=None, **kw):   # kw: wake_only (2026-09-05)
             if s["sid"] == "bad-session":
                 raise TypeError("%d format: a real number is required, not list")
             seen.append(s["sid"])

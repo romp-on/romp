@@ -618,3 +618,185 @@ class LiftKeepsLiveLedgerRecords(unittest.TestCase):
                     self.assertNotIn(gid, left, "spent latches still drop (the 2026-08-16 fix)")
             finally:
                 km.jd.STATE = saved
+
+
+class InHarnessWaitLift(unittest.TestCase):
+    """A task/job stamp whose dispatches sit on ANOTHER top lifts when the in-harness world it stood
+    over goes EMPTY after the stamp (2026-09-05). The live specimen: the closer stamped a top kind=job
+    for a Monitor plus a background command the session itself was running; the planner placed both
+    launches on a sibling top, so the stamp owned nothing (`own == []`) and the dispatch-less skip
+    kept it — for 17 hours, over an authoritatively empty registry, nothing pending anywhere. The
+    agents-kind orphan rule already lifts that shape; task/job now take the same lift, keyed on the
+    same authority (the backend's present-and-empty lifecycle set, no live subagents, no armed kernel
+    watch) plus the watermark the whole sweep uses: the LAST in-harness item's ending — a terminal
+    record, a Monitor's recorded ceiling, the launch ledger's stop tombstone, or the CLI respawn that
+    killed everything — must postdate the stamp's anchor. A world already empty when the closer
+    stamped is a wait on something the registry cannot see (a CI run): the dead-man's, untouched.
+
+    SYNTHETIC fixtures; a PRIVATE sid (the goal-store fixture rule: load_goals replays the per-sid
+    override journal, and the shared placeholder sid's journal is written by other modules)."""
+
+    PSID = "44444444-5555-6666-7777-888888888888"
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        td = Path(self.td.name)
+        self.saved = {k: getattr(km, k) for k in
+                      ("_alive_sessions", "_mark_views_dirty", "_sdk_spawned_at", "_bg_placed_tops")}
+        self.saved_jd = (km.jd.STATE, km.jd.GOALDIR)
+        km.jd.STATE = td
+        km.jd.GOALDIR = td / "goals"
+        km.jd.GOALDIR.mkdir(parents=True)
+        (td / "sdk").mkdir()
+        self.path = str(td / (self.PSID + ".jsonl"))
+        km._alive_sessions = lambda now, tmux: [{"sid": self.PSID, "path": self.path}]
+        km._mark_views_dirty = lambda *a, **k: None
+        km._sdk_spawned_at = lambda sid: self.spawn
+        self.spawn = STAMP - 50                       # default: the CLI predates the stamp — no respawn story
+        self.gid, self.other = self.PSID + ":g1", self.PSID + ":g2"
+        # the planner placed every launch on the SIBLING top: this goal owns no dispatch
+        km._bg_placed_tops = lambda sid, path, tids: {t: self.other for t in tids}
+        self._saved_watches = list(km._pr_watches)
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(km, k, v)
+        km._pr_watches[:] = self._saved_watches
+        km.jd.STATE, km.jd.GOALDIR = self.saved_jd
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        try:
+            (km.jd._overrides_dir() / (self.PSID + ".jsonl")).unlink()
+        except OSError:
+            pass
+        self.td.cleanup()
+
+    def _transcript(self, recs):
+        with open(self.path, "w") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+        km._bgall_cache.clear(); km._bgtasks_cache.clear()
+
+    def _seed(self, kind, anchor=STAMP, why="watching the rebuild; will pick the result up when it lands"):
+        nd = {"id": self.gid, "text": "rebuild the notes-api index", "parentId": None,
+              "nodeComplete": False, "blocked": False, "cleared": False, "trail": [], "t": BORN, "mt": BORN,
+              "awaitingWhy": why, "awaitingAt": anchor,
+              **({"awaitingKind": kind} if kind else {}),
+              "log": [{"ev_t": anchor, "src": "closer", "kind": "awaiting", "why": why,
+                       **({"awaitKind": kind} if kind else {}), "at": anchor}]}
+        sib = {"id": self.other, "text": "wire the web session's watcher", "parentId": None,
+               "nodeComplete": False, "blocked": False, "cleared": False, "trail": [], "t": BORN, "mt": BORN,
+               "log": []}
+        (km.jd.GOALDIR / (self.PSID + ".json")).write_text(json.dumps(
+            {"rompUuid": self.PSID, "seq": 1, "placements": {}, "status": {},
+             "nodes": {self.gid: nd, self.other: sib}}))
+
+    def _reg(self, **fields):
+        (km.jd.STATE / "sdk" / (self.PSID + ".json")).write_text(json.dumps(fields))
+
+    def _node(self):
+        return json.loads((km.jd.GOALDIR / (self.PSID + ".json")).read_text())["nodes"][self.gid]
+
+    def _stamp(self):
+        return self._node().get("awaitingWhy") or None
+
+    def _tick(self, snap, now=BACK + 100):
+        km._lift_spent_awaiting(now, {self.PSID: snap} if snap is not None else {})
+
+    def test_a_job_stamp_over_dispatches_placed_elsewhere_lifts_when_the_world_empties_after_it(self):
+        # the specimen: the background command returned AFTER the stamp; the registry is present and
+        # empty; the goal owns nothing (placed on the sibling) — the wait it described is over
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        self._seed("job")
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNone(self._stamp(), "nothing in-harness runs any more, and it ended after the stamp")
+
+    def test_the_lift_is_the_agents_lift_exactly(self):
+        # same writer, same row: a romp/awaiting LIFT anchored at the stamp (never wall-clock)
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        self._seed("task")
+        self._tick({"state": "", "bgTasks": []})
+        row = [e for e in self._node()["log"] if e.get("kind") == "awaiting"][-1]
+        self.assertEqual((row.get("src"), row.get("lift"), row.get("ev_t")), ("romp", True, STAMP))
+
+    def test_a_task_stamp_takes_the_same_lift(self):
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        self._seed("task")
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNone(self._stamp())
+
+    def test_one_live_registry_entry_keeps_the_stamp(self):
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK), _launch("t2", LAUNCH + 1)])
+        self._seed("job")
+        self._tick({"state": "", "bgTasks": [{"toolUseId": "t2", "desc": "x", "since": LAUNCH + 1}]})
+        self.assertIsNotNone(self._stamp(), "something is still running in-harness — the wait stands")
+
+    def test_live_subagents_keep_the_stamp(self):
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        self._seed("task")
+        self._tick({"state": "", "bgTasks": [], "subagents": [{"type": "Task", "since": BACK}]})
+        self.assertIsNotNone(self._stamp())
+
+    def test_no_authoritative_registry_means_no_move(self):
+        # a tmux CLI carries no lifecycle set: registry-absent is not evidence of anything
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        self._seed("job")
+        self._tick({"state": ""})
+        self.assertIsNotNone(self._stamp(), "no authoritative source → no move")
+        # …and a DORMANT session is skipped outright (its tasks died with its CLI; the death owns it)
+        self._seed("job")
+        self._tick(None)
+        self.assertIsNotNone(self._stamp())
+
+    def test_emptiness_that_predates_the_stamp_is_not_the_waits_ending(self):
+        # the closer stamped AFTER the last return, knowing it — the wait is about something the
+        # registry cannot see (a CI run); the dead-man owns it, this sweep does not
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        self._seed("job", anchor=BACK + 100)
+        self._tick({"state": "", "bgTasks": []}, now=BACK + 500)
+        self.assertIsNotNone(self._stamp(), "the world was already empty when the judge stamped")
+
+    def test_nothing_ever_dispatched_keeps_a_job_stamp(self):
+        # a genuinely external job with no in-harness carrier at all: no ending event exists here
+        self._transcript([])
+        self._seed("job")
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNotNone(self._stamp(), "no item ended after the stamp — nothing to key on")
+
+    def test_a_respawn_after_the_stamp_is_a_sufficient_ending(self):
+        # the sibling's launch has no terminal record (killed with the process); the CLI epoch is
+        # newer than the stamp, so everything the stamp could have watched died at that moment
+        self._transcript([_launch("t1", LAUNCH)])
+        self._seed("task")
+        self.spawn = STAMP + 50
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNone(self._stamp())
+
+    def test_a_ledger_stop_tombstone_after_the_stamp_is_the_ending_event(self):
+        # a Monitor called off with TaskStop suppresses its notification — the transcript never
+        # learns — but the launch ledger journals the stop; that tombstone is the exact event
+        self._transcript([_monitor("m1", LAUNCH, timeout_ms=30_000_000)])
+        self._seed("job")
+        self._reg(bgLedgerEnded=[{"tid": "m1", "why": "stopped", "at": BACK}])
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNone(self._stamp())
+        self._seed("job")
+        self._reg(bgLedgerEnded=[{"tid": "m1", "why": "stopped", "at": STAMP - 10}])
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNotNone(self._stamp(), "a stop the judge already knew about is not new information")
+
+    def test_an_armed_kernel_watch_keeps_a_job_stamp(self):
+        # a PR watch is the kernel's own carrier of an external wait: its delivery IS the ending
+        # event, so the stamp stands while the watch is armed for this session
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        self._seed("job")
+        km._pr_watches.append({"pr": 7, "repo": "notes-api/notes-api", "sid": self.PSID, "at": LAUNCH,
+                               "_next": 0, "_fails": 0, "_busy": False})
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNotNone(self._stamp(), "the kernel is still watching something for this session")
+
+    def test_a_kindless_stamp_keeps_the_conservative_skip(self):
+        self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
+        self._seed(None)
+        self._tick({"state": "", "bgTasks": []})
+        self.assertIsNotNone(self._stamp(), "a kindless stamp may be a peer wait — untouched, as before")

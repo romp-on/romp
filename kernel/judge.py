@@ -8954,7 +8954,10 @@ CLOSER_SYS = (
     "and still needs answered. Work handed OFF to a peer is the peer's own — ownership transferred, "
     "not a wait; omit it. The kind boundaries are strict: job means an external computation the "
     "session ITSELF launched (a cluster job, CI, a build) — another SESSION's work is never a job, "
-    "however long it runs; agents means background agents this session dispatched and still out; "
+    "however long it runs; and job is only for compute the session cannot watch from inside the "
+    "harness (a CI run, a deploy, a remote queue): a wait on its own background command, Monitor, "
+    "or subagent is task or agents, never job; agents means background agents this session "
+    "dispatched and still out; "
     "timer means a scheduled check-back that actually EXISTS at turn end — never one the turn "
     "canceled. Waiting for INBOUND mail (the manager's next dispatch, a peer's next message) is not "
     "a wait at all: an idle recipient reads idle — omit it. Never relabel a wait to a different "
@@ -9001,6 +9004,10 @@ CLOSER_SYS = (
 # The awaiting KINDS — what a wait is on, as data (the user 2026-08-15, who wanted the surfaces to
 # say WHAT is awaited, and the rules scoped by it): agents/subagents dispatched in-harness; a
 # background task/watcher; an external job (cluster/CI/build); a peer session; a scheduled check-back.
+# The task/job line matters mechanically (2026-09-05): task and agents end on events romp observes
+# (the lifecycle registry, notification pairing), so their stamps lift exactly; job is compute the
+# session cannot watch from inside the harness, whose stamp has only the 6h dead-man — a closer that
+# files an in-harness Monitor or background command as job trades an exact lift for a clock.
 # The judge files one per awaiting verdict; a stamp without one (older judges, legacy stores) is
 # kindless and behaves exactly as before the enum existed.
 AWAIT_KINDS = ("agents", "task", "job", "peer", "timer")
