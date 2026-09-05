@@ -2248,6 +2248,32 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .notice-dot-clear { border-color: var(--dim); }
 .clear-loading { display: inline-flex; align-items: center; gap: 8px; }
 .clear-truncated { color: var(--dim); padding: 4px 0 6px; }
+
+/* ── SUBAGENT TRANSCRIPTS (plans/subagent-transcripts.md, 2026-09-05) ──────────────────────────────
+   The open-transcript arrow on an Agent head / agent bg row and the viewer header's pin share ONE
+   button dress (dim line icon, accent on hover — the house icon-button treatment); the running
+   preview under the head wears the tool-fold-toggle's 0.86em (no new size on the tool head); the
+   viewer header is a sticky dim line above the transcript, tokens only so both themes read. */
+.tool-open-agent, .sub-head-pin { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 4px; color: var(--dim); cursor: pointer; flex: 0 0 auto; align-self: center; }
+.tool-open-agent:hover, .sub-head-pin:hover { color: var(--accent); background: var(--accent-wash); }
+.tool-open-agent svg, .sub-head-pin svg { display: block; }
+.tool-open-agent.bg-open-agent { margin-left: 2px; }
+.sub-head-pin.pinned { color: var(--accent); }
+.agent-gist { display: flex; flex-direction: column; gap: 1px; margin: 1px 0 3px; color: var(--dim); font-size: 0.86em; }
+.agent-gist-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.agent-gist-tool { flex: 0 0 auto; font-weight: 600; }
+.agent-gist-desc { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-gist-meta { flex: 0 0 auto; white-space: nowrap; opacity: 0.8; }
+#sub-head { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--box-border); color: var(--dim); font-size: 0.86em; }
+.sub-head-line { display: flex; align-items: center; gap: 6px; padding: 6px 12px; min-width: 0; }
+.sub-head-parent { color: var(--fg); cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.sub-head-parent:hover { text-decoration: underline; }
+.sub-head-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sub-head-state.running { color: var(--st-working-bg); }
+.sub-head-state.finished { color: var(--st-ready-bg); }
+.sub-head-pin { margin-left: auto; }
+.sub-head-note { padding: 0 12px 6px; }
+.sub-status-line { color: var(--dim); }
 /* the nested pre-clear transcript: same renderers as the live chat, scoped so its rail hugs the card */
 .clear-episode { border-top: 1px solid var(--box-border); margin-top: 4px; padding-top: 4px; }
 
