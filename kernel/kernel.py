@@ -20431,8 +20431,21 @@ def _set_model_or_park(be, sid, value, floating=False):
         _forget_model_pick(value)
     _mark_model_pending(sid, value)
     _note_model_pick(value)          # a version pick becomes its family's remembered default (2026-08-25)
-    if _ops_gate(sid):
+    # A model change is NOT connect-time and NOT a slash injection: SDKBackend.set_model states it applies
+    # "LIVE on a connected session via the SDK control channel — NOT a /model slash injection, which the SDK
+    # input stream does not interpret". So the reason _send_or_park parks a typed slash command mid-turn (the
+    # CLI only EXECUTES one as a fresh top-level prompt) does not apply here, and an open turn alone is no
+    # reason to defer the pick. This mirrors _send_or_park's own rule for the same backends: a forwards_sends
+    # backend takes input mid-turn, so the switch lands on the turn's next request — which is what the
+    # interactive CLI does and what a user typing /model expects. Every OTHER park reason stands, and each is
+    # a case the control channel cannot answer: a compaction or a move is tearing the client down, a limit
+    # hold means the account cannot serve a request at all, and an existing FIFO means an earlier op is still
+    # owed its turn, so press order must hold (the user 2026-07-02 x2). Press order is kept when it fires
+    # too: with no queue created, a send typed after this one is handed over next, in order.
+    if _compacting_now(sid) or _pending_ops.get(sid) or str(sid) in _moving or _limit_hold(sid):
         _park_op(sid, ("model", value))
+    elif _working_now(sid) and not _forwards_sends(be):
+        _park_op(sid, ("model", value))     # tmux: set_model TYPES /model into the pane, never mid-turn
     else:
         be.set_model(sid, value)
 

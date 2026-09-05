@@ -286,11 +286,26 @@ class SdkForwardsAndBatch(unittest.TestCase):
                          "all three reach the SDK queue → its inputs() folds them into one turn")
         self.assertNotIn(SID, km._pending_ops)
 
-    def test_a_send_after_a_parked_drive_op_chains_behind_it_even_for_the_sdk(self):
-        # press-order beats mid-turn forwarding: once a /model is parked, a later message stays behind it
-        # (the user 2026-07-17, who asked to be careful with that aspect). The drive op parks (a queue exists), so the
-        # send parks too — it does NOT jump ahead by forwarding mid-turn.
+    def test_a_send_after_a_live_model_pick_still_reaches_the_model_second(self):
+        # press-order beats mid-turn forwarding (the user 2026-07-17, who asked to be careful with that
+        # aspect) — and on a forwards_sends backend it is now kept by DELIVERING in order rather than by
+        # deferring both. A model pick rides the SDK control channel, not the input stream, so an open turn
+        # no longer parks it (see tests/test_model_live_midturn.py); the send that follows is handed over
+        # next. What must never happen — the message reaching the model BEFORE the switch — still cannot.
+        # The parked shape this test used to pin is still pinned wherever the pick DOES park: tmux, a
+        # compaction, an existing queue, a limit hold (all in test_model_live_midturn.py).
         km._working_now = lambda sid: True
+        km._set_model_or_park(self.fbe, SID, "opus")
+        km._send_or_park(self.fbe, SID, "after the model", echo="human")
+        self.assertEqual(self.fbe.calls, [("model", "opus"), ("send", "after the model")],
+                         "model first, then the message — press order, both immediate")
+        self.assertNotIn(SID, km._pending_ops, "nothing needed to park")
+
+    def test_a_send_after_a_PARKED_drive_op_still_chains_behind_it(self):
+        # the original 2026-07-17 shape, on the path where the pick still parks: a compaction. The send must
+        # not forward past it.
+        km._working_now = lambda sid: True
+        km._compacting_now = lambda sid: True
         km._set_model_or_park(self.fbe, SID, "opus")
         km._send_or_park(self.fbe, SID, "after the model", echo="human")
         self.assertEqual(self.fbe.calls, [], "nothing fires: model parked, the send chained behind it")
