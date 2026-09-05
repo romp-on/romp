@@ -143,6 +143,13 @@ class KindBoundaries(_Base):
 
     def test_the_kind_boundaries_are_stated(self):
         for phrase in ("another SESSION's work is never a job",
+                       # 2026-09-05: a closer stamped kind=job for a Monitor plus a background
+                       # command the session itself was running — "job" is for compute the session
+                       # cannot watch from inside the harness; its own commands/watchers/subagents
+                       # are task/agents. The dead-man for job waits is a 6h clock, so a
+                       # mislabelled in-harness wait costs hours the exact lifts would have saved.
+                       "cannot watch from inside the harness",
+                       "own background command, Monitor, or subagent is task or agents, never job",
                        "never one the turn "
                        "canceled",
                        "an idle recipient reads idle",
