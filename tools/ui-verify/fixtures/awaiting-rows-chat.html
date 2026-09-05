@@ -5,8 +5,11 @@
      statusline beneath it with the Awaiting chip as a BUTTON reading "Awaiting 4". Invented content
      (notes-api demo domain), the DOM class for class as renderAwaitWhy / bgRow / updateStatusline emit it.
        tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/awaiting-rows-chat.html \
-           --out /tmp/awaiting-shots/chat-dark.png --size 760x330 --extra-css 'body{background:var(--bg);padding-top:10px}'
-       …and with --body-class "theme-light chat-theme-<name>" for the light theme.
+           --out /tmp/awaiting-shots/chat-dark.png --size 760x540 --extra-css 'body{background:var(--bg);padding-top:10px}'
+       …and with --body-class "theme-light chat-theme-<name>" for the light theme. The height matters: the
+       box caps at min(50vh, 340px), so a 330px-tall shot gives it 165px and clips the Watches group mid-row,
+       and 470px (235px) scrolls the closing note just out of view (the first two renders did exactly that);
+       the box's natural height here is ~262px, so 540px lets the whole box show as a real pane would.
 -->
 <div id="content" style="flex:0 0 auto"></div>
 <div id="bg-tasks" class="bg-awaited">
