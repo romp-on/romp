@@ -474,7 +474,12 @@ function initGear(post) {
   // and the button reopens the modal mid-flow instead of restarting the login.
   var lgM = document.getElementById('rs-login-modal');
   function lgModal(on) { if (lgM) lgM.hidden = !on; }
-  if (lgM) lgM.addEventListener('click', function (e) { if (e.target === lgM) lgModal(false); });
+  if (lgM) lgM.addEventListener('click', function (e) {
+    // This dialog is a sibling of settings. Keep its clicks inside the dialog so the
+    // settings outside-click handler cannot close the panel and shrink its host iframe.
+    e.stopPropagation();
+    if (e.target === lgM) lgModal(false);
+  });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && lgM && !lgM.hidden) lgModal(false); });
   function lgRender(v) {
     if (!lgB) return;
