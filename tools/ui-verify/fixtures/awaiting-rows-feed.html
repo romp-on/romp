@@ -1,0 +1,35 @@
+<!-- SYNTHETIC fixture: a feed card whose Awaiting pill is pressed open on a MIXED wait
+     (plans/subagent-transcripts.md slice 2, 2026-09-05): the pill reads "Awaiting 4 · 12m" and the
+     checklist spot lists the awaited rows grouped under small dim headers (Agents / Commands / Watches),
+     labels only, the mini swirl as each row's mark. Invented content (notes-api demo domain), the DOM
+     class for class as applySections' renderTree emits it.
+       tools/ui-verify/shot.sh --css ui/webview/feed.css --body tools/ui-verify/fixtures/awaiting-rows-feed.html \
+           --out /tmp/awaiting-shots/feed-dark.png --size 520x300 --extra-css '#feed-list { min-height: 260px; }'
+-->
+<div id="feed-head"></div>
+<div id="feed-list">
+  <div class="feed-cols">
+    <div class="feed-col col-working">
+      <div class="feed-col-head"><span class="feed-col-name fcol-chip fcol-chip-working">Working</span><span class="feed-col-count">1</span></div>
+      <div class="feed-col-list">
+        <div class="fitem ask" style="background:rgba(66, 169, 176, 0.22);--card-r:66;--card-g:169;--card-b:176"><div class="fitem-main">
+          <div class="fask-row1"><div class="fcard-title nav">ship the notes-api exporter</div><span class="ftime">12m ago</span></div>
+          <div class="fask-row2"><div class="fask-id"><span class="fwork-dot await"></span><a class="fname" style="color:#E0A030">web</a></div></div>
+          <div class="fask-row3">
+            <button class="fask-secbtn fask-taskbtn on" aria-pressed="true"><span class="fask-awaiting-swirl" aria-hidden="true"></span><span class="fask-taskbtn-lbl">Awaiting 4 · 12m</span></button>
+            <button class="fask-secbtn">Sub-goals</button>
+          </div>
+          <div class="fask-checklist">
+            <div class="ftask-group">Agents</div>
+            <div class="fcheck ftask"><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">Map the notes-api parser</span></div>
+            <div class="fcheck ftask"><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">Audit the exporter's retries</span></div>
+            <div class="ftask-group">Commands</div>
+            <div class="fcheck ftask"><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">Build the docs site</span></div>
+            <div class="ftask-group">Watches</div>
+            <div class="fcheck ftask"><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">the CI run on web</span></div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
