@@ -609,6 +609,10 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .fask-taskbtn { display: inline-flex; align-items: center; gap: 5px; }
 .fask-taskbtn .fask-awaiting-swirl { width: 10px; height: 10px; }
 .ftask-swirl.fask-awaiting-swirl { display: inline-block; width: 11px; height: 11px; vertical-align: -1px; }
+/* the expanded list grouped by KIND (slice 2, 2026-09-05): a small dim caps header per group, in the
+   .fmodal-warn-cap vocabulary, shown only when more than one group is on the card */
+.ftask-group { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); margin: 4px 0 1px; }
+.ftask-group:first-child { margin-top: 1px; }
 
 /* "Followed up" — optimistic reopen pending the judge's re-file (judges delegation, 2026-06-17); blue pill */
 .fask-followedup { flex: 0 0 auto; font-size: 0.66em; font-weight: 700; letter-spacing: 0.04em;
