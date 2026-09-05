@@ -47,10 +47,11 @@ test("AWAITING outranks everything and wears the box", () => {
   assert.match(s.tip, /Not on you|not on you/);
 });
 
-test("the kind words the box: 'Awaiting job' for an external computation, per KIND_WORD", () => {
-  // the wait's CLASS in the visible label (the user 2026-08-15) — tooltips are dead on the touch PWA
+test("the kind words the box: 'Awaiting watch' for an armed watch, per KIND_WORD", () => {
+  // the wait's CLASS in the visible label (the user 2026-08-15) — tooltips are dead on the touch PWA.
+  // The kernel's "job" key reads "watch" since slice 2 (2026-09-05): the plain word for what it is
   assert.equal(spinFor({ awaiting: { why: "", kind: "job" }, column: "working" }, false, false).caption,
-               "Awaiting job");
+               "Awaiting watch");
   assert.equal(spinFor({ awaiting: { why: "", kind: "timer" }, column: "working" }, false, false).caption,
                "Awaiting timer");
   assert.equal(spinFor({ awaiting: { why: "", kind: "banana" }, column: "working" }, false, false).caption,
@@ -166,7 +167,7 @@ test("a settled card displaced to Working loses its line but never its caption",
 const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
 
 test("feed.ts routes the card's swirl through spinFor and keeps no inline copy of the ladder", () => {
-  assert.match(FEED, /import \{ spinFor, KIND_WORD, kindWord, waitedSuffix \} from "\.\/spin-caption";/);
+  assert.match(FEED, /import \{ spinFor, waitedSuffix, awaitWord, groupRows, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow \} from "\.\/spin-caption";/);   // slice 2: the rows' vocabulary rides the same import
   // the elapsed readout reaches the OTHER two awaiting surfaces through the same helper: the
   // "Awaiting task" pill and the "Awaiting <peer>" chip (the user 2026-08-23)
   assert.match(FEED, /const pillWaited = waitedSuffix\(it\.awaiting && it\.awaiting\.since, Date\.now\(\) \/ 1000\);/);
@@ -287,19 +288,23 @@ test("kindWord: exactly one agent is 'agent'; two or more are 'agents'", () => {
   assert.equal(kindWord("agents", 7), "agents");
 });
 
-test("kindWord: the other kinds pluralize by count too", () => {
-  assert.equal(kindWord("task", 1), "task");
-  assert.equal(kindWord("task", 3), "tasks");
-  assert.equal(kindWord("job", 2), "jobs");
+test("kindWord: the other kinds pluralize by count too — in the plain words of slice 2 (2026-09-05)", () => {
+  // the kernel's KEYS stay (task / job); the WORDS are what the thing is: a background command, an armed
+  // watch. "watch" pluralizes to "watches", not "watchs".
+  assert.equal(kindWord("task", 1), "command");
+  assert.equal(kindWord("task", 3), "commands");
+  assert.equal(kindWord("job", 1), "watch");
+  assert.equal(kindWord("job", 2), "watches");
   assert.equal(kindWord("peer", 1), "peer");
   assert.equal(kindWord("peer", 2), "peers");
   assert.equal(kindWord("timer", 4), "timers");
+  assert.equal(kindWord("mixed", 4), "", "several kinds at once have no word — the number is the label");
 });
 
 test("kindWord: an unknown count keeps the surfaces' historic default; an unknown kind stays agents", () => {
   assert.equal(kindWord("agents", null), "agents");
   assert.equal(kindWord("agents", undefined), "agents");
-  assert.equal(kindWord("task", null), "task");
+  assert.equal(kindWord("task", null), "command");
   assert.equal(kindWord(null, 1), "agent");
   assert.equal(kindWord("", 2), "agents");
   assert.equal(kindWord("nonsense", 2), "agents");

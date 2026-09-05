@@ -17,7 +17,9 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kern
 test("an awaitingBg lane renders an Awaiting badge in the romp brand green (the user 2026-07-22)", () => {
   // keyed on the chip state (the shared _session_chip split) OR the legacy why-field (older remote kernels)
   // the kind word agrees in NUMBER with the kernel's count (T228) — via the standalone twin of kindWord()
-  assert.match(TL, /else if \(s\.state === 'awaitingBg' \|\| s\.awaitingBg\) m = \{ label: 'Awaiting' \+ \(s\.awaitingKind \? ' ' \+ tlKindWord\(s\.awaitingKind, s\.awaitingCount\) : ''\), kind: 'awaitbg' \};/);
+  // …through tlAwaitSuffix since slice 2 (2026-09-05): the twin's word when it has one, the bare count for a mixed wait
+  assert.match(TL, /else if \(s\.state === 'awaitingBg' \|\| s\.awaitingBg\) m = \{ label: 'Awaiting' \+ tlAwaitSuffix\(s\.awaitingKind, s\.awaitingCount\), kind: 'awaitbg' \};/);
+  assert.match(TL, /const w = kind \? tlKindWord\(kind, count\) : '';\s*\n\s*if \(w\) return ' ' \+ w;/);
   // brand green, matching --st-awaitbg-bg in styles.css (this file loads standalone, so the hex is mirrored)
   assert.match(TL, /awaitbg: \{ bg: '#54B204', fg: '#0c1a00' \}/);
   // an awaitingBg lane still reads ACTIVE (full opacity / ongoing treatment), like working/compacting/clearing
@@ -71,7 +73,10 @@ test("the timeline's tlKindWord twin agrees with spin-caption's kindWord on ever
   }
   assert.equal(tl("agents", 1), "agent", "one awaited agent reads singular on the lane, as on the chip");
   assert.equal(tl("agents", 2), "agents");
-  assert.equal(tl("task", 3), "tasks");
+  assert.equal(tl("task", 3), "commands", "the plain words of slice 2 (2026-09-05): a task row is a command");
+  assert.equal(tl("job", 1), "watch");
+  assert.equal(tl("job", 2), "watches");
+  assert.equal(tl("mixed", 4), "", "a mixed wait has no word on the lane either");
   assert.equal(tl("agents", null), "agents", "an older kernel with no count keeps the historic plural");
 });
 

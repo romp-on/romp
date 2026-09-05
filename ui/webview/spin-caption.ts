@@ -35,9 +35,18 @@
 // only branches that fire in that window, so the swirl is the sole thing saying the card is in motion and
 // still blocked underneath. Gating either on a brief would leave it silent.
 
+/** One awaited ROW (kernel _awaiting_item, plans/subagent-transcripts.md slice 2, 2026-09-05): kind is
+ *  the row GROUP — agents | commands | watches | peer | timer — never a legacy kind key. agentId rides
+ *  on an agent row (the open-transcript arrow), detail on a watch row (its predicate), watchId on a
+ *  generic watch (the Cancel handle; a PR watch has no early-retire path and carries none). */
+export interface AwaitRow {
+  kind: string; id?: string; label?: string; since?: number | null;
+  agentId?: string | null; detail?: string | null; watchId?: string | null;
+}
+
 /** The card fields the ladder reads. Structural, so the test can pass plain objects. */
 export interface SpinItem {
-  awaiting?: { why?: string | null; kind?: string | null; since?: number | null; count?: number | null; tasks?: unknown[] | null } | null;   // count = how many things are awaited (T225: the label agrees in number)   // since = the wait's own event time (kernel or-chain / _session_awaiting; the user 2026-08-23)
+  awaiting?: { why?: string | null; kind?: string | null; since?: number | null; count?: number | null; tasks?: unknown[] | null; items?: AwaitRow[] | null } | null;   // count = how many things are awaited (T225: the label agrees in number)   // since = the wait's own event time (kernel or-chain / _session_awaiting; the user 2026-08-23)   // items = the awaited rows (slice 2); present → the pill lists them and the caption stands down
   waitingOn?: unknown;
   provisional?: boolean;
   column?: string;
@@ -60,22 +69,93 @@ export interface Spin {
 
 const NONE: Spin = { caption: null, tip: "", awaitingBg: false };
 
-/** The awaiting KIND's one label word (kernel jd.AWAIT_KINDS; the user 2026-08-15). Kindless (an older
- *  kernel, an untyped legacy stamp) falls back to "agents" — the word this box has always defaulted to. */
+/** The awaiting KIND's one label word (kernel jd.AWAIT_KINDS; the user 2026-08-15). The KEYS are the
+ *  kernel's legacy kind keys (agents / task / job / peer / timer, plus "mixed" since slice 2); the WORDS
+ *  are the plain ones the user asked for on 2026-09-05 (plans/subagent-transcripts.md slice 2): "task"
+ *  reads "command" (a run_in_background Bash or Monitor), "job" reads "watch" (an armed `romp watch`),
+ *  and "mixed" — several kinds at once — has NO word: the number alone is the label ("Awaiting 4").
+ *  Kindless (an older kernel, an untyped legacy stamp) falls back to "agents" — the word this box has
+ *  always defaulted to. The timeline mirrors this table byte for byte (tlKindWord). */
 export const KIND_WORD: Record<string, string> = {
-  agents: "agents", task: "task", job: "job", peer: "peer", timer: "timer",
+  agents: "agents", task: "command", job: "watch", peer: "peer", timer: "timer", mixed: "",
 };
+
+/** English plural for the kind words: "watch" → "watches", everything else + "s". */
+function pluralWord(w: string): string {
+  return /ch$/.test(w) ? w + "es" : w + "s";
+}
 
 /** The kind word AGREEING IN NUMBER with how many things are awaited (T225; the user 2026-09-02,
  *  who wants one awaited agent labelled as one, not as "agents"). One helper feeds the
  *  chat chip, the awaiting box gist, the feed pill and the spin caption, so every surface derives the
  *  word from the same count. An unknown count (null/undefined — an older kernel, a kindless stamp)
- *  keeps the plural KIND_WORD default the surfaces have always worn; an unknown kind stays "agents". */
+ *  keeps the KIND_WORD default the surfaces have always worn (plural "agents", singular otherwise);
+ *  an unknown kind stays "agents"; "mixed" is wordless whatever the count. */
 export function kindWord(kind: string | null | undefined, count: number | null | undefined): string {
+  if (kind === "mixed") return "";
   const base = KIND_WORD[kind || ""] || "agents";
   if (typeof count !== "number" || !Number.isFinite(count)) return base;
   if (count === 1) return base === "agents" ? "agent" : base;
-  return base === "agents" ? base : base + "s";
+  return base === "agents" ? base : pluralWord(base);
+}
+
+// ── the awaited ROWS' vocabulary (slice 2) ──────────────────────────────────────────────────────────
+/** Row groups in DISPLAY order — the kernel's _AWAIT_ITEM_KINDS, mirrored. */
+export const ROW_KINDS = ["agents", "commands", "watches", "peer", "timer"] as const;
+/** singular / plural per row group. */
+const ROW_WORD: Record<string, [string, string]> = {
+  agents: ["agent", "agents"], commands: ["command", "commands"], watches: ["watch", "watches"],
+  peer: ["peer", "peers"], timer: ["timer", "timers"],
+};
+/** The small dim header over each group when several groups show. */
+export const GROUP_TITLE: Record<string, string> = {
+  agents: "Agents", commands: "Commands", watches: "Watches", peer: "Peers", timer: "Timers",
+};
+/** legacy kind key → row group, for an older kernel's payload that ships descriptions but no rows. */
+export const ROW_KIND_OF_LEGACY: Record<string, string> = {
+  agents: "agents", task: "commands", job: "watches", peer: "peer", timer: "timer",
+};
+
+/** One group's word, agreeing in number: rowWord("watches", 2) → "watches"; rowWord("agents", 1) → "agent". */
+export function rowWord(kind: string, n: number): string {
+  const w = ROW_WORD[kind] || ROW_WORD.commands;
+  return n === 1 ? w[0] : w[1];
+}
+
+/** The rows bucketed by group, in display order; empty groups omitted. */
+export function groupRows(items: readonly AwaitRow[] | null | undefined): { kind: string; rows: AwaitRow[] }[] {
+  const out: { kind: string; rows: AwaitRow[] }[] = [];
+  for (const k of ROW_KINDS) {
+    const rows = (items || []).filter((it) => it && it.kind === k);
+    if (rows.length) out.push({ kind: k, rows });
+  }
+  const known = new Set<string>(ROW_KINDS);
+  const other = (items || []).filter((it) => it && !known.has(it.kind));   // a newer kernel's group this build doesn't know: shown, never dropped
+  if (other.length) out.push({ kind: "other", rows: other });
+  return out;
+}
+
+/** "2 agents · 1 command · 1 watch" — the tooltip breakdown; "" with no rows. */
+export function awaitBreakdown(items: readonly AwaitRow[] | null | undefined): string {
+  return groupRows(items).map((g) => g.rows.length + " " + rowWord(g.kind, g.rows.length)).join(" · ");
+}
+
+/** The text after "Awaiting" on the chat chip, the box gist and the feed pill — ONE rule (the user
+ *  2026-09-05): one row → its word ("agent", "command", "watch", "timer"; a peer row → "peer", which
+ *  the callers swap for the peer's own name); several of ONE group → the count and the word ("3
+ *  agents"); several GROUPS → the number alone ("4"), the breakdown riding the tooltip. With no rows
+ *  (an older kernel, a judge stamp, an overlay row) the legacy kind + count word it as before, the count
+ *  leading when it is known and plural ("3 agents"); kind "mixed" with no rows is the bare count. */
+export function awaitWord(kind: string | null | undefined, count: number | null | undefined,
+                          items: readonly AwaitRow[] | null | undefined): string {
+  const groups = groupRows(items);
+  const n = (items || []).length;
+  if (groups.length > 1) return String(n);
+  if (groups.length === 1) return n === 1 ? rowWord(groups[0].kind, 1) : n + " " + rowWord(groups[0].kind, n);
+  const known = typeof count === "number" && Number.isFinite(count) && count > 0;
+  if (kind === "mixed") return known ? String(count) : "";
+  const w = kindWord(kind, count);
+  return known && count! > 1 ? count + " " + w : w;
 }
 
 /** dCompleted/dBlocked come from distillInputs(distillState, column) — the GENUINE resolution state, not
@@ -101,13 +181,18 @@ export function spinFor(it: SpinItem, distillPending: boolean, dCompleted: boole
   // a bg-TASK wait no longer boxes its why here (the user 2026-07-13): the compact "Awaiting task" pill
   // on the toggles row carries it (with the task list one click away, like Sub-goals) — see applySections
   const awTasks = ((aw && aw.tasks) || []).filter(Boolean);
+  // …and since slice 2 (2026-09-05) the awaited ROWS: any wait the kernel can enumerate — agents,
+  // commands, watches, peers — ships them, and the pill lists them grouped, so the same say-it-once
+  // rule holds for every such wait, not only the bg-task one. A wait with NEITHER (a judge stamp, an
+  // overlay row, an older kernel) keeps the boxed caption below — it is the only place its why shows.
+  const awRows = awTasks.length + ((aw && aw.items) || []).length;
   // A bg-TASK wait says it ONCE (the user 2026-08-23, second screenshot of the day): the "Awaiting
   // task" pill + its open-by-default list are the whole read. The first cut of today's fix named the
   // first task in a caption here — and with the list now open by default, one card said the same
   // wait three times (pill, caption, list row). No caption, then; the floor guards below keep the
   // quiet/unknown lines from contradicting the pill instead (that contradiction is what the caption
   // was for).
-  if (aw && !it.waitingOn && !awTasks.length) {
+  if (aw && !it.waitingOn && !awRows) {
     // AWAITING — the session is held, waiting on work it dispatched. It keeps its own read: a boxed
     // "Awaiting <kind-word>" label, the kind carried as DATA from the kernel (the user 2026-08-15) so
     // the box says WHAT is awaited — agents, a job on a cluster, a timer — not one word for five
@@ -220,7 +305,7 @@ export function spinFor(it: SpinItem, distillPending: boolean, dCompleted: boole
     // say what this card is doing, and the quiet/unknown lines below would either contradict them
     // ("Paused — nothing is in motion" under in-flight tasks — the morning's screenshot) or repeat
     // them. An OPEN turn still narrates: the session working WHILE tasks run is new information.
-    if (awTasks.length && it.sessState !== "open") return NONE;
+    if (awRows && it.sessState !== "open") return NONE;
     if (it.sessState === "open") {
       return {
         caption: "Working…",
