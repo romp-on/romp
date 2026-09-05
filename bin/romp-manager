@@ -549,9 +549,22 @@ function runManager() {
 // prompt "Visual Studio Code wants to access…" — even with VS Code closed (its helpers linger). Starting
 // the server here at login fixes it permanently. `exit-empty off` keeps the (initially empty) server alive
 // until real sessions join; it's a no-op if a server is already running (the user 2026-06-16).
+// op's own credential (a service-account token in service.env, for the kernel's `op read`) must not
+// become the tmux SERVER's environment: every pane the server ever creates inherits the server's
+// globals, not the launching client's, so a scrubbed `romp new` client still handed the token to
+// `exec claude` (review, 2026-09-05). Scrubbed only when romp is the op consumer (a reference is
+// configured); a box whose sessions run `op` through Claude Code's apiKeyHelper keeps its environment.
+function withoutOpCredentials(env) {
+  const out = Object.assign({}, env);
+  if (!out.ROMP_API_KEY_REF) return out;
+  for (const k of Object.keys(out)) {
+    if (k === 'OP_SERVICE_ACCOUNT_TOKEN' || k === 'OP_CONNECT_HOST' || k === 'OP_CONNECT_TOKEN' || k === 'OP_ACCOUNT' || k.startsWith('OP_SESSION_')) delete out[k];
+  }
+  return out;
+}
 function startTmuxServer() {
   try {
-    execFileSync('tmux', ['start-server', ';', 'set', '-g', 'exit-empty', 'off'], { stdio: 'ignore', timeout: 5000 });
+    execFileSync('tmux', ['start-server', ';', 'set', '-g', 'exit-empty', 'off'], { stdio: 'ignore', timeout: 5000, env: withoutOpCredentials(process.env) });
     log('tmux server ensured (launchd-rooted) — new sessions won\'t inherit a terminal\'s TCC identity');
   } catch (e) { /* tmux not installed, or a server is already up — nothing to do */ }
 }

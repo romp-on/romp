@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """romp-keyswap — point every romp session at another API key, without restarting anything.
 
-`romp keyswap` rewrites ONE line of the manager's env file (`~/.config/romp/service.env`): the
-`ANTHROPIC_API_KEY=` line, taken from a sibling file you keep beside it (`service.env.highprio`,
-`service.env.lowprio`, …). The kernel reads that line live, per session launch, so:
+`romp keyswap` selects a credential source in the manager's env file
+(`~/.config/romp/service.env`), taken from a sibling profile (`service.env.highprio`,
+`service.env.lowprio`, …). A profile contains `ROMP_API_KEY_REF=op://…` for runtime 1Password
+retrieval, or `ANTHROPIC_API_KEY=…` for a conventional key. Switching removes competing credential
+assignments. This command never resolves a 1Password reference. The kernel reads the source live:
 
   * a session started or revived from then on bills the new key with no further action;
   * a session already running keeps the key its CLI process started with, because the key rides
@@ -13,9 +15,9 @@
     background tasks in flight is skipped by --cycle (a reconnect would kill them) and named, so you
     cycle it again once they are done.
 
-No key value is ever printed, logged or passed over the wire. The only rendered form is the first
-12 hex of its sha256 ("sha256:1a2b3c…"), which is enough to see that the swap landed and that the
-kernel reads the same value this command wrote.
+No key value is ever printed, logged or passed over the wire. Keys and references are represented
+by fingerprints. Reference comparisons confirm the kernel's configured source; runtime retrieval
+and rotation checks happen in the kernel.
 
 Usage:
     romp keyswap                            # what is live now, and which candidates exist
@@ -35,7 +37,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 # The SAME module the kernel reads the key with, not a second copy of the rules: writer and reader
 # then cannot disagree about which file holds the key, which line wins, or how it is parsed.
-ks = SourceFileLoader("romp_keysource", str(ROOT / "kernel" / "keysource.py")).load_module()
+ks = sys.modules.get("romp_keysource") or SourceFileLoader(
+    "romp_keysource", str(ROOT / "kernel" / "keysource.py")).load_module()
 
 KPORTS = ["http://127.0.0.1:29855", "http://127.0.0.1:7878", "http://127.0.0.1:7432"]
 
@@ -109,6 +112,27 @@ def _fp(key):
     return ("sha256:" + f) if f else "(none)"
 
 
+def _source_label(source):
+    """Describe configuration without retrieving a provider's secret or exposing a literal key."""
+    try:
+        source.validate()
+    except ks.KeySourceError:
+        return "(invalid key source)"
+    if source.kind == "op":
+        return "1Password reference " + source.fingerprint()
+    return _fp(source.value)
+
+
+def _legacy_key_present(path):
+    """Detect plaintext hidden by a higher-priority reference so selecting it also cleans up."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return bool(ks.parse_key(fh.read()))
+    except (OSError, UnicodeError):
+        # Attempt the write so its ordinary error path reports an unreadable live file.
+        return True
+
+
 def _candidates(path, out):
     """List the sibling `service.env.<name>` files, each by fingerprint only — so `romp keyswap`
     with no argument answers both "which key is live" and "what can I swap to"."""
@@ -118,17 +142,18 @@ def _candidates(path, out):
         names = sorted(n[len(base):] for n in os.listdir(d) if n.startswith(base) and not n.endswith("~"))
     except OSError:
         names = []
-    live = ks.read_key(path)
+    live = ks.read_source(path)
     if not names:
         out("candidates  none — keep one file per key beside it, e.g. %s.lowprio (chmod 600),"
             % os.path.basename(path))
-        out("            each a single %s=… line" % ks.KEY_VAR)
+        out("            each a single ROMP_API_KEY_REF=op://… or %s=… line" % ks.KEY_VAR)
         return
     out("candidates")
     for n in names:
-        k = ks.read_key(ks.sibling_path(n, path))
-        mark = "  <- live" if (k and k == live) else ""
-        out("  %-14s %s%s" % (n, _fp(k) if k else "(no %s line)" % ks.KEY_VAR, mark))
+        source = ks.read_source(ks.sibling_path(n, path))
+        mark = "  <- live" if (source.configured and source == live) else ""
+        label = _source_label(source) if source.kind != "none" else "(no key source)"
+        out("  %-14s %s%s" % (n, label, mark))
 
 
 def _kernel_check(path, out):
@@ -156,18 +181,35 @@ def _kernel_check(path, out):
     if not body.get("ok"):
         out("kernel      could not be asked — %s" % (body.get("error") or body.get("detail") or "unknown"))
         return 1
-    return _compare(body.get("keyFp") or "", path, out)
+    return _compare(body, path, out)
 
 
-def _compare(kfp, path, out):
-    """Print the kernel's fingerprint and, when it is not the file's, say so and why it may be."""
-    out("kernel      reads %s" % (("sha256:" + kfp) if kfp else "(none)"))
-    if kfp == ks.fingerprint(ks.read_key(path)):
-        return 0
-    out("MISMATCH    the kernel is not reading this file's key. Usual causes: the service was installed")
+def _compare(body, path, out):
+    """Compare provider configuration, or conventional keys for compatibility with older kernels."""
+    source = ks.read_source(path)
+    try:
+        source.validate()
+    except ks.KeySourceError as exc:
+        out("MISMATCH    this file has an invalid key source — %s" % exc)
+        return 1
+    if source.kind == "op":
+        if "sourceFp" not in body:
+            out("kernel      predates runtime key sources; update it with `romp refresh` before cycling")
+            return 1
+        source_fp = body.get("sourceFp") or ""
+        out("kernel      source %s" % (source_fp or "(none)"))
+        if source_fp == source.fingerprint():
+            out("            1Password reference matches; credentials are retrieved at runtime")
+            return 0
+    else:
+        kfp = body.get("keyFp") or ""
+        out("kernel      reads %s" % (("sha256:" + kfp) if kfp else "(none)"))
+        if kfp == source.fingerprint():
+            return 0
+    out("MISMATCH    the kernel is not reading this file's key source. Usual causes: the service was installed")
     out("            with another env-file path that the kernel's environment does not carry (re-run")
-    out("            `romp service install`), the file is unreadable to the kernel, or the file has no")
-    out("            %s line and the kernel still holds its startup key." % ks.KEY_VAR)
+    out("            `romp service install`), the file is unreadable to the kernel, or its credential")
+    out("            configuration differs from the running manager's.")
     return 1
 
 
@@ -197,13 +239,18 @@ def _cycle(sessions, all_, out, path=None):
     if not body.get("ok"):
         out("cycle       FAILED — %s" % (body.get("error") or body.get("detail") or "unknown"))
         return 1
-    if _compare(body.get("keyFp") or "", path or ks.service_env_path(), out):
-        out("cycle       NOT DONE — the kernel is not on this file's key, so a reconnect would re-present")
-        out("            the key it already has. Fix the mismatch above first, then cycle.")
+    if _compare(body, path or ks.service_env_path(), out):
+        out("cycle       NOT DONE — the kernel's key source could not be verified; fix the issue above first")
         return 1
-    body = _post(u, "/keycycle", {"all": True} if all_ else {"sessions": sessions})
+    expected_fp = body.get("sourceFp", body.get("keyFp") or "") or ""
+    request = {"all": True} if all_ else {"sessions": sessions}
+    request["expectedSourceFp"] = expected_fp
+    body = _post(u, "/keycycle", request)
     if not body.get("ok"):
         out("cycle       FAILED — %s" % (body.get("error") or body.get("detail") or "unknown"))
+        return 1
+    if (body.get("sourceFp", body.get("keyFp") or "") or "") != expected_fp:
+        out("cycle       FAILED — the key source changed during the request; check it before cycling again")
         return 1
     rows = body.get("rows") or []
     if not rows:
@@ -212,8 +259,8 @@ def _cycle(sessions, all_, out, path=None):
     for r in rows:
         out("  %-14s %s" % (str(r.get("session"))[:14], _explain(str(r.get("status") or ""))))
     if any(str(r.get("status")) == "working" for r in rows):
-        out("            re-run the same --cycle once those are quiet; sessions already moved read \"current\"")
-    return 0
+        out("            re-run --cycle for the skipped sessions once those are quiet")
+    return 1 if any(str(r.get("status")).startswith("error:") for r in rows) else 0
 
 
 def _explain(status):
@@ -269,8 +316,14 @@ def main(argv, out=None):
         # Read-only report. Deliberately the no-argument behaviour: a swap is a real change and
         # should be asked for by name.
         out("service.env %s" % path)
-        out("live key    %s" % _fp(ks.read_key(path)))
+        current = ks.read_source(path)
+        out("live key    %s" % _source_label(current))
         _candidates(path, out)
+        try:
+            current.validate()
+        except ks.KeySourceError as exc:
+            out("configuration invalid — %s" % exc)
+            return 1
         if cycle or cycle_all:
             return _cycle(cycle, cycle_all, out, path)
         rc = _kernel_check(path, out)
@@ -283,37 +336,47 @@ def main(argv, out=None):
         sys.stderr.write("             keep one per key beside the env file (e.g. %s.lowprio, chmod 600)\n"
                          % os.path.basename(path))
         return 2
-    new = ks.read_key(src)
-    if not new:
+    new = ks.read_source(src)
+    try:
+        new.validate()
+    except ks.KeySourceError as exc:
+        sys.stderr.write("romp keyswap: %s has an invalid key source — %s (file untouched)\n"
+                         % (src, exc))
+        return 2
+    if not new.configured or not new.value:
         # Refuse rather than write an empty key: the CLI reads an empty ANTHROPIC_API_KEY as
         # "API-key mode, no key" and every session would then fail to authenticate.
-        sys.stderr.write("romp keyswap: %s has no %s= line — nothing to swap to (file untouched)\n"
-                         % (src, ks.KEY_VAR))
+        sys.stderr.write("romp keyswap: %s has no usable ROMP_API_KEY_REF= or %s= line — "
+                         "nothing to swap to (file untouched)\n" % (src, ks.KEY_VAR))
         return 2
-    cur = ks.read_key(path)
-    if new == cur:
+    cur = ks.read_source(path)
+    # A pre-existing reference may still sit beside a legacy plaintext key. Selecting that same
+    # reference also migrates the file: remove the leftover secret instead of treating it as done.
+    if new == cur and not (new.kind == "op" and _legacy_key_present(path)):
         out("service.env %s" % path)
-        out("live key    %s — already this key, nothing rewritten" % _fp(cur))
+        out("live key    %s — already this key source, nothing rewritten" % _source_label(cur))
     else:
         try:
-            res = ks.write_key(new, path)
+            res = ks.write_source(new, path)
         except OSError as e:
             sys.stderr.write("romp keyswap: could not rewrite %s: %s\n" % (path, e))
             return 1
         # Verify from the FILE, not from what we meant to write: re-read and fingerprint it.
-        landed = ks.read_key(path)
+        landed = ks.read_source(path)
         if landed != new:
             sys.stderr.write("romp keyswap: the rewrite did not land (file reads %s, expected %s) — "
-                             "check %s by hand\n" % (_fp(landed), _fp(new), path))
+                             "check %s by hand\n" % (_source_label(landed), _source_label(new), path))
             return 1
         out("service.env %s" % res["path"])
         if res.get("target") and res["target"] != res["path"]:
             out("            (a link: written through to %s)" % res["target"])
-        out("key line    %s -> %s  (%d lines, mode %o%s)"
-            % (_fp(res["old"]), _fp(new), res["lines"], res["mode"],
+        out("key source  %s -> %s  (%d lines, mode %o%s)"
+            % (_source_label(res["old"]), _source_label(new), res["lines"], res["mode"],
                ", tightened from a group/other-readable mode" if res["tightened"] else ""))
         out("source      %s" % src)
-    out("effect      new and revived sessions bill this key immediately; no manager restart needed")
+    out("effect      new and revived sessions use this key source; no manager restart needed")
+    if new.kind == "op":
+        out("            the kernel retrieves the key through op at runtime; no key was copied to disk")
     if cycle or cycle_all:
         return _cycle(cycle, cycle_all, out, path)
     rc = _kernel_check(path, out)

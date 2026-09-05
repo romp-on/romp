@@ -67,11 +67,13 @@ test("the gate, the clear, and the envelope mark all scope to LOGIN-billed calls
   // usage.json's windows are the login account's; a judge call bills the JUDGED session's account
   // (the 2026-08-12 rule) — so a key-billed call (pay-per-token, no windows) is never gated, its
   // success never clears the login latch, and its limit-shaped 429 never mints one.
-  assert.match(JUDGE, /auth = _judge_auth\(fsid\) {10,}# this call bills what the judged session bills\n    try:/,
-    "billing resolves BEFORE the gate");
-  assert.match(JUDGE, /json\.loads\(\(STATE \/ "usage\.json"\)\.read_text\(\)\) if auth == "login" else \{\}/);
-  assert.match(JUDGE, /if auth == "login":\s*\n\s*# only a LOGIN-billed success is evidence/);
-  assert.match(JUDGE, /if auth == "login":\s*\n\s{24}_limit_mark\("account", None, None, model\)/,
+  const run = JUDGE.slice(JUDGE.indexOf("def _judge_run(")).split("\ndef ", 1)[0];
+  const billing = run.indexOf('auth = "codex" if engine == "codex" else _judge_auth(fsid)');
+  const gate = run.indexOf('u = json.loads((STATE / "usage.json").read_text()) if auth == "login" else {}');
+  assert.ok(billing >= 0 && gate > billing,
+    "billing resolves BEFORE the login-only gate, including the Codex bypass");
+  assert.match(run, /if auth == "login":\s*\n\s*# only a LOGIN-billed success is evidence/);
+  assert.match(run, /if auth == "login":\s*\n\s{24}_limit_mark\("account", None, None, model\)/,
     "the envelope mark too (the manager's ruling: it carries no resets_at, so a false one sticks)");
 });
 

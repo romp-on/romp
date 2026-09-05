@@ -1044,14 +1044,12 @@ def _models_api_credential():
     fn = getattr(jd, "_WORK_KEY_FN", None)
     key = ""
     if fn is not None:
-        try:
-            key = fn() or ""
-        except Exception:
-            key = ""
-    key = key or os.environ.get("ANTHROPIC_API_KEY", "") or ""
+        key = fn() or ""  # A selected provider's failure must not borrow another credential.
+    else:
+        key = jd._keysrc.select_source(os.environ.get("ANTHROPIC_API_KEY", "") or "").resolve()
     if key:
         return ("x-api-key", key)
-    tok = os.environ.get("ANTHROPIC_AUTH_TOKEN", "") or ""
+    tok = jd._login_auth_env().get("ANTHROPIC_AUTH_TOKEN", "") or ""
     if tok:
         return ("Authorization", "Bearer " + tok)
     return None
@@ -1095,14 +1093,14 @@ def _refresh_model_catalog(reason, _async=True):
 
     def go():
         try:
-            cred = _models_api_credential()
-            if cred is None:
-                _catalog_status["lastError"] = "no API credential in the kernel's environment"
-                sys.stderr.write("model catalog (%s): no API credential the kernel can use — serving the "
-                                 "%s list; new models need ANTHROPIC_API_KEY in the manager env (or a "
-                                 "MODEL_VERSIONS edit)\n" % (reason, _catalog_status["source"]))
-                return
             try:
+                cred = _models_api_credential()
+                if cred is None:
+                    _catalog_status["lastError"] = "no API credential in the kernel's environment"
+                    sys.stderr.write("model catalog (%s): no API credential the kernel can use — serving the "
+                                     "%s list; configure an API key source to refresh it\n"
+                                     % (reason, _catalog_status["source"]))
+                    return
                 rows = _fetch_models_api(cred)
             except Exception as e:
                 _catalog_status["lastError"] = "%s: %s" % (type(e).__name__, str(e)[:200])
@@ -8035,6 +8033,7 @@ def _spawn_session(name, cwd=None):
     cwd = cwd or _default_create_dir()
     _commands_for_cwd(cwd)   # pre-warm the slash-command list — a new session predicts a composer (the user 2026-08-13)
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    jd._keysrc.strip_op_env(env)     # op's credential stays with the kernel; a tmux launch may predate the backend's claim
     try:
         subprocess.run([str(BIN / "romp"), "new", "-t", "--detach", name], cwd=cwd, env=env, timeout=25,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -8088,7 +8087,7 @@ _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")   # the shell-identifier 
 _ENV_RESERVED_NAMES = ("ROMP_SID", "ROMP_SESSION_NAME")
 
 
-def _env_error(env):
+def _env_error(env, auth=""):
     """Why POST /new's "env" is not a valid per-session env payload — "" when it is. The kernel-side
     mirror of sdk_backend.env_request_error (that module loads lazily inside _sdk(), so the handler
     can't import it at the door): a dict of NAME → string-value pairs, names in the shell-identifier
@@ -8108,6 +8107,9 @@ def _env_error(env):
         if k in _ENV_RESERVED_NAMES:
             return ("env: %s is reserved — romp sets the session's identity env "
                     "(ROMP_SID, ROMP_SESSION_NAME) itself" % k)
+        if (k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+                and k in jd._keysrc.runtime_reserved_names(auth or "", jd._keysrc.select_source())):
+            return "env: %s is reserved while runtime API key retrieval is configured" % k
         if not isinstance(v, str):
             return "env: the value for %r must be a string" % (k,)
         if "\x00" in v:
@@ -9634,6 +9636,8 @@ def _sdk_locked():
             # the unwired judges inherited the post-claim env on a login-less host and every call
             # refused "Not logged in" for 13 hours while the cards sat parked in Working).
             jd._WORK_KEY_FN = sbmod.work_api_key
+            jd._WORK_KEY_CONFIGURED_FN = lambda: sbmod.work_api_key_source().configured
+            jd._LOGIN_AUTH_ENV_FN = sbmod.startup_auth_env
             # T222: the live model catalog — the last fetched list installs before any picker asks,
             # then the BOOT event refreshes it (async; the key is claimable from here on)
             try:
@@ -9784,7 +9788,7 @@ def _auth_key_present():
     display everywhere, and host names already tell keys apart in the per-host hover). Cheap: an
     attribute read off the backend singleton, safe per-push."""
     be = _sdk()
-    return bool(str(getattr(be, "work_key", "") or "") if be else "")
+    return bool(getattr(be, "work_key_configured", False)) if be else False
 
 
 def _work_key_fp():
@@ -11020,7 +11024,8 @@ def _revive_session(sid, client=None):
             cwd = _cwd_of(sid)
             workdir = cwd if cwd and os.path.isdir(cwd) else os.path.expanduser("~")
             r = subprocess.run([str(BIN / "romp"), "resume", sid, "--name", name, "--detach"],
-                               cwd=workdir, capture_output=True, text=True, timeout=40)
+                               cwd=workdir, capture_output=True, text=True, timeout=40,
+                               env=jd._keysrc.strip_op_env(dict(os.environ)))
             ok = r.returncode == 0
             if not ok:
                 detail = (r.stderr or r.stdout or "romp exited %d" % r.returncode).strip()[:200]
@@ -34677,7 +34682,28 @@ class Handler(BaseHTTPRequestHandler):
                 if be is None:
                     return self._send(503, json.dumps({"ok": False, "error": "no SDK backend"}),
                                       "application/json")
-                keyfp = _work_key_fp()
+                try:
+                    source_reader = getattr(be, "_work_key_source", None)
+                    if source_reader is not None:
+                        source = source_reader()
+                        source.validate()
+                        sourcefp = source.fingerprint()
+                        # A status read must never fetch a provider. Its reference identity is
+                        # sufficient to confirm that keyswap and this kernel see the same source.
+                        keyfp = "" if source.kind == "op" else sourcefp
+                    else:
+                        keyfp = sourcefp = _work_key_fp()  # older backend/test doubles
+                except Exception as e:
+                    return self._send(200, json.dumps({"ok": False,
+                        "error": jd._credential_error_note(e)}), "application/json")
+                expected_source_fp = b.get("expectedSourceFp")
+                if "expectedSourceFp" in b:
+                    if not isinstance(expected_source_fp, str):
+                        return self._send(400, json.dumps({"ok": False,
+                            "error": "expectedSourceFp must be a string"}), "application/json")
+                    if expected_source_fp != sourcefp:
+                        return self._send(409, json.dumps({"ok": False,
+                            "error": "API key source changed; check it before cycling again"}), "application/json")
                 rows = []
                 if b.get("all"):
                     # every LIVE SDK session: the dormant ones need nothing (their next launch reads
@@ -34691,15 +34717,51 @@ class Handler(BaseHTTPRequestHandler):
                                                            "error": "sessions must be a list"}),
                                           "application/json")
                     who_list = [(str(w), _sid_of(str(w))) for w in raw if str(w or "").strip()]
+                # Resolve the key ONCE for the whole request (an `op read` may take seconds): every session
+                # below is compared against this fingerprint instead of each retrieving its own — a dozen
+                # quiet sessions used to mean a dozen serial retrievals on this thread, past the CLI's
+                # timeout (review find, 2026-09-05). Only when there is a session to cycle: a status read
+                # retrieves nothing. A failure, or a source that changed while retrieving, is reported on
+                # every row and reconnects nothing — the per-session contract, kept. The reconnects this
+                # schedules still resolve afresh at launch.
+                current_key_fp, resolve_error = None, None
+                probes = {}
+                if source_reader is not None and hasattr(be, "_work_key_and_source"):
+                    for who, sid in who_list:
+                        try:
+                            probes[sid] = be.cycle_key(sid, probe=True)
+                        except Exception as e:
+                            probes[sid] = "error: %s" % jd._credential_error_note(e)
+                needs_key = any(v == "cycle" for v in probes.values())
+                if needs_key:
+                    try:
+                        key, _src = be._work_key_and_source(source)
+                        if not key:
+                            raise jd._keysrc.KeySourceError("API key billing selected but no API key source is configured")
+                        after = source_reader()
+                        after.validate()
+                        if after.fingerprint() != sourcefp:
+                            raise jd._keysrc.KeySourceError("API key source changed during retrieval; check it before cycling again")
+                        current_key_fp = jd._keysrc.fingerprint(key)
+                    except Exception as e:
+                        resolve_error = jd._credential_error_note(e)
                 for who, sid in who_list:
                     try:
-                        status = be.cycle_key(sid)
+                        pre = probes.get(sid)
+                        if pre is not None and pre != "cycle":
+                            status = pre                       # unknown / dormant / login / working: needs no key
+                        elif source_reader is not None and hasattr(be, "_work_key_and_source"):
+                            status = be.cycle_key(sid, expected_source_fp=expected_source_fp,
+                                                  current_key_fp=current_key_fp, resolve_error=resolve_error)
+                        else:
+                            status = be.cycle_key(sid)
                     except Exception as e:
-                        status = "error: %s" % str(e)[:80]
+                        status = "error: %s" % jd._credential_error_note(e)
                     rows.append({"session": _name_of(sid) or who, "status": status})
                 if any(r["status"] == "cycling" for r in rows):
                     _push_soon()                      # something changed; a fingerprint READ ({"sessions": []}) did not
-                return self._send(200, json.dumps({"ok": True, "keyFp": keyfp, "rows": rows}),
+                return self._send(200, json.dumps({"ok": True, "keyFp": keyfp,
+                                                  "sourceFp": sourcefp, "rows": rows}),
                                   "application/json")
             if u.path in ("/interrupt", "/end"):
                 # Headless session control (2026-07-05): interrupt/end existed ONLY as WS drive ops, so
@@ -34769,7 +34831,7 @@ class Handler(BaseHTTPRequestHandler):
                 # swallowed as "not asked" while the caller reads ok:true as the env applying.
                 env_req = (b or {}).get("env")
                 if env_req is not None:
-                    eerr = _env_error(env_req)
+                    eerr = _env_error(env_req, str((b or {}).get("auth") or ""))
                     if eerr:
                         return self._send(400, json.dumps({"ok": False, "error": eerr}),
                                           "application/json")
@@ -36736,6 +36798,13 @@ def main():
     # (a federated host) has no ~/.local/bin on PATH — bare `claude` exec-failed silently there.
     os.environ.setdefault("ROMP_CLAUDE_BIN", _claude_bin())
     signal.signal(signal.SIGTERM, _graceful_term)             # drain, don't die mid-flight (see _graceful_term)
+    # op's own credential (a service-account token in service.env) leaves the environment BEFORE anything
+    # is spawned — the bundler, the postal bus, tmux launches, the SDK backend's own claim later is a
+    # no-op re-assert — and the tmux server the manager started with that environment is scrubbed too,
+    # since every pane inherits the SERVER's globals, not the launching client's (review, 2026-09-05).
+    _claimed = jd._keysrc.claim_op_env()
+    if _claimed:
+        jd._keysrc.tmux_unset_global(_claimed, os.environ.get("ROMP_TMUX_SOCKET", ""))
     _ensure_bundles()
     try:                                                      # the diary boot sweep (2026-07-07): migrate every
         _death_boot_pass()                                    # deaths no kernel was up to see: stamp them

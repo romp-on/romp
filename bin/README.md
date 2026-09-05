@@ -34,7 +34,7 @@ no separate implementation to point at.
 | `romp-judge` | `kernel/judge.py` | Layer 2: the judge engine + all judge prompts (captioner, archiver, planner, …). `docs/judges.md`. |
 | `romp-askparse` | `kernel/askparse.py` | Parses the AskUserQuestion picker out of a captured tmux pane (tmux backend only; SDK sessions get the picker natively). |
 | `romp_sdk_backend.py` | `kernel/sdk_backend.py` | The **SDK session backend** (current default): drives sessions via the Claude Agent SDK. |
-| _(no bin entry)_ | `kernel/keysource.py` | The live source of the manager's API key: the `ANTHROPIC_API_KEY=` line of `service.env`, re-read at every session launch. Shared by the kernel and `romp keyswap`, so the reader and the writer cannot disagree. |
+| _(no bin entry)_ | `kernel/keysource.py` | The live API key source: an optional `ROMP_API_KEY_REF` resolved by `op` at runtime, or a legacy key. Source inspection never fetches secrets. Shared by the kernel and `romp keyswap`. |
 | `romp_session_backend.py` | `kernel/session_backend.py` | The `SessionBackend` ABC — the one seam both backends (SDK, tmux) implement. |
 | `romp_colormap.py` | `kernel/colormap.py` | The recency colormaps, single source of truth shared with the web bundles. |
 | `romp_palette.py` | `kernel/palette.py` | The session-identity color palettes. |
@@ -51,7 +51,7 @@ no separate implementation to point at.
 |---|---|---|
 | `romp-update` | `cli/update.py` | Pushes this machine's committed romp to attached remote kernels and restarts them (`romp update [host]`). |
 | `romp-version` | `cli/version.py` | Version report across the moving parts (`romp version`). |
-| `romp-keyswap` | `cli/keyswap.py` | Switches which API key the sessions bill without restarting the manager: rewrites only the `ANTHROPIC_API_KEY=` line of `service.env` from a sibling file, and `--cycle`/`--cycle-all` reconnects running sessions onto it (`romp keyswap`). |
+| `romp-keyswap` | `cli/keyswap.py` | Switches `ROMP_API_KEY_REF` references or legacy API keys using sibling `service.env.<name>` profiles without restarting the manager. Listing/selection never fetch secrets; `--cycle`/`--cycle-all` reconnects running sessions onto the source (`romp keyswap`). |
 | `romp-idle-dots` | `cli/idle_dots.py` | tmux backend only: heals stranded `working` state / fades idle tab dots by inspecting tmux panes. Fired from `hooks/tmux-status.sh`. |
 
 ## tmux backend only (real files)

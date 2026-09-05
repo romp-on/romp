@@ -33,7 +33,9 @@ class RateLimitGate(unittest.TestCase):
         # the gate scopes to LOGIN-billed calls (2026-08-28) — pin the billing deterministically:
         # these tests always assumed login, which silently flipped to key on an env-keyed machine
         self._saved_key = jd._work_key
+        self._saved_key_configured = jd._work_key_configured
         jd._work_key = lambda: ""
+        jd._work_key_configured = lambda: bool(jd._work_key())
 
         class _FakeDone:
             stdout = '{"result": "the-model-reply"}'
@@ -46,6 +48,7 @@ class RateLimitGate(unittest.TestCase):
     def tearDown(self):
         jd.subprocess.run = self._saved_run
         jd._work_key = self._saved_key
+        jd._work_key_configured = self._saved_key_configured
         shutil.rmtree(self.td, ignore_errors=True)
 
     def _usage(self, pct, resets_in, bucket="five_hour"):

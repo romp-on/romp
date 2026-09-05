@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import Mock, patch
 import urllib.request
 from contextlib import redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -210,6 +211,13 @@ class FetchAndFallback(unittest.TestCase):
         self._state = jd.STATE
         jd.STATE = Path(self.td.name)
         self._url, self._fn = km.MODELS_API_URL, getattr(jd, "_WORK_KEY_FN", None)
+        self._login_fn = jd._LOGIN_AUTH_ENV_FN
+        jd._LOGIN_AUTH_ENV_FN = None
+        self._source_env = {k: os.environ.get(k) for k in
+                            ("ROMP_SERVICE_ENV_FILE", "ROMP_API_KEY_REF", "ANTHROPIC_AUTH_TOKEN")}
+        os.environ["ROMP_SERVICE_ENV_FILE"] = str(Path(self.td.name) / "service.env")
+        os.environ.pop("ROMP_API_KEY_REF", None)
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
         self._env_key = os.environ.get("ANTHROPIC_API_KEY")
         os.environ["ANTHROPIC_API_KEY"] = "synthetic-test-credential"   # the fake sees only this (never a key-shaped string: the pre-commit scanner)
         jd._WORK_KEY_FN = None
@@ -223,6 +231,12 @@ class FetchAndFallback(unittest.TestCase):
         _reset_catalog()
         km.MODELS_API_URL = self._url
         jd._WORK_KEY_FN = self._fn
+        jd._LOGIN_AUTH_ENV_FN = self._login_fn
+        for key, value in self._source_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         if self._env_key is None:
             os.environ.pop("ANTHROPIC_API_KEY", None)
         else:
@@ -301,6 +315,41 @@ class FetchAndFallback(unittest.TestCase):
         self.assertIn("no API credential", km._catalog_status["lastError"])
         self.assertIn("no API credential the kernel can use", log)
         self.assertEqual(km.MODEL_VERSIONS["fable"][0]["value"], "claude-fable-5-1", "seed still serves")
+
+    def test_provider_failure_never_falls_back_to_an_ambient_key_or_token(self):
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = "synthetic-ambient-token"
+        jd._WORK_KEY_FN = Mock(side_effect=jd._keysrc.KeySourceError("1Password retrieval failed"))
+        started, log = self._refresh()
+        self.assertTrue(started)
+        jd._WORK_KEY_FN.assert_called_once_with()
+        self.assertEqual(_FakeModelsAPI.seen, [])
+        self.assertIn("1Password retrieval failed", km._catalog_status["lastError"])
+        self.assertNotIn("synthetic-ambient-token", log)
+        self.assertNotIn("synthetic-test-credential", log)
+        self.assertFalse(km._catalog_status["inflight"])
+
+    def test_runtime_reference_is_resolved_once_per_catalog_refresh_without_persistence(self):
+        ref = "op://test-vault/test-item/api-key"
+        os.environ["ROMP_API_KEY_REF"] = ref
+        with patch.object(jd._keysrc.subprocess, "run",
+                          return_value=Mock(returncode=0, stdout=b"synthetic-runtime-key")) as run:
+            self._refresh()
+            self.assertEqual(run.call_count, 1)
+            self._refresh()
+            self.assertEqual(run.call_count, 2)
+        self.assertTrue(_FakeModelsAPI.seen)
+        for file in Path(self.td.name).rglob("*"):
+            if file.is_file():
+                self.assertNotIn(b"synthetic-runtime-key", file.read_bytes())
+
+    def test_invalid_reference_prevents_requests_and_does_not_use_legacy_key(self):
+        Path(os.environ["ROMP_SERVICE_ENV_FILE"]).write_text("ROMP_API_KEY_REF=\n")
+        with patch.object(jd._keysrc.subprocess, "run") as run:
+            started, _ = self._refresh()
+        self.assertTrue(started)
+        run.assert_not_called()
+        self.assertEqual(_FakeModelsAPI.seen, [])
+        self.assertIn("ROMP_API_KEY_REF", km._catalog_status["lastError"])
 
     def test_a_fetch_that_adds_ids_tells_every_open_picker_to_re_read_models(self):
         # the refresh used to call _push_soon() here, its comment claiming the pickers re-read /models

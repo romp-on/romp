@@ -24,7 +24,7 @@ update` starts a session called "update".
 | `romp update [host…]` | Push this machine's committed Romp to attached remotes and restart them |
 | `romp up` | Run the kernel manager in the foreground; rare, since the login service runs it |
 | `romp version` | Version report across the moving parts |
-| `romp keyswap [<name>] [--cycle <session,…>\|--cycle-all]` | Switch which API key the sessions bill, with no restart: rewrites only the `ANTHROPIC_API_KEY=` line of `service.env` from `service.env.<name>`, and `--cycle` moves running sessions onto it. Bare, it reports the live key and the candidates. See [Switching which API key the sessions bill](#switching-which-api-key-the-sessions-bill-romp-keyswap) |
+| `romp keyswap [<name>] [--cycle <session,…>\|--cycle-all]` | Switch the API key source without restarting the manager: selects a 1Password reference or a legacy key from `service.env.<name>`, and `--cycle` reconnects running sessions onto it. Bare, it reports the configured source and candidates without fetching secrets. See [Switching which API key the sessions bill](#switching-which-api-key-the-sessions-bill-romp-keyswap) |
 | `romp help` | The same list, from the terminal |
 
 These are for scripting and for agents rather than daily use:
@@ -54,8 +54,9 @@ every session there and outlives them all. Re-running `romp new --env` against
 a running session declares its full per-session env: any var you don't name
 again is dropped, and `romp new --no-env <name>` declares the empty set — it
 clears them all. Keep real secrets out of it: each value is copied into
-per-session files and the session registry under `~/.local/state/romp/`. Keys
-and credentials stay in `service.env` or the `apiKeyHelper`.
+per-session files and the session registry under `~/.local/state/romp/`. For
+runtime API keys, configure a 1Password reference in the service environment
+instead; see [Service environment and credentials](#service-environment-and-credentials).
 
 Two things to know before building on `romp sessions --json`. **`waiting` means
 at rest**, the ordinary state of a session that has finished its turn, so
@@ -196,7 +197,8 @@ the control never silently disappears.
 ### Per-session billing (login vs API key)
 
 An SDK session can bill either the machine's Claude login (subscription usage)
-or the `ANTHROPIC_API_KEY` the manager's environment carries — per session.
+or the configured API key source — per session. That source can be a 1Password
+reference resolved at runtime or a legacy `ANTHROPIC_API_KEY`.
 
 The new-session picker's **Billing** row states the case whenever the backend
 toggle says SDK: segmented buttons when the selected host offers both choices,
@@ -307,58 +309,157 @@ Run `romp-service install` again after changing one. The service unit bakes in
 whatever is set at install time, so a renumbered port that only lives in your
 shell leaves the supervised manager on the old one, and the two collide.
 
-### Service environment (secrets)
+### Service environment and credentials
 
 The manager runs as a login service (launchd on macOS, systemd --user on
-Linux), so it never sees variables your shell rc exports — a terminal having
-`ANTHROPIC_API_KEY` does nothing for the sessions the kernel spawns. On a
-machine where Claude authenticates through an OAuth login this gap is
-invisible (the credentials live in a file any process can read); on an
-API-key-only machine it means SDK sessions come up unauthenticated while
-`claude` in your terminal works fine.
+Linux), so it does not receive variables exported by your shell rc. Configure
+the service in `~/.config/romp/service.env` using plain `KEY=VALUE` lines and
+owner-only permissions (`chmod 600`). The service reads this file at manager
+startup; API key source settings are also read live before use. Other changes
+need a manager restart. `ROMP_SERVICE_ENV_FILE` overrides the file's path.
+Supervised services use this file as their API key source. An empty or missing
+source cannot fall back to credentials inherited from an earlier manager
+start, including after a kernel refresh or crash restart. Foreground managers
+can use an environment source when no service-file source governs them.
 
-Env like that goes in `~/.config/romp/service.env` — plain `KEY=VALUE` lines,
-`chmod 600`:
+#### API keys from 1Password at runtime
 
-    ANTHROPIC_API_KEY=sk-ant-...
+To keep API key values out of Romp's configuration files, set a
+[1Password secret reference](https://www.1password.dev/cli/secret-references):
 
-Unlike the ports above it is NOT baked at install: it is read each time the
-manager starts (the systemd unit via `EnvironmentFile=-`, the macOS login
-agent's launcher by parsing it — line by line, never sourced, so a malformed
-line is skipped rather than executed). Rotate a value by editing the file and
-restarting the manager (`romp-service install`); a missing file is a no-op.
+    ROMP_API_KEY_REF=op://vault/item/field
 
-`ANTHROPIC_API_KEY` is the one exception to that last sentence — it needs no
-restart at all. See below.
+`ROMP_API_KEY_REF` takes priority over a legacy `ANTHROPIC_API_KEY` in the
+selected configuration. An empty or invalid reference is an error, not a
+request to use the legacy key. Remove competing plaintext assignments when
+migrating; `romp keyswap` does this automatically when selecting a profile.
+
+Romp runs [`op read --no-newline`](https://www.1password.dev/cli/reference/commands/read)
+for each Claude SDK session launch or reconnect, each API-key-billed judge
+call, and each direct model-catalog refresh. A paginated catalog refresh uses
+that credential for all its pages. An explicit `romp keyswap --cycle` resolves
+the key once per request to check which quiet sessions need a reconnect. When
+a retrieval fails, the judges do not retry it on every call: the failure holds
+for the rest of that judging pass and is retried when the next pass begins or
+the source changes, so an unreachable `op` costs one timeout per pass. Romp
+captures the value in memory and passes it to that operation. It does not write the resolved key
+to disk or cache it for later operations. A running Claude process retains
+the key it received at launch until it reconnects; this is not retrieval
+before every message in an existing session.
+
+The `op` executable must be on the **service's PATH**, and 1Password access
+must work for the OS user running the service. The service installer records
+PATH at install time; run `romp-service install` again after changing it.
+An interactive terminal sign-in does not by itself establish that a headless
+login service can read the same secret: a service has no desktop app to
+unlock. The supported unattended route is a
+[1Password service account](https://developer.1password.com/docs/service-accounts/):
+put its token in `service.env` beside the reference,
+
+    OP_SERVICE_ACCOUNT_TOKEN=ops_...
+    ROMP_API_KEY_REF=op://vault/item/field
+
+and give the account read access to that one vault, and nothing else. When a
+reference is configured, Romp takes `op`'s own credential names
+(`OP_SERVICE_ACCOUNT_TOKEN`, `OP_SESSION_*`, `OP_CONNECT_*`, `OP_ACCOUNT`) out
+of its environment as its first act at startup, says which names it claimed in
+the kernel log, hands them to the `op read` subprocess alone, and scrubs them
+from the tmux server's global environment: no Claude session, judge call, or
+tmux launch inherits them, so an agent running `env` sees neither the API key
+nor the credential. This keeps the token out of every agent's shell by
+default; it is inheritance hygiene, not isolation. The file stays readable to
+the same OS user (keep it `chmod 600`), and a same-user process can read the
+manager's original environment, which is why the account must see only the
+one vault. Like the rest of `service.env`, the token line loads when the
+manager starts; changing it needs a manager restart, where the reference
+itself is read live. Do not put the token in a per-session environment
+(`romp new --env`), which is copied into per-session files.
+
+On a box where the sessions fetch their key through Claude Code's
+`apiKeyHelper` calling `op`, and no reference is configured, Romp leaves
+`op`'s environment alone: the sessions need it.
+
+A supervised manager (the systemd or launchd service) reads its key source
+from `service.env` **only**. A key that reaches the manager some other way, a
+systemd drop-in `Environment=` or a launchd plist entry, is ignored and said
+so once in the kernel log with its fingerprint; sessions without an explicit
+Billing pick then launch on the login. Move such a key into `service.env`, or
+replace it with a reference.
+
+For a foreground manager, the same reference can be supplied in its
+environment:
+
+    ROMP_API_KEY_REF=op://vault/item/field romp up
+
+The Billing picker, status displays, and `romp keyswap` listing and selection
+inspect the configured source without running `op`. A configured reference
+therefore means "API key available to try", not "1Password access verified".
+If a selected provider cannot resolve the key, the operation fails with a
+credential error. It does not use an ambient key, a previous resolved key,
+or a Claude login as a fallback. Choosing **Login** explicitly still uses
+Claude Code's supported login flow and does not resolve the API key source.
+
+To migrate an existing service:
+
+1. Put the API key in 1Password and obtain its field's secret reference.
+2. Replace `ANTHROPIC_API_KEY=...` in `service.env` with
+   `ROMP_API_KEY_REF=op://vault/item/field`. Replace any sibling profiles used
+   by `romp keyswap` in the same way, and remove obsolete plaintext copies.
+3. Refresh the kernel once to load this version of Romp. Future source edits
+   take effect without restarting the manager.
+4. Reconnect existing key-billed sessions with `romp keyswap --cycle-all`
+   when they are quiet. Newly launched sessions and subsequent judge/model
+   requests use the configured source immediately.
+
+Removing or emptying an explicit service-file key source cannot revive the
+key inherited when the kernel started. After removing a selected provider,
+API-key operations fail until a valid source is selected; choose **Login**
+explicitly to use that mode. Removing a source does not revoke a credential
+already held by a running Claude process; reconnect or end those sessions too.
+Rotate a previously exposed key with its issuer as appropriate.
+
+#### Existing API keys and Claude login
+
+1Password is optional for general use. Without a runtime provider selected,
+Romp continues to support legacy `ANTHROPIC_API_KEY` configuration, including
+in `service.env`, and the existing Claude Code login. A foreground manager
+can also use its inherited API key when no service-file source governs it.
+For login, authenticate through Claude Code's supported CLI login flow and
+select **Login** in Billing; no extracted OAuth token is needed.
+
+Plaintext keys remain supported for compatibility, but do not meet policies
+that require secrets to be fetched from 1Password at runtime. File permissions
+do not change that distinction.
 
 ### Switching which API key the sessions bill (`romp keyswap`)
 
-The key a session bills rides its launch environment, and romp reads the
-`ANTHROPIC_API_KEY=` line of `service.env` **fresh at every session launch**.
+The key a session bills rides its launch environment, and Romp checks the
+API key source in `service.env` **at every session launch**.
 So changing keys — moving to another organisation's key, rotating a leaked
 one, switching between a high-priority and a batch key — costs no manager
 restart, and no session loses an open turn.
 
-Keep one file per key beside `service.env`, each a single `ANTHROPIC_API_KEY=`
-line, `chmod 600`:
+Keep one file per profile beside `service.env`, each with a single
+`ROMP_API_KEY_REF=op://vault/item/field` assignment, `chmod 600`:
 
     ~/.config/romp/service.env.highprio
     ~/.config/romp/service.env.lowprio
 
 Then:
 
-    romp keyswap                       # which key is live, and what you can swap to
-    romp keyswap lowprio               # rewrite the key line from service.env.lowprio
+    romp keyswap                       # configured source and candidate profiles
+    romp keyswap lowprio               # select the source from service.env.lowprio
     romp keyswap lowprio --cycle-all   # …and move the running sessions onto it too
     romp keyswap lowprio --cycle web,api
 
-`romp keyswap <name>` rewrites **only** the `ANTHROPIC_API_KEY=` line, in
-place, keeping every other line of the file as it was (line endings come out
-as LF) — a temp file and a rename, so no reader ever sees the file
-half-written, and the mode stays `600` (a looser one is tightened). A
-symlinked `service.env` is written through: the target changes, the link
-stays. It refuses a source file with no key line rather
-than writing an empty key, which the CLI would read as "API-key mode, no key".
+Legacy profiles containing a single `ANTHROPIC_API_KEY=` assignment also
+work. `romp keyswap <name>` writes the selected assignment and removes the
+competing key-source assignment, keeping all unrelated lines as they were
+(line endings come out as LF). A temp file and rename make the update atomic,
+and the mode stays `600` (a looser one is tightened). A symlinked `service.env`
+is written through: the target changes, the link stays. A profile without a
+usable source is rejected. Listing or selecting a reference never retrieves
+its key; an explicit `--cycle` check asks the kernel to resolve it.
 
 After the rewrite:
 
@@ -370,25 +471,29 @@ After the rewrite:
   conversation with its history intact — the same mechanism a reasoning-effort
   or billing switch uses — and only for a session that is quiet right now. Sessions billing the machine login are
   skipped, dormant ones are reported as needing nothing, a session already
-  launched on the live key reads `current`, and a session with a turn,
+  launched on the current resolved key reads `current`, and a session with a turn,
   subagents or background tasks in flight is skipped and named — a reconnect
-  would kill that work — so you re-run the same `--cycle` once it is quiet,
-  until every session reads `current`;
-* **the judges and the model catalog** pick the new key up on their next call,
-  with no cycling at all.
+  would kill that work — so re-run `--cycle` for those sessions once they are
+  quiet;
+* **the judges and direct model-catalog refreshes** pick the new source up on
+  their next call, with no cycling at all.
 
-No key value is ever printed, logged, or sent over a socket. The only rendered
-form is the first 12 hex of its sha256 — `sha256:1a2b3c4d5e6f` — which appears
-in the command's output, in the Log panel when the key changes, and in the
-kernel's own answer to `--cycle`. Comparing those tells you the swap landed
-without either side showing the key.
+No key value is printed or sent in Romp's status/control responses. Legacy
+keys are identified by the first 12 hex of their sha256, such as
+`sha256:1a2b3c4d5e6f`. Provider status uses a fingerprint of the reference,
+without resolving it; this cannot verify the secret value or detect a rotation
+behind an unchanged reference. An explicit `--cycle` resolves the current key
+for each quiet session and reconnects it if that key differs from its launch
+key, including when the reference itself is unchanged. A session already
+using that key reads `current` and stays connected. A reconnect resolves the
+source again at the actual launch, so it does not reuse a key cached by the
+cycle check.
 
-**One restart, once:** a kernel that is already running when this feature is
-installed neither reads the file live nor knows the `--cycle` route, so it is
-still on the key it booted with. Take the update a single time with `romp
-refresh` — or `romp refresh --quiet`, which waits for the sessions to finish
-their turns first — and every swap after that is restart-free. `romp keyswap
---cycle-all` says so plainly if it meets an older kernel.
+**One restart, once:** a running kernel needs to load this version to support
+runtime providers. Take the update with `romp refresh` — or `romp refresh
+--quiet`, which waits for sessions to finish their turns first — and later
+source swaps need no manager restart. `romp keyswap --cycle-all` reports when
+it encounters a kernel too old to support cycling.
 
 Remote kernels each have their own `service.env` and their own key: run
 `romp keyswap` on that machine.
@@ -397,8 +502,8 @@ Remote kernels each have their own `service.env` and their own key: run
 the path it resolved into the unit and, when that is not the default, exports
 it to the service as well, so the kernel's live read and the installer name
 one file; a service installed before that carries only the default. `romp
-keyswap` asks the running kernel which key it reads and says `MISMATCH` when
-that is not the file's — the check to make after a swap.
+keyswap` compares the running kernel's source identity with the file's and
+says `MISMATCH` when they differ — the check to make after a swap.
 
 ## Where things live
 

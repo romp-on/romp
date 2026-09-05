@@ -37,11 +37,13 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+os.environ.pop("ROMP_SUPERVISED", None)  # a romp-managed shell inherits it; these tests stage the unsupervised startup-key case
 # The manager env file is a LIVE key source now (kernel/keysource.py), so floor it too: without this
 # a bare (non-pytest) run of this file on a machine with a real ~/.config/romp/service.env resolves
 # the developer's actual key instead of the fixture's. conftest.py holds the same floor for pytest.
 os.environ["ROMP_SERVICE_ENV_FILE"] = os.path.join(os.environ["XDG_STATE_HOME"], "no-such-service.env")
 os.environ["ROMP_SERVICE_ENV"] = os.environ["ROMP_SERVICE_ENV_FILE"]
+os.environ.pop("ROMP_API_KEY_REF", None)
 sb = SourceFileLoader("romp_sdk_backend_auth", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
 km = SourceFileLoader("romp_kernel_auth", os.path.join(BIN, "romp-kernel")).load_module()
 
@@ -118,10 +120,10 @@ class EffectiveAuth(_Keyed):
 class EffectiveAuthKeyless(_Keyed):
     KEY = ""
 
-    def test_everything_falls_to_login_when_no_key_exists(self):
+    def test_an_explicit_key_pick_never_becomes_login_when_no_key_exists(self):
         self.assertEqual(self._sess(1).effective_auth(), "login")
-        self.assertEqual(self._sess(2, auth="key").effective_auth(), "login",
-                         "'key' with nothing to inject launches on the login — loudly, via _options")
+        self.assertEqual(self._sess(2, auth="key").effective_auth(), "key")
+        self.assertEqual(self.be.default_auth({"auth": "key"}), "key")
 
 
 class _OptionsHarness(_Keyed):
@@ -166,10 +168,10 @@ class OptionsInjection(_OptionsHarness):
         self._options_kw(s2)
         self.assertFalse(s2._launched_keyed)
 
-    def test_a_key_pick_with_no_key_is_a_logged_problem_not_a_silent_fall(self):
-        src = open(os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).read()
-        self.assertIn("session is set to the API key but the manager environment carries", src)
-        self.assertIn('ANTHROPIC_API_KEY=work_key', src)
+    def test_a_key_pick_with_no_key_refuses_to_launch_on_the_login(self):
+        self.be.work_key = ""
+        with self.assertRaisesRegex(sb._keysrc.KeySourceError, "no API key source"):
+            self._options_kw(self._sess(3, auth="key"))
 
 
 class FastOrgPermissionFollowsBilling(_OptionsHarness):
@@ -424,7 +426,7 @@ class Availability(unittest.TestCase):
         km._sdk, km._claude_account, km._claude_account_label = self.real_sdk, self.real_acct, self.real_label
 
     def _world(self, key, acct, label="user@example.com"):
-        km._sdk = lambda: type("B", (), {"work_key": key})()
+        km._sdk = lambda: type("B", (), {"work_key_configured": bool(key)})()
         km._claude_account = lambda: acct
         km._claude_account_label = lambda: (label if acct else "")
 

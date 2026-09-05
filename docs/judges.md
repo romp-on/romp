@@ -372,18 +372,22 @@ toward nothing.
 
 A judge call bills **the account of the session it judges** — the same pick the
 session's own Billing selector holds, read from the same registry, with the same
-fallback (an explicit login pick → the login; anything else → the manager env's
-API key when one exists, else the login). The key itself has exactly one claimer:
-the SDK backend pops it out of the kernel's environment at first use so no
-session CLI inherits it ambiently, and judges read that same stash through a wire
-the kernel installs (`judge._WORK_KEY_FN`) — before the wire lands, or standalone
-(`romp-judge --once`), the key is still sitting in the environment and is read in
-place. Every judge child env is built with the ambient variable stripped and the
-key injected back only for a key-mode call: billing is an explicit choice per
-call, never inheritance. (Before this, judges inherited the post-claim
-environment: on a host with no login, every call refused "Not logged in" for 13
-hours — ~53k errors — while the board sat frozen in Working with nothing saying
-why.)
+selection (an explicit login pick → the login; otherwise the configured API
+key source when one exists, else the login). With `ROMP_API_KEY_REF` configured,
+each key-billed judge call resolves the reference through `op read --no-newline`; a
+retrieval that fails is not retried by later calls in the same judging pass, and the first
+call of a pass to reach the key gates the others until its retrieval returns. The next pass,
+or a changed source, retries.
+The resolved key is used for that call without a provider cache or a plaintext
+file. The same source selection applies to standalone `romp-judge --once`.
+Every judge child environment strips ambient Anthropic credentials and injects
+the selected key only for a key-mode call. A provider failure fails that call
+with a credential error; it cannot silently use the machine login or a stale
+key. An explicitly login-billed call does not run `op`.
+
+Legacy `ANTHROPIC_API_KEY` and Claude login remain supported when no runtime
+provider is selected. See [Service environment and credentials](reference.md#service-environment-and-credentials)
+for setup, service PATH and authentication requirements, and migration.
 
 A **credential-class** failure (not logged in, an invalid key, an expired OAuth
 token) is one no retry can fix — only the user can. The first such error

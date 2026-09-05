@@ -25,13 +25,17 @@ Session control (how romp drives Claude Code) sits behind one seam:
 Shared lookup tables: `colormap.py` (recency tints, single source shared with
 the web bundles) and `palette.py` (session-identity colors).
 
-`keysource.py` is the live source of the manager's API key: the
-`ANTHROPIC_API_KEY=` line of `service.env`, re-read at every session launch so
-switching keys needs no manager restart. `cli/keyswap.py` (`romp keyswap`) loads
-the same module to write that line, so the reader and the writer cannot disagree
-about the path or the parse. A key value never lands in the kernel's own
-environment and never reaches a log — `fingerprint()` (the sha256 head) is the
-only renderable form.
+`keysource.py` selects the manager's live API key source: a
+`ROMP_API_KEY_REF=op://vault/item/field` reference or a legacy
+`ANTHROPIC_API_KEY`. Source inspection is separate from resolution so UI/status
+reads do not fetch secrets. A selected reference is resolved with `op read
+--no-newline` for each Claude session launch/reconnect, key-billed judge call,
+and direct model-catalog refresh. Explicit cycle checks also resolve the key
+to detect rotations; a reconnect resolves it again at launch. Resolved provider
+keys are not cached or written to disk. Resolution failures fail closed.
+`cli/keyswap.py` (`romp keyswap`) shares the path and parser to switch references or legacy keys without
+resolving them. Removing a service-file source cannot restore a stale startup
+key. See `docs/reference.md` for migration and service authentication setup.
 
 Everything here is loaded by file path (`SourceFileLoader`), not installed as a
 package — the repo runs straight from a git clone. Python tests live in

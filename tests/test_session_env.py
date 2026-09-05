@@ -456,6 +456,41 @@ class ValidatorLockstep(unittest.TestCase):
             self.assertEqual(km._env_error(payload), sb.env_request_error(payload),
                              "the copies must stay in lockstep — payload %r" % (payload,))
 
+    CREDENTIALS = ({"ANTHROPIC_API_KEY": "x"}, {"ANTHROPIC_AUTH_TOKEN": "x"}, {"CLAUDE_CODE_OAUTH_TOKEN": "x"})
+
+    def test_the_copies_agree_on_credentials_with_and_without_runtime_retrieval(self):
+        """Under runtime API-key retrieval a per-session API key is reserved (it competes with the source); a
+        login session's token override is not (review find, 2026-09-05). Both copies, both worlds."""
+        import tempfile
+        km = self._kernel()
+        for payload in self.CREDENTIALS:                       # no source configured: all three pass
+            self.assertEqual(km._env_error(payload), "")
+            self.assertEqual(sb.env_request_error(payload), "")
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "service.env")
+        with open(path, "w") as fh:
+            fh.write("ROMP_API_KEY_REF=op://test-vault/test-item/credential\n")
+        saved = {k: os.environ.get(k) for k in ("ROMP_SERVICE_ENV_FILE", "ROMP_SERVICE_ENV")}
+        try:
+            os.environ["ROMP_SERVICE_ENV_FILE"] = path; os.environ["ROMP_SERVICE_ENV"] = path
+            for m in (km.jd._keysrc, sb._keysrc):
+                m._CACHE = ((), ""); m._AUTHORITATIVE_PATHS.clear()
+            for auth in ("", "key", "login"):
+                verdicts = [(km._env_error(p, auth), sb.env_request_error(p, auth)) for p in self.CREDENTIALS]
+                for a, b in verdicts:
+                    self.assertEqual(a, b, "the copies must stay in lockstep under runtime retrieval (auth=%r)" % auth)
+                self.assertIn("reserved while runtime API key retrieval", verdicts[0][0], "the API key always competes")
+                if auth == "login":
+                    self.assertEqual(verdicts[1][0], ""); self.assertEqual(verdicts[2][0], "")   # its own token stays
+                else:
+                    self.assertIn("reserved", verdicts[1][0]); self.assertIn("reserved", verdicts[2][0])   # keyed: no competing token
+        finally:
+            for k, v in saved.items():
+                if v is None: os.environ.pop(k, None)
+                else: os.environ[k] = v
+            for m in (km.jd._keysrc, sb._keysrc):
+                m._CACHE = ((), ""); m._AUTHORITATIVE_PATHS.clear()
+
 
 class DrivePlumbing(unittest.TestCase):
     """The /new door rides the same park/drain path as the other per-session switches (source pins,

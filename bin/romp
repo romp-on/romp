@@ -644,7 +644,7 @@ EOF
     _romp_cmd "romp update [host]"         romp-update  "Push this machine's committed romp to attached remotes and restart them"
     _romp_cmd "romp up"                    romp-manager "Run the kernel manager in the foreground (rare — the login service runs it)"
     _romp_cmd "romp version"               romp-version "Versions across the parts (tree, kernel, served vs built bundles)"
-    _romp_cmd "romp keyswap [<name>]"      romp-keyswap "Switch which API key the sessions bill, no restart (service.env.<name>; --cycle-all reconnects running ones)"
+    _romp_cmd "romp keyswap [<name>]"      romp-keyswap "Select a 1Password reference or legacy key (service.env.<name>; --cycle-all reconnects running sessions)"
     _romp_cmd "romp uninstall"             romp-uninstall "Remove romp's installed footprint (--purge also deletes recorded state)"
     _romp_cmd "romp help"                  -            "Show this help"
     cat <<'EOF'
@@ -718,11 +718,10 @@ if [[ "${1:-}" == "update" ]]; then
     exec romp-update "$@"
 fi
 
-# `romp keyswap [<name>] [--cycle <session,...> | --cycle-all]` — point the sessions at another API
-# key WITHOUT restarting the manager (the user 2026-09-04). Rewrites only the ANTHROPIC_API_KEY= line
-# of ~/.config/romp/service.env from a sibling file (service.env.<name>); the kernel reads that line
-# live at every session launch, and --cycle reconnects named running sessions so they re-present the
-# new key with their history intact. Delegates to romp-keyswap (python). Prints fingerprints, never keys.
+# `romp keyswap [<name>] [--cycle <session,...> | --cycle-all]` selects ROMP_API_KEY_REF or a legacy
+# ANTHROPIC_API_KEY from a sibling service.env.<name>, removing the competing assignment. Listing
+# and selection inspect sources without fetching secrets; --cycle asks the kernel to reconnect
+# sessions, resolving provider keys at launch. Delegates to romp-keyswap (python); never prints keys.
 if [[ "${1:-}" == "keyswap" ]]; then
     shift
     exec romp-keyswap "$@"
@@ -1821,7 +1820,7 @@ case "${1:-}" in
                            # VALUE is meaningful (explicitly setting empty), but a missing '=' or a
                            # NAME outside [A-Za-z_][A-Za-z0-9_]* is a usage error, never a silent
                            # skip. Toggles only (FEATURE_FLAG=1, CLAUDE_CODE_*) — real secrets stay
-                           # in service.env / the apiKeyHelper, since this payload is copied into
+                           # behind ROMP_API_KEY_REF or the apiKeyHelper, since this payload is copied into
                            # per-sid files and the session registry.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
                                echo "usage: romp new [-t] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] <name>" >&2; exit 2
@@ -2253,6 +2252,14 @@ if tmux has-session -t "=$name" 2>/dev/null; then
         tmux attach-session -t "$name"
     fi
 else
+    # op's credential never rides a session: when romp itself runs `op` (a reference is configured), the
+    # tmux SERVER's globals — what every new pane inherits — are scrubbed of it before the pane exists
+    # (review, 2026-09-05: the server the manager started carried service.env's token to `exec claude`).
+    if [[ -n "${ROMP_API_KEY_REF:-}" ]]; then
+        while IFS= read -r op_var; do
+            [[ -n "$op_var" ]] && tmux set-environment -gu "$op_var" 2>/dev/null || true
+        done < <(tmux show-environment -g 2>/dev/null | sed -n -E 's/^(OP_SERVICE_ACCOUNT_TOKEN|OP_CONNECT_HOST|OP_CONNECT_TOKEN|OP_ACCOUNT|OP_SESSION_[A-Za-z0-9_]*)=.*/\1/p')
+    fi
     # Create new detached session in working directory
     tmux new-session -d -s "$name" -c "$work_dir"
 

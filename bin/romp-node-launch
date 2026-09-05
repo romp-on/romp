@@ -46,9 +46,9 @@ if [ -n "$sys_node" ]; then
 fi
 
 # Extra service environment (parity with the systemd unit's EnvironmentFile=-):
-# plain KEY=VALUE lines exported to the manager, so env a login shell has but
-# launchd doesn't (e.g. ANTHROPIC_API_KEY where claude auth is env-var-only)
-# reaches kernel-spawned sessions. Parsed line-by-line, never sourced: a
+# plain KEY=VALUE lines exported to the manager, so variables available only in
+# a login shell also reach the kernel. ROMP_API_KEY_REF remains a reference here;
+# the kernel resolves it through op when needed. Parsed line-by-line, never sourced: a
 # malformed line is skipped instead of executing code or (under set -eu)
 # taking the manager — and the whole kernel — down with it.
 ENV_FILE="${ROMP_SERVICE_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/romp/service.env}"
