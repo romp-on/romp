@@ -1609,7 +1609,8 @@ class ViewBuilder(unittest.TestCase):
         self.assertEqual(km._session_awaiting(SID, str(self.tpath), True),
                          {"kind": None, "since": 200,   # the overlay row's own stamp → the chips' elapsed readout (the user 2026-08-23)
                           "why": "Waiting on 2 background jobs it launched.",
-                          "count": None},   # a bare overlay row names no count — never parsed from the why (T225)
+                          "count": None,   # a bare overlay row names no count — never parsed from the why (T225)
+                          "items": []},    # …and names no rows (slice 2, 2026-09-05)
                          "the genuine awaiting badge still shows")
 
     def test_blocked_rolls_up_the_card_tree_so_a_buried_block_is_visible(self):
@@ -1699,26 +1700,42 @@ class ViewBuilder(unittest.TestCase):
             # source 0: real subagents in flight — the snapshot carries the live LIST (a {"type","since"}
             # per agent); the why counts via len() (the pre-fix code %d-formatted the list itself)
             km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "", "since": T0}, {"type": "", "since": T0}]}}
+            # …each agent its own ROW since slice 2 (2026-09-05); a hook-only agent with no agentId has an
+            # empty row id and its type (here none → "agent") as the label until a launch row names it.
+            # The snapshot carries an EMPTY lifecycle set on purpose: since the sources are COMBINED, a
+            # live snapshot with no bgTasks key at all would let source 0.75 add the transcript's launch
+            # above as a command row beside the agents (a mixed read) — an SDK snapshot's empty set is
+            # authoritative and keeps this an agents-only read.
+            agent_row = {"kind": "agents", "id": "", "label": "agent", "since": T0}
+            km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "", "since": T0}, {"type": "", "since": T0}], "bgTasks": []}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
                              {"kind": "agents", "why": "2 background agents still working",
                               "since": T0,   # the oldest live agent's start → the chips' elapsed readout (the user 2026-08-23)
-                              "count": 2},   # the live agent count — the chip's number agreement rides it (T225)
+                              "count": 2,    # the live agent count — the chip's number agreement rides it (T225)
+                              "items": [agent_row, agent_row], "tasks": ["agent", "agent"]},
                              "a live subagent DOES leave an idle session awaiting (a working flavor)")
-            # source 0.5: the live bg-task set — one task shows its description verbatim
+            # source 0.5: the live bg-task set — one task shows its description verbatim (a COMMAND row;
+            # the sentence says "command" since slice 2)
+            desc = "20-minute timer for campaign-start check"
+            cmd_row = {"kind": "commands", "id": "tu_bg", "label": desc, "since": T0 + 9}
             km._tmux_sessions = lambda: {SID: {"bgTasks": [timer]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
                              {"kind": "task", "since": T0 + 9,   # the dispatch stamp (the user 2026-08-23)
-                              "why": "waiting on a background task: 20-minute timer for campaign-start check",
-                              "count": 1})
+                              "why": "waiting on a background command: " + desc,
+                              "count": 1, "items": [cmd_row], "tasks": [desc]})
             km._tmux_sessions = lambda: {SID: {"bgTasks": [timer, dict(timer, desc="power watcher")]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
                              {"kind": "task", "since": T0 + 9,
-                              "why": "waiting on 2 background tasks — 20-minute timer for campaign-start check, …",
-                              "count": 2})
-            # subagents outrank bg tasks when both run (they're the bigger dispatch)
+                              "why": "waiting on 2 background commands — " + desc + ", …",
+                              "count": 2, "items": [cmd_row, dict(cmd_row, label="power watcher")],
+                              "tasks": [desc, "power watcher"]})
+            # an agent AND a bg task at once: until 2026-09-05 the agents source short-circuited and the task
+            # vanished from the read; now both are rows of two kinds — kind "mixed", every row counted,
+            # the why naming each group (the user: they are different things, show them separately)
             km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "", "since": T0}], "bgTasks": [timer]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
-                             {"kind": "agents", "why": "1 background agent still working", "since": T0, "count": 1})
+                             {"kind": "mixed", "why": "waiting on 1 background agent and 1 background command",
+                              "since": T0, "count": 2, "items": [agent_row, cmd_row], "tasks": ["agent", desc]})
         finally:
             km._tmux_sessions = saved
 
@@ -1734,7 +1751,8 @@ class ViewBuilder(unittest.TestCase):
         ]) + "\n")
         self.assertEqual(km._session_awaiting(SID, "/nonexistent", True),
                          {"kind": None, "why": "3 agents in flight",
-                          "since": T0 + 1, "count": None},   # the overlay row's own stamp (the user 2026-08-23)
+                          "since": T0 + 1, "count": None,   # the overlay row's own stamp (the user 2026-08-23)
+                          "items": []},                     # an overlay row names no rows (slice 2)
                          "the latest awaiting overlay (interleaved with state records) drives the badge")
         self.assertIsNone(km._session_awaiting(SID, "/nonexistent", False),
                           "a WORKING session is not 'awaiting' (idle=False short-circuits)")

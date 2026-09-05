@@ -57,7 +57,7 @@ class SessionAwaitingSince(unittest.TestCase):
         km._bg_pending = lambda sid, path, ts: ts
         aw = km._session_awaiting(SID, "/tmp/x", True)
         self.assertEqual(aw["since"], 300)
-        self.assertIn("2 background tasks", aw["why"])
+        self.assertIn("2 background commands", aw["why"])   # "commands" since slice 2 (2026-09-05): shell launches are command rows
 
     def test_overlay_rides_its_own_rows_stamp(self):
         km._states_awaiting_overlay = lambda sid: {"awaiting": True, "why": "waiting on a build",

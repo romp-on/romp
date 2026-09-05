@@ -413,16 +413,25 @@ class DurableAwaitingSource(unittest.TestCase):
     def _restore(self, saved):
         km._tmux_sessions, km._sdk_spawned_at, km._states_awaiting_overlay = saved
 
-    def test_pending_agent_dispatches_read_kind_agents_not_task(self):
-        # dispatched agents/workflows are kind agents even through the task stream; a MIXED pending
-        # set (or plain shell work) is kind task — the generic word (the user 2026-08-15)
+    def test_pending_agent_and_shell_dispatches_are_two_rows_of_two_kinds(self):
+        # dispatched agents/workflows are AGENT rows even through the task stream; a shell launch is a
+        # COMMAND row. Until 2026-09-05 a mixed pending set collapsed to the generic kind "task" (the
+        # agent silently absorbed into "Awaiting 2 tasks"); the user's call (plans/subagent-transcripts.md
+        # slice 2): the kinds are different things — separate rows, kind "mixed", count = every row.
         rows = [{"toolUseId": "t1", "desc": "audit the sampler", "since": 5, "type": "local_agent"},
                 {"toolUseId": "t2", "desc": "notes-api sweep", "since": 6, "type": "local_workflow"}]
         saved = self._patched({self.SID: {"bgTasks": rows}})
         try:
-            self.assertEqual(km._session_awaiting(self.SID, None, True)["kind"], "agents")
+            aw = km._session_awaiting(self.SID, None, True)
+            self.assertEqual((aw["kind"], aw["count"]), ("agents", 2))
+            self.assertEqual([it["kind"] for it in aw["items"]], ["agents", "agents"])
             rows.append({"toolUseId": "t3", "desc": "mkdocs serve", "since": 7, "type": "local_bash"})
-            self.assertEqual(km._session_awaiting(self.SID, None, True)["kind"], "task")
+            aw = km._session_awaiting(self.SID, None, True)
+            self.assertEqual((aw["kind"], aw["count"]), ("mixed", 3), "two kinds present → mixed, every row counted")
+            self.assertEqual([(it["kind"], it["label"]) for it in aw["items"]],
+                             [("agents", "audit the sampler"), ("agents", "notes-api sweep"), ("commands", "mkdocs serve")])
+            self.assertNotIn("task", aw["why"], "the collapse word is gone: %r" % aw["why"])
+            self.assertEqual(aw["why"], "waiting on 2 background agents and 1 background command")
         finally:
             self._restore(saved)
 
@@ -434,8 +443,10 @@ class DurableAwaitingSource(unittest.TestCase):
         finally:
             self._restore(saved)
             os.unlink(path)
-        self.assertEqual(why, {"kind": "task", "why": "waiting on a background task: power watcher",
-                               "since": None, "count": 1})   # the transcript scan carries no dispatch stamp → no duration, never a guess
+        self.assertEqual(why, {"kind": "task", "why": "waiting on a background command: power watcher",   # "command" since slice 2 (2026-09-05)
+                               "since": None, "count": 1,   # the transcript scan carries no dispatch stamp → no duration, never a guess
+                               "tasks": ["power watcher"],
+                               "items": [{"kind": "commands", "id": TUSE, "label": "power watcher", "since": None}]})   # the one awaited row (slice 2)
 
     def test_the_notification_landing_ends_it(self):
         path = _write([_launch(), _notif_str(tid=TUSE)])

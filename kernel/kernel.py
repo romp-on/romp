@@ -14044,23 +14044,34 @@ def _watch_awaiting(sid):
     is event-true at both ends (armed at registration, removed when the predicate fires, times out, or
     is cancelled), and it's kernel-owned, so this source survives restarts like the watches themselves.
     `tasks` lists each watch in the registrant's own words (the --note, else an elided predicate), so a
-    plural wait can enumerate them in the box's fold."""
+    plural wait can enumerate them in the box's fold. `items` is the same set as awaited ROWS
+    (_awaiting_item: kind "watches"), one per watch: a generic watch carries `watchId` — the handle the
+    box's Cancel button hands to cancel_watch, the same path `romp watch --cancel <id>` takes — and its
+    predicate as `detail`; a PR watch has no cancel path (nothing retires a pr-watch early today), so
+    it carries no watchId and the box offers no button for it."""
     sid = str(sid)
     with _watch_lock:
         rows = [dict(r) for r in _watches if str(r.get("sid")) == sid]
     prs = [dict(r) for r in _pr_watches if str(r.get("sid")) == sid]   # tick-thread idiom: copy, no lock
-    descs = []
+    descs, items = [], []
     for r in rows:
         note = (r.get("note") or "").strip()
         cmd = str(r.get("cmd") or "")
-        descs.append(note or "a kernel watch: %s" % (cmd if len(cmd) <= 80 else cmd[:77] + "…"))
+        clipped = cmd if len(cmd) <= 80 else cmd[:77] + "…"
+        descs.append(note or "a kernel watch: %s" % clipped)
+        it = _awaiting_item("watches", "watch:%s" % r.get("id"), note or clipped, r.get("at"), detail=cmd)
+        if r.get("id"):
+            it["watchId"] = str(r["id"])
+        items.append(it)
     for r in prs:
         descs.append("PR #%s (%s) to land" % (r.get("pr"), r.get("repo")))
+        items.append(_awaiting_item("watches", "pr:%s#%s" % (r.get("repo"), r.get("pr")),
+                                    "PR #%s (%s)" % (r.get("pr"), r.get("repo")), r.get("at")))
     if not descs:
         return None
     since = min([r.get("at") for r in rows + prs if r.get("at")] or [None])
     why = ("waiting on " + descs[0]) if len(descs) == 1 else         ("waiting on %d armed watches — %s, …" % (len(descs), descs[0]))
-    return {"kind": "job", "why": why, "since": since, "tasks": descs, "count": len(descs)}
+    return {"kind": "job", "why": why, "since": since, "tasks": descs, "count": len(descs), "items": items}
 
 
 def _watch_notice(kind, row, detail=""):
@@ -17015,16 +17026,101 @@ def _session_delegated_identities(sid):
     return sorted((_peer_identity(p) for p in peers), key=lambda d: d["name"])
 
 
+# ── awaited ROWS (plans/subagent-transcripts.md slice 2, the user 2026-09-05) ─────────────────────────
+# _session_awaiting used to answer with ONE kind chosen by source precedence: live subagents, else the
+# pending background launches (kind agents only if EVERY pending row was an agent, else the generic
+# "task"), else armed watches. So one situation read "agents" or "tasks" depending on which source spoke
+# first, a background shell command plus a background agent read "Awaiting 2 tasks" with the agent
+# silently absorbed, and nothing on screen listed what was awaited. The user's call: the kinds are
+# different things — show them as SEPARATE ROWS grouped by kind. Every live source now contributes
+# `items` — one row per awaited thing — and the legacy single kind/count/why are DERIVED from the rows:
+# one kind present → that kind's word (precedence only ever chose the word); several → kind "mixed",
+# count = every row. Rows wear the GROUP vocabulary (agents / commands / watches / peer / timer); the
+# legacy kind keys (agents / task / job / peer / timer) stay for every consumer that still reads them,
+# _AWAIT_ITEM_LEGACY_KIND bridging the two.
+_AWAIT_ITEM_KINDS = ("agents", "commands", "watches", "peer", "timer")       # the row groups, in display order
+_AWAIT_ITEM_LEGACY_KIND = {"agents": "agents", "commands": "task", "watches": "job", "peer": "peer", "timer": "timer"}
+
+
+def _awaiting_item(kind, iid, label, since, agent_id=None, detail=None):
+    """One awaited row: {kind, id, label, since} plus agentId (an agent row — the open-transcript arrow)
+    and detail (a watch's predicate) only when known, so every row without them is byte-identical to the
+    minimal shape. `since` is the row's OWN event time (a dispatch stamp, a hook's start, a watch's
+    registration) or None — never wall-clock now (the user 2026-08-23)."""
+    assert kind in _AWAIT_ITEM_KINDS, kind
+    it = {"kind": kind, "id": str(iid or ""), "label": str(label or "").strip(), "since": (int(since) if since else None)}
+    if agent_id:
+        it["agentId"] = str(agent_id)
+    if detail:
+        it["detail"] = str(detail)
+    return it
+
+
+def _awaiting_kind_phrase(kind, n):
+    """The counted noun phrase for one row group — the mixed why's building block."""
+    if kind == "agents":
+        return "%d background agent%s" % (n, "" if n == 1 else "s")
+    if kind == "commands":
+        return "%d background command%s" % (n, "" if n == 1 else "s")
+    if kind == "watches":
+        return "%d armed watch%s" % (n, "" if n == 1 else "es")
+    if kind == "peer":
+        return "%d peer%s" % (n, "" if n == 1 else "s")
+    return "%d timer%s" % (n, "" if n == 1 else "s")
+
+
+def _awaiting_from_items(agents, commands, watch):
+    """The awaiting answer DERIVED from the live rows — agents (source 0 + the pending agent launches),
+    commands (the pending shell/monitor launches) and `watch` (_watch_awaiting's dict, or None). None when
+    there are no rows. One kind present → its legacy kind word and the sentence that kind always wore
+    (byte-identical to the pre-rows whys, so nothing downstream re-learns them); several → kind "mixed",
+    count = every row, and a why that names each group ("waiting on 2 background agents, 1 background
+    command and 1 armed watch"). `since` is the oldest row's own time; `tasks` the labels, so the
+    payload's awaitingTasks fallback lists every awaited thing for consumers that still read that."""
+    items = list(agents) + list(commands) + list((watch or {}).get("items") or [])
+    if not items:
+        return None
+    kinds = [k for k in _AWAIT_ITEM_KINDS if any(it["kind"] == k for it in items)]
+    n = len(items)
+    since = min([it.get("since") for it in items if it.get("since")] or [None])
+    if kinds == ["agents"]:
+        why = "%d background agent%s still working" % (n, "" if n == 1 else "s")
+    elif kinds == ["commands"]:
+        d0 = commands[0]["label"]
+        why = ("waiting on a background command%s" % ((": " + d0) if d0 else "") if n == 1 else
+               "waiting on %d background commands%s" % (n, (" — " + d0 + ", …") if d0 else ""))
+    elif kinds == ["watches"]:
+        why = watch["why"]
+    else:
+        parts = [_awaiting_kind_phrase(k, sum(1 for it in items if it["kind"] == k)) for k in kinds]
+        why = "waiting on " + (", ".join(parts[:-1]) + " and " + parts[-1])
+    kind = _AWAIT_ITEM_LEGACY_KIND[kinds[0]] if len(kinds) == 1 else "mixed"
+    return {"kind": kind, "why": why, "since": since, "count": n, "items": items,
+            "tasks": [it["label"] or "background work" for it in items]}   # a label-less row keeps a kind-neutral word
+
+
+def _awaiting_peer_items(peers):
+    """Peer rows from the identities a stamp or the delegation graph names — label only (no sid: a nested
+    id would dodge federation's prefixing; the chip/box name and colour peers from awaitingPeers)."""
+    return [_awaiting_item("peer", "peer:%s" % (p.get("name") or ""), p.get("name") or "a peer", None)
+            for p in (peers or [])]
+
+
 def _session_awaiting(sid, path, idle, stamp=False):
     """A session AWAITING dispatched/delegated background work (a WORKING flavor, the user 2026-06-22) →
-    {"kind", "why", "since"}: the one-line 'why' for the ⏳ awaiting badge plus WHAT the wait is on
+    {"kind", "why", "since", "count", "items"}: the one-line 'why' for the ⏳ awaiting badge plus WHAT the wait is on
     (jd.AWAIT_KINDS, the user 2026-08-15 — kind rides as DATA so surfaces can word it and rules can scope
     by it; None = kindless, the legacy shape) plus WHEN the wait began — each source's own event time
     (a dispatch stamp, an overlay row's t, the judge's awaitingAt), never wall-clock now, so the chips can
     say how long the wait has held (the user 2026-08-23: a stuck wait was invisible without a duration).
     `since` is None when the winning source carries no event time — the surfaces then show no duration
     rather than a guessed one. Falsy (None) when not awaiting, so truthiness callers read unchanged.
-    Only when IDLE — an actively producing turn is just 'working'. The EVENT-BASED sources, in order:
+    Only when IDLE — an actively producing turn is just 'working'. The EVENT-BASED sources, in order —
+    though sources 0, 0.5/0.75 and 0.9 no longer short-circuit one another: each contributes ROWS
+    (`items`, one per awaited thing, grouped agents / commands / watches — plans/subagent-transcripts.md
+    slice 2) and the single kind/count/why are derived from the union (_awaiting_from_items; several
+    kinds present → kind "mixed"). The order below still ranks those three over the overlay and the
+    stamp-gated arms, which answer only when no live row exists:
       0. the backend snapshot's LIVE subagent count (SubagentStart/Stop) — genuine delegated Claude
          AGENTS in flight, held in memory, independent of any turn.
       0.5 the backend snapshot's LIVE bg-task set — the CLI's DESIGNED task lifecycle stream
@@ -17079,48 +17175,67 @@ def _session_awaiting(sid, path, idle, stamp=False):
     # subagents field → None → fall through unchanged.
     live = _tmux_sessions().get(str(sid))    # None = not a live CLI (dormant); {}-like = live snapshot
     tm = live or {}
+    # Sources 0, 0.5/0.75 and 0.9 are COMBINED into rows (2026-09-05; see _awaiting_from_items): each
+    # contributes what it knows, and the one answer is derived from all of them — the old first-source-
+    # wins short-circuit is what made one situation read "agents" or "tasks" by accident of ordering.
+    agents, commands = [], []
+    seen_agent = {}   # agentId → its row: a background agent is in BOTH the hook set and the task stream
     subs = tm.get("subagents")
-    if subs:
-        # `subagents` is the snapshot's LIST of live agents ({"type","since"}); the original source-0 code
-        # formatted the list itself with %d (latent TypeError since 3325771, masked because a subagent
-        # normally runs inside an open turn → idle=False → this branch never ran) — count via len().
-        n = len(subs)
-        return {"kind": "agents", "why": "%d background agent%s still working" % (n, "" if n == 1 else "s"),
-                "count": n,   # how many are awaited — the chip/box word agrees in number with THIS (T225)
-                "since": min([s.get("since") for s in subs if s.get("since")] or [None])}   # the oldest live agent's start — the wait has held at least this long
+    for sub in subs or []:
+        # `subagents` is the snapshot's LIST of live agents ({"type","since","agentId"} — the hook's
+        # agent_id since slice 1); the original source-0 code formatted the list itself with %d (latent
+        # TypeError since 3325771, masked because a subagent normally runs inside an open turn →
+        # idle=False → this branch never ran). The type is the row's label until its launch row (below)
+        # brings the dispatch's own description.
+        if not isinstance(sub, dict):
+            continue
+        aid = sub.get("agentId")
+        it = _awaiting_item("agents", aid or "", sub.get("type") or "agent", sub.get("since"), agent_id=aid)
+        if aid:
+            seen_agent[str(aid)] = it
+        agents.append(it)
     tasks = _bg_live_norm(sid, path)
-    if tasks:
+    pending = _bg_pending(sid, path, tasks) if tasks else []
+    meta = None   # the subagents sidecar map, read once and only if an agent launch lacks its agentId
+    for t in pending:
         # Sources 0.5/0.75 — only the PENDING tasks (launch not yet placed) count; a placed launch's
         # story belongs to the judge's verdicts (see the docstring's 0.5 entry for the full rule).
-        pending = _bg_pending(sid, path, tasks)
-        if pending:
-            d0 = pending[0]["desc"]
-            # a dispatched agent/workflow is kind agents even through the task stream; a mixed set
-            # (or plain shell work) is kind task — the generic word for in-harness background work
-            kind = ("agents" if all("agent" in (t.get("type") or "") or t.get("type") == "local_workflow"
-                                    for t in pending) else "task")
-            since = min([t.get("t") for t in pending if t.get("t")] or [None])   # the oldest pending dispatch
-            if len(pending) == 1:
-                return {"kind": kind, "since": since, "count": 1,
-                        "why": "waiting on a background task%s" % ((": " + d0) if d0 else "")}
-            return {"kind": kind, "since": since, "count": len(pending),
-                    "why": "waiting on %d background tasks%s"
-                           % (len(pending), (" — " + d0 + ", …") if d0 else "")}
+        # A dispatched agent/workflow is an AGENT row even through the task stream; a shell command or
+        # a Monitor is a COMMAND row. No collapse: two kinds present read as two groups, never "task".
+        is_agent = "agent" in (t.get("type") or "") or t.get("type") == "local_workflow"
+        if not is_agent:
+            commands.append(_awaiting_item("commands", t.get("tid") or "", t.get("desc") or "background command", t.get("t")))
+            continue
+        aid = t.get("agentId")
+        if not aid and path and t.get("tid"):
+            meta = _subagent_meta_map(path) if meta is None else meta
+            aid = (meta.get(t["tid"]) or {}).get("agentId")
+        hit = seen_agent.get(str(aid)) if aid else None
+        if hit is not None:
+            # the SAME agent seen by the hook: one row, wearing the launch's id (Stop's handle), its
+            # description, and the earlier of the two start times
+            hit["id"] = t.get("tid") or hit["id"]
+            hit["label"] = t.get("desc") or hit["label"]
+            if t.get("t") and not hit.get("since"):
+                hit["since"] = int(t["t"])
+            continue
+        agents.append(_awaiting_item("agents", t.get("tid") or "", t.get("desc") or "background agent", t.get("t"), agent_id=aid))
     # Source 0.9 — ARMED KERNEL WATCHES this session registered (`romp watch --cmd` / `romp watch-pr`):
     # kernel-owned and restart-proof like the rows themselves, event-true at both ends (armed at
     # registration, cleared when the predicate fires or the watch cancels/times out). The user's rule
     # (2026-08-30): ANY awaited thing shows — an idle session holding only a watch used to read plain
     # ready, its wait visible nowhere but `romp watch --list`.
-    w = _watch_awaiting(sid)
-    if w:
-        return w
+    combined = _awaiting_from_items(agents, commands, _watch_awaiting(sid))
+    if combined:
+        return combined
     ov = _states_awaiting_overlay(sid)
     if ov is not None and ov.get("awaiting"):         # a producer wrote a LIVE awaiting:true → trust its why
         ovk = ov.get("kind")
         return {"kind": ovk if ovk in jd.AWAIT_KINDS else None,
                 "since": ov.get("t") or None,          # the overlay row's own stamp — when the hook declared the wait
                 "count": ov["count"] if isinstance(ov.get("count"), int) and ov["count"] > 0 else None,   # only when the producer said (no parsing the why)
-                "why": ov.get("why") or "waiting on dispatched work"}
+                "why": ov.get("why") or "waiting on dispatched work",
+                "items": []}                           # an overlay row names no rows — the box shows its why alone
     # An awaiting:false overlay row is NOT a veto — it says only that THIS channel has nothing to add.
     # The SDK Stop hook has written an unconditional false at every turn end since 2026-07-07 while
     # nothing writes true, so treating "most recent row is false" as the session's answer made source 2
@@ -17146,23 +17261,26 @@ def _session_awaiting(sid, path, idle, stamp=False):
         # and nobody else's (the user 2026-08-08): the three surfaces answered one question two ways.
         y = _owned_yield_why(sid, path)
         if y:
-            return {"kind": "task", "why": y, "since": None, "count": 1}   # a live owned dispatch — in-harness work (no single event time to show)
+            return {"kind": "task", "why": y, "since": None, "count": 1, "items": []}   # a live owned dispatch — in-harness work (no single event time to show; the yield names no row)
         _gid, _at, st_why, st_kind, st_peers = _session_stamp_full(sid)
         if st_why:
             out = {"kind": st_kind, "why": st_why, "since": _at or None,   # the judge's own classification rides the stamp, with its awaitingAt
-                   "count": len(st_peers) if st_peers else None}   # a peer stamp knows its peers; other stamps carry no count
+                   "count": len(st_peers) if st_peers else None,   # a peer stamp knows its peers; other stamps carry no count
+                   "items": []}                                    # a stamp names no rows (a peer stamp names its peers, below)
             if st_kind == "peer" and st_peers:
                 # the stamp RECORDS who the wait is on (judge awaitPeers) — name them (2026-08-26);
                 # `peers` rides only when known, so every other arm's shape is byte-identical
                 out["peers"] = sorted((_peer_identity(p) for p in st_peers), key=lambda d_: d_["name"])
+                out["items"] = _awaiting_peer_items(out["peers"])
             return out
         d = _session_delegated_why(sid)
         if d:
-            out = {"kind": "peer", "why": d, "since": None}   # the courier handoff graph is peer by construction
+            out = {"kind": "peer", "why": d, "since": None, "items": []}   # the courier handoff graph is peer by construction
             pi = _session_delegated_identities(sid)
             if pi:
                 out["peers"] = pi
                 out["count"] = len(pi)
+                out["items"] = _awaiting_peer_items(pi)
             return out
     return None
 
@@ -17440,7 +17558,10 @@ def _owned_yield_why(sid, path):
         best = cand if best is None else max(best, cand)
     if best is None:
         return None
-    return "waiting on a background task%s" % ((": " + best[1]) if best[1] else "")
+    # worded "command" since 2026-09-05 (the awaiting vocabulary: agents / commands / watches — plans/
+    # subagent-transcripts.md slice 2): the owned dispatch is in-harness background work the chip words as
+    # a command; the kind stays the legacy "task" key every consumer already reads
+    return "waiting on a background command%s" % ((": " + best[1]) if best[1] else "")
 
 
 def _states_awaiting_overlay(sid):
@@ -22876,6 +22997,10 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                   # number — a single agent is not "agents") — the chip and the box derive the word from
                   # this one number; None when the source cannot know (an untyped stamp, a bare overlay)
                   "awaitingCount": ((_aw or {}).get("count") if isinstance((_aw or {}).get("count"), int) else None),
+                  # …and the awaited ROWS themselves — [{kind, id, label, since, agentId?, detail?,
+                  # watchId?}], grouped by the box and worded by the chip's tooltip (slice 2, 2026-09-05);
+                  # [] for a wait no source can enumerate (a judge stamp, a bare overlay row)
+                  "awaitingItems": (list((_aw or {}).get("items") or []) if awaiting_why else []),
                   "awaitingTasks": (((_awaiting_task_descs(sid, sess["path"]) or
                                       (_aw or {}).get("tasks") or [])) if awaiting_why else []),
                   # …and the same tasks' launch ids, so the #bg-tasks box outlines exactly the awaited
@@ -23694,7 +23819,7 @@ def _provisional_card(s, name, color, fsid, live, now, store=None):
             "provisional": True, "judging": not turn_open, "tree": []}
 
 
-def _awaiting_card(s, name, color, fsid, live, now, why, kind=None, since=None, count=None):
+def _awaiting_card(s, name, color, fsid, live, now, why, kind=None, since=None, count=None, items=None):
     """A lightweight WORKING-column placeholder for a LIVE, IDLE session AWAITING a dispatched BACKGROUND
     TASK when there is NO open goal to floor to awaiting (the user 2026-07-13). The turn ended and every
     card is done/cleared/placed, so the goal loop has nothing to floor AND _provisional_card bows out (its
@@ -23717,9 +23842,9 @@ def _awaiting_card(s, name, color, fsid, live, now, why, kind=None, since=None, 
             t = turns[-1].get("t", now)              # last activity → recency tint, sorts with the working column
     except Exception:
         pass
-    # _session_awaiting already phrases the why ("waiting on a background task: <desc>"); capitalize it for
+    # _session_awaiting already phrases the why ("waiting on a background command: <desc>"); capitalize it for
     # the headline. The task list rides `awaiting` for the pill, so the headline needn't repeat every task.
-    text = (why[:1].upper() + why[1:]) if why else "Waiting on a background task"
+    text = (why[:1].upper() + why[1:]) if why else "Waiting on a background command"
     return {"itemId": "awaiting:" + fsid, "sid": fsid, "name": name, "color": color, "text": text,
             "t": t, "live": live, "trgb": list(cm.age_rgb(now - t, _colormap())),
             "turnId": None, "origin": None, "followupPending": None,
@@ -23730,6 +23855,7 @@ def _awaiting_card(s, name, color, fsid, live, now, why, kind=None, since=None, 
             # "Working…"/"Analyzing…" chip, carries the state (feed.ts defers the provisional chip when awaiting).
             "awaiting": {"why": why, "kind": kind, "since": since,
                          "count": count if isinstance(count, int) else None,   # the feed pill's word agrees in number (T225)
+                         "items": list(items or []),   # the awaited rows the pill lists, grouped (slice 2)
                          "tasks": _awaiting_task_descs(fsid, s["path"])},
             "provisional": True, "judging": False, "tree": []}
 
@@ -24425,6 +24551,7 @@ def build_feed(now, tmux=None):
         sess_awaiting_since = _sess_aw.get("since") if _sess_aw else None   # the wait's own event time (the user 2026-08-23)
         sess_awaiting_count = _sess_aw.get("count") if _sess_aw else None   # how many are awaited — the pill's word agrees in number (T225)
         sess_awaiting_peers = _sess_aw.get("peers") if _sess_aw else None   # named identities when the arm knows them (2026-08-26)
+        sess_awaiting_items = list(_sess_aw.get("items") or []) if _sess_aw else []   # the awaited rows (slice 2) — the pill lists them grouped
         if sess_awaiting_why and not who_working:
             awaiting.append(name)                    # the AWAITING dot list (await-green, the user 2026-07-13) — the
             #                                          same split _session_chip makes; feed/chat dots match the chip
@@ -24515,7 +24642,7 @@ def build_feed(now, tmux=None):
                 # the blocked card's own thread still proves the thread moved past the block.
                 _await_ok = bool(_own) and _own["since"] >= _blk_t
                 if _await_ok:
-                    _owned_why = "waiting on a background task%s" % (
+                    _owned_why = "waiting on a background command%s" % (   # the chip's word for in-harness work (2026-09-05)
                         (": " + _own["descs"][0]) if _own["descs"] else "")
                     _owned_since = _own["since"]           # the dispatch event that proved the yield
             # The JUDGE's durable ⏳ stamp (the closer's awaiting verdict, kernel/judge.py): this goal's
@@ -24612,14 +24739,15 @@ def build_feed(now, tmux=None):
             await_since = None                       # mirroring the or-chain exactly (a kindless winner
             await_peers = None                       # stays kindless; since = the wait's own event time).
             await_count = None                       # how many are awaited — the SAME number the chat chip words itself
+            await_items = []                         # the awaited ROWS the pill lists, grouped by kind (slice 2, 2026-09-05)
             if col == "awaiting":                    # from (T228, the user's one-count rule): the live snapshot's own
                 # count, the peers a stamp or delegation names, one owned dispatch; None when the arm cannot know
-                for _w, _k, _s, _p, _n in ((sess_awaiting_why, sess_awaiting_kind, sess_awaiting_since, sess_awaiting_peers, sess_awaiting_count),
-                                           (_stamp_why, _stamp_kind, _stamp_since, _stamp_peers, (len(_stamp_peers) if _stamp_peers else None)),
-                                           (_deleg_why, "peer", _deleg_since, _deleg_peers, (len(_deleg_peers) if _deleg_peers else None)),
-                                           (_owned_why, "task", _owned_since, None, 1)):
+                for _w, _k, _s, _p, _n, _it in ((sess_awaiting_why, sess_awaiting_kind, sess_awaiting_since, sess_awaiting_peers, sess_awaiting_count, sess_awaiting_items),
+                                                (_stamp_why, _stamp_kind, _stamp_since, _stamp_peers, (len(_stamp_peers) if _stamp_peers else None), _awaiting_peer_items(_stamp_peers)),
+                                                (_deleg_why, "peer", _deleg_since, _deleg_peers, (len(_deleg_peers) if _deleg_peers else None), _awaiting_peer_items(_deleg_peers)),
+                                                (_owned_why, "task", _owned_since, None, 1, [])):
                     if _w:
-                        await_kind, await_since, await_peers = _k, _s, _p
+                        await_kind, await_since, await_peers, await_items = _k, _s, _p, _it
                         await_count = _n if isinstance(_n, int) and _n > 0 else None
                         break
             # The card's TIME reflects its CURRENT STATE, not when the goal was minted: a COMPLETED card
@@ -24909,6 +25037,7 @@ def build_feed(now, tmux=None):
                 "awaiting": ({"why": await_why, "kind": await_kind, "since": await_since,
                               "count": await_count,   # the one number every surface words itself from (T228)
                               "peers": await_peers,   # delegation wait → [{name, host, sid, color}] for the identity-coloured box (the user 2026-08-23)
+                              "items": await_items,   # the awaited rows, grouped by the pill's expansion (slice 2)
                               "tasks": _awaiting_task_descs(fsid, s["path"])} if col == "awaiting" else None),
                 "summary": nodes[nid].get("summary"),    # the distiller's key takeaway for a completed goal (modal) — the user 2026-06-17
                 "distillState": distill_state,   # "completed" | "blocked" | null — the GENUINE state the distiller line keys on, so the brief/takeaway doesn't flicker off when recheck/rejudging drops `column` to working (the user 2026-07-21)
@@ -25049,7 +25178,7 @@ def build_feed(now, tmux=None):
                 # hit ("there's no card there"). Ephemeral: gone the moment sess_awaiting_why clears.
                 asks.append(_awaiting_card(s, name, color, fsid, live, now, sess_awaiting_why,
                                            kind=sess_awaiting_kind, since=sess_awaiting_since,
-                                           count=sess_awaiting_count))
+                                           count=sess_awaiting_count, items=sess_awaiting_items))
     # THE SERVING FOLD, commit side (T137): join each candidate's rows under its dispatch's
     # tracker row — a read-only render-time join across stores (the node itself stays in the
     # WORKER's store, where plan-sync completion, nudge freshness, and clears live; node ids are
@@ -27085,6 +27214,7 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
             "id": sid, "name": name, "live": live, "state": state, "awaitingBg": awaiting_bg,
             "awaitingKind": awaiting_kind,
             "awaitingCount": ((_aw_bg or {}).get("count") if isinstance((_aw_bg or {}).get("count"), int) else None),   # the lane badge agrees in number (T228)
+            "awaitingItems": (list((_aw_bg or {}).get("items") or []) if awaiting_bg else []),   # the awaited rows, same set as the chat box (slice 2)
             "awaitingPeers": ((_aw_bg or {}).get("peers") or None),   # named identities for a peer wait (2026-08-26)
             # the live bg-task descriptions behind awaitingBg (the user 2026-07-13): the lane draws the
             # idle-but-waiting stretch as a thin dashed segment whose hover lists exactly what's pending
@@ -35983,6 +36113,17 @@ class Handler(BaseHTTPRequestHandler):
                 sys.stderr.write("openSubagent %s/%s: %s\n" % (sid, aid, traceback.format_exc()))
                 client["send"](json.dumps({"type": "subagent", "id": sid, "agentId": aid,
                                            "error": "romp couldn't build this agent's transcript — the kernel log has the traceback."}))
+            return
+        if msg and msg.get("type") == "cancelWatch" and msg.get("watchId"):
+            # The awaiting box's Cancel on a generic `romp watch --cmd` row (slice 2, 2026-09-05): the SAME
+            # cancel_watch the CLI's `romp watch --cancel <id>` and POST /watch {"cancel"} reach — no new
+            # retire path, one more door to it. `id` (the session) rides only so federation routes the
+            # message to the kernel that owns the watch. LOUD on a miss (fail loudly, never degrade
+            # silently): the watch may have fired or been cancelled from the CLI a moment earlier.
+            if not cancel_watch(str(msg["watchId"]).strip()):
+                client["send"](json.dumps({"type": "warn",
+                                           "text": "Couldn't cancel that watch — it may have already fired or been cancelled."}))
+            _push_soon()
             return
         if msg and msg.get("type") == "setGlobalRetryPaused":
             _set_retry_paused(msg.get("value"))

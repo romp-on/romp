@@ -82,7 +82,8 @@ class OwnedYieldAwaiting(unittest.TestCase):
     def test_a_dispatch_that_outran_the_block_is_the_session_awaiting_why(self):
         self._store()
         why = km._owned_yield_why(SID, self.path)
-        self.assertEqual(why, "waiting on a background task: " + DESC,
+        # "command" since 2026-09-05 (slice 2 vocabulary: agents / commands / watches — "task" retired)
+        self.assertEqual(why, "waiting on a background command: " + DESC,
                          "the same why the card shows — one story, both surfaces")
 
     def test_a_dispatch_that_predates_the_block_proves_nothing(self):
@@ -113,9 +114,10 @@ class OwnedYieldAwaiting(unittest.TestCase):
     def test_the_session_surfaces_light_from_it_when_idle(self):
         self._store()
         self.assertEqual(km._session_awaiting(SID, self.path, True, stamp=True),
-                         {"kind": "task", "why": "waiting on a background task: " + DESC,
+                         {"kind": "task", "why": "waiting on a background command: " + DESC,   # "command" (slice 2 vocabulary); the kind KEY stays "task"
                           "since": None,   # the owned-yield read has no single event time → no duration
-                          "count": 1},   # one owned dispatch (T225)
+                          "count": 1,    # one owned dispatch (T225)
+                          "items": []},  # the yield names no row (slice 2); the tracked task itself lists in the box
                          "the lane/chip say awaiting instead of READY")
 
     def test_the_feed_path_is_unchanged_no_session_wide_floor(self):
