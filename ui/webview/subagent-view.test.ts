@@ -129,9 +129,12 @@ test("the viewer is a PEEK through the chat's own derivation: chatVisible answer
   assert.match(RENDER, /a pinned viewer does NOT survive\s*\n?\s*\/\/ a reload in this slice/);
 });
 
-test("the viewer is READ-ONLY: composer and send disabled, its own placeholder, no meta menus in the statusline", () => {
+test("the viewer is READ-ONLY: the message box is hidden, send disabled, one dim statusline line, no meta menus", () => {
   assert.match(RENDER, /const viewer = !!s\.sub;[^\n]*\n\s*composer\.disabled = closed \|\| viewer;/);
-  assert.match(RENDER, /if \(viewer\) composer\.placeholder = "Subagent transcript — read-only";/);
+  // ONE read-only cue: the message box (input + send) is hidden outright in the viewer; the statusline
+  // line below carries the word — never both (the placeholder once doubled it, 2026-09-05)
+  assert.match(RENDER, /if \(composerBox\) composerBox\.style\.display = viewer \? "none" : "";/);
+  assert.doesNotMatch(RENDER, /Subagent transcript — read-only/);
   assert.match(RENDER, /if \(sendBtn\) sendBtn\.disabled = closed \|\| viewer;/);
   assert.match(RENDER, /if \(s\.sub\) \{[\s\S]{0,400}?ro\.textContent = "read-only · a subagent's transcript";[\s\S]{0,100}?return;/);
   // the tab: no drag (a reorder would post the id into the kernel's order), no rename menu, ✕ = Close tab

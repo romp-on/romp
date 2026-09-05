@@ -9038,9 +9038,12 @@ function showActive() {
     const viewer = !!s.sub;   // a SUBAGENT VIEWER is read-only by nature: there is no session behind it to message
     composer.disabled = closed || viewer;
     composer.placeholder = closed ? "Session closed — read-only" : composerRestingPlaceholder();
-    if (viewer) composer.placeholder = "Subagent transcript — read-only";
     const sendBtn = document.getElementById("composer-send") as HTMLButtonElement | null;
     if (sendBtn) sendBtn.disabled = closed || viewer;   // read-only session/viewer → the explicit send button is dead too
+    // ONE read-only cue for the viewer: the statusline's dim line. The whole message box (input + send)
+    // goes, so the pane never says it twice and the transcript gets the vertical space back.
+    const composerBox = document.getElementById("composer");
+    if (composerBox) composerBox.style.display = viewer ? "none" : "";
   }
   // tint the whole-window border with the active session's identity color
   if (s.color && s.color.bg) document.body.style.setProperty("--active-accent", s.color.bg);
