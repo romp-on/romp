@@ -42,11 +42,12 @@ MESSAGES_LOG = STATE / "timeline" / "messages.jsonl"
 # Mid-turn the model stops with `tool_use` (a tool cycle) — that does NOT end the turn.
 END_STOPS = ("end_turn", "stop_sequence")
 # The toolUseResult keys a consumer actually reads (Edit's structuredPatch → diffRows,
-# AskUserQuestion's answers map → the answered box). The atom carry is GATED on one of these
-# being present: an unconditional dict carry held every Read result's full file bytes in the
-# parse cache by reference — ~a fifth of transcript bytes on read-heavy sessions — for shapes
-# nothing reads. Widen this set when a new consumer appears; never revert to carry-all.
-TUR_CONSUMED_KEYS = frozenset(("answers", "structuredPatch"))
+# AskUserQuestion's answers map → the answered box, the Agent tool's agentId / isAsync → the
+# subagent join + the background-launch flag, plans/subagent-transcripts.md). The atom carry is
+# GATED on one of these being present: an unconditional dict carry held every Read result's full
+# file bytes in the parse cache by reference — ~a fifth of transcript bytes on read-heavy sessions —
+# for shapes nothing reads. Widen this set when a new consumer appears; never revert to carry-all.
+TUR_CONSUMED_KEYS = frozenset(("answers", "structuredPatch", "agentId", "isAsync"))
 # romp's own postal marker, injected into a delivered message body. It is the ONLY
 # postal signal — never the generic "Stop hook feedback:" prefix (any blocking Stop
 # hook produces that). The sender rompUuid is resolved from timeline/messages.jsonl
@@ -210,8 +211,17 @@ def _parse_task_notification(txt):
     # has_status: whether <status> was PRESENT, distinct from the "completed" default. A Monitor's
     # per-EVENT notification carries no status tag (only its terminal one does) — without this bit the
     # default would let a wrapped event read as "completed" and end a watch that is still live.
+    # result: an AGENT's closing message (the <result> body) — the report the parent's Agent tool head
+    # shows once a background agent has come to rest (plans/subagent-transcripts.md); a command's
+    # notification carries none. Capped like the chat's own tool output.
     return {"status": (st or "completed").lower(), "has_status": bool(st), "summary": fld("summary"),
-            "output_file": fld("output-file"), "tool_use_id": fld("tool-use-id")}
+            "output_file": fld("output-file"), "tool_use_id": fld("tool-use-id"),
+            "result": fld("result")[:_RESULT_CAP]}
+
+
+# A background agent's <result> text kept on its scan row (the want_all view) — the same 16000-char cap
+# build_session puts on every tool's output, so the report fold and the scan row can never disagree.
+_RESULT_CAP = 16000
 
 
 # A non-persistent Monitor records its own lifetime ceiling at launch (timeout_ms — the harness kills
@@ -306,6 +316,8 @@ def _bg_step(state, o):
                 return                     # a monitor EVENT (no <status> tag) — the watch is still live
             tasks[tid].update(status=note["status"], outputFile=note["output_file"],
                               summary=note["summary"] or tasks[tid]["summary"])
+            if note.get("result"):         # an agent's closing message → the Agent head's report fold
+                tasks[tid]["result"] = note["result"]
             if end_t:                      # WHEN the result landed — the awaiting-stamp lift keys the
                 tasks[tid]["endT"] = end_t  # "returned after the stamp was written" test on it (2026-08-16)
             _bg_forget_terminal(state, tid)
@@ -391,6 +403,8 @@ def _bg_step(state, o):
                                   "outputFile": tur.get("outputFile") or ""}
                     if tur.get("taskType") or d.get("type"):
                         tasks[tid]["type"] = tur.get("taskType") or d["type"]
+                    if tur.get("agentId"):   # the ack names the agent whose own transcript this launch writes
+                        tasks[tid]["agentId"] = str(tur["agentId"])   # (plans/subagent-transcripts.md)
                     order.append(tid)
                     continue
                 if async_launch and tid in tasks and not b.get("is_error") \
@@ -402,6 +416,8 @@ def _bg_step(state, o):
                     tk["outputFile"] = tk["outputFile"] or tur.get("outputFile") or ""
                     if tur.get("taskType"):
                         tk["type"] = tur["taskType"]
+                    if tur.get("agentId") and not tk.get("agentId"):
+                        tk["agentId"] = str(tur["agentId"])
                     if not tk["command"]:
                         tk["command"] = _clip_detail(tur.get("prompt") or "")
                     continue
@@ -411,6 +427,8 @@ def _bg_step(state, o):
                         continue               # a wrapped monitor EVENT — not a terminal (see _mark)
                     tasks[tid].update(status=note["status"], outputFile=note["output_file"],
                                       summary=note["summary"] or tasks[tid]["summary"])
+                    if note.get("result"):
+                        tasks[tid]["result"] = note["result"]
                     et = parse_z(o.get("timestamp"))
                     if et:                     # the return's moment (see _mark)
                         tasks[tid]["endT"] = et

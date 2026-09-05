@@ -495,7 +495,8 @@ def msg_to_atom(msg, sid, fsid, t, skill_tool_ids=()):
 # The toolUseResult keys a consumer actually reads — MIRRORS event_model.TUR_CONSUMED_KEYS (this
 # module loads standalone, so it cannot import the event model; a drift pin in test_sdk_backend.py
 # holds the two sets equal). Widen both together when a new consumer appears; never carry-all.
-TUR_CONSUMED_KEYS = frozenset(("answers", "structuredPatch"))
+TUR_CONSUMED_KEYS = frozenset(("answers", "structuredPatch", "agentId", "isAsync"))   # + the Agent tool's
+#   join/background flag (plans/subagent-transcripts.md, 2026-09-05) — widened in step with event_model
 
 TYPE_SOMETHING = "Type something"   # meta-option label the webview turns into the inline "add your own" field
 
@@ -4256,10 +4257,12 @@ class SdkSession:
         return {}
 
     def _live_subagents(self) -> list:
-        """The Task subagents running RIGHT NOW: [{"type","since"}], oldest first. Copied under the lock (hooks
-        mutate on the loop thread; snapshot() reads on the kernel thread)."""
+        """The Task subagents running RIGHT NOW: [{"type","since","agentId"}], oldest first. Copied under the
+        lock (hooks mutate on the loop thread; snapshot() reads on the kernel thread). agentId is the hook's
+        agent_id — the same `a…` id the CLI names the agent's own transcript file after, so the kernel can
+        say WHICH launch is alive, not only how many (plans/subagent-transcripts.md, 2026-09-05)."""
         with self._sub_lock:
-            return sorted((dict(v) for v in self._subagents.values()), key=lambda d: d.get("since") or 0)
+            return sorted(({**v, "agentId": k} for k, v in self._subagents.items()), key=lambda d: d.get("since") or 0)
 
     def _drop_live_work(self, reason: str):
         """The CLI process is gone — a reconnect (an effort/fast/auth switch) abandons the old client — so
