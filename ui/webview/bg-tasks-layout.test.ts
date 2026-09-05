@@ -44,8 +44,11 @@ test("status dots are SOLID — the pulsating yellow animation is gone", () => {
 test("each RUNNING task row has a Stop button riding the stable delegate (the user 2026-08-04)", () => {
   // the button posts the SDK's designed stop_task control request, keyed by the id the box shows;
   // gated on status so a finished row never grows a dead control
-  assert.match(RENDER, /if \(\(t\.status \|\| "running"\) === "running"\) \{/);
-  assert.match(RENDER, /stop\.dataset\.act = "bg-stop"; stop\.dataset\.id = t\.id;/);
+  // since slice 2 (2026-09-05) the row SPEC decides: a tracked task's Stop handle is its id while it
+  // runs (taskRowSpec / awaitRowSpec), and bgRow renders the button from that handle
+  assert.match(RENDER, /stopId: status === "running" \? t\.id : null/);
+  assert.match(RENDER, /if \(t\.stopId\) \{/);
+  assert.match(RENDER, /stop\.dataset\.act = "bg-stop"; stop\.dataset\.id = t\.stopId;/);
   // click-safe: handled on the SAME delegate as the fold toggles, never a per-render listener…
   assert.match(RENDER, /"bg-stop": \(el\) => \{/);
   assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "stopTask", id: activeId, taskId: id \}\);/);

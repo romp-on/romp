@@ -32,7 +32,10 @@ test("three-level disclosure: header fold, then per-task detail, both keyed so t
   assert.match(SRC, /rh\.dataset\.act = "bg-toggle"; rh\.dataset\.id = t\.id;/);
   // detail body = command + output, textContent only (untrusted)
   assert.match(SRC, /cmd\.textContent = t\.command;/);
-  assert.match(SRC, /out\.textContent = t\.output \|\| "\(no output captured\)";/);
+  // the fallback moved into the row spec (slice 2, 2026-09-05: one bgRow renderer for every kind of row);
+  // an AGENT row carries no output — its output file IS its transcript, and the arrow is the way in
+  assert.match(SRC, /output: t\.agentId \? null : \(t\.output \|\| "\(no output captured\)"\)/);
+  assert.match(SRC, /if \(t\.output\) \{ const out = el\("pre", "bg-out"\); out\.textContent = t\.output; det\.appendChild\(out\); \}/);
 });
 
 test("the worst status drives the collapsed header dot so a failure is glanceable", () => {

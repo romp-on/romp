@@ -52,8 +52,10 @@ class SourcePins(unittest.TestCase):
             self.assertIn("if (awaitKey(s.status) !== before) renderBgTasks();", body, fn)
 
     def test_the_chip_and_the_gist_agree_in_number_from_one_count(self):
-        self.assertIn("kindWord(s.status.awaitingKind, s.status.awaitingCount)", RENDER)
-        self.assertIn("kindWord(s!.status.awaitingKind, s!.status.awaitingCount)", RENDER)
+        # since slice 2 (plans/subagent-transcripts.md, 2026-09-05) the ONE rule is awaitWord: the kernel's
+        # kind + count + the awaited ROWS word the chip and the gist alike ("agent", "3 agents", "4" for mixed)
+        self.assertIn("const chipWord = awaitWord(s.status.awaitingKind, s.status.awaitingCount, chipItems);", RENDER)
+        self.assertIn("const word = awaitWord(s!.status.awaitingKind, s!.status.awaitingCount, items);", RENDER)
 
 
 def _free_port():
