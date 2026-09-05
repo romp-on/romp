@@ -14044,23 +14044,34 @@ def _watch_awaiting(sid):
     is event-true at both ends (armed at registration, removed when the predicate fires, times out, or
     is cancelled), and it's kernel-owned, so this source survives restarts like the watches themselves.
     `tasks` lists each watch in the registrant's own words (the --note, else an elided predicate), so a
-    plural wait can enumerate them in the box's fold."""
+    plural wait can enumerate them in the box's fold. `items` is the same set as awaited ROWS
+    (_awaiting_item: kind "watches"), one per watch: a generic watch carries `watchId` — the handle the
+    box's Cancel button hands to cancel_watch, the same path `romp watch --cancel <id>` takes — and its
+    predicate as `detail`; a PR watch has no cancel path (nothing retires a pr-watch early today), so
+    it carries no watchId and the box offers no button for it."""
     sid = str(sid)
     with _watch_lock:
         rows = [dict(r) for r in _watches if str(r.get("sid")) == sid]
     prs = [dict(r) for r in _pr_watches if str(r.get("sid")) == sid]   # tick-thread idiom: copy, no lock
-    descs = []
+    descs, items = [], []
     for r in rows:
         note = (r.get("note") or "").strip()
         cmd = str(r.get("cmd") or "")
-        descs.append(note or "a kernel watch: %s" % (cmd if len(cmd) <= 80 else cmd[:77] + "…"))
+        clipped = cmd if len(cmd) <= 80 else cmd[:77] + "…"
+        descs.append(note or "a kernel watch: %s" % clipped)
+        it = _awaiting_item("watches", "watch:%s" % r.get("id"), note or clipped, r.get("at"), detail=cmd)
+        if r.get("id"):
+            it["watchId"] = str(r["id"])
+        items.append(it)
     for r in prs:
         descs.append("PR #%s (%s) to land" % (r.get("pr"), r.get("repo")))
+        items.append(_awaiting_item("watches", "pr:%s#%s" % (r.get("repo"), r.get("pr")),
+                                    "PR #%s (%s)" % (r.get("pr"), r.get("repo")), r.get("at")))
     if not descs:
         return None
     since = min([r.get("at") for r in rows + prs if r.get("at")] or [None])
     why = ("waiting on " + descs[0]) if len(descs) == 1 else         ("waiting on %d armed watches — %s, …" % (len(descs), descs[0]))
-    return {"kind": "job", "why": why, "since": since, "tasks": descs, "count": len(descs)}
+    return {"kind": "job", "why": why, "since": since, "tasks": descs, "count": len(descs), "items": items}
 
 
 def _watch_notice(kind, row, detail=""):
@@ -17015,16 +17026,101 @@ def _session_delegated_identities(sid):
     return sorted((_peer_identity(p) for p in peers), key=lambda d: d["name"])
 
 
+# ── awaited ROWS (plans/subagent-transcripts.md slice 2, the user 2026-09-05) ─────────────────────────
+# _session_awaiting used to answer with ONE kind chosen by source precedence: live subagents, else the
+# pending background launches (kind agents only if EVERY pending row was an agent, else the generic
+# "task"), else armed watches. So one situation read "agents" or "tasks" depending on which source spoke
+# first, a background shell command plus a background agent read "Awaiting 2 tasks" with the agent
+# silently absorbed, and nothing on screen listed what was awaited. The user's call: the kinds are
+# different things — show them as SEPARATE ROWS grouped by kind. Every live source now contributes
+# `items` — one row per awaited thing — and the legacy single kind/count/why are DERIVED from the rows:
+# one kind present → that kind's word (precedence only ever chose the word); several → kind "mixed",
+# count = every row. Rows wear the GROUP vocabulary (agents / commands / watches / peer / timer); the
+# legacy kind keys (agents / task / job / peer / timer) stay for every consumer that still reads them,
+# _AWAIT_ITEM_LEGACY_KIND bridging the two.
+_AWAIT_ITEM_KINDS = ("agents", "commands", "watches", "peer", "timer")       # the row groups, in display order
+_AWAIT_ITEM_LEGACY_KIND = {"agents": "agents", "commands": "task", "watches": "job", "peer": "peer", "timer": "timer"}
+
+
+def _awaiting_item(kind, iid, label, since, agent_id=None, detail=None):
+    """One awaited row: {kind, id, label, since} plus agentId (an agent row — the open-transcript arrow)
+    and detail (a watch's predicate) only when known, so every row without them is byte-identical to the
+    minimal shape. `since` is the row's OWN event time (a dispatch stamp, a hook's start, a watch's
+    registration) or None — never wall-clock now (the user 2026-08-23)."""
+    assert kind in _AWAIT_ITEM_KINDS, kind
+    it = {"kind": kind, "id": str(iid or ""), "label": str(label or "").strip(), "since": (int(since) if since else None)}
+    if agent_id:
+        it["agentId"] = str(agent_id)
+    if detail:
+        it["detail"] = str(detail)
+    return it
+
+
+def _awaiting_kind_phrase(kind, n):
+    """The counted noun phrase for one row group — the mixed why's building block."""
+    if kind == "agents":
+        return "%d background agent%s" % (n, "" if n == 1 else "s")
+    if kind == "commands":
+        return "%d background command%s" % (n, "" if n == 1 else "s")
+    if kind == "watches":
+        return "%d armed watch%s" % (n, "" if n == 1 else "es")
+    if kind == "peer":
+        return "%d peer%s" % (n, "" if n == 1 else "s")
+    return "%d timer%s" % (n, "" if n == 1 else "s")
+
+
+def _awaiting_from_items(agents, commands, watch):
+    """The awaiting answer DERIVED from the live rows — agents (source 0 + the pending agent launches),
+    commands (the pending shell/monitor launches) and `watch` (_watch_awaiting's dict, or None). None when
+    there are no rows. One kind present → its legacy kind word and the sentence that kind always wore
+    (byte-identical to the pre-rows whys, so nothing downstream re-learns them); several → kind "mixed",
+    count = every row, and a why that names each group ("waiting on 2 background agents, 1 background
+    command and 1 armed watch"). `since` is the oldest row's own time; `tasks` the labels, so the
+    payload's awaitingTasks fallback lists every awaited thing for consumers that still read that."""
+    items = list(agents) + list(commands) + list((watch or {}).get("items") or [])
+    if not items:
+        return None
+    kinds = [k for k in _AWAIT_ITEM_KINDS if any(it["kind"] == k for it in items)]
+    n = len(items)
+    since = min([it.get("since") for it in items if it.get("since")] or [None])
+    if kinds == ["agents"]:
+        why = "%d background agent%s still working" % (n, "" if n == 1 else "s")
+    elif kinds == ["commands"]:
+        d0 = commands[0]["label"]
+        why = ("waiting on a background command%s" % ((": " + d0) if d0 else "") if n == 1 else
+               "waiting on %d background commands%s" % (n, (" — " + d0 + ", …") if d0 else ""))
+    elif kinds == ["watches"]:
+        why = watch["why"]
+    else:
+        parts = [_awaiting_kind_phrase(k, sum(1 for it in items if it["kind"] == k)) for k in kinds]
+        why = "waiting on " + (", ".join(parts[:-1]) + " and " + parts[-1])
+    kind = _AWAIT_ITEM_LEGACY_KIND[kinds[0]] if len(kinds) == 1 else "mixed"
+    return {"kind": kind, "why": why, "since": since, "count": n, "items": items,
+            "tasks": [it["label"] or "background work" for it in items]}   # a label-less row keeps a kind-neutral word
+
+
+def _awaiting_peer_items(peers):
+    """Peer rows from the identities a stamp or the delegation graph names — label only (no sid: a nested
+    id would dodge federation's prefixing; the chip/box name and colour peers from awaitingPeers)."""
+    return [_awaiting_item("peer", "peer:%s" % (p.get("name") or ""), p.get("name") or "a peer", None)
+            for p in (peers or [])]
+
+
 def _session_awaiting(sid, path, idle, stamp=False):
     """A session AWAITING dispatched/delegated background work (a WORKING flavor, the user 2026-06-22) →
-    {"kind", "why", "since"}: the one-line 'why' for the ⏳ awaiting badge plus WHAT the wait is on
+    {"kind", "why", "since", "count", "items"}: the one-line 'why' for the ⏳ awaiting badge plus WHAT the wait is on
     (jd.AWAIT_KINDS, the user 2026-08-15 — kind rides as DATA so surfaces can word it and rules can scope
     by it; None = kindless, the legacy shape) plus WHEN the wait began — each source's own event time
     (a dispatch stamp, an overlay row's t, the judge's awaitingAt), never wall-clock now, so the chips can
     say how long the wait has held (the user 2026-08-23: a stuck wait was invisible without a duration).
     `since` is None when the winning source carries no event time — the surfaces then show no duration
     rather than a guessed one. Falsy (None) when not awaiting, so truthiness callers read unchanged.
-    Only when IDLE — an actively producing turn is just 'working'. The EVENT-BASED sources, in order:
+    Only when IDLE — an actively producing turn is just 'working'. The EVENT-BASED sources, in order —
+    though sources 0, 0.5/0.75 and 0.9 no longer short-circuit one another: each contributes ROWS
+    (`items`, one per awaited thing, grouped agents / commands / watches — plans/subagent-transcripts.md
+    slice 2) and the single kind/count/why are derived from the union (_awaiting_from_items; several
+    kinds present → kind "mixed"). The order below still ranks those three over the overlay and the
+    stamp-gated arms, which answer only when no live row exists:
       0. the backend snapshot's LIVE subagent count (SubagentStart/Stop) — genuine delegated Claude
          AGENTS in flight, held in memory, independent of any turn.
       0.5 the backend snapshot's LIVE bg-task set — the CLI's DESIGNED task lifecycle stream
@@ -17079,48 +17175,67 @@ def _session_awaiting(sid, path, idle, stamp=False):
     # subagents field → None → fall through unchanged.
     live = _tmux_sessions().get(str(sid))    # None = not a live CLI (dormant); {}-like = live snapshot
     tm = live or {}
+    # Sources 0, 0.5/0.75 and 0.9 are COMBINED into rows (2026-09-05; see _awaiting_from_items): each
+    # contributes what it knows, and the one answer is derived from all of them — the old first-source-
+    # wins short-circuit is what made one situation read "agents" or "tasks" by accident of ordering.
+    agents, commands = [], []
+    seen_agent = {}   # agentId → its row: a background agent is in BOTH the hook set and the task stream
     subs = tm.get("subagents")
-    if subs:
-        # `subagents` is the snapshot's LIST of live agents ({"type","since"}); the original source-0 code
-        # formatted the list itself with %d (latent TypeError since 3325771, masked because a subagent
-        # normally runs inside an open turn → idle=False → this branch never ran) — count via len().
-        n = len(subs)
-        return {"kind": "agents", "why": "%d background agent%s still working" % (n, "" if n == 1 else "s"),
-                "count": n,   # how many are awaited — the chip/box word agrees in number with THIS (T225)
-                "since": min([s.get("since") for s in subs if s.get("since")] or [None])}   # the oldest live agent's start — the wait has held at least this long
+    for sub in subs or []:
+        # `subagents` is the snapshot's LIST of live agents ({"type","since","agentId"} — the hook's
+        # agent_id since slice 1); the original source-0 code formatted the list itself with %d (latent
+        # TypeError since 3325771, masked because a subagent normally runs inside an open turn →
+        # idle=False → this branch never ran). The type is the row's label until its launch row (below)
+        # brings the dispatch's own description.
+        if not isinstance(sub, dict):
+            continue
+        aid = sub.get("agentId")
+        it = _awaiting_item("agents", aid or "", sub.get("type") or "agent", sub.get("since"), agent_id=aid)
+        if aid:
+            seen_agent[str(aid)] = it
+        agents.append(it)
     tasks = _bg_live_norm(sid, path)
-    if tasks:
+    pending = _bg_pending(sid, path, tasks) if tasks else []
+    meta = None   # the subagents sidecar map, read once and only if an agent launch lacks its agentId
+    for t in pending:
         # Sources 0.5/0.75 — only the PENDING tasks (launch not yet placed) count; a placed launch's
         # story belongs to the judge's verdicts (see the docstring's 0.5 entry for the full rule).
-        pending = _bg_pending(sid, path, tasks)
-        if pending:
-            d0 = pending[0]["desc"]
-            # a dispatched agent/workflow is kind agents even through the task stream; a mixed set
-            # (or plain shell work) is kind task — the generic word for in-harness background work
-            kind = ("agents" if all("agent" in (t.get("type") or "") or t.get("type") == "local_workflow"
-                                    for t in pending) else "task")
-            since = min([t.get("t") for t in pending if t.get("t")] or [None])   # the oldest pending dispatch
-            if len(pending) == 1:
-                return {"kind": kind, "since": since, "count": 1,
-                        "why": "waiting on a background task%s" % ((": " + d0) if d0 else "")}
-            return {"kind": kind, "since": since, "count": len(pending),
-                    "why": "waiting on %d background tasks%s"
-                           % (len(pending), (" — " + d0 + ", …") if d0 else "")}
+        # A dispatched agent/workflow is an AGENT row even through the task stream; a shell command or
+        # a Monitor is a COMMAND row. No collapse: two kinds present read as two groups, never "task".
+        is_agent = "agent" in (t.get("type") or "") or t.get("type") == "local_workflow"
+        if not is_agent:
+            commands.append(_awaiting_item("commands", t.get("tid") or "", t.get("desc") or "background command", t.get("t")))
+            continue
+        aid = t.get("agentId")
+        if not aid and path and t.get("tid"):
+            meta = _subagent_meta_map(path) if meta is None else meta
+            aid = (meta.get(t["tid"]) or {}).get("agentId")
+        hit = seen_agent.get(str(aid)) if aid else None
+        if hit is not None:
+            # the SAME agent seen by the hook: one row, wearing the launch's id (Stop's handle), its
+            # description, and the earlier of the two start times
+            hit["id"] = t.get("tid") or hit["id"]
+            hit["label"] = t.get("desc") or hit["label"]
+            if t.get("t") and not hit.get("since"):
+                hit["since"] = int(t["t"])
+            continue
+        agents.append(_awaiting_item("agents", t.get("tid") or "", t.get("desc") or "background agent", t.get("t"), agent_id=aid))
     # Source 0.9 — ARMED KERNEL WATCHES this session registered (`romp watch --cmd` / `romp watch-pr`):
     # kernel-owned and restart-proof like the rows themselves, event-true at both ends (armed at
     # registration, cleared when the predicate fires or the watch cancels/times out). The user's rule
     # (2026-08-30): ANY awaited thing shows — an idle session holding only a watch used to read plain
     # ready, its wait visible nowhere but `romp watch --list`.
-    w = _watch_awaiting(sid)
-    if w:
-        return w
+    combined = _awaiting_from_items(agents, commands, _watch_awaiting(sid))
+    if combined:
+        return combined
     ov = _states_awaiting_overlay(sid)
     if ov is not None and ov.get("awaiting"):         # a producer wrote a LIVE awaiting:true → trust its why
         ovk = ov.get("kind")
         return {"kind": ovk if ovk in jd.AWAIT_KINDS else None,
                 "since": ov.get("t") or None,          # the overlay row's own stamp — when the hook declared the wait
                 "count": ov["count"] if isinstance(ov.get("count"), int) and ov["count"] > 0 else None,   # only when the producer said (no parsing the why)
-                "why": ov.get("why") or "waiting on dispatched work"}
+                "why": ov.get("why") or "waiting on dispatched work",
+                "items": []}                           # an overlay row names no rows — the box shows its why alone
     # An awaiting:false overlay row is NOT a veto — it says only that THIS channel has nothing to add.
     # The SDK Stop hook has written an unconditional false at every turn end since 2026-07-07 while
     # nothing writes true, so treating "most recent row is false" as the session's answer made source 2
@@ -17146,23 +17261,26 @@ def _session_awaiting(sid, path, idle, stamp=False):
         # and nobody else's (the user 2026-08-08): the three surfaces answered one question two ways.
         y = _owned_yield_why(sid, path)
         if y:
-            return {"kind": "task", "why": y, "since": None, "count": 1}   # a live owned dispatch — in-harness work (no single event time to show)
+            return {"kind": "task", "why": y, "since": None, "count": 1, "items": []}   # a live owned dispatch — in-harness work (no single event time to show; the yield names no row)
         _gid, _at, st_why, st_kind, st_peers = _session_stamp_full(sid)
         if st_why:
             out = {"kind": st_kind, "why": st_why, "since": _at or None,   # the judge's own classification rides the stamp, with its awaitingAt
-                   "count": len(st_peers) if st_peers else None}   # a peer stamp knows its peers; other stamps carry no count
+                   "count": len(st_peers) if st_peers else None,   # a peer stamp knows its peers; other stamps carry no count
+                   "items": []}                                    # a stamp names no rows (a peer stamp names its peers, below)
             if st_kind == "peer" and st_peers:
                 # the stamp RECORDS who the wait is on (judge awaitPeers) — name them (2026-08-26);
                 # `peers` rides only when known, so every other arm's shape is byte-identical
                 out["peers"] = sorted((_peer_identity(p) for p in st_peers), key=lambda d_: d_["name"])
+                out["items"] = _awaiting_peer_items(out["peers"])
             return out
         d = _session_delegated_why(sid)
         if d:
-            out = {"kind": "peer", "why": d, "since": None}   # the courier handoff graph is peer by construction
+            out = {"kind": "peer", "why": d, "since": None, "items": []}   # the courier handoff graph is peer by construction
             pi = _session_delegated_identities(sid)
             if pi:
                 out["peers"] = pi
                 out["count"] = len(pi)
+                out["items"] = _awaiting_peer_items(pi)
             return out
     return None
 
@@ -17440,7 +17558,10 @@ def _owned_yield_why(sid, path):
         best = cand if best is None else max(best, cand)
     if best is None:
         return None
-    return "waiting on a background task%s" % ((": " + best[1]) if best[1] else "")
+    # worded "command" since 2026-09-05 (the awaiting vocabulary: agents / commands / watches — plans/
+    # subagent-transcripts.md slice 2): the owned dispatch is in-harness background work the chip words as
+    # a command; the kind stays the legacy "task" key every consumer already reads
+    return "waiting on a background command%s" % ((": " + best[1]) if best[1] else "")
 
 
 def _states_awaiting_overlay(sid):
@@ -17738,10 +17859,358 @@ def _bg_tasks(path, spawned_at=None, live=None):
     elif spawned_at:
         scan = [tk for tk in scan if not (tk.get("t") and tk["t"] < spawned_at)]
     out = []
+    meta = None                                   # the subagents sidecar map, read once and only if an agent row needs it
     for tk in scan[:30]:    # show up to 30 lines (the flat list scrolls); count below reports the true total
-        out.append({"id": tk["id"], "status": tk["status"], "summary": tk["summary"], "command": tk["command"],
-                    "output": _read_task_output(tk["outputFile"])})
+        row = {"id": tk["id"], "status": tk["status"], "summary": tk["summary"], "command": tk["command"],
+               "output": _read_task_output(tk["outputFile"])}
+        # an AGENT row names the agent whose own transcript it writes, so the box can offer the same
+        # open-transcript arrow the Agent tool head has (plans/subagent-transcripts.md). Three sources,
+        # any one suffices: the launch ack's agentId, the sidecar map, the output symlink's basename.
+        # Shell tasks (`b…` ids, plain-text output) get no agentId and keep their treatment.
+        if tk.get("type") in ("local_agent", None) or tk.get("agentId"):
+            aid = tk.get("agentId")
+            if not aid:
+                meta = _subagent_meta_map(path) if meta is None else meta
+                aid = (meta.get(tk["id"]) or {}).get("agentId") or _agent_id_of_output(tk.get("outputFile"))
+            if aid and _AGENT_ID_RE.match(str(aid)):
+                row["agentId"] = str(aid)
+        out.append(row)
     return {"count": len(scan), "tasks": out}
+
+
+# ───────────────────────── subagent transcripts (plans/subagent-transcripts.md, 2026-09-05) ─────────────────────────
+# Claude Code writes every subagent (the Agent tool; older transcripts say Task) its OWN complete JSONL
+# beside the parent transcript — <proj>/<fsid>/subagents/agent-<agentId>.jsonl — plus a sidecar
+# agent-<agentId>.meta.json whose toolUseId is the parent's tool_use block id. The dashboard reads THAT
+# file (the authoritative copy; the background task's /tmp output file is a symlink to it) rather than
+# un-dropping the SDK's sidechain stream, which the backend deliberately filters out of the parent's
+# conversation (tests/test_sidechain_atoms.py). Everything below is event-based: directory mtimes, file
+# (mtime, size) keys, the transcript's own launch↔notification pairing, and the SDK's live sets.
+_AGENT_ID_RE = re.compile(r"^a[0-9a-f]{16}$")
+_SUBAGENT_META_CACHE = {}       # subagents dir -> (dir mtime_ns, {toolUseId: {agentId, agentType, description, spawnDepth}})
+_AGENT_GIST_CACHE = {}          # agent jsonl path -> em.fold_records entry (the live preview's fold state)
+_AGENT_LAUNCH_CACHE = {}        # parent jsonl path -> em.fold_records entry (foreground launches + their settles)
+_SUBAGENT_FRAMES = {}           # (sid, agentId) -> (change key, frame, serialized) — shared by every client with it open
+SUBAGENT_EVENT_CAP = 300        # events shipped per viewer frame — a bounded TAIL, honest about the cut (the episode fold's rule)
+SUBAGENT_RECENT = 3             # tool calls the live preview shows under the Agent head
+
+
+def _subagents_dir(path):
+    """The subagents directory for a transcript file: <dir>/<file stem>/subagents."""
+    return Path(str(path)).with_suffix("") / "subagents"
+
+
+def _subagent_meta_map(path):
+    """toolUseId → {agentId, agentType, description, spawnDepth} for every agent-*.meta.json beside the
+    transcript at `path`, cached on the DIRECTORY's mtime (a sidecar landing changes it — a stat, never a
+    timer). {} when the directory does not exist (older CLIs wrote no subagent files)."""
+    d = _subagents_dir(path)
+    try:
+        key = os.stat(d).st_mtime_ns
+    except OSError:
+        _SUBAGENT_META_CACHE.pop(str(d), None)
+        return {}
+    hit = _SUBAGENT_META_CACHE.get(str(d))
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    out = {}
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        names = []
+    for nm in names:
+        if not (nm.startswith("agent-") and nm.endswith(".meta.json")):
+            continue
+        aid = nm[len("agent-"):-len(".meta.json")]
+        if not _AGENT_ID_RE.match(aid):
+            continue
+        try:
+            meta = json.loads((d / nm).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict) or not meta.get("toolUseId"):
+            continue
+        out[str(meta["toolUseId"])] = {"agentId": aid, "agentType": meta.get("agentType") or "",
+                                       "description": meta.get("description") or "",
+                                       "spawnDepth": meta.get("spawnDepth")}
+    if len(_SUBAGENT_META_CACHE) > 256:
+        _SUBAGENT_META_CACHE.clear()
+    _SUBAGENT_META_CACHE[str(d)] = (key, out)
+    return out
+
+
+def _subagent_meta(path, agent_id):
+    """One agent's sidecar (agentType, description, spawnDepth, toolUseId) read directly; {} when absent."""
+    mp = _subagents_dir(path) / ("agent-%s.meta.json" % agent_id)
+    try:
+        meta = json.loads(mp.read_text())
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _subagent_file(path, agent_id):
+    """The agent's own transcript beside the parent transcript `path`, or — when the sidecar dir has moved
+    under a /clear fork's fsid — the one file of that name anywhere in the project dir. None when missing."""
+    if not path or not _AGENT_ID_RE.match(str(agent_id or "")):
+        return None
+    ap = _subagents_dir(path) / ("agent-%s.jsonl" % agent_id)
+    if ap.exists():
+        return ap
+    try:
+        for cand in Path(str(path)).parent.glob("*/subagents/agent-%s.jsonl" % agent_id):
+            return cand
+    except OSError:
+        pass
+    return None
+
+
+def _agent_id_of_output(output_file):
+    """The agent id a background task's output path names (…/tasks/<agentId>.output), else None."""
+    stem = os.path.splitext(os.path.basename(str(output_file or "")))[0]
+    return stem if _AGENT_ID_RE.match(stem) else None
+
+
+def _tool_gist_desc(name, inp):
+    """A tool call's one-line gist in the chat head's own vocabulary: input.description, else the file
+    path, else the command's first line, then a search's pattern/query before its scope path (the
+    pattern says what was looked for; the path only where), then url/skill/prompt — clipped."""
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("description", "file_path", "command", "pattern", "query", "path", "url", "skill", "prompt"):
+        v = inp.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip().splitlines()[0][:80]
+    return ""
+
+
+def _gist_fresh():
+    return {"recent": [], "calls": 0, "since": None, "last": None}
+
+
+def _gist_step(state, o):
+    ts = o.get("timestamp") if isinstance(o.get("timestamp"), str) else None
+    if ts:
+        state["since"] = state["since"] or ts
+        state["last"] = ts
+    if o.get("type") == "assistant":
+        c = (o.get("message") or {}).get("content")
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    state["calls"] += 1
+                    state["recent"] = (state["recent"] + [{"tool": b.get("name") or "tool",
+                                                           "desc": _tool_gist_desc(b.get("name"), b.get("input")),
+                                                           "ts": ts}])[-SUBAGENT_RECENT:]
+    return state
+
+
+def _agent_gist(agent_path):
+    """The live preview under a running Agent head: its last SUBAGENT_RECENT tool calls (newest last),
+    the tool-call count so far, and the first/last record stamps — folded append-incrementally over the
+    agent's own file (em.fold_records: a growing file steps only its new records). None when unreadable."""
+    try:
+        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step)
+    except Exception:
+        return None
+    if not st["since"]:
+        return None
+    return {"recent": [dict(r) for r in st["recent"]], "calls": st["calls"], "since": st["since"], "last": st["last"]}
+
+
+def _launch_fresh():
+    return {"launched": {}, "settled": set()}
+
+
+def _launch_step(state, o):
+    """FOREGROUND agent launches (a tool_use named Agent/Task) and the tool_results that settle them — an
+    async ack is a launch acknowledgement, not a settle, and leaves the id open for the bg scan's pairing."""
+    t = o.get("type")
+    c = (o.get("message") or {}).get("content")
+    if t == "assistant" and isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ("Agent", "Task") and b.get("id"):
+                state["launched"].setdefault(b["id"], em.parse_z(o.get("timestamp")))
+    elif t == "user" and isinstance(c, list):
+        tur = o.get("toolUseResult")
+        tur = tur if isinstance(tur, dict) else {}
+        if tur.get("isAsync") or tur.get("status") == "async_launched":
+            return state
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in state["launched"]:
+                state["settled"].add(b["tool_use_id"])
+    return state
+
+
+def _agent_launch_state(path):
+    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step)
+
+
+def _agent_alive(row, agent_id, tm, spawned_at):
+    """Is a launched agent still running? `row` is its bg-scan row ({id, status, t, …}; a foreground launch
+    passes a synthetic running row) — the transcript's own pairing says whether a result has landed. The
+    live gate then says whether the CLI that would deliver one is still around: an SDK session's snapshot
+    carries the SubagentStart/Stop set (agent ids) and the task-lifecycle set (tool-use ids) — the agent is
+    alive iff either names it; a tmux or dormant session falls to the spawned-at ghost gate _bg_tasks
+    applies (a launch older than the current CLI epoch died with the previous CLI). Never a clock."""
+    if not row or row.get("status") != "running":
+        return False
+    if tm is not None and ("subagents" in tm or "bgTasks" in tm):
+        live_agents = {str(x.get("agentId")) for x in (tm.get("subagents") or []) if x.get("agentId")}
+        live_tools = {str(x.get("toolUseId")) for x in (tm.get("bgTasks") or []) if x.get("toolUseId")}
+        return (str(agent_id) in live_agents) or (str(row.get("id")) in live_tools)
+    return not (spawned_at and row.get("t") and row["t"] < spawned_at)
+
+
+def _agent_running_for(parent_path, tool_use_id, agent_id, tm, spawned_at):
+    """The viewer's `running` flag for one agent, from the parent transcript: a background launch is read
+    off the bg scan's pairing (its notification ends it), a foreground one off its own tool_result."""
+    if not tool_use_id:
+        return False
+    rows = {r["id"]: r for r in _bg_scan_all_cached(parent_path)}
+    row = rows.get(tool_use_id)
+    if row is not None:
+        return _agent_alive(row, agent_id, tm, spawned_at)
+    st = _agent_launch_state(parent_path)
+    if tool_use_id not in st["launched"] or tool_use_id in st["settled"]:
+        return False
+    return _agent_alive({"id": tool_use_id, "status": "running", "t": st["launched"][tool_use_id]}, agent_id, tm, spawned_at)
+
+
+def _stamp_agents(by_tool, scan_path, tm, spawned_at, meta_path=None):
+    """Post-pass over one build's Agent/Task tool events (plans/subagent-transcripts.md): every one gets
+    toolUseId + agentId (from the ack's toolUseResult or the sidecar map); a BACKGROUND launch that is
+    still running drops its launch-ack output (the ack is not a report — the client's existing no-output
+    rule then reads it as running), takes agentRunning and the live agentGist preview; one whose
+    <task-notification> has landed takes the notification's <result> as its output, so the head's report
+    fold shows the closing summary instead of the ack. A foreground agent's tool_result was always the
+    report and is left alone. Returns {toolUseId: "sync"|"running"|"report"|"pending"} for the fold's
+    sealed-agent gate (pending = launched, no result, and not alive — the ack stays as the honest output)."""
+    meta = None
+    rows = None
+    out = {}
+    for tid, ev in by_tool.items():
+        if ev.get("name") not in ("Agent", "Task"):
+            continue
+        if meta is None:
+            meta = _subagent_meta_map(meta_path or scan_path)
+        aid = ev.get("agentId") or (meta.get(tid) or {}).get("agentId")
+        ev["agentId"] = str(aid) if aid else None
+        if not ev.get("agentAsync"):
+            out[tid] = "sync"
+            continue
+        if rows is None:
+            rows = {r["id"]: r for r in _bg_scan_all_cached(scan_path)}
+        row = rows.get(tid)
+        if row is not None and row.get("status") != "running":
+            if row.get("result"):
+                ev["output"] = row["result"]
+                ev["isError"] = row["status"] not in ("completed", "done", "success")
+            out[tid] = "report"
+        elif _agent_alive(row, aid, tm, spawned_at):
+            ev["output"] = ""
+            ev["agentRunning"] = True
+            ap = _subagent_file(meta_path or scan_path, aid) if aid else None
+            g = _agent_gist(ap) if ap is not None else None
+            if g:
+                ev["agentGist"] = g
+            out[tid] = "running"
+        else:
+            out[tid] = "pending"
+    return out
+
+
+def _chat_agent_open_at(events, lo):
+    """Index of the first RUNNING Agent card at/after `lo` — a launch turn the chat fold must not seal
+    while the agent runs (its preview and eventual report are rebuilt live in the tail). None when every
+    agent in range has settled. The undecided-seam rule's twin (see _chat_seam_open_at)."""
+    for i in range(lo, len(events)):
+        if events[i].get("kind") == "tool" and events[i].get("agentRunning"):
+            return i
+    return None
+
+
+def _chat_agents_moved(agents, path, tm, spawned_at):
+    """The fold's sealed-agent gate: True when a sealed Agent card would render differently now — a
+    launch sealed with no agent id has gained its sidecar, or a background launch sealed WITHOUT its
+    report (pending) has come to rest or is alive again. `agents` = [(toolUseId, agentId, pending)]."""
+    meta = None
+    rows = None
+    for tid, aid, pending in agents:
+        if aid is None:
+            meta = _subagent_meta_map(path) if meta is None else meta
+            if tid in meta:
+                return True
+        if pending:
+            rows = {r["id"]: r for r in _bg_scan_all_cached(path)} if rows is None else rows
+            row = rows.get(tid)
+            if row is not None and (row.get("status") != "running" or _agent_alive(row, aid, tm, spawned_at)):
+                return True
+    return False
+
+
+def build_subagent(sid, agent_id, now, tmux=None):
+    """The {type:"subagent"} viewer frame for one agent of session `sid`: its sidecar meta, whether it is
+    still running, and its transcript rendered through build_session's override mode — the SAME renderer
+    the chat uses, in sidechain mode (no parent side-store notes) — as a capped tail. FAIL LOUDLY (the
+    repo rule): a missing file is an `error` sentence the pane shows, never a blank."""
+    base = {"type": "subagent", "id": sid, "agentId": agent_id}
+    if not _AGENT_ID_RE.match(str(agent_id or "")):
+        return {**base, "error": "That is not a subagent id, so there is no transcript to open."}
+    tmux = _tmux_sessions() if tmux is None else tmux
+    ppath = _path_of(sid, now)
+    if not ppath:
+        return {**base, "error": "This session's transcript can't be found, so its agents can't be opened."}
+    apath = _subagent_file(ppath, agent_id)
+    if apath is None:
+        return {**base, "error": "The transcript file for agent %s is missing beside this session's transcript "
+                                 "(subagents/agent-%s.jsonl), so it can't be shown." % (agent_id, agent_id)}
+    meta = _subagent_meta(ppath, agent_id)
+    full = build_session(sid, now, tmux, path_override=str(apath), sidechain=True, meta_path=ppath)
+    if not full:
+        return {**base, "error": "This session isn't known to romp any more, so its agent can't be shown."}
+    evs = full.get("events") or []
+    return {**base,
+            "meta": {"agentType": meta.get("agentType") or "", "description": meta.get("description") or "",
+                     "spawnDepth": meta.get("spawnDepth"), "toolUseId": meta.get("toolUseId") or ""},
+            "running": _agent_running_for(ppath, meta.get("toolUseId"), agent_id, tmux.get(str(sid)), _sdk_spawned_at(sid)),
+            "events": evs[-SUBAGENT_EVENT_CAP:], "truncated": len(evs) > SUBAGENT_EVENT_CAP}
+
+
+def _subagent_frame_cached(sid, agent_id, now, tmux=None):
+    """(frame, serialized) for an OPEN viewer, rebuilt only when its change key moved: the agent file's
+    (mtime, size), the running flag, and whether the sidecar exists. Shared across clients; the per-client
+    dedup slot ("subagent", sid, agentId) absorbs an unchanged re-send."""
+    tmux = _tmux_sessions() if tmux is None else tmux
+    ppath = _path_of(sid, now)
+    apath = _subagent_file(ppath, agent_id) if ppath else None
+    meta = _subagent_meta(ppath, agent_id) if ppath else {}
+    running = (_agent_running_for(ppath, meta.get("toolUseId"), agent_id, tmux.get(str(sid)), _sdk_spawned_at(sid))
+               if ppath else False)
+    key = (ppath, _chat_stat_key(str(apath)) if apath is not None else None, running, bool(meta))
+    hit = _SUBAGENT_FRAMES.get((sid, agent_id))
+    if hit is not None and hit[0] == key:
+        return hit[1], hit[2]
+    fr = build_subagent(sid, agent_id, now, tmux)
+    pre = json.dumps(fr)
+    if len(_SUBAGENT_FRAMES) > 64:
+        _SUBAGENT_FRAMES.clear()
+    _SUBAGENT_FRAMES[(sid, agent_id)] = (key, fr, pre)
+    return fr, pre
+
+
+def _push_subagents(clients, now, tmux):
+    """Re-push every OPEN subagent viewer on these chat clients (client["subagents"], set by openSubagent,
+    cleared by closeSubagent or the socket going away). Rides the pusher's existing per-cycle chat pass —
+    no polling loop of its own — and costs a stat per open viewer when nothing changed."""
+    for c in clients:
+        for (ssid, aid) in list((c.get("subagents") or {}).keys()):
+            try:
+                fr, pre = _subagent_frame_cached(ssid, aid, now, tmux)
+            except Exception:
+                sys.stderr.write("subagent frame failed for %s/%s: %s\n" % (ssid, aid, traceback.format_exc()))
+                continue
+            _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
 
 
 # The MONTHLY SPEND CAP error (the user 2026-07-14): a billing limit ("You've hit your monthly spend
@@ -21440,9 +21909,14 @@ def _stamp_interrupt_causes(events):
     return events
 
 
-def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
+def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None):
     """A {type:"session"} message the render.js bundle consumes: the event tree reshaped to
     ChatEvent[], plus the TOC ledger (archiver headline + turn captions) and a status chip.
+
+    sidechain (build_subagent, plans/subagent-transcripts.md): the override file is a SUBAGENT's own
+    transcript — render it through the same pipeline, but keep the parent's side-store notes (retry
+    recoveries, orphan replies, effort/gesture chips — all sid-keyed) out of a conversation they never
+    belonged to. meta_path names the PARENT transcript whose subagents/ sidecars join nested Agent calls.
 
     path_override (build_episode, the user 2026-07-27): parse THAT transcript instead of the session's
     current one — the single sid→path resolution point the episode plan reserved (plans/clear-episodes.md).
@@ -21557,6 +22031,9 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
     # retry that re-replied must not double. Match exact, and either-way prefix (a partial stream vs its full
     # retry). NB: build the disk-text set from the SAME session["turns"] atoms this loop renders.
     orphans = _past_floor(_orphan_replies(sid)); _oi = 0
+    if sidechain:
+        # a subagent's transcript carries none of the parent's side-store notes (see the docstring)
+        recoveries, gaveups, efforts, gestures, orphans = [], [], [], [], []
     _disk_texts = set()
     _turn_texts = {}                          # turn index → that turn's disk texts (built on demand, see the fold)
     def _texts_of_turn(_i):
@@ -21615,6 +22092,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                 _fold_why = "gesture"                 # a gesture chip the live tail pruned now renders durably
             elif _fe["orphan_uuids"] & _landed_uuids:
                 _fold_why = "landed"                  # an interleaved orphan reply landed on some branch after all
+            elif _fe.get("agents") and _chat_agents_moved(_fe["agents"], sess["path"], tm0, _sdk_spawned_at(sid)):
+                _fold_why = "agent"                   # a sealed Agent card's report landed / sidecar appeared / liveness flipped
             else:
                 _k = _fe["n"]
                 _tail_tr = set()
@@ -21770,6 +22249,14 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                             ev["output"] = (c if isinstance(c, str) else json.dumps(c))[:16000]
                             ev["isError"] = bool(tr.get("is_error"))
                             ev["resultUuid"] = a.get("uuid")
+                            if tur and ev.get("name") in ("Agent", "Task"):
+                                # the ack names the agent whose own transcript this launch writes, and
+                                # says whether it was a BACKGROUND launch (the ack is then not the
+                                # report — _stamp_agents fills the real one when the notification lands)
+                                if tur.get("agentId"):
+                                    ev["agentId"] = str(tur["agentId"])
+                                if tur.get("isAsync") or tur.get("status") == "async_launched":
+                                    ev["agentAsync"] = True
                             # Edit/MultiEdit: Claude Code records a structuredPatch (toolUseResult) carrying REAL
                             # file line numbers + context — turn it into numbered diff rows so the chat shows a
                             # true line-number gutter (the user 2026-06-29). filePath-matched so the right result
@@ -21955,6 +22442,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                               "desc": str(inp.get("description") or "")[:200],
                               "input": json.dumps(inp) if _full else json.dumps(inp)[:4000], "output": "", "isError": False,
                               "uuid": a.get("uuid"), "ts": ts,
+                              "toolUseId": b.get("id"),   # the tool_use BLOCK id (uuid is the record's) — the join
+                              #   key a subagent's sidecar / a task-notification names (plans/subagent-transcripts.md)
                               "file": inp.get("file_path") or inp.get("path") or "",
                               "diff": _edit_diff(inp) if b.get("name") in ("Edit", "MultiEdit", "Write") else ""}
                         if b.get("name") == "AskUserQuestion":
@@ -21991,6 +22480,10 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                 events.append({"kind": "modelFallback", "uuid": a.get("uuid"), "ts": ts,
                                "from": a.get("fallback_from") or "", "to": a.get("fallback_to") or "",
                                "md": a.get("content") or ""})
+    # Agent/Task cards: the agent join, the running preview, the landed report (plans/subagent-transcripts.md).
+    # Tail events only in fold mode — the sealed prefix's cards are gated by _chat_agents_moved and held
+    # open by _chat_agent_open_at below.
+    _agent_states = _stamp_agents(by_tool, sess["path"], tm0, _sdk_spawned_at(sid), meta_path=meta_path)
     _flush_recoveries(tail_cap_t)                       # a recovery on the still-open tail turn (t past the last atom) → bottom of the flow
     #                                                     (tail_cap_t: an episode render stops at its /clear — later notes belong to the next episode)
     # The post-passes run over the TAIL only (issue 903): the prefix was hydrated, stamped and tlId'd
@@ -22034,6 +22527,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                 _b = next((_i for _i in range(_pref_len, len(events)) if _turn_of(events[_i]) >= _np),
                           len(events))
                 _open = _chat_seam_open_at(events[:_b], _pref_len)   # an undecided seam holds the boundary
+                if _open is None:
+                    _open = _chat_agent_open_at(events[:_b], _pref_len)   # …and so does a RUNNING agent's launch turn
                 if _open is None:
                     break
                 _np = _turn_of(events[_open])   # may equal _fk: the next pass then finds _b == _pref_len and no
@@ -22099,7 +22594,13 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                     "open_tools": _open_tools, "skill_unfilled": _skill_unf,
                     "postal_raw": _praw, "postal_cards": _pcards,
                     "postal_key": _pk, "judge_gen": _judge_gen[0], "pl_pending": _plp,
-                    "task_outs": _touts})
+                    "task_outs": _touts,
+                    # the sealed Agent cards, for _chat_agents_moved: (toolUseId, agentId, pending) —
+                    # pending = a background launch sealed without its report (the ack stands as output)
+                    "agents": (list(_fe["agents"]) if _fold_ok and _fe.get("agents") else [])
+                              + [(_e.get("toolUseId"), _e.get("agentId"),
+                                  _agent_states.get(_e.get("toolUseId")) == "pending")
+                                 for _e in _newpart if _e.get("kind") == "tool" and _e.get("name") in ("Agent", "Task")]})
             _chat_fold_last.info["prefix_next"] = _b
         except Exception:
             with _chat_fold_lock:
@@ -22496,6 +22997,10 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                   # number — a single agent is not "agents") — the chip and the box derive the word from
                   # this one number; None when the source cannot know (an untyped stamp, a bare overlay)
                   "awaitingCount": ((_aw or {}).get("count") if isinstance((_aw or {}).get("count"), int) else None),
+                  # …and the awaited ROWS themselves — [{kind, id, label, since, agentId?, detail?,
+                  # watchId?}], grouped by the box and worded by the chip's tooltip (slice 2, 2026-09-05);
+                  # [] for a wait no source can enumerate (a judge stamp, a bare overlay row)
+                  "awaitingItems": (list((_aw or {}).get("items") or []) if awaiting_why else []),
                   "awaitingTasks": (((_awaiting_task_descs(sid, sess["path"]) or
                                       (_aw or {}).get("tasks") or [])) if awaiting_why else []),
                   # …and the same tasks' launch ids, so the #bg-tasks box outlines exactly the awaited
@@ -23314,7 +23819,7 @@ def _provisional_card(s, name, color, fsid, live, now, store=None):
             "provisional": True, "judging": not turn_open, "tree": []}
 
 
-def _awaiting_card(s, name, color, fsid, live, now, why, kind=None, since=None, count=None):
+def _awaiting_card(s, name, color, fsid, live, now, why, kind=None, since=None, count=None, items=None):
     """A lightweight WORKING-column placeholder for a LIVE, IDLE session AWAITING a dispatched BACKGROUND
     TASK when there is NO open goal to floor to awaiting (the user 2026-07-13). The turn ended and every
     card is done/cleared/placed, so the goal loop has nothing to floor AND _provisional_card bows out (its
@@ -23337,9 +23842,9 @@ def _awaiting_card(s, name, color, fsid, live, now, why, kind=None, since=None, 
             t = turns[-1].get("t", now)              # last activity → recency tint, sorts with the working column
     except Exception:
         pass
-    # _session_awaiting already phrases the why ("waiting on a background task: <desc>"); capitalize it for
+    # _session_awaiting already phrases the why ("waiting on a background command: <desc>"); capitalize it for
     # the headline. The task list rides `awaiting` for the pill, so the headline needn't repeat every task.
-    text = (why[:1].upper() + why[1:]) if why else "Waiting on a background task"
+    text = (why[:1].upper() + why[1:]) if why else "Waiting on a background command"
     return {"itemId": "awaiting:" + fsid, "sid": fsid, "name": name, "color": color, "text": text,
             "t": t, "live": live, "trgb": list(cm.age_rgb(now - t, _colormap())),
             "turnId": None, "origin": None, "followupPending": None,
@@ -23350,6 +23855,7 @@ def _awaiting_card(s, name, color, fsid, live, now, why, kind=None, since=None, 
             # "Working…"/"Analyzing…" chip, carries the state (feed.ts defers the provisional chip when awaiting).
             "awaiting": {"why": why, "kind": kind, "since": since,
                          "count": count if isinstance(count, int) else None,   # the feed pill's word agrees in number (T225)
+                         "items": list(items or []),   # the awaited rows the pill lists, grouped (slice 2)
                          "tasks": _awaiting_task_descs(fsid, s["path"])},
             "provisional": True, "judging": False, "tree": []}
 
@@ -24045,6 +24551,7 @@ def build_feed(now, tmux=None):
         sess_awaiting_since = _sess_aw.get("since") if _sess_aw else None   # the wait's own event time (the user 2026-08-23)
         sess_awaiting_count = _sess_aw.get("count") if _sess_aw else None   # how many are awaited — the pill's word agrees in number (T225)
         sess_awaiting_peers = _sess_aw.get("peers") if _sess_aw else None   # named identities when the arm knows them (2026-08-26)
+        sess_awaiting_items = list(_sess_aw.get("items") or []) if _sess_aw else []   # the awaited rows (slice 2) — the pill lists them grouped
         if sess_awaiting_why and not who_working:
             awaiting.append(name)                    # the AWAITING dot list (await-green, the user 2026-07-13) — the
             #                                          same split _session_chip makes; feed/chat dots match the chip
@@ -24135,7 +24642,7 @@ def build_feed(now, tmux=None):
                 # the blocked card's own thread still proves the thread moved past the block.
                 _await_ok = bool(_own) and _own["since"] >= _blk_t
                 if _await_ok:
-                    _owned_why = "waiting on a background task%s" % (
+                    _owned_why = "waiting on a background command%s" % (   # the chip's word for in-harness work (2026-09-05)
                         (": " + _own["descs"][0]) if _own["descs"] else "")
                     _owned_since = _own["since"]           # the dispatch event that proved the yield
             # The JUDGE's durable ⏳ stamp (the closer's awaiting verdict, kernel/judge.py): this goal's
@@ -24232,14 +24739,15 @@ def build_feed(now, tmux=None):
             await_since = None                       # mirroring the or-chain exactly (a kindless winner
             await_peers = None                       # stays kindless; since = the wait's own event time).
             await_count = None                       # how many are awaited — the SAME number the chat chip words itself
+            await_items = []                         # the awaited ROWS the pill lists, grouped by kind (slice 2, 2026-09-05)
             if col == "awaiting":                    # from (T228, the user's one-count rule): the live snapshot's own
                 # count, the peers a stamp or delegation names, one owned dispatch; None when the arm cannot know
-                for _w, _k, _s, _p, _n in ((sess_awaiting_why, sess_awaiting_kind, sess_awaiting_since, sess_awaiting_peers, sess_awaiting_count),
-                                           (_stamp_why, _stamp_kind, _stamp_since, _stamp_peers, (len(_stamp_peers) if _stamp_peers else None)),
-                                           (_deleg_why, "peer", _deleg_since, _deleg_peers, (len(_deleg_peers) if _deleg_peers else None)),
-                                           (_owned_why, "task", _owned_since, None, 1)):
+                for _w, _k, _s, _p, _n, _it in ((sess_awaiting_why, sess_awaiting_kind, sess_awaiting_since, sess_awaiting_peers, sess_awaiting_count, sess_awaiting_items),
+                                                (_stamp_why, _stamp_kind, _stamp_since, _stamp_peers, (len(_stamp_peers) if _stamp_peers else None), _awaiting_peer_items(_stamp_peers)),
+                                                (_deleg_why, "peer", _deleg_since, _deleg_peers, (len(_deleg_peers) if _deleg_peers else None), _awaiting_peer_items(_deleg_peers)),
+                                                (_owned_why, "task", _owned_since, None, 1, [])):
                     if _w:
-                        await_kind, await_since, await_peers = _k, _s, _p
+                        await_kind, await_since, await_peers, await_items = _k, _s, _p, _it
                         await_count = _n if isinstance(_n, int) and _n > 0 else None
                         break
             # The card's TIME reflects its CURRENT STATE, not when the goal was minted: a COMPLETED card
@@ -24529,6 +25037,7 @@ def build_feed(now, tmux=None):
                 "awaiting": ({"why": await_why, "kind": await_kind, "since": await_since,
                               "count": await_count,   # the one number every surface words itself from (T228)
                               "peers": await_peers,   # delegation wait → [{name, host, sid, color}] for the identity-coloured box (the user 2026-08-23)
+                              "items": await_items,   # the awaited rows, grouped by the pill's expansion (slice 2)
                               "tasks": _awaiting_task_descs(fsid, s["path"])} if col == "awaiting" else None),
                 "summary": nodes[nid].get("summary"),    # the distiller's key takeaway for a completed goal (modal) — the user 2026-06-17
                 "distillState": distill_state,   # "completed" | "blocked" | null — the GENUINE state the distiller line keys on, so the brief/takeaway doesn't flicker off when recheck/rejudging drops `column` to working (the user 2026-07-21)
@@ -24669,7 +25178,7 @@ def build_feed(now, tmux=None):
                 # hit ("there's no card there"). Ephemeral: gone the moment sess_awaiting_why clears.
                 asks.append(_awaiting_card(s, name, color, fsid, live, now, sess_awaiting_why,
                                            kind=sess_awaiting_kind, since=sess_awaiting_since,
-                                           count=sess_awaiting_count))
+                                           count=sess_awaiting_count, items=sess_awaiting_items))
     # THE SERVING FOLD, commit side (T137): join each candidate's rows under its dispatch's
     # tracker row — a read-only render-time join across stores (the node itself stays in the
     # WORKER's store, where plan-sync completion, nudge freshness, and clears live; node ids are
@@ -26705,6 +27214,7 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
             "id": sid, "name": name, "live": live, "state": state, "awaitingBg": awaiting_bg,
             "awaitingKind": awaiting_kind,
             "awaitingCount": ((_aw_bg or {}).get("count") if isinstance((_aw_bg or {}).get("count"), int) else None),   # the lane badge agrees in number (T228)
+            "awaitingItems": (list((_aw_bg or {}).get("items") or []) if awaiting_bg else []),   # the awaited rows, same set as the chat box (slice 2)
             "awaitingPeers": ((_aw_bg or {}).get("peers") or None),   # named identities for a peer wait (2026-08-26)
             # the live bg-task descriptions behind awaitingBg (the user 2026-07-13): the lane draws the
             # idle-but-waiting stretch as a thin dashed segment whose hover lists exactly what's pending
@@ -29102,6 +29612,9 @@ def _push(targets, connect=False, tmux=None):
                 if fr:
                     for c in chat_clients:
                         _send_client(c, ("comments", s["sid"]), fr)
+            # OPEN SUBAGENT VIEWERS (plans/subagent-transcripts.md): each rides its own per-client dedup slot
+            # like the comment frames, rebuilt only when the agent's file or liveness moved.
+            _push_subagents(chat_clients, now, tmux)
         fsig = _fleet_view_sig(now, tmux) if (want_feed or want_tl) else None
         feed_src = _cached_feed(now, tmux, fsig, connect) if want_feed else None
         feed = feed_src
@@ -35580,6 +36093,37 @@ class Handler(BaseHTTPRequestHandler):
                 client["send"](json.dumps(build_episode(str(msg["id"]), int(time.time()))))
             except Exception:
                 sys.stderr.write("loadEpisode: %s\n" % traceback.format_exc())
+            return
+        if msg and msg.get("type") in ("openSubagent", "closeSubagent") and msg.get("id") and msg.get("agentId"):
+            # A subagent viewer opened/closed (plans/subagent-transcripts.md): openSubagent answers NOW with
+            # the frame and registers the viewer on this client, so the pusher's chat pass re-sends it while
+            # the agent's file changes (_push_subagents); closeSubagent unregisters it. The dedup slot is
+            # dropped on both, so a reopen of an UNCHANGED agent is never swallowed as a duplicate.
+            sid, aid = str(msg["id"]), str(msg["agentId"])
+            with _client_lock(client):
+                client.setdefault("sent", {}).pop(("subagent", sid, aid), None)
+            if msg["type"] == "closeSubagent":
+                (client.get("subagents") or {}).pop((sid, aid), None)
+                return
+            client.setdefault("subagents", {})[(sid, aid)] = True
+            try:
+                fr, pre = _subagent_frame_cached(sid, aid, int(time.time()))
+                _send_client(client, ("subagent", sid, aid), fr, pre=pre)
+            except Exception:
+                sys.stderr.write("openSubagent %s/%s: %s\n" % (sid, aid, traceback.format_exc()))
+                client["send"](json.dumps({"type": "subagent", "id": sid, "agentId": aid,
+                                           "error": "romp couldn't build this agent's transcript — the kernel log has the traceback."}))
+            return
+        if msg and msg.get("type") == "cancelWatch" and msg.get("watchId"):
+            # The awaiting box's Cancel on a generic `romp watch --cmd` row (slice 2, 2026-09-05): the SAME
+            # cancel_watch the CLI's `romp watch --cancel <id>` and POST /watch {"cancel"} reach — no new
+            # retire path, one more door to it. `id` (the session) rides only so federation routes the
+            # message to the kernel that owns the watch. LOUD on a miss (fail loudly, never degrade
+            # silently): the watch may have fired or been cancelled from the CLI a moment earlier.
+            if not cancel_watch(str(msg["watchId"]).strip()):
+                client["send"](json.dumps({"type": "warn",
+                                           "text": "Couldn't cancel that watch — it may have already fired or been cancelled."}))
+            _push_soon()
             return
         if msg and msg.get("type") == "setGlobalRetryPaused":
             _set_retry_paused(msg.get("value"))

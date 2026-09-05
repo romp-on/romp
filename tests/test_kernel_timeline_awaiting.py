@@ -103,7 +103,7 @@ class TimelineAwaiting(unittest.TestCase):
                                            "context": None, "compactPct": None, "color": None, "mode": "",
                                            "bgTasks": [{"task_id": "t1", "desc": "Watch for round3 copy"}]}}
         lane = self._lane()
-        self.assertEqual(lane["awaitingBg"], "waiting on a background task: Watch for round3 copy")
+        self.assertEqual(lane["awaitingBg"], "waiting on a background command: Watch for round3 copy")   # "command" since slice 2 (2026-09-05)
         self.assertEqual(lane["awaitingTasks"], ["Watch for round3 copy"])
 
     def test_the_lane_ships_the_awaited_count_beside_the_kind(self):

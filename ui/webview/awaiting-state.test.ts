@@ -75,18 +75,21 @@ test("the awaiting WHY lives in the background box, not the statusline (the user
   const branch = RENDER.split('state === "awaitingBg") {')[1].split("} else if")[0];
   assert.doesNotMatch(branch, /sl-await-why/);
   assert.doesNotMatch(STYLES, /sl-await-why/);
-  // …and the #bg-tasks box renders it when no tracked tasks claim the box: the same fold treatment
-  // (await-green dot, verb-stripped header), expanding to the full why, the awaited items when there are
-  // several, and a plain-words note on what the state means. No Stop — nothing untracked is killable.
-  assert.match(RENDER, /\{ renderAwaitWhy\(host, s \|\| null\); return; \}/);
+  // …and the #bg-tasks box renders it — since slice 2 (2026-09-05) whenever a wait exists, the tracked
+  // tasks joining its rows: the same fold treatment (await-green dot, verb-stripped header), expanding
+  // to the awaited ROWS grouped by kind, or to the full why when the kernel names none, and a
+  // plain-words note on what the state means. Stop rides only a row backed by a LIVE tracked task
+  // (bgRow's stopId) — an untracked wait (a peer's PR, a watch) still has no process to kill.
+  assert.match(RENDER, /if \(why \|\| !count \|\| !tasks\.length\) \{ renderAwaitWhy\(host, s \|\| null, tasks\); return; \}/);
   assert.match(RENDER, /"bg-fold-head bg-await"/);
-  assert.match(RENDER, /"Awaiting" \+ \(kw \? " " \+ kindWord\(s!\.status\.awaitingKind, s!\.status\.awaitingCount\) : ""\) \+ " · " \+ why\.replace\(\/\^\(waiting on\|awaiting\)\\s\+\/i, ""\)/);
+  assert.match(RENDER, /lab\.textContent = "Awaiting" \+ \(word \? " " \+ word : ""\) \+ " · " \+ why\.replace\(\/\^\(waiting on\|awaiting\)\\s\+\/i, ""\)/);
   // …the kind word rides the visible label (the user 2026-08-15) — tooltips are dead on the touch PWA
-  assert.match(RENDER, /KIND_WORD\[\(s!\.status\.awaitingKind \|\| ""\)\]/);
+  assert.match(RENDER, /const word = awaitWord\(s!\.status\.awaitingKind, s!\.status\.awaitingCount, items\);/);
   assert.match(RENDER, /chip-awaiting-" \+ \(s\.status\.awaitingKind \|\| "untyped"\)/);
-  assert.match(RENDER, /if \(items\.length > 1\)/);
+  assert.match(RENDER, /if \(descs\.length > 1\)/);   // the no-rows fallback lists the legacy descriptions only when there are several
   assert.match(RENDER, /bg-await-note/);
-  assert.doesNotMatch(RENDER.split("function renderAwaitWhy")[1].split("\n}")[0], /bg-stop/);
+  assert.match(RENDER, /stopId: running \? tracked!\.id : null/);
+  assert.match(RENDER, /return \{ id, status: "armed", caption: "armed", label: it\.label \|\| "a watch", since: it\.since,\s*\n\s*watchId: it\.watchId \|\| null, command: it\.detail \|\| null \};/, "a watch row: Cancel when the kernel has a handle, never Stop");
   assert.match(STYLES, /\.bg-fold-head\.bg-await \{ --bgt: var\(--st-awaitbg-bg\); \}/);
 });
 
@@ -100,7 +103,8 @@ test("the awaited tasks wear the chip's green outline — exact launch-id match;
   assert.match(RENDER, /awaitingTaskIds\?: string\[\];/);
   assert.match(RENDER, /const awaited = new Set<string>\(s!\.status\.awaitingTaskIds \|\| \[\]\);/);   // ids' presence, never the chip state (2026-08-30: awaited things show even while working)
   assert.match(RENDER, /host\.classList\.toggle\("bg-awaited", tasks\.some\(\(t\) => awaited\.has\(t\.id\)\)\);/);
-  assert.match(RENDER, /\(awaited\.has\(t\.id\) \? " bg-awaited" : ""\)/);
+  assert.match(RENDER, /bgRow\(taskRowSpec\(t, awaited\.has\(t\.id\)\), sid\)/);   // the row spec carries the match (slice 2's one row renderer)
+  assert.match(RENDER, /\(t\.awaited \? " bg-awaited" : ""\)/);
   // …the untracked-wait box (renderAwaitWhy) IS the awaited thing, so it wears the border whole
   assert.match(RENDER, /host\.classList\.add\("bg-awaited"\);/);
   // the outline is the chip's await-green — the border/outline only; the status DOT rules are untouched
@@ -123,7 +127,9 @@ test("awaited things show even while WORKING, and kernel watches feed the box (t
   // 2. kernel watches are an awaiting SOURCE (idle: flips the chip like any wait; the rows are
   // kernel-owned and event-true at both ends — armed at registration, cleared on fire/cancel)
   assert.match(KERNEL, /def _watch_awaiting\(sid\):/);
-  assert.match(KERNEL, /w = _watch_awaiting\(sid\)\s*\n\s*if w:\s*\n\s*return w/);
+  // …COMBINED with the live agents and pending launches since slice 2 (2026-09-05) — no source
+  // short-circuits another; the one answer is derived from every row
+  assert.match(KERNEL, /combined = _awaiting_from_items\(agents, commands, _watch_awaiting\(sid\)\)\s*\n\s*if combined:\s*\n\s*return combined/);
   // 3. mid-turn, the CONTENT rides the payload while the shared state formula stays untouched —
   // the chip keeps reading working, the box renders from the fields
   assert.match(KERNEL, /if not _aw and open_now:\s*\n\s*_aw = _watch_awaiting\(sid\)/);

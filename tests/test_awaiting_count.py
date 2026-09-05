@@ -77,6 +77,8 @@ class AwaitingCount(unittest.TestCase):
             aw = km._session_awaiting(SID, "/tmp/x", True)
             self.assertEqual((aw["kind"], aw["count"]), ("job", 3))
             self.assertEqual(len(aw["tasks"]), 3)
+            self.assertEqual(len(aw["items"]), 3, "one row per watch (slice 2)")
+            self.assertTrue(all(it["kind"] == "watches" for it in aw["items"]))
         finally:
             km._watches, km._pr_watches = saved
 
@@ -122,9 +124,20 @@ class AwaitingCount(unittest.TestCase):
         self.assertIn('"awaitingCount": ((_aw_bg or {}).get("count") if isinstance((_aw_bg or {}).get("count"), int) else None),',
                       src, "the timeline lane payload")
         self.assertIn('"count": await_count,', src, "the goal card's awaiting object")
-        self.assertIn('(_owned_why, "task", _owned_since, None, 1)', src, "one owned dispatch counts one")
-        self.assertIn('(_stamp_why, _stamp_kind, _stamp_since, _stamp_peers, (len(_stamp_peers) if _stamp_peers else None))', src,
-                      "a stamp counts the peers it names")
+        # the or-chain tuples grew a sixth slot — the awaited ROWS (slice 2, 2026-09-05) — beside the count
+        self.assertIn('(_owned_why, "task", _owned_since, None, 1, [])', src, "one owned dispatch counts one (and names no row)")
+        self.assertIn('(_stamp_why, _stamp_kind, _stamp_since, _stamp_peers, (len(_stamp_peers) if _stamp_peers else None), _awaiting_peer_items(_stamp_peers))', src,
+                      "a stamp counts the peers it names, and lists them as rows")
+
+    def test_every_surface_ships_the_rows_beside_the_count(self):
+        # slice 2 (plans/subagent-transcripts.md, 2026-09-05): wherever awaitingKind/awaitingCount ship,
+        # the awaited ROWS ship too — the chat status, the timeline lane, the goal card, the placeholder card
+        src = inspect.getsource(km)
+        self.assertIn('"awaitingItems": (list((_aw or {}).get("items") or []) if awaiting_why else []),', src, "the chat status payload")
+        self.assertIn('"awaitingItems": (list((_aw_bg or {}).get("items") or []) if awaiting_bg else []),', src, "the timeline lane payload")
+        self.assertIn('"items": await_items,', src, "the goal card's awaiting object")
+        self.assertIn('"items": list(items or []),', src, "the placeholder card's awaiting object")
+        self.assertIn('count=sess_awaiting_count, items=sess_awaiting_items))', src, "…threaded from the session read")
 
 
 if __name__ == "__main__":

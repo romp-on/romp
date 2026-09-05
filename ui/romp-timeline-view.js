@@ -445,13 +445,23 @@ function idleGaps(merged, gapCT, now) {
 // "agent", never "agents"). This is the RESOLVED twin of ui/webview/spin-caption.ts kindWord()/KIND_WORD —
 // this file runs standalone (Obsidian too) and cannot import it, so the table and the rule are mirrored
 // here byte for byte and timeline-awaiting.test.ts holds the two together. An unknown count (an older
-// kernel ships none) keeps the plural default each kind always wore; an unknown kind stays "agents".
-const KIND_WORD = { agents: 'agents', task: 'task', job: 'job', peer: 'peer', timer: 'timer' };
+// kernel ships none) keeps the default each kind always wore; an unknown kind stays "agents". The WORDS
+// are the plain ones since 2026-09-05 (plans/subagent-transcripts.md slice 2): the kernel's "task" key
+// reads "command", "job" reads "watch", and "mixed" (several kinds at once) has no word — the badge
+// shows the count alone there (tlAwaitSuffix).
+const KIND_WORD = { agents: 'agents', task: 'command', job: 'watch', peer: 'peer', timer: 'timer', mixed: '' };
 function tlKindWord(kind, count) {
+  if (kind === 'mixed') return '';
   const base = KIND_WORD[kind || ''] || 'agents';
   if (typeof count !== 'number' || !Number.isFinite(count)) return base;
   if (count === 1) return base === 'agents' ? 'agent' : base;
-  return base === 'agents' ? base : base + 's';
+  return base === 'agents' ? base : (/ch$/.test(base) ? base + 'es' : base + 's');
+}
+// " agent" / " watches" after 'Awaiting'; a wordless mixed wait shows its count (" 4"); '' when neither is known.
+function tlAwaitSuffix(kind, count) {
+  const w = kind ? tlKindWord(kind, count) : '';
+  if (w) return ' ' + w;
+  return (kind === 'mixed' && typeof count === 'number' && count > 0) ? ' ' + count : '';
 }
 
 function badgeFor(s) {
@@ -477,7 +487,7 @@ function badgeFor(s) {
   // (The LEGACY lane state 'awaiting' above means blocked-on-you — this name dodges that.)
   // The KIND rides the label ('Awaiting job', the user 2026-08-15), worded by tlKindWord so one agent reads
   // 'Awaiting agent' (T228); an older kernel ships no awaitingKind and the badge reads plain 'Awaiting' as before.
-  else if (s.state === 'awaitingBg' || s.awaitingBg) m = { label: 'Awaiting' + (s.awaitingKind ? ' ' + tlKindWord(s.awaitingKind, s.awaitingCount) : ''), kind: 'awaitbg' };   // agrees in number with the chip (T228)
+  else if (s.state === 'awaitingBg' || s.awaitingBg) m = { label: 'Awaiting' + tlAwaitSuffix(s.awaitingKind, s.awaitingCount), kind: 'awaitbg' };   // agrees in number with the chip (T228); the plain words of slice 2
   else if (s.state === 'ready' || s.state === 'waiting' || s.state === 'idle') m = { label: 'Ready', kind: 'ready' };
   if (!m) return null;
   return { label: m.label, bg: BADGE[m.kind].bg, fg: BADGE[m.kind].fg };

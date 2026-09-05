@@ -7,7 +7,7 @@
 // pushes and updated in place — never torn down — so hovering one doesn't flicker
 // when the fleet streams new deliverables in.
 import { distillText, distillInputs, applyDistillLine, distillPending, distillStaleNote } from "./distiller-line";
-import { spinFor, KIND_WORD, kindWord, waitedSuffix } from "./spin-caption";
+import { spinFor, waitedSuffix, awaitWord, groupRows, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow } from "./spin-caption";
 import { onlyTag, matchesOnly } from "./only-filter";
 import { searchMatches, searchSids } from "./feed-search";
 import { TagLens, lensAll, lensLabel, lensVisible, lensUnions } from "./tag-lens";
@@ -117,7 +117,8 @@ interface AskItem {
   satellite?: boolean | null;                        // tracked delegation (the user 2026-08-24): this card is the recipient-side copy of a delegator-homed primary — off the default board; the session filter still reaches it (nothing runs in secret)
   delegTracked?: { name: string; host?: string; sid: string; color?: { bg: string; fg: string } | null }[] | null;  // tracked delegation PRIMARY: the recipient identities whose live status this one card carries  // courier handoff: planted by a peer's message → "↪ from <peer>"; peerHost = a FEDERATED sender's host, rendered as the quiet "host:" prefix (absent on older payloads / local senders). live = the sender's linked entry is still OPEN; false → the badge is PROVENANCE, dimmed (the completed-column merge, the user 2026-08-16)
   waitingOn?: { peerSid: string; name: string; color: { bg: string; fg: string } | null; inCycle: boolean; kind?: string; since?: number } | null;  // unanswered msg out to a live peer → "Awaiting <peer>" chip, or "Handed off to <peer>" when kind is "delegate" (peer name in native colour, no emoji; kernel _wait_for_graph; the user 2026-06-22 / 2026-07-25). since = when the unanswered ask was sent → the chip's elapsed readout (the user 2026-08-23)
-  awaiting?: { why?: string | null; kind?: string | null; since?: number | null; tasks?: string[] | null;
+  awaiting?: { why?: string | null; kind?: string | null; since?: number | null; count?: number | null; tasks?: string[] | null;
+               items?: AwaitRow[] | null;   // the awaited ROWS grouped by kind (slice 2, 2026-09-05) — the pill lists them; count = how many (T225)
                peers?: { name: string; host?: string; sid?: string; color?: { bg: string; fg: string } | null }[] | null } | null;   // peers: delegation wait → the box names them in identity colour (the user 2026-08-23)   // AWAITING flavor: held in Working, ⏳ awaiting badge — waiting on dispatched/delegated work (agents/subagents/a build), NOT on you (kernel build_feed; the user 2026-06-22). The peer case rides waitingOn; this carries the generic "why". `tasks` = live bg-task descriptions (the user 2026-07-13): present → the compact "Awaiting task" pill (expands the list, like Sub-goals) replaces the boxed why. since = the wait's own event time → the box/pill elapsed readout (the user 2026-08-23)
   groupTitle?: string;                             // host: this ask shares a typed turn with siblings → the group's title
   groupN?: number;                                 // host: sibling count for that turn (>1 ⇒ fold into one group card)
@@ -1444,7 +1445,15 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
   // live background tasks (the user 2026-07-13): when the card is AWAITING on tasks, the compact
   // "Awaiting task" pill joins the section toggles and expands this list (the old boxed caption is gone)
   const taskList = ((it.awaiting && it.awaiting.tasks) || []).filter(Boolean);
-  const hasTasks = taskList.length > 0;
+  // …and since slice 2 (2026-09-05) the awaited ROWS, grouped by kind — agents, commands, watches,
+  // peers — so the pill shows for ANY wait the kernel can enumerate, not only a bg-task one (a wait on
+  // live subagents had no clickable affordance on the card). An older kernel ships descriptions only;
+  // they read as rows of the legacy kind's group, so the list never goes blank on a mixed deployment.
+  const awKind = (it.awaiting && it.awaiting.kind) || "";
+  const awItems: AwaitRow[] = ((it.awaiting && it.awaiting.items) || []).filter((r) => r && r.kind);
+  const taskRows: AwaitRow[] = awItems.length ? awItems
+    : taskList.map((d) => ({ kind: ROW_KIND_OF_LEGACY[awKind] || "commands", label: d }));
+  const hasTasks = taskRows.length > 0;
   // resolve the selection (default = summary open), falling back to "none" if the chosen section is empty
   // the stall note (the user 2026-07-23) — shown whenever the kernel says romp is holding this card, with
   // or without a judge-written note, since `why` alone already answers "why is nothing happening"
@@ -1521,16 +1530,24 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
   // Awaiting, and two words for one state read as two states (the user 2026-08-13).
   const taskBtn = a._taskBtn as HTMLElement;
   taskBtn.style.display = hasTasks ? "" : "none";
-  // the KIND words the pill (the user 2026-08-15): "Awaiting job", "Awaiting 3 agents" — the wait's
-  // class in the visible label (tooltips are dead on the touch PWA); kindless keeps the classic "task"
-  const awKind = (it.awaiting && it.awaiting.kind) || "";
-  const kw = KIND_WORD[awKind] || "task";
+  // the KIND words the pill (the user 2026-08-15): "Awaiting watch", "Awaiting 3 agents" — the wait's
+  // class in the visible label (tooltips are dead on the touch PWA). ONE rule with the chat chip and
+  // the awaiting box (awaitWord, slice 2): one row → its word, several of a kind → count + word, mixed
+  // kinds → the number alone ("Awaiting 4"); a single named peer → its name in identity colour.
   // the wait's elapsed time rides the pill exactly as it rides the awaiting box and the working
   // narration — a stuck wait must be glanceable everywhere the state shows (the user 2026-08-23)
   const pillWaited = waitedSuffix(it.awaiting && it.awaiting.since, Date.now() / 1000);
-  (a._taskLbl as HTMLElement).textContent =
-    (taskList.length === 1 ? "Awaiting " + (awKind ? kindWord(awKind, 1) : kw)
-                           : "Awaiting " + taskList.length + " " + (awKind ? kindWord(awKind, taskList.length) : kw + "s")) + pillWaited;   // one number-agreeing vocabulary (T225)
+  const pillPeers = (it.awaiting && it.awaiting.peers) || [];
+  const pillWord = awaitWord(awKind, (it.awaiting && it.awaiting.count) ?? taskRows.length, taskRows);
+  const pillLbl = a._taskLbl as HTMLElement;
+  pillLbl.replaceChildren("Awaiting ");
+  if (pillPeers.length === 1 && taskRows.every((r) => r.kind === "peer")) {
+    const nm = el("span", "fask-waiton-name");
+    nm.replaceChildren(...hostPartsNodes(pillPeers[0].host, pillPeers[0].name));
+    if (pillPeers[0].color && pillPeers[0].color.bg) nm.style.color = pillPeers[0].color.bg;
+    pillLbl.appendChild(nm);
+  } else pillLbl.append(pillWord);
+  pillLbl.append(pillWaited);
   taskBtn.classList.toggle("on", choice === "tasks");
   taskBtn.setAttribute("aria-pressed", choice === "tasks" ? "true" : "false");
   taskBtn.title = choice === "tasks" ? "hide the tasks" : "show the tasks";
@@ -1551,14 +1568,34 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
     // the TASK list (the user 2026-07-13): same view/spot as the sub-goal checklist — one row per live
     // background task, a small spinning swirl as its mark (in flight), the task's own description as text
     if (choice === "tasks") {
-      for (const d of taskList) {
-        const row = el("div", "fcheck ftask");
-        const tri = el("span", "fcheck-tri empty");
-        const mark = el("span", "fcheck-mark");
-        mark.appendChild(el("span", "fask-awaiting-swirl ftask-swirl"));
-        const txt = el("span", "fcheck-text"); txt.textContent = d;
-        row.append(tri, mark, txt);
-        cl.appendChild(row);
+      // …grouped by KIND since slice 2 (2026-09-05): a small dim header per group when more than one
+      // shows (agents / commands / watches / peers), labels only — the chat's box carries the controls
+      const groups = groupRows(taskRows);
+      const peerByName = new Map(pillPeers.map((p) => [p.name, p]));
+      for (const g of groups) {
+        if (groups.length > 1) { const gh = el("div", "ftask-group"); gh.textContent = GROUP_TITLE[g.kind] || "Other"; cl.appendChild(gh); }
+        for (const r of g.rows) {
+          const row = el("div", "fcheck ftask");
+          const tri = el("span", "fcheck-tri empty");
+          const mark = el("span", "fcheck-mark");
+          mark.appendChild(el("span", "fask-awaiting-swirl ftask-swirl"));
+          const txt = el("span", "fcheck-text");
+          const p = r.kind === "peer" ? peerByName.get(r.label || "") : undefined;
+          if (p) {
+            // a peer row names the session the way the awaiting box does: identity colour, quiet host prefix,
+            // click opens the session (the standard session-chip gesture)
+            txt.replaceChildren(...hostPartsNodes(p.host, p.name));
+            if (p.color && p.color.bg) txt.style.color = p.color.bg;
+            if (p.sid) {
+              const sid = p.sid;
+              txt.title = "waiting on " + p.name + " — click opens the session";
+              txt.style.cursor = "pointer";
+              txt.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: sid }); };
+            }
+          } else txt.textContent = r.label || r.kind;
+          row.append(tri, mark, txt);
+          cl.appendChild(row);
+        }
       }
       cl.style.display = cl.children.length ? "" : "none";
       return;

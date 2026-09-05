@@ -1,0 +1,38 @@
+<!-- SYNTHETIC fixture: the chat pane's awaiting box in the MIXED case (plans/subagent-transcripts.md
+     slice 2, 2026-09-05) — the #bg-tasks box expanded with its rows grouped by kind under small dim
+     headers (Agents / Commands / Watches), each row wearing its own kind's affordances (the agent rows'
+     open-transcript arrow + Stop, the command row's Stop + fold caret, the watch row's Cancel), and the
+     statusline beneath it with the Awaiting chip as a BUTTON reading "Awaiting 4". Invented content
+     (notes-api demo domain), the DOM class for class as renderAwaitWhy / bgRow / updateStatusline emit it.
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/awaiting-rows-chat.html \
+           --out /tmp/awaiting-shots/chat-dark.png --size 760x540 --extra-css 'body{background:var(--bg);padding-top:10px}'
+       …and with --body-class "theme-light chat-theme-<name>" for the light theme. The height matters: the
+       box caps at min(50vh, 340px), so a 330px-tall shot gives it 165px and clips the Watches group mid-row,
+       and 470px (235px) scrolls the closing note just out of view (the first two renders did exactly that);
+       the box's natural height here is ~262px, so 540px lets the whole box show as a real pane would.
+-->
+<div id="content" style="flex:0 0 auto"></div>
+<div id="bg-tasks" class="bg-awaited">
+  <div class="bg-fold-head bg-await open" data-act="bg-fold"><span class="bg-caret">▾</span><span class="bg-dot"></span><span class="bg-fold-label">Awaiting 4 · 2 agents · 1 command · 1 watch</span></div>
+  <div class="bg-list">
+    <div class="bg-group-head">Agents</div>
+    <div class="bg-task bg-running">
+      <div class="bg-head" data-act="bg-toggle"><span class="bg-dot"></span><span class="bg-sum">Map the notes-api parser</span><span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/><path d="M9.5 3h3.5v3.5"/><path d="M13 3 7.5 8.5"/></svg></span><span class="bg-since">· 12m</span><span class="bg-status">running</span><button class="bg-stop">Stop</button><span class="bg-caret">▸</span></div>
+    </div>
+    <div class="bg-task bg-running">
+      <div class="bg-head bg-flat"><span class="bg-dot"></span><span class="bg-sum">Audit the exporter's retries</span><span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/><path d="M9.5 3h3.5v3.5"/><path d="M13 3 7.5 8.5"/></svg></span><span class="bg-since">· 4m</span><span class="bg-status">running</span></div>
+    </div>
+    <div class="bg-group-head">Commands</div>
+    <div class="bg-task bg-running">
+      <div class="bg-head" data-act="bg-toggle"><span class="bg-dot"></span><span class="bg-sum">Build the docs site</span><span class="bg-since">· 9m</span><span class="bg-status">running</span><button class="bg-stop">Stop</button><span class="bg-caret">▸</span></div>
+    </div>
+    <div class="bg-group-head">Watches</div>
+    <div class="bg-task bg-armed">
+      <div class="bg-head" data-act="bg-toggle"><span class="bg-dot"></span><span class="bg-sum">the CI run on web</span><span class="bg-since">· 31m</span><span class="bg-status">armed</span><button class="bg-stop bg-cancel">Cancel</button><span class="bg-caret">▸</span></div>
+    </div>
+    <div class="bg-await-note">The session is idle until this finishes; it picks back up on its own when the result lands.</div>
+  </div>
+</div>
+<div id="footer">
+  <div id="statusline" class="statusline"><button type="button" class="chip chip-awaitingBg chip-btn chip-awaiting-mixed" data-act="awaitingChip">Awaiting 4</button><span class="status-timer" id="work-timer">31:07</span><span class="sl-right"><span class="status-timer">web · main</span></span></div>
+</div>

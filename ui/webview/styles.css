@@ -813,6 +813,7 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
   padding: 7px 11px; cursor: pointer; user-select: none; font-size: 12px; }
 .bg-fold-head.open { border-bottom: 1px solid var(--box-border); }
 .bg-fold-head:hover { background: rgba(255, 255, 255, 0.04); }
+/* Stop (a live task) and Cancel (an armed watch — slice 2, 2026-09-05) wear ONE button treatment */
 .bg-stop { flex: 0 0 auto; font-size: var(--btn-fs-sm); padding: var(--btn-pad-sm); border-radius: 9px; cursor: pointer;
   border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); background: transparent; color: var(--fg);
   transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease, transform 0.08s ease; }
@@ -829,6 +830,18 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 .bg-task { --bgt: var(--st-working-bg); }
 .bg-task.bg-failed { --bgt: var(--st-blocked-bg); }
 .bg-task.bg-completed { --bgt: var(--st-ready-bg); }
+/* an armed watch / a peer or timer wait: nothing is computing HERE — the dot wears the await-green (slice 2) */
+.bg-task.bg-armed, .bg-task.bg-waiting { --bgt: var(--st-awaitbg-bg); }
+/* the rows grouped by KIND (slice 2, 2026-09-05): a small dim header per group, in the .bg-status
+   vocabulary (10px uppercase), shown only when more than one group is on screen */
+.bg-group-head { flex: 0 0 auto; padding: 6px 9px 2px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; color: var(--dim); }
+.bg-group-head + .bg-group-head { padding-top: 2px; }
+/* a row with nothing to unfold (a hook-only agent, a PR watch, a peer) is not a toggle: no hand, no hover wash */
+.bg-head.bg-flat { cursor: default; }
+.bg-head.bg-flat:hover { background: none; }
+/* how long a row has been waited on (its own event time; the statusline tick keeps it live) */
+.bg-since { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bg-list > .bg-await-note { padding: 2px 9px 4px; }
 /* AWAITED (the user 2026-08-19): the session's await-green chip is waiting on THIS task — the box
    border + the row's thin outline take the chip's green; the dot keeps meaning the task's own status */
 #bg-tasks.bg-awaited { border-color: var(--st-awaitbg-bg); }
@@ -1171,6 +1184,13 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    #fff default = the no-identity (cross-host) name stays legible on the dark backing. */
 .chip-peer-name { background: rgba(0, 0, 0, 0.85); color: #fff; border-radius: 7px; padding: 0 5px; margin-left: 1px; }
 .chip-awaitingBg { background: var(--st-awaitbg-bg); color: var(--st-awaitbg-fg); }
+/* the Awaiting chip is a BUTTON (slice 2, 2026-09-05): click opens the awaiting box below. The UA
+   button chrome is reset so it wears the chip exactly (.chip supplies size, weight, padding, radius);
+   hover lifts it a touch, :active presses, and the delegate's .romp-acted pulse acknowledges the click. */
+button.chip { font-family: inherit; line-height: normal; border: 0; cursor: pointer; transition: filter 0.12s ease, transform 0.08s ease; }
+button.chip:hover { filter: brightness(1.08); }
+button.chip:active { transform: scale(0.96); }
+button.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* retrying = a SOFT 'blocked on the API' (rate-limit / overload auto-retry) — not a hang, not working. Amber/
    orange, deliberately distinct from working-yellow and blocked-red (the user via api 2026-06-23). */
 .chip-retrying { background: #e67e22; color: #2a1500; }
@@ -2248,6 +2268,32 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .notice-dot-clear { border-color: var(--dim); }
 .clear-loading { display: inline-flex; align-items: center; gap: 8px; }
 .clear-truncated { color: var(--dim); padding: 4px 0 6px; }
+
+/* ── SUBAGENT TRANSCRIPTS (plans/subagent-transcripts.md, 2026-09-05) ──────────────────────────────
+   The open-transcript arrow on an Agent head / agent bg row and the viewer header's pin share ONE
+   button dress (dim line icon, accent on hover — the house icon-button treatment); the running
+   preview under the head wears the tool-fold-toggle's 0.86em (no new size on the tool head); the
+   viewer header is a sticky dim line above the transcript, tokens only so both themes read. */
+.tool-open-agent, .sub-head-pin { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 4px; color: var(--dim); cursor: pointer; flex: 0 0 auto; align-self: center; }
+.tool-open-agent:hover, .sub-head-pin:hover { color: var(--accent); background: var(--accent-wash); }
+.tool-open-agent svg, .sub-head-pin svg { display: block; }
+.tool-open-agent.bg-open-agent { margin-left: 2px; }
+.sub-head-pin.pinned { color: var(--accent); }
+.agent-gist { display: flex; flex-direction: column; gap: 1px; margin: 1px 0 3px; color: var(--dim); font-size: 0.86em; }
+.agent-gist-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.agent-gist-tool { flex: 0 0 auto; font-weight: 600; }
+.agent-gist-desc { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-gist-meta { flex: 0 0 auto; white-space: nowrap; opacity: 0.8; }
+#sub-head { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--box-border); color: var(--dim); font-size: 0.86em; }
+.sub-head-line { display: flex; align-items: center; gap: 6px; padding: 6px 12px; min-width: 0; }
+.sub-head-parent { color: var(--fg); cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.sub-head-parent:hover { text-decoration: underline; }
+.sub-head-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sub-head-state.running { color: var(--st-working-bg); }
+.sub-head-state.finished { color: var(--st-ready-bg); }
+.sub-head-pin { margin-left: auto; }
+.sub-head-note { padding: 0 12px 6px; }
+.sub-status-line { color: var(--dim); }
 /* the nested pre-clear transcript: same renderers as the live chat, scoped so its rail hugs the card */
 .clear-episode { border-top: 1px solid var(--box-border); margin-top: 4px; padding-top: 4px; }
 

@@ -2708,7 +2708,7 @@ def _parse_plan(raw, menu_len, allow_extend=False):
         elif do in ("done", "block", "awaiting"):
             g, r = _int(o, "goal"), _int(o, "ref")
             ak = str(o.get("kind") or "").strip().lower() if do == "awaiting" else ""
-            ak = {"kind": ak} if ak in AWAIT_KINDS else {}             # garbage/absent → kindless (legacy)
+            ak = {"kind": ak} if ak in AWAIT_KINDS_JUDGED else {}      # garbage/absent/"mixed" → kindless (legacy)
             if g and 1 <= g <= menu_len:
                 ops.append({"do": do, "why": why, "goal": g, **ak})
             elif r and r >= 1:
@@ -9003,7 +9003,15 @@ CLOSER_SYS = (
 # background task/watcher; an external job (cluster/CI/build); a peer session; a scheduled check-back.
 # The judge files one per awaiting verdict; a stamp without one (older judges, legacy stores) is
 # kindless and behaves exactly as before the enum existed.
-AWAIT_KINDS = ("agents", "task", "job", "peer", "timer")
+#
+# Two tuples since 2026-09-05 (plans/subagent-transcripts.md, slice 2): AWAIT_KINDS_JUDGED is what a
+# closer may FILE — the specific thing one goal waits on; AWAIT_KINDS adds "mixed", which only the
+# kernel's LIVE session read (_session_awaiting) produces when a session waits on several kinds at
+# once (an agent AND a background command AND a watch). A stamp is never "mixed": the parse sites
+# validate against the judged tuple, so an LLM emitting the word degrades to kindless like any other
+# off-enum kind, and every lift/supersede rule keyed on a stamp's kind keeps seeing a specific one.
+AWAIT_KINDS_JUDGED = ("agents", "task", "job", "peer", "timer")
+AWAIT_KINDS = AWAIT_KINDS_JUDGED + ("mixed",)
 
 # The PEER-kind write gate's evidence (the user 2026-08-24, after three reports of idle sessions
 # reading "awaiting a peer"): a kind=peer stamp requires an un-answered kind=question THIS session
@@ -9109,7 +9117,7 @@ def _parse_close(raw, menu_len):
                 why = " ".join(str(it.get("why", "")).split())[:300]
                 if kinds:
                     k = str(it.get("kind") or "").strip().lower()
-                    out[n] = {"why": why, "kind": k if k in AWAIT_KINDS else None}
+                    out[n] = {"why": why, "kind": k if k in AWAIT_KINDS_JUDGED else None}   # a closer files a specific kind, never "mixed"
                 else:
                     out[n] = why
         return out
