@@ -54,8 +54,14 @@ const url = await (async () => {
 check("url-streams-as-link", url.startsWith("https://claude.com/cai/oauth/authorize?code=true"),
   url || "no link rendered");
 await shot("url-shown");
+// Clicking to paste must retain settings: closing it also drops the shell's full-window
+// feed iframe, which makes the login dialog disappear under the pointer.
+await page.click("#rs-login-input");
+check("input-click-keeps-settings-open", await page.isVisible("#rsettings"));
+check("input-keeps-focus", await page.evaluate(() => document.activeElement?.id === "rs-login-input"));
 await page.fill("#rs-login-input", "LAB-SYNTH-CODE");
 await page.click("#rs-login-send");
+check("submit-keeps-settings-open", await page.isVisible("#rsettings"));
 const done = await (async () => {
   const t0 = Date.now();
   while (Date.now() - t0 < 20000) {

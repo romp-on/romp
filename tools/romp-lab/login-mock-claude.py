@@ -19,7 +19,9 @@ if "/login" not in line:
 say("Select login method:\n1. Claude account with subscription\n2. Anthropic Console account\n")
 sys.stdin.readline()
 url = ("https://claude.com/cai/oauth/authorize?code=true&client_id=SYNTHETIC"
-       "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=LABFIXTURE")
+       "&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+       "&scope=user%3Aprofile+user%3Ainference&code_challenge=SYNTHETIC-CHALLENGE"
+       "&code_challenge_method=S256&state=LABFIXTURE")
 say("Browser didn't open? Use the url below to sign in\n")
 say("\x1b]8;id=1;" + url + "\x1b\\" + url + "\x1b]8;;\x1b\\\n")
 say("Paste code here if prompted >\n")
