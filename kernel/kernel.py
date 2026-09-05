@@ -24881,6 +24881,7 @@ def _login_code(code):
 
 def _login_start():
     """Spawn the PTY login flow; the reader thread drives the gates and parses the URL."""
+    import fcntl, struct, termios
     import pty as _pty
     with _login_lock:
         if _login_flow["state"] in ("starting", "url", "verifying"):
@@ -24895,6 +24896,9 @@ def _login_start():
         env.pop("CLAUDE_CODE_CHILD_SESSION", None)  # a plain top-level CLI
         try:
             m, s = _pty.openpty()
+            # There is no visible terminal. Give the CLI room to print its OAuth URL intact
+            # instead of hard-wrapping it at the default 80 columns (including inside OSC-8).
+            fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 4096, 0, 0))
             proc = subprocess.Popen([_claude_bin()], stdin=s, stdout=s, stderr=s,
                                     env=env, cwd=str(scratch), close_fds=True)
             os.close(s)
@@ -24908,7 +24912,40 @@ def _login_start():
     return ""
 
 
-_LOGIN_URL_RE = re.compile(r"https://claude\.com/[^\s\x1b\x07]*oauth[^\s\x1b\x07]*")
+_LOGIN_URL_RE = re.compile(
+    r"https://(?:claude\.com/(?:cai/)?|claude\.ai/)oauth/authorize\?[^\s\x1b\x07]*")
+_LOGIN_OSC_RE = re.compile(r"\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)")
+
+
+def _login_url(buf):
+    """Return a complete CLI-issued URL, never the first line or an unfinished PTY read.
+
+    OSC-8's terminator bounds the actual link even when its visible label is wrapped. Some
+    CLI versions also wrap the target: remove only its layout whitespace, preserving all OAuth
+    values, including the CLI's registered code-display redirect and PKCE challenge/state.
+    """
+    def valid(url):
+        if not _LOGIN_URL_RE.fullmatch(url):
+            return False
+        q = parse_qs(urlparse(url).query)
+        required = ("client_id", "redirect_uri", "scope", "state", "code_challenge")
+        return (all(len(q.get(key, [])) == 1 and q[key][0] for key in required)
+                and q.get("code") == ["true"] and q.get("response_type") == ["code"]
+                and q.get("code_challenge_method") == ["S256"])
+
+    for link in _LOGIN_OSC_RE.finditer(buf):
+        url = re.sub(r"\s+", "", link.group(1))
+        if valid(url):
+            return url
+    # Plain output is usable only when a delimiter has arrived. End-of-buffer can be mid-URL,
+    # even after every required parameter has begun; publishing then permanently latches it.
+    plain = _LOGIN_OSC_RE.sub("", buf)
+    # An unfinished OSC target belongs to the next read, not to the plain-text fallback.
+    plain = plain.split("\x1b]", 1)[0]
+    for link in _LOGIN_URL_RE.finditer(plain):
+        if link.end() < len(plain) and valid(link.group(0)):
+            return link.group(0)
+    return ""
 
 
 def trust_gate_passed(low0):
@@ -24929,14 +24966,17 @@ def _login_reader(fd, proc):
         with _login_lock:
             if _login_flow["pid"] != proc.pid:      # cancelled/superseded
                 break
-        r, _, _ = _select.select([fd], [], [], 0.5)
+        try:
+            r, _, _ = _select.select([fd], [], [], 0.5)
+        except (OSError, ValueError):               # Cancel can close the PTY during select.
+            break
         if r:
             try:
                 chunk = os.read(fd, 8192).decode("utf-8", "replace")
             except OSError:
                 break
             buf = (buf + chunk)[-20000:]
-        plain = re.sub(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\\\)", "", buf)
+        plain = re.sub(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", buf)
         plain = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", plain)
         low0 = plain.lower().replace(" ", "")
         if not trust_answered and "trustthisfolder" in low0:
@@ -24956,11 +24996,11 @@ def _login_reader(fd, proc):
             sent_pick = True
             buf = ""
             continue
-        murl = _LOGIN_URL_RE.search(plain)
-        if murl:
+        url = _login_url(buf)
+        if url:
             with _login_lock:
                 if _login_flow["pid"] == proc.pid and _login_flow["state"] in ("starting",):
-                    _login_flow.update(state="url", url=murl.group(0), t=time.time())
+                    _login_flow.update(state="url", url=url, t=time.time())
             _push_soon()
         low = plain.lower()
         # the VERDICT WINDOW is anchored on the paste prompt itself, not a buffer clear (a clear
