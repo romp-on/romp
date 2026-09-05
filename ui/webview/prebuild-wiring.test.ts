@@ -23,8 +23,9 @@ test("the pre-build runs at IDLE priority (requestIdleCallback) with a setTimeou
 test("a pass YIELDS to the active tab's build and is chunked to the idle deadline", () => {
   // never compete with the active (foreground) heavy build — defer and retry next idle
   assert.match(RENDER, /if \(pendingBuildRaf != null\) \{ schedulePrebuild\(\); return; \}/);
-  // stop when the idle budget is spent and resume next idle (chunked → never janks the main thread)
-  assert.match(RENDER, /if \(deadline\.timeRemaining\(\) < \d+\) \{ schedulePrebuild\(\); break; \}/);
+  // stop when the idle budget is spent and resume next idle (chunked → never janks the main thread); checked
+  // BEFORE each tab since 2026-09-04 (see tab-switch-lag.test.ts), and a timed-out callback runs regardless
+  assert.match(RENDER, /if \(deadline\.timeRemaining\(\) < \d+ && !deadline\.didTimeout\) \{ schedulePrebuild\(\); break; \}/);
 });
 
 test("a pass builds each off-screen tab's hidden DOM via ensureView + syncView", () => {

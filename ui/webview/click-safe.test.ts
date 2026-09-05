@@ -78,8 +78,11 @@ test("Timeline: the EXTERNAL redraws (poll + live-tick) are held under a pressed
   assert.match(TIMELINE, /this\.svg\.addEventListener\('pointerdown', \(\) => \{ this\._pointerHeld = true; \}\);/);
   // the poll update() buffers (reusing the freeze-on-hover _dirtyWhileTip path) instead of relaying out
   assert.match(TIMELINE, /\|\| this\._pointerHeld\) \{ this\._dirtyWhileTip = true; return; \}/);
-  // the live-edge tick skips its frame's draw but keeps the rAF loop alive so it resumes on release
-  assert.match(TIMELINE, /if \(this\._pointerHeld\) \{ this\._liveRAF = requestAnimationFrame\(\(\) => this\._tickLive\(\)\); return; \}/);
+  // the live-edge tick skips its look's draw but keeps the loop alive so it resumes on release — since
+  // 2026-09-04 the loop sleeps between looks (see timeline-live-tick.test.ts), so a held pointer re-arms it
+  // on a short sleep rather than the next animation frame
+  assert.match(TIMELINE, /if \(this\._pointerHeld\) \{ this\._liveResume = true; return; \}/);
+  assert.match(TIMELINE, /if \(this\._liveResume\) \{ this\._liveResume = false; this\._startLiveTick\(\); \}/, "the release event restarts the loop");
   // release repaints the buffered catch-up AFTER the click fires (setTimeout 0) — event-based, no time heuristic
   assert.match(TIMELINE, /window\.addEventListener\('pointerup', _release\);/);
   assert.match(TIMELINE, /window\.addEventListener\('pointercancel', _release\);/);

@@ -4509,6 +4509,16 @@ function ensureTabRowObserver(bar: HTMLElement): void {
   tabRowObserver.observe(bar);
 }
 
+// Coalesce the strip repaints that inbound frames ask for: a pusher cycle lands one tail per changed tab
+// (sixteen on a busy board), and each rebuilt all seventeen tabs and forced a layout. One rebuild per
+// animation frame carries the same information (2026-09-04). A user gesture keeps calling renderTabs()
+// directly — its feedback must not wait a frame.
+let tabsRaf: number | null = null;
+function scheduleRenderTabs(): void {
+  if (tabsRaf != null) return;
+  tabsRaf = requestAnimationFrame(() => { tabsRaf = null; renderTabs(); });
+}
+
 function renderTabs() {
   if (renameActive) { renderPendingAfterRename = true; return; }
   if (tabPointerHeld) { renderPendingWhilePressed = true; return; }   // don't destroy a tab mid-click (see tabPointerHeld)
@@ -8870,8 +8880,10 @@ const _cic = (typeof window !== "undefined" ? (window as any).cancelIdleCallback
   | undefined;
 // requestIdleCallback when available; else a short setTimeout with a small synthetic frame budget, so the
 // behaviour degrades gracefully where it's absent.
+// The fallback deadline COUNTS DOWN from its 12 ms budget (it used to report 12 ms forever, so the idle loop
+// never yielded once it started building — 2026-09-04).
 const requestIdle = (cb: (d: IdleDeadline) => void): number =>
-  _ric ? _ric(cb, { timeout: 1500 }) : (window.setTimeout(() => cb({ timeRemaining: () => 12 }), 16) as unknown as number);
+  _ric ? _ric(cb, { timeout: 1500 }) : (window.setTimeout(() => { const t0 = performance.now(); cb({ timeRemaining: () => Math.max(0, 12 - (performance.now() - t0)) }); }, 16) as unknown as number);
 const cancelIdle = (h: number): void => { if (_cic) _cic(h); else clearTimeout(h); };
 
 let prebuildHandle: number | null = null;
@@ -8906,11 +8918,11 @@ function runPrebuild(deadline: IdleDeadline): void {
   const savedOwnerSid = renderingOwnerSid;
   for (const id of prebuildPlan(activeId, mru, order, viewState)) {
     if (!sessions.has(id)) continue;
+    if (deadline.timeRemaining() < 3 && !deadline.didTimeout) { schedulePrebuild(); break; } // budget gone → resume next idle
     try {
       ensureView(id);
       syncView(id); // build the hidden view now, off the critical path
     } catch { /* one malformed tab must not break idle pre-building of the rest */ }
-    if (deadline.timeRemaining() < 3) { schedulePrebuild(); break; } // out of idle budget → resume next idle
   }
   renderingSid = savedRenderingSid;
   renderingOwnerSid = savedOwnerSid;
@@ -12088,7 +12100,7 @@ function chatTail(msg: any) {
   const before = awaitKey(s.status);
   if (msg.status) s.status = msg.status;
   if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
-  renderTabs();
+  scheduleRenderTabs();   // once per animation frame however many tails a cycle lands (2026-09-04)
   if (msg.id === activeId) {
     const v = views.get(msg.id);
     if (v) {
@@ -12104,9 +12116,19 @@ function chatTail(msg: any) {
     // Render the box from the SAME frame, keyed on the awaited fields CHANGING — never on the per-second ticks.
     if (awaitKey(s.status) !== before) renderBgTasks();
   } else {
+    // The SAME rule as the active tab: repaint from the exact changed point. Marking the view stale routed
+    // the idle rebuild — and, when idle never came, the click itself — through a full 80-unit window
+    // rebuild for every background tab that had merely appended a turn (2026-09-04; on a seventeen-session
+    // board that was most tabs, most of the time).
     const v = views.get(msg.id);
-    if (v) v.stale = true;
-    schedulePrebuild(); // rebuild the now-stale off-screen view in idle, before the user switches to it
+    if (v) {
+      v.rendered = Math.min(v.rendered, from);
+      // Still a full window rebuild when the tail shrank, or when the change landed INSIDE a window the user
+      // had scrolled away from the tail: the incremental path assumes new events lie below such a window.
+      const atTail = (v.winEnd ?? Infinity) >= (v.unitTotal ?? 0);
+      if (shrank || (!atTail && from < (v.winEnd ?? 0))) v.stale = true;
+    }
+    schedulePrebuild(); // rebuild the now-stale off-screen view in idle, before the user switches to it (an incremental repaint now)
   }
 }
 

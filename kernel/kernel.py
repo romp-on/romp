@@ -27400,6 +27400,14 @@ def _dedup_sig(msg, s):
     if isinstance(msg, dict) and any(k in msg for k in _DEDUP_VOLATILE):
         return json.dumps({k: v for k, v in msg.items() if k not in _DEDUP_VOLATILE},
                           sort_keys=True, default=str)
+    # The timeline SKELETON rides as {"type": "data", "data": {..., "now": ...}}: its clock is nested one
+    # level down, where the strip above never looked, so an unchanged skeleton re-sent on every cycle and
+    # the timeline pane rebuilt its whole SVG each time — with nothing on screen having moved (measured
+    # 2026-09-04: only `now` differs across a clock step). Strip the nested clock the same way.
+    if isinstance(msg, dict) and msg.get("type") == "data" and isinstance(msg.get("data"), dict) \
+            and any(k in msg["data"] for k in _DEDUP_VOLATILE):
+        inner = {k: v for k, v in msg["data"].items() if k not in _DEDUP_VOLATILE}
+        return json.dumps(dict(msg, data=inner), sort_keys=True, default=str)
     return s
 
 

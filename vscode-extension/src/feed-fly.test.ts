@@ -12,10 +12,12 @@ const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", 
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.css"), "utf8");
 
 test("render() captures rects BEFORE the reconcile and flies changed cards AFTER", () => {
-  // capture must precede the column reconciles…
-  assert.match(FEED, /const flipFirst = captureCardRects\(cols\);[\s\S]*?reconcileCol\(cols\.asks/);
+  // capture must precede the column reconciles… — and, since 2026-09-04, happens only when a card CAN have
+  // moved (a column change, an arrival, a departure: feed-flip.ts), because the capture and the fly each
+  // force a layout of the whole document on the main thread every pane shares
+  assert.match(FEED, /const flipFirst = needFlip \? captureCardRects\(cols\) : new Map<string, FlipState>\(\);[\s\S]*?reconcileCol\(cols\.asks/);
   // …and the fly runs after the DOM (and scroll) settle (the identity-alias step sits just before it)
-  assert.match(FEED, /list\.scrollTop = prevScroll;[\s\S]*?\/\/ FLIP step 2[\s\S]*?flyColumnChanges\(flipFirst, cols\);/);
+  assert.match(FEED, /list\.scrollTop = prevScroll;[\s\S]*?\/\/ FLIP step 2[\s\S]*?if \(needFlip\) flyColumnChanges\(flipFirst, cols\);/);
 });
 
 test("FLIP-across-identity: a new-key card aliases to its predecessor's rect so it slides, not pops", () => {
@@ -38,8 +40,9 @@ test("flyColumnChanges FLIPs any moved card (not new cards / non-movers); only c
   assert.match(FEED, /if \(!dx && !dy\) continue;/);                          // no real move → skip
   // staying in the same column NO LONGER aborts — an in-column shifter must glide too (the user 2026-06-29)
   assert.doesNotMatch(FEED, /prev\.col === colEl\.id\) continue/);
-  // a column-crosser gets the back layer; an in-column shifter glides in normal flow
-  assert.match(FEED, /const crossed = prev\.col !== colEl\.id;/);
+  // a column-crosser gets the back layer; an in-column shifter glides in normal flow (the decision is taken
+  // in the read pass and carried to the write pass — feed-flip.test.ts pins the read-then-write order)
+  assert.match(FEED, /crossed: prev\.col !== colEl\.id/);
   assert.match(FEED, /if \(crossed\) c\.classList\.add\("fitem-flying"\);/);
 });
 

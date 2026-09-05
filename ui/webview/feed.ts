@@ -7,6 +7,7 @@
 // pushes and updated in place — never torn down — so hovering one doesn't flicker
 // when the fleet streams new deliverables in.
 import { distillText, distillInputs, applyDistillLine, distillPending, distillStaleNote } from "./distiller-line";
+import { flipNeeded } from "./feed-flip";
 import { spinFor, KIND_WORD, kindWord, waitedSuffix } from "./spin-caption";
 import { onlyTag, matchesOnly } from "./only-filter";
 import { searchMatches, searchSids } from "./feed-search";
@@ -1645,9 +1646,36 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
   renderTree();
 }
 
+// The payload copy a card was last painted from, serialized — a card whose data did not change since is not
+// repainted. Every feed frame used to rewrite all ~155 cards (about a hundred DOM writes each) when the frame
+// changed one of them (2026-09-04). The display-side state a paint also reads (hover/pin focus, the pending
+// bell, the done ticks) is folded into the key, so a change to any of it repaints as before.
+// Bumped whenever a display-side input EVERY card reads changes: the view prefs (grouped, collapsed), the
+// working/awaiting/unknown status sets and the self host that the session dots and delegation lines read.
+// A card's key carries it, so such a change repaints every card once, as before. The coarse clock repaints
+// each card at most every 15 s so the durations it renders (waited, working for, paragraph ages) keep
+// ticking — the old cadence was every kernel push, at most 60 s apart.
+let paintEpoch = 0;
+let statusSig = "";
+function noteStatusInputs(): void {
+  const sig = [...workingSet].sort().join(",") + "|" + [...awaitingSet].sort().join(",") + "|" + [...unknownSet].sort().join(",") + "|" + feedSelfHost;
+  if (sig !== statusSig) { statusSig = sig; paintEpoch++; }
+}
+function cardPaintKey(it: AskItem): string {
+  return JSON.stringify(it) + "|" + (it.itemId === (hoverAskId ?? pinnedAskId) ? "f" : "") + (it.itemId === pinnedAskId ? "p" : "")
+    + "|" + (pendingNotify.has(it.itemId) ? String(pendingNotify.get(it.itemId)) : "") + "|" + [...pendingDone].join(",")
+    + "|" + paintEpoch + "|" + Math.floor(Date.now() / 15000);
+}
+
 function updateAskCard(card: HTMLElement, it: AskItem) {
   const a = card as any;
   a._it = it;   // the freshest payload copy — the right-click bell menu reads this, never a stale closure
+  const pk = cardPaintKey(it);
+  // Nothing this card shows has changed → leave its DOM alone. Except a card with a LATCHED button (Approve →
+  // Delivering…, Retry → Retrying…, Revive → Reviving…): those rely on the next paint to re-enable when the
+  // refused action left the payload unchanged, so a card with a disabled button always repaints.
+  if (a._paintKey === pk && !card.querySelector("button[disabled]")) return;
+  a._paintKey = pk;
   // per-card bell: retire the optimistic value once the kernel's payload agrees (event-based, no timer),
   // then render whichever stands. Same sticky-optimism shape as the timeline lane's _pendingFlags.
   if (pendingNotify.has(it.itemId) && !!it.notify === pendingNotify.get(it.itemId)) pendingNotify.delete(it.itemId);
@@ -4131,6 +4159,19 @@ function reconcileCol(listEl: HTMLElement, entries: Entry[], globalDesired: Set<
 // its new home. The flying card sits in the BACK layer (position:relative; z-index:-1 → behind sibling cards
 // but above the column background) so it never flies OVER other content. Respects prefers-reduced-motion.
 type FlipState = { rect: DOMRect; col: string };
+// column id per card key as of the LAST render — the flip gate compares the next render against it
+let prevCols: Map<string, string> = new Map();
+// the card keys of a render's buckets, mapped to the column each lands in (the same keys reconcileCol mints)
+function columnsOf(buckets: Record<Column, Entry[]>): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const col of Object.keys(buckets) as Column[]) {
+    buckets[col].forEach((e, i) => {
+      const key = e.kind === "ask" ? "a:" + e.ask.itemId : e.kind === "group" ? "g:" + e.group.turnId : "s:" + col + ":" + e.sid;
+      m.set(key, col + ":" + i);   // column AND position: a card that moved within its column glides too (the user 2026-06-29)
+    });
+  }
+  return m;
+}
 const FLY_COLS: ("asks" | "needsInput" | "completed")[] = ["asks", "needsInput", "completed"];
 function captureCardRects(cols: ReturnType<typeof ensureCols>): Map<string, FlipState> {
   const m = new Map<string, FlipState>();
@@ -4145,6 +4186,10 @@ function captureCardRects(cols: ReturnType<typeof ensureCols>): Map<string, Flip
 function flyColumnChanges(first: Map<string, FlipState>, cols: ReturnType<typeof ensureCols>): void {
   if (!first.size) return;
   try { if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return; } catch { /* no matchMedia */ }
+  // READ every card's new position first, then WRITE: a transform written between two rect reads dirties
+  // layout, so the next read forces a fresh layout of the whole document — one per card, 155 times per
+  // feed frame (measured 2026-09-04: the largest single cost on the main thread the chat pane's clicks share).
+  const moves: { c: HTMLElement; dx: number; dy: number; crossed: boolean }[] = [];
   for (const key of FLY_COLS) {
     const colEl = cols[key];
     for (const c of Array.from(colEl.children) as HTMLElement[]) {
@@ -4154,11 +4199,15 @@ function flyColumnChanges(first: Map<string, FlipState>, cols: ReturnType<typeof
       const now = c.getBoundingClientRect();
       const dx = prev.rect.left - now.left, dy = prev.rect.top - now.top;
       if (!dx && !dy) continue;                            // didn't move → leave it alone
+      moves.push({ c, dx, dy, crossed: prev.col !== colEl.id });
+    }
+  }
+  for (const { c, dx, dy, crossed } of moves) {
+    {
       // Two flavors of move, ONE FLIP (the user 2026-06-29): a card that CHANGED COLUMN flies in the BACK
       // layer (z-index:-1 → behind the other cards, so it never sails over them); a card that STAYED in its
       // column but shifted — because the card that left it vacated a slot — glides IN PLACE in normal flow, so
       // the remaining cards reflow smoothly to their new spots instead of snapping there in a discrete jump.
-      const crossed = prev.col !== colEl.id;
       if (crossed) c.classList.add("fitem-flying");
       // Invert: jump the card back to its old spot, instantly.
       c.style.transition = "none";
@@ -4528,8 +4577,13 @@ function render() {
   }
 
   // FLIP step 1 (the user 2026-06-27): record every visible card's position + column BEFORE the reconcile, so
-  // a card that changes column can FLY from its old spot to the new one instead of teleporting.
-  const flipFirst = captureCardRects(cols);
+  // a card that changes column can FLY from its old spot to the new one instead of teleporting. Only when
+  // something CAN move: the capture and the fly each force a layout of the whole document, and most frames
+  // change a card in place (text, tint, status chip) with every card staying where it was (2026-09-04).
+  const nextCols = columnsOf(buckets);
+  const needFlip = flipNeeded(prevCols, nextCols);
+  prevCols = nextCols;
+  const flipFirst = needFlip ? captureCardRects(cols) : new Map<string, FlipState>();
 
   const desired = new Set<string>();
   reconcileCol(cols.asks, buckets.asks, desired);
@@ -4637,7 +4691,7 @@ function render() {
     if (prevKey && prevKey !== curKey && flipFirst.has(prevKey)) flipFirst.set(curKey, flipFirst.get(prevKey)!);
   }
   // FLIP step 2: any card whose column changed flies from its recorded spot to the new one (in the back layer).
-  flyColumnChanges(flipFirst, cols);
+  if (needFlip) flyColumnChanges(flipFirst, cols);
   prevItemKey = curItemKey;   // remember this render's identity map for the next FLIP-across-identity
   renderModal();   // keep the ⛶ full-screen tree (if open) in sync with this push
   applyExtHover(); // reconcile/renderModal may have rebuilt nodes — re-apply the rail-dot outlines (cards AND modal rows)
@@ -4767,6 +4821,7 @@ window.addEventListener("blur", () => { if (kbMode) kbExit(); });   // shell mov
 // same-page toggle both land here).
 let lastCollapsedPref = feedPrefs().collapsed;
 function onSettingsChanged(): void {
+  paintEpoch++;   // grouped/collapsed/stacked reach into every card's paint (name row, row2, sections)
   const p = feedPrefs();
   if (p.collapsed !== lastCollapsedPref) { lastCollapsedPref = p.collapsed; secChoice.clear(); }
   applyStacked(p.stacked);
@@ -5087,6 +5142,7 @@ function applyFeedPayload(m: any): void {
   }
   awaitingSet = new Set(Array.isArray(m.awaiting) ? m.awaiting : []);   // await-green awaiting dots (the user 2026-07-13)
   unknownSet = new Set(Array.isArray(m.stateUnknown) ? m.stateUnknown : []);   // listed-but-unreadable → gray ring, never a blank
+  noteStatusInputs();   // the dots and delegation lines every card paints read these → a change repaints every card
   bgServicesMap = m.bgServices && typeof m.bgServices === "object" ? m.bgServices : {};   // session name -> judge-classified service descs → the session-header chip (2026-07-24)
   if (Array.isArray(m.order)) sessionOrder = m.order.filter((x: any) => typeof x === "string");   // grouped-mode session rank (tab/lane order)
   pendingHosts = Array.isArray(m.pendingHosts) ? m.pendingHosts.filter((h: any) => typeof h === "string") : [];
