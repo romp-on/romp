@@ -494,7 +494,9 @@ def _read_jsonl(path):
 # whole-parse cache contract. The cached list itself is never extended in place — a grown file stores a
 # NEW list — so a concurrent reader holding the old list is never surprised mid-iteration.
 _JSONL_CACHE = {}                 # path -> (mtime, size, offset, tail_bytes, records); dict order = LRU, hits reinsert
-_JSONL_CACHE_MAX = 384            # bounds MEMORY only — past the cap, evict the least-recently-USED entry, one per
+_JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-03: the per-session states,
+                                  # captions and the postal/nudge logs became tenants — a few KB each — and
+                                  # must never evict a live transcript's slot) — past the cap, evict the least-recently-USED entry, one per
                                   # insert, never clear(). The old clear-at-cap was sized to the session count, but
                                   # the working set is FILES, not sessions (every subagent writes its own transcript):
                                   # once more distinct files than slots passed through one push cycle, the clear

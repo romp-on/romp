@@ -2672,12 +2672,16 @@ class ViewBuilder(unittest.TestCase):
         self.assertEqual(chat_order, ["NEW", "C", "A"],
                          "the transcript-less session shares the active tier (stable within it)")
 
-    def test_push_caches_unchanged_background_tabs_but_always_rebuilds_active(self):
+    def test_push_caches_unchanged_tabs_and_rebuilds_each_on_its_own_change(self):
         # the user 2026-06-24 (sluggish UI): the 0.5s pusher rebuilt EVERY open tab — a full transcript reshape
         # into ChatEvent[] AND a json.dumps of the whole chat, per tab, even when nothing changed — which pegged
         # the kernel on multi-MB transcripts and starved the webview. A BACKGROUND tab whose transcript+states
-        # are unchanged now reuses its built payload (one stat() instead of a reshape+serialize); the ACTIVE
-        # tab always rebuilds so what the user is watching stays live (incl. SDK live-tail atoms).
+        # are unchanged reuses its built payload (one stat() instead of a reshape+serialize). The ACTIVE tab
+        # used to rebuild on every push "to stay live"; since 2026-09-03 it too is served from its last build
+        # while its EXACT key (_active_chat_sig: file stats + live tail + snapshot + clock predicates) is
+        # unchanged and no kernel-side mutation postdates the build — so a watched 80 MB session no longer
+        # costs a reshape per 0.5 s cycle with nothing moving. Liveness is unchanged: any input that can
+        # move the payload is in the key, and _mark_views_dirty busts it for in-memory stamps.
         import tempfile
         d = tempfile.mkdtemp()
         pa, pb = os.path.join(d, "A.jsonl"), os.path.join(d, "B.jsonl")
@@ -2698,19 +2702,30 @@ class ViewBuilder(unittest.TestCase):
         client = {"app": "chat", "active": "A", "alive": True}
         try:
             km._push([client])                       # 1st: builds A + B
-            km._push([client])                       # 2nd: A rebuilt (active); B reused (unchanged)
+            km._push([client])                       # 2nd: nothing moved → A and B both served
             after_two = list(calls)
             with open(pb, "a") as f:                 # B's transcript grows → its signature busts
                 f.write("{}\n")
             os.utime(pb, None)
-            km._push([client])                       # 3rd: A rebuilt; B rebuilt (changed)
+            km._push([client])                       # 3rd: B rebuilt (changed); A still served
+            after_three = list(calls)
+            with open(pa, "a") as f:                 # A's transcript grows → the ACTIVE key busts
+                f.write("{}\n")
+            os.utime(pa, None)
+            km._push([client])                       # 4th: A rebuilt
+            after_four = list(calls)
+            km._mark_views_dirty()                   # a kernel-side mutation no file records
+            km._push([client])                       # 5th: A rebuilt (dirty postdates its build)
         finally:
             (km._tmux_sessions, km._chat_tab_sessions, km.build_session, km.build_feed,
              km.build_timeline, km._send_client) = saved
             km._built_chat.clear()
-        self.assertEqual(calls.count("A"), 3, "the ACTIVE tab rebuilds on every push (stays live)")
+        self.assertEqual(after_two.count("A"), 1, "an unchanged ACTIVE tab is served on the 2nd push")
         self.assertEqual(after_two.count("B"), 1, "an unchanged BACKGROUND tab is NOT rebuilt on the 2nd push")
-        self.assertEqual(calls.count("B"), 2, "the background tab rebuilds once its transcript actually changes")
+        self.assertEqual(after_three.count("B"), 2, "the background tab rebuilds once its transcript actually changes")
+        self.assertEqual(after_three.count("A"), 1, "…and that does not rebuild the active tab")
+        self.assertEqual(after_four.count("A"), 2, "the active tab rebuilds once ITS transcript changes")
+        self.assertEqual(calls.count("A"), 3, "a kernel-side mutation (views dirty) rebuilds the active tab")
 
     def _orphaned_goal(self, idle=True, closer_done=True, planned=True):
         # an idle (or still-open) session whose top goal still shows "working". closer_done puts the latest

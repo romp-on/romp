@@ -4679,6 +4679,7 @@ class SdkBackend:
         #                                    the catalog lives in the kernel; the backend never imports it
         self._notify = notify              # notify(app, msg) -> push to clients (kernel._send_to_app)
         self._poke_cb = poke               # wake the kernel's producer/judges (optional)
+        self._owns_memo: dict = {}         # sid -> ((reg mtime_ns, size), owns?) — see owns()
         self._push_cb = push               # wake the kernel's PUSHER → immediate chat push (live tail)
         self._push_session_cb = push_session   # targeted ONE-session push (kernel _push_session_now) for
         #   per-session chip events (the connect handshake): a wake alone leaves the flip riding the next
@@ -4697,6 +4698,10 @@ class SdkBackend:
         #                                           writes come from kernel AND loop threads)
         self._pending_ask: dict[str, bool] = {}   # sid -> has an ask awaiting answer
         self._live: dict[str, dict] = {}          # sid -> {key -> atom}: the in-memory LIVE TAIL (ahead of disk)
+        self._live_rev: dict[str, int] = {}       # sid -> count of changes to its live tail (add/edit/drop) —
+        #                                           the exact "the live tail moved" event the kernel's active-tab
+        #                                           cache keys on (2026-09-03); bumped by _touch_live at every
+        #                                           mutation site, never read as a value beyond equality
         self._rl_lock = threading.Lock()          # serializes usage.json read-merge-write (_record_rate_limit)
         self._drain_hold_until = 0.0              # deploy-drain lease (T121): RUNTIME-ONLY — a fresh boot starts clear by construction
         self._drain_hold_since = 0.0
@@ -6379,6 +6384,7 @@ class SdkBackend:
         if injected and "<!-- romp-auto -->" in text:
             echo["rompAuto"] = True                          # auto-nudge → romp-logo on the chat/timeline
         self._live.setdefault(sid, {})[key] = echo
+        self._touch_live(sid)
         self._persist_echoes(sid)                            # unlanded echoes survive a kernel restart (reg mirror)
         self._wake_push()
         return True
@@ -6425,6 +6431,7 @@ class SdkBackend:
                 if e.get("dropped"):
                     atom["dropped"] = True
                 self._live.setdefault(reg["sid"], {})[key] = atom
+                self._touch_live(reg["sid"])
             if self._live.get(reg["sid"]):
                 self._mark_dropped_echoes(reg["sid"], reg.get("queue") or [])
 
@@ -6513,6 +6520,7 @@ class SdkBackend:
             if a["_echo_text"] in rekeyed:
                 continue                                   # now in the queue → renders as queued, prunes on landing
             a["dropped"] = True
+            self._touch_live(sid)
             self._log("%s: a send never reached its CLI (the process died holding it) — kept in the chat "
                       "as never-delivered: %.80r" % (sid[:8], a["_echo_text"]), problem=True)
         self._persist_echoes(sid)
@@ -6561,6 +6569,7 @@ class SdkBackend:
                 continue
             if (uuid is not None and k == uuid) or (t is not None and int(a.get("t") or 0) == t):
                 live.pop(k, None)
+                self._touch_live(sid)
                 if not live:
                     self._live.pop(sid, None)
                 self._persist_echoes(sid)
@@ -7627,7 +7636,23 @@ class SdkBackend:
         return "key" if self.work_key else "login"
 
     def owns(self, sid: str) -> bool:
-        return read_reg(self.state_dir, sid) is not None
+        """Whether this backend has a registry entry for `sid`. Memoized on the reg file's (mtime, size):
+        Sessions.backend_for asks this for every session in every pusher tick job — 130+ reg opens and
+        JSON decodes per cycle on a 17-session board with nothing changed (2026-09-03) — and the answer
+        can only change when the file does. A vanished file forgets its memo (the reg is gone)."""
+        p = _reg_path(self.state_dir, sid)
+        try:
+            st = p.stat()
+            key = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            self._owns_memo.pop(sid, None)
+            return False
+        hit = self._owns_memo.get(sid)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        ok = read_reg(self.state_dir, sid) is not None
+        self._owns_memo[sid] = (key, ok)
+        return ok
 
     def ensure_scheduled(self) -> int:
         """Keep a CLI process ALIVE for every session with ARMED SESSION TIMERS (reg sessionCrons, the
@@ -7879,6 +7904,7 @@ class SdkBackend:
         d = self._live.setdefault(sess.sid, {})
         d[atom["uuid"]] = atom
         _evict_live_overflow(d)                  # safety cap if no client ever drains/prunes — never an echo
+        self._touch_live(sess.sid)
         # The stream is the AUTHORITATIVE busy signal: a genuine WORK atom (streamed assistant/tool
         # output — not an input echo, not a /model-style command line) means the CLI is producing RIGHT
         # NOW, so re-assert 'working' if a prior state write settled ahead of it (e.g. a separate turn
@@ -7911,6 +7937,17 @@ class SdkBackend:
             except Exception as e:
                 self._log("session push (%s) failed: %s" % (sid, e))
         threading.Thread(target=run, name="sdk-push-session", daemon=True).start()
+
+    def _touch_live(self, sid: str) -> None:
+        """Record that `sid`'s live tail changed (see _live_rev)."""
+        revs = getattr(self, "_live_rev", None)          # a bare __new__ backend (tests drive prune_live on one)
+        if revs is None:                                 # has no counters yet: mint them rather than raise
+            revs = self._live_rev = {}
+        revs[sid] = revs.get(sid, 0) + 1
+
+    def live_rev(self, sid: str) -> int:
+        """How many times `sid`'s live tail has changed this process — equality means nothing moved."""
+        return getattr(self, "_live_rev", {}).get(sid, 0)
 
     def live_atoms(self, sid: str) -> list:
         """The session's in-memory live-tail atoms (newest last), for build_session to merge ahead of disk."""
@@ -7961,6 +7998,7 @@ class SdkBackend:
             if landed or stale_echo or stale_cmd:
                 echo_removed = echo_removed or bool(et and not a.get("command"))
                 del d[k]
+                self._touch_live(sid)
         if not d:
             self._live.pop(sid, None)
         if echo_removed:
@@ -8009,6 +8047,7 @@ class SdkBackend:
                         except Exception:
                             self._log("orphan-reply persist failed: %s" % traceback.format_exc())
                 del d[k]
+                self._touch_live(sid)
         if not d:
             self._live.pop(sid, None)
 

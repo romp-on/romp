@@ -850,12 +850,21 @@ def pass_watermark(tier, fsid):
     return _PASS_DONE.get((str(tier), str(fsid)))
 _active_lock = threading.Lock()
 _active_seq = [0]
+_active_change = [0]      # bumped on EVERY begin and end — the exact "the set of in-flight judge calls
+#                            changed" event the kernel's view signature keys on (2026-09-03), so a
+#                            judging swirl lights and clears on the call itself, not on a pass cadence
+
+
+def active_change():
+    """Monotonic count of changes to the in-flight judge-call set (begins + ends)."""
+    return _active_change[0]
 
 
 def _active_begin(judge, fsid, sent):
     """Mark a judge call as running; returns a run id to pass to _active_end on completion."""
     with _active_lock:
         _active_seq[0] += 1
+        _active_change[0] += 1
         rid = _active_seq[0]
         _active[rid] = {"judge": judge, "fsid": fsid, "sent": sent}
         return rid
@@ -863,7 +872,8 @@ def _active_begin(judge, fsid, sent):
 
 def _active_end(rid):
     with _active_lock:
-        _active.pop(rid, None)
+        if _active.pop(rid, None) is not None:
+            _active_change[0] += 1
 
 
 def active_runs():

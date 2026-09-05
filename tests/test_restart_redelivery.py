@@ -54,6 +54,9 @@ class Redelivery(unittest.TestCase):
 
             def _wake_push(self):
                 pass
+
+            def _touch_live(self, sid):
+                pass                      # the live-tail revision hook (2026-09-03): a stub needs no counter
             _text_landed = sb.SdkBackend._text_landed if hasattr(sb, "SdkBackend") else None
         self.be = BE()
         # bind the real methods under test onto the stub

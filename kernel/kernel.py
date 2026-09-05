@@ -592,6 +592,7 @@ def _version_info():
             "postalUnresolved": {"ids": len(_POSTAL_UNRESOLVED["seen"]),   # T234: unresolved postal ids
                                  "warned": _POSTAL_UNRESOLVED["warned"],    # (distinct pairs seen, lines
                                  "suppressed": _POSTAL_UNRESOLVED["suppressed"]},   # written, repeats held)
+            "views": dict(_VIEW_STATS),      # feed/timeline/chat rebuilt vs served from cache (2026-09-03)
             "drainRefused": dict(_DRAIN_REFUSED),   # T224: refused /busy?drain=1 arms — count (lifetime
             #                                          total), episodeCount (the current/last episode),
             #                                          open episode, last time; the silent degrade made visible
@@ -772,6 +773,9 @@ def iso(t):
         return ""
 
 
+_names_entry_memo = {}   # entry name -> ((mtime_ns, size, ino), parts) — see _names_snapshot
+
+
 def _names_snapshot():
     """{sid: tab-fields list} for every names-registry entry, read once. The pusher cycle publishes
     this as its names scope (_live_scope.names): build_session re-resolves every path token through
@@ -784,7 +788,15 @@ def _names_snapshot():
     try:
         for f in NAMES.iterdir():
             try:
-                snap[f.name] = f.read_text().rstrip("\n").split("\t")
+                # per-entry memo on (mtime_ns, size, inode) (2026-09-03): entries are published by
+                # os.replace, so any rewrite moves the key; an unchanged entry costs one stat, not a read
+                st = f.stat()
+                key = (st.st_mtime_ns, st.st_size, st.st_ino)
+                hit = _names_entry_memo.get(f.name)
+                if hit is None or hit[0] != key:
+                    hit = (key, f.read_text().rstrip("\n").split("\t"))
+                    _names_entry_memo[f.name] = hit
+                snap[f.name] = hit[1]
             except Exception:   # OSError, but ALSO UnicodeDecodeError on a torn/raw-bytes entry — the
                 continue        # per-call readers this replaces caught bare Exception, and this function
         #                         runs on the pusher thread's bare loop, so it must NEVER raise (review
@@ -792,6 +804,8 @@ def _names_snapshot():
         #                         good, and again on every restart while the file persisted)
     except Exception:
         pass
+    for gone in [n for n in _names_entry_memo if n not in snap]:
+        _names_entry_memo.pop(gone, None)              # a removed entry drops its memo
     return snap
 
 
@@ -4407,6 +4421,7 @@ def _set_retry_paused(paused, reason=""):
         if reason:
             d["reason"] = reason
     _atomic_write(jd.STATE / "retry-paused.json", json.dumps(d))
+    _mark_views_dirty()   # the queued bubble renders this hold; every writer publishes the flip (review 2026-09-05)
 
 
 def _retry_pause_reason():
@@ -5283,6 +5298,28 @@ def _pure_delegation_top(nodes, top_id, sid=None, path=None):
     return bool(leaves) and all(isinstance(nodes.get(nid, {}).get("handoff"), dict) for nid in leaves)
 
 
+def _states_rows(sid):
+    """Every parsed row of states/<sid>.jsonl, served APPEND-INCREMENTALLY from event_model's jsonl cache
+    (the transcripts' own reader: one stat per call while the file is quiet, only the appended bytes
+    when it grew). Upstream's _fold_records now serves most per-push readers; the three that remain on this
+    path (the busy hint, the nudge times, the state intervals) used to open the file and json.loads
+    every line on every call — per session per pusher cycle, on a log that only ever grows (≈5k rows /
+    1 MB on a long-lived session): ~2 full reads per second per session with NOTHING changed, measured
+    2026-09-03 as the largest steady-state read volume in the kernel (the states logs were the most-opened
+    files in a 12 s descriptor sample). Rows are the cache's own objects — read-only by contract, never
+    mutate them. Missing/unreadable file → [] (the readers' old OSError branches)."""
+    return em._read_jsonl_incremental(jd.STATE / "states" / ("%s.jsonl" % sid))
+
+
+def _messages_rows(path=None):
+    """Every parsed row of the postal log (timeline/messages.jsonl), append-incremental like _states_rows —
+    the feed's parked-handoff scan, the timeline's connector join, the postal index and the wait maps each
+    re-read and re-parsed the whole 5 MB log per build. Read-only rows; [] when absent. `path` defaults to
+    jd.MESSAGES; readers that historically derived the path from jd.STATE at call time pass it (in
+    production both name the same file; tests re-point one or the other)."""
+    return em._read_jsonl_incremental(path if path is not None else jd.MESSAGES)
+
+
 def _last_state(sid):
     """(value, t) of the most-recent STATE transition in states/<sid>.jsonl ('working'/'waiting'/'idle'/…),
     ignoring the interleaved awaiting overlays; ('', 0) when there's no state file yet. The Stop hook (tmux) and
@@ -5291,22 +5328,11 @@ def _last_state(sid):
     state recorded AFTER the parsed turn's end means the session is genuinely still working (a newer turn the
     parse hasn't caught up to); one recorded BEFORE it means the turn ended and the post-turn 'waiting' write
     was lost (e.g. a kernel restart) — a stale record that must not block the nudge forever."""
-    p = jd.STATE / "states" / ("%s.jsonl" % sid)
     val, vt = "", 0
-    try:
-        with open(p, errors="replace") as f:
-            for line in f:
-                if '"state"' not in line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(rec, dict) and isinstance(rec.get("state"), str):
-                    val = rec["state"]
-                    vt = rec.get("t", vt)
-    except OSError:
-        return ("", 0)
+    for rec in _states_rows(sid):
+        if isinstance(rec, dict) and isinstance(rec.get("state"), str):
+            val = rec["state"]
+            vt = rec.get("t", vt)
     return (val, vt)
 
 
@@ -5752,6 +5778,26 @@ def _stamp_written_at(nd):
     return max(best, nd.get("awaitingAt") or 0)
 
 
+def _sid_inputs_fp(sid, path, extra=()):
+    """(stat, …) of the recorded inputs a per-session tick ruling reads — the goal store, its override
+    journal, the transcript, the postal log and the SDK reg — plus `extra` live facts. Equal tuples across
+    cycles mean the ruling's inputs did not move; None when nothing can be stat'd (then never skip)."""
+    out = []
+    for p in (jd.GOALDIR / (str(sid) + ".json"), jd.STATE / "overrides" / (str(sid) + ".jsonl"),
+              path or "", jd.STATE / "timeline" / "messages.jsonl", jd.STATE / "sdk" / (str(sid) + ".json")):
+        try:
+            st = os.stat(p) if p else None
+            out.append((st.st_mtime_ns, st.st_size, st.st_ino) if st else None)   # ino: an atomic republish
+        except OSError:                                                            # of equal size in one
+            out.append(None)                                                       # timestamp tick still moves
+    if all(x is None for x in out):
+        return None
+    return tuple(out) + tuple(extra)
+
+
+_lift_seen = {}   # sid -> the inputs fingerprint the awaiting lift last ruled on — see _lift_spent_awaiting
+
+
 def _lift_spent_awaiting(now, tmux):
     """Retire a goal's ⏳ awaiting stamp once the dispatches it was waiting on have RETURNED (the user
     2026-07-22). The closer's lift is bounded to the goals a turn actually WORKED ON (`touched`), which is
@@ -5781,7 +5827,27 @@ def _lift_spent_awaiting(now, tmux):
         try:
             if tmux.get(sid) is None:                 # dormant → its tasks died with the CLI, don't rule
                 continue
-            store = jd.load_goals(sid)
+            # Every fact this lift rules on is recorded somewhere that stats: the goal store and its
+            # override journal (the stamps), the transcript (the returns), the postal log (a peer's
+            # reply), the SDK reg (the CLI epoch) and the backend's live task set. Unchanged since the
+            # last cycle → the ruling is unchanged → skip the load (2026-09-03: this ran a full store
+            # load + journal replay per live session per 0.5 s cycle on a quiet board).
+            snap = tmux.get(sid) or {}
+            # …plus the two facts the ruling reads that no file records: the live subagent count, and
+            # for every dispatch the transcript pairs, WHETHER its recorded deadline has passed (a
+            # watcher past deadline+grace counts as returned — a clock fact, keyed as the boolean it
+            # resolves to, so the crossing itself re-examines the session; review 2026-09-03).
+            every = _bg_scan_all_cached(s["path"]) if s.get("path") else []
+            gate = _sid_inputs_fp(sid, s.get("path"),
+                                  extra=(tuple(sorted(str(t.get("toolUseId") or "") for t in (snap.get("bgTasks") or ())
+                                                      if isinstance(t, dict))),
+                                         len(snap.get("subagents") or ()),
+                                         tuple(sorted((str(t.get("id") or ""), bool(em._bg_expired(t, now)))
+                                                      for t in every if isinstance(t, dict) and t.get("status") == "running"))))
+            if gate is not None and _lift_seen.get(sid) == gate:
+                continue
+            _lift_seen[sid] = gate                    # recorded now; a ruling that RAISES forgets it below,
+            store = jd.load_goals(sid)                # so the next cycle retries instead of skipping
             nodes = store.get("nodes") or {}
             stamped = [nd for nd in nodes.values()
                        if nd.get("awaitingWhy") and nd.get("awaitingAt") and not nd.get("rolledUp")]
@@ -5966,7 +6032,9 @@ def _lift_spent_awaiting(now, tmux):
                 jd.rollup_status(store, False)
                 jd.save_goals(sid, store)
                 _mark_views_dirty()
+
         except Exception:
+            _lift_seen.pop(sid, None)                 # a raised ruling is not a ruling — re-run next cycle
             sys.stderr.write("awaiting-lift (session %s): %s\n" % (sid or "?", traceback.format_exc()))
 
 
@@ -8566,13 +8634,32 @@ def _comment_msg_text(rec):
     return "\n".join(p for p in parts if p).strip()
 
 
+_thread_reg_memo = {}   # tsid -> ((mtime_ns, size), reg dict) — see _thread_reg
+
+
 def _thread_reg(tsid):
-    """The thread's SDK registry entry (authoritative for cwd/lastSid/threadOf), {} when unreadable."""
+    """The thread's SDK registry entry (authoritative for cwd/lastSid/threadOf), {} when unreadable.
+    Memoized on the file's (mtime, size, inode) — thirteen callers, two of them per chat build, each decoded
+    the file afresh (2026-09-03). Returns a shallow copy so a caller's edit never leaks into the memo."""
+    p = jd.STATE / "sdk" / (tsid + ".json")
     try:
-        d = json.loads((jd.STATE / "sdk" / (tsid + ".json")).read_text())
-        return d if isinstance(d, dict) else {}
+        st = p.stat()
+        key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        _thread_reg_memo.pop(tsid, None)
+        return {}
+    hit = _thread_reg_memo.get(tsid)
+    if hit is not None and hit[0] == key:
+        return dict(hit[1])
+    try:
+        d = json.loads(p.read_text())
+        d = d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
+    if len(_thread_reg_memo) > 512:
+        _thread_reg_memo.pop(next(iter(_thread_reg_memo)))
+    _thread_reg_memo[tsid] = (key, d)
+    return dict(d)
 
 
 def _thread_transcript_path(reg, tsid):
@@ -17454,23 +17541,15 @@ def _states_awaiting_overlay(sid):
     signal is open_now OR awaiting, the timeline's is open_now alone, so a stale awaiting splits them). An
     idle/waiting state after an awaiting:true is consistent with awaiting (idle while the job runs) and does
     NOT supersede it. State records carry "state", overlay records carry "awaiting"; the two never overlap."""
-    p = jd.STATE / "states" / ("%s.jsonl" % sid)
     last = None
     working_after = False
-    try:
-        with open(p, errors="replace") as f:
-            for line in f:
-                if '"awaiting"' in line:
-                    try:
-                        o = json.loads(line)
-                    except Exception:
-                        continue
-                    if isinstance(o, dict) and "awaiting" in o:
-                        last, working_after = o, False     # a fresh overlay record resets the supersede flag
-                elif '"state"' in line and '"working"' in line:
-                    working_after = True                   # a real work turn resumed since the last overlay record
-    except OSError:
-        return None
+    for o in _states_rows(sid):
+        if not isinstance(o, dict):
+            continue
+        if "awaiting" in o:
+            last, working_after = o, False             # a fresh overlay record resets the supersede flag
+        elif o.get("state") == "working":
+            working_after = True                       # a real work turn resumed since the last overlay record
     if last is not None and last.get("awaiting") and working_after:
         return {"awaiting": False, "why": None}            # stale true — superseded by a later work turn
     return last
@@ -17494,21 +17573,16 @@ def _session_retrying(sid, tm):
         return None
     since = None
     try:
-        with open(jd.STATE / "states" / ("%s.jsonl" % sid), errors="replace") as f:
-            for line in f:
-                if '"state"' not in line:
-                    continue                               # overlay/recovery rows don't bound a stretch
-                try:
-                    o = json.loads(line)
-                except Exception:
-                    continue
-                st = o.get("state") if isinstance(o, dict) else None
-                if st == "retrying":
-                    if since is None:
-                        since = o.get("t")                 # first row of the current stretch
-                elif st:
-                    since = None                           # any real state transition ends the stretch
-    except OSError:
+        for o in _states_rows(sid):
+            st = o.get("state") if isinstance(o, dict) else None
+            if not st:
+                continue                                   # overlay/recovery rows don't bound a stretch
+            if st == "retrying":
+                if since is None:
+                    since = o.get("t")                     # first row of the current stretch
+            else:
+                since = None                               # any real state transition ends the stretch
+    except Exception:
         pass
     try:
         count = int(tm.get("retryCount") or 0)
@@ -18000,17 +18074,13 @@ def _ask_poll():
 
 
 def _captions(fsid):
+    """{unit id -> caption row} from captions/<fsid>.jsonl — append-incremental like the states logs
+    (2026-09-03): the chat build, the feed and the timeline each re-read and re-decoded the whole file
+    per build. Rows are the cache's objects: read-only."""
     out = {}
-    try:
-        for line in (jd.CAPDIR / (fsid + ".jsonl")).read_text(errors="replace").splitlines():
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
-            if o.get("id"):
-                out[o["id"]] = o
-    except OSError:
-        pass
+    for o in em._read_jsonl_incremental(jd.CAPDIR / (fsid + ".jsonl")):
+        if isinstance(o, dict) and o.get("id"):
+            out[o["id"]] = o
     return out
 
 
@@ -18189,14 +18259,8 @@ def _postal_index():
     if hit is not None and hit[0] == key:
         return hit[1]
     idx = {}
-    try:
-        lines = p.read_text(errors="replace").splitlines()
-    except OSError:
-        return idx
-    for ln in lines:
-        try:
-            o = json.loads(ln)
-        except Exception:
+    for o in _messages_rows(p):                       # append-incremental rows (2026-09-03): a send no
+        if not isinstance(o, dict):                   # longer re-decodes the whole log on the active tab
             continue
         if o.get("ev") == "sent" and o.get("id"):
             idx[o["id"]] = {"id": o["id"], "from": o.get("from", "?"), "fromId": o.get("from_id", ""),
@@ -18520,11 +18584,24 @@ def _task_store_fp(fsid):
     if d is None:
         return None
     try:
-        ents = [(e.name, e.stat().st_mtime) for e in os.scandir(d)
-                if e.name.endswith(".json")]
+        ents = []
+        with os.scandir(d) as it:
+            for e in it:
+                if not e.name.endswith(".json"):
+                    continue
+                try:
+                    st = e.stat()
+                except OSError:
+                    continue                              # unlinked between readdir and stat → not in the store
+                ents.append((e.name, st.st_mtime_ns, st.st_size, st.st_ino))   # ns + size + inode: a same-size
+        #                                                    rename-publish inside one coarse timestamp tick
+        #                                                    still moves the key (review 2026-09-03)
     except OSError:
         return None
     return tuple(sorted(ents))
+
+
+_task_store_memo = {}   # store dir -> (per-file fingerprint, task list) — see _read_task_store
 
 
 def _read_task_store(fsid, fold=None):
@@ -18549,6 +18626,26 @@ def _read_task_store(fsid, fold=None):
     d = _task_store_resolve(fsid, fold)
     if d is None:
         return None                                       # store unlocatable → the caller surfaces an error
+    # Memoized on the resolved dir + every N.json's (name, mtime, size) (2026-09-03): the active tab's
+    # build listed and decoded every task file per cycle. The fingerprint is the same shape
+    # _task_store_fp already stats for the chat-build key. Callers get their own copy.
+    try:
+        fp = []
+        with os.scandir(d) as it:
+            for e in it:
+                if not e.name.endswith(".json"):
+                    continue
+                try:
+                    st = e.stat()
+                except OSError:
+                    continue                              # unlinked between readdir and stat → not part of the store
+                fp.append((e.name, st.st_mtime_ns, st.st_size, st.st_ino))
+        fp = tuple(sorted(fp))
+    except OSError:
+        return None                                       # store unreadable → the caller surfaces an error
+    hit = _task_store_memo.get(str(d))
+    if hit is not None and hit[0] == fp:
+        return [dict(t) for t in hit[1]]
     try:
         names = [n for n in os.listdir(d) if n.endswith(".json")]
     except OSError:
@@ -18568,8 +18665,12 @@ def _read_task_store(fsid, fold=None):
                       "status": str(t.get("status") or "pending"),
                       "_order": int(tid) if tid.isdigit() else (1 << 30)})
     tasks.sort(key=lambda t: (t["_order"], t["id"]))       # readable dir → authoritative (empty list included)
-    return [{"id": t["id"], "subject": t["subject"], "activeForm": t["activeForm"], "status": t["status"]}
-            for t in tasks]
+    out = [{"id": t["id"], "subject": t["subject"], "activeForm": t["activeForm"], "status": t["status"]}
+           for t in tasks]
+    if len(_task_store_memo) > 512:
+        _task_store_memo.pop(next(iter(_task_store_memo)))
+    _task_store_memo[str(d)] = (fp, out)
+    return [dict(t) for t in out]
 
 
 def _fold_tasks(session):
@@ -18622,11 +18723,54 @@ _parse_cache = {}                                # realpath → ((mtime, size, p
 # every 0.5s poll — a full transcript reshape into ChatEvent[] AND a json.dumps of the whole chat, per tab,
 # even when nothing changed. With transcripts now tens of MB, that pegged the kernel and starved the
 # webview. Cache each session's built payload + its serialized string, keyed on the transcript+states
-# (mtime,size) — the same trust model as _parse_cache. The ACTIVE tab(s) always rebuild (so what the user
-# is watching stays live, incl. SDK live-tail atoms that lead the disk); an unchanged BACKGROUND tab reuses
-# the cache → one stat() instead of a reshape+serialize. A real change (or switching to the tab) rebuilds.
-_built_chat = {}                                 # sid → (sig, payload_dict, serialized_str)
-_judge_gen = [0]                                 # bumped each producer pass → busts the cache when the judge
+# (mtime,size) — the same trust model as _parse_cache. The ACTIVE tab(s) are served while _active_chat_sig
+# is unchanged (its key carries what no file records: the owning backend's live tail and queue, the snapshot
+# facts, the side files, the clock predicates — 2026-09-03/05); an unchanged BACKGROUND tab reuses the
+# cache on its file-stat + snapshot key → one stat() instead of a reshape+serialize. A real change (or
+# switching to the tab) rebuilds.
+_built_chat = {}                                 # sid → (sig, payload_dict, serialized_str, active_sig, build_started_at)
+def _judge_store_fp():
+    """Fingerprint of every store a judge pass can WRITE — goal trees, captions, archives, the cleared
+    archive and the episode log: (dir, name, mtime_ns, size) per file, from one scandir each. Two equal
+    fingerprints around a pass prove the pass changed nothing a view reads; that is the exact event
+    _judge_gen now keys on (2026-09-03). Before, the generation bumped after EVERY producer pass (≤3 s
+    cadence), so the feed, the timeline and every background chat tab rebuilt every pass on a quiet
+    board — the dominant clock-like input to the view signatures, measured in the offline replay."""
+    out = []
+    for d in (jd.GOALDIR, jd.CAPDIR, jd.ARCHDIR, jd.STATE / "goals-archive", jd.STATE / "episodes"):
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    try:
+                        st = e.stat()
+                    except OSError:
+                        continue
+                    out.append((d.name, e.name, st.st_mtime_ns, st.st_size, st.st_ino))
+        except OSError:
+            continue
+    out.sort()
+    return tuple(out)
+
+
+_last_judge_fp = [None]   # the stores' fingerprint at the END of the last producer pass — see below
+
+
+def _bump_judge_gen_if_changed(before_fp=None):
+    """Advance the judge generation when the judge-written stores changed since the LAST time this looked
+    (the end of the previous pass) — not merely during the pass: a kernel-side save between passes (a
+    user's clear or resolve, the awaiting lift, a nudge verdict) moves a store too, and the background
+    chat tabs refresh on this generation alone (review 2026-09-03). `before_fp` is accepted for callers
+    that hold one but the comparison anchor is the previous look. Returns True when it advanced."""
+    cur = _judge_store_fp()
+    anchor = _last_judge_fp[0] if _last_judge_fp[0] is not None else before_fp
+    _last_judge_fp[0] = cur
+    if cur != anchor:
+        _judge_gen[0] += 1
+        return True
+    return False
+
+
+_judge_gen = [0]                                 # bumped when a producer pass CHANGED a store → busts the cache when the judge
                                                  # may have changed goal/caption state without a transcript write
 
 # ATOMIC JUDGE-PASS VISIBILITY (the user 2026-06-30): the triage judges (planner → closer → courier →
@@ -18714,6 +18858,178 @@ def _feed_goals(sid):
 # events holds the last-built events per session; _chat_diff finds the first index that differs from it — the
 # exact point content changed (a new event OR a tool output that just filled an earlier card). Diffing by
 # CONTENT (not a fixed window) is robust to _hydrate_postal turning one event into several cards mid-array.
+def _clock_predicates(sid, tm, now, path=None):
+    """The clock-derived facts build_session renders, as the booleans they resolve to — so a cache key
+    that carries them changes EXACTLY when the rendered payload would (the flip is the event), never on a
+    tick: the faded look at an hour idle (_idle_faded), an interrupt whose 120 s in-flight cap has run
+    out (_interrupting), a model switch whose 20 s cap has (_model_pending_now), a compaction whose 180 s
+    optimistic cap has (_compacting_optimistic), and each live background task past its recorded
+    deadline (em._bg_expired). These are the only reasons an identical-input build can differ."""
+    tm = tm or {}
+    since = tm.get("since") or 0
+    ic = _interrupt_clicked.get(sid)
+    mp = _model_switch_pending.get(sid) or {}
+    cc = _compact_clicked.get(sid)
+    # the live-task set AFTER the build's own expiry filter (_bg_live_norm joins each task's recorded
+    # deadline from the launch ledger and drops the expired ones) — a task expiring is a tid dropping
+    # out of this tuple. The raw snapshot rows carry no deadline, so a predicate over them could never
+    # flip (review 2026-09-03).
+    try:
+        live_ids = tuple(sorted(str(r.get("tid") or "") for r in _bg_live_norm(sid, path) if isinstance(r, dict)))
+    except Exception:
+        live_ids = None
+    return (bool(since) and bool(_idle_faded(tm.get("state") or "", since, now)),
+            bool(since) and (now - since > FADED_S),   # the hour mark itself: the build derives the chip's
+            #                                            state (a stuck 'compacting' overridden, "" → ready),
+            #                                            so key the flip whatever the raw state says
+            bool(ic) and (now - ic > 120),
+            bool(mp) and (now > (mp.get("until") or 0)),
+            bool(cc) and (now - cc > 180),
+            live_ids)
+
+
+_ACTIVE_SIG_FILES = ("sdk/{sid}.json", "sdk", "goals/{sid}.json", "overrides/{sid}.jsonl", "archive/{sid}.json",
+                     "goals-archive/{sid}.json", "captions/{sid}.jsonl", "episodes/{sid}.jsonl", "cleared.jsonl",
+                     "timeline/messages.jsonl", "colormap", "session-flags.json", "notify-cards.json",
+                     "retry-suppressed.json", "auto-nudge.json",
+                     "watches.json", "pr-watches.json",   # the kernel-owned watch set the awaiting box renders
+                     "usage.json",                        # the account limit hold behind the queued bubble
+                     "retry-paused.json")                 # the spend hold the queued bubble renders (review 2026-09-05)
+
+
+def _claudemd_paths(cwd):
+    """The CLAUDE.md files _claudemd_docs reads for `cwd`, in load order — the global file, then each project
+    file from the git root down to cwd. Shared with the active-tab key so an edit to any of them is a
+    keyed event, not a silent lag."""
+    out = [str(_GLOBAL_CLAUDE_MD)]
+    home = os.path.expanduser("~")
+    chain = []
+    d = os.path.abspath(os.path.expanduser(cwd)) if cwd else None
+    while d:
+        chain.append(d)
+        if os.path.isdir(os.path.join(d, ".git")):
+            break
+        parent = os.path.dirname(d)
+        if parent == d or d == home:
+            break
+        d = parent
+    out += [os.path.join(dd, "CLAUDE.md") for dd in reversed(chain)]
+    return out
+
+
+def _external_sig(sid, path=None):
+    """(stat, …) of the inputs OUTSIDE the state root that build_session renders: the account file the
+    billing badge reads; the HEAD files of the git trees its branch rows read — the registered cwd's
+    tree AND the tree of the last edited file (the per-session worktree, under this repo's convention),
+    both resolved through _tree_of exactly as the build does, so a subdirectory cwd keys its repo's
+    HEAD too; the CLAUDE.md chain (the docs card); and the output file of every running background
+    task, whose tail the task box shows live. cwd falls back to the transcript's own stamp when the
+    registry has none, as the build's does. These are external edits with no romp event; a stat is the
+    honest key (review 2026-09-03). Accepted lag, documented: a path token that becomes a link because a
+    PEER created the file it names re-resolves on the next keyed change, not on the file's creation."""
+    meta = _session_meta(path) if path else {}
+    cwd = _cwd_of(sid) or (meta.get("cwd") if isinstance(meta, dict) else "") or ""
+    paths = [os.path.expanduser("~/.claude.json")]
+    _ks = getattr(jd, "_keysrc", None)                  # the env file's key line decides authBoth (read live since b4ca13e7)
+    if _ks is not None:
+        try:
+            paths.append(_ks.service_env_path())
+        except Exception:
+            pass
+    tops = []
+    for d in (os.path.expanduser(cwd) if cwd else "",
+              os.path.dirname((meta.get("lastEditPath") if isinstance(meta, dict) else "") or "")):
+        if not d:
+            continue
+        try:
+            top = _tree_of(d)[0]
+        except Exception:
+            top = ""
+        if top and top not in tops:
+            tops.append(top)
+    for top in tops:
+        try:
+            hp = _git_head_file(top)
+        except Exception:
+            hp = ""
+        if hp:
+            paths.append(hp)
+    paths += _claudemd_paths(cwd) if cwd else [str(_GLOBAL_CLAUDE_MD)]
+    if path:
+        try:
+            for tk in _bg_scan_cached(path):
+                if isinstance(tk, dict) and tk.get("status") == "running" and tk.get("outputFile"):
+                    paths.append(os.path.expanduser(str(tk["outputFile"])))
+        except Exception:
+            pass
+    out = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+            out.append((st.st_mtime_ns, st.st_size, st.st_ino))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+def _active_chat_sig(sess, tm, now, base=None):
+    """The exact change key for the WATCHED chat tab (2026-09-03). The active tab used to rebuild on every
+    pusher cycle "by design" — its payload moves with inputs no file records: the SDK live tail, the
+    snapshot facts, the send queue, the compacting/clearing brackets, kernel-side stamps — so the
+    background tabs' file-stat signature could not serve it, and an 80 MB session cost ~0.4-0.9 s of
+    reshape per 0.5 s cycle whether or not anything moved (the offline replay). This key names each of
+    those inputs: _chat_build_sig (transcript/states/judge gen/task store/pending cut) + the backend's live
+    revision, queue, brackets + the snapshot row minus its volatile timestamp + the stat of every side file
+    the build reads + the names registry + the clock predicates that flip the rendered output + the
+    in-flight judge set. Kernel-side stamps that lack a stat are covered by _views_dirty at the serve
+    site (the _cached_feed idiom). None → never cache (no transcript, or an input we cannot key).
+    `base` is the pusher's already-computed _chat_build_sig for this tab (one stat pass, not two)."""
+    base = _chat_build_sig(sess, tm) if base is None else base
+    if base is None:
+        return None
+    sid = str(sess.get("sid") or "")
+    try:
+        snap = json.dumps({kk: vv for kk, vv in (tm or {}).items() if kk != "snapT"}, sort_keys=True, default=str)
+    except Exception:
+        return None
+    # The live tail of the backend that OWNS the session — not only the SDK's (review 2026-09-05: a tmux
+    # session's composer echo and a Codex session's queue live in their own stores, which the build renders
+    # but no file records; keyed on _sdk() alone the watched tmux tab served its last build with the send
+    # missing until some file moved). The SDK backend counts its mutations (live_rev); the others are
+    # digested from exactly what the build reads: each live atom's identity and dropped flag, the queue,
+    # the brackets and the launch error.
+    be = Sessions.backend_for(sid)
+    live = ()
+    if be is not None:
+        try:
+            if hasattr(be, "live_rev"):
+                live = (be.live_rev(sid), tuple(be.pending_queued(sid) or ()), be.compacting(sid), be.clearing(sid))
+            else:
+                atoms = tuple((str(a.get("uuid") or a.get("id") or ""), bool(a.get("dropped")), str(a.get("text") or "")[:64])
+                              for a in (be.live_atoms(sid) or ()) if isinstance(a, dict))
+                le = be.launch_error(sid) if hasattr(be, "launch_error") else None
+                live = (atoms, tuple(be.pending_queued(sid) or ()),
+                        be.compacting(sid) if hasattr(be, "compacting") else None,
+                        be.clearing(sid) if hasattr(be, "clearing") else None, bool(le))
+        except Exception:
+            return None
+    files = []
+    for rel in _ACTIVE_SIG_FILES:
+        try:
+            st = os.stat(jd.STATE / rel.format(sid=sid))
+            files.append((st.st_mtime_ns, st.st_size, st.st_ino))
+        except OSError:
+            files.append(None)
+    try:
+        ext = _external_sig(sid, sess.get("path"))
+    except Exception:
+        return None
+    names = getattr(_live_scope, "names", None)
+    names_key = hash(repr(sorted(names.items()))) if isinstance(names, dict) else None
+    return base + (snap, live, tuple(files), names_key, _clock_predicates(sid, tm, now, sess.get("path")),
+                   jd.active_change(), ext)
+
+
 _prev_chat_events = {}                           # sid → the events list from the previous build (to diff against)
 # ── the chat-payload FOLD (issue 903, 2026-09-03) ──────────────────────────────────────────────────
 # build_session reshaped a working session's WHOLE event list on every push (0.3-1 ms/event; 26k
@@ -18859,12 +19175,18 @@ def _chat_diff(prev, cur):
     return i
 
 
-def _chat_build_sig(sess):
+def _chat_build_sig(sess, tm=None):
     """A cheap (transcript mtime,size, states mtime,size) signature for the chat-build cache — busts on any
-    new content OR a state transition (idle/working), the two things that change a session's chat payload.
-    A new caption (TOC headline) lags for a background tab until its transcript next changes or it's opened,
-    which is acceptable for a tab the user isn't looking at. Returns None (→ never cache, always rebuild) if
-    the session has no transcript path or it can't be stat'd."""
+    new content OR a state transition (idle/working), the two things that change a session's chat payload,
+    plus the judge generation, the task store, the pending cut, and — when the caller hands the session's
+    snapshot row `tm` — the facts the build renders from it (state, model, ctx, effort, subagents, background
+    tasks, pending picks, retry count, connected, spawning). The judge generation used to advance every pass
+    and so rebuilt every background tab within ~3 s whatever changed; it now advances only when a judge-
+    written store moved, so the snapshot digest is what keeps a background tab's chips within one cycle of
+    the truth (review 2026-09-05). What still lags for a BACKGROUND tab until one of those inputs moves: the
+    side files only the active key stats (watches, usage, cleared cards, notify cards) — acceptable for a tab
+    the user isn't looking at; it is rebuilt the moment it becomes the active one. Returns None (→ never
+    cache, always rebuild) if the session has no transcript path or it can't be stat'd."""
     path = sess.get("path")
     if not path:
         return None
@@ -18896,6 +19218,13 @@ def _chat_build_sig(sess):
     # tail until the file next changes. Cheap: live SDK sessions answer from memory, no I/O.
     _be = _sdk()
     sig.append(_be.pending_cut(sess.get("sid") or "") if _be else "")
+    if tm is not None:
+        t = tm
+        sig.append((t.get("state"), t.get("model"), t.get("ctx"), t.get("effort"), t.get("mode"), t.get("fast"), t.get("since"),
+                    len(t.get("subagents") or ()), len(t.get("bgTasks") or ()), bool(t.get("interrupting")),
+                    bool(t.get("modelPending")), bool(t.get("effortPending")), bool(t.get("authPending")),
+                    int(t.get("retryCount") or 0), bool(t.get("connected")), bool(t.get("spawning")),
+                    t.get("auth"), t.get("authLive")))
     return tuple(sig)
 
 
@@ -23447,11 +23776,9 @@ def _postal_wait_maps():
     try:
         rows = []
         alias = {}   # "host:name" -> sid, learned from every row a remote sender stamped
-        for line in jd.MESSAGES.read_text(errors="replace").splitlines():
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
+        for o in _messages_rows():                    # append-incremental rows (2026-09-03); the fold
+            if not isinstance(o, dict):               # itself stays whole-log: aliases learned from LATER
+                continue                              # rows resolve EARLIER peer: rows
             rows.append(o)
             if o.get("from_host") and o.get("from") and o.get("from_id"):
                 alias[str(o["from_host"]) + ":" + str(o["from"])] = str(o["from_id"])
@@ -25514,14 +25841,8 @@ def _parked_handoffs(now, alive_sids):
     [{msgId, fromId, fromName, toId, toName, body, t}]. Best-effort []."""
     base = jd.STATE / "postal"
     out = []
-    try:
-        lines = jd.MESSAGES.read_text(errors="replace").splitlines()
-    except OSError:
-        return out
-    for line in lines:
-        try:
-            o = json.loads(line)
-        except Exception:
+    for o in _messages_rows():
+        if not isinstance(o, dict):
             continue
         mid, to_id, from_id = o.get("id"), o.get("to_id"), o.get("from_id")
         if not (o.get("park") and mid and to_id and from_id):
@@ -26488,16 +26809,9 @@ def _nudge_times():
     if hit is not None and hit[0] == key:
         return hit[1]
     idx = {}
-    try:
-        for line in p.read_text(errors="replace").splitlines():
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(o, dict) and o.get("gid") and o.get("t"):
-                idx.setdefault(o["gid"], []).append(int(o["t"]))
-    except OSError:
-        return {}
+    for o in em._read_jsonl_incremental(p):          # append-incremental (2026-09-03): the log grows on
+        if isinstance(o, dict) and o.get("gid") and o.get("t"):   # most nudge ticks; only new rows decode
+            idx.setdefault(o["gid"], []).append(int(o["t"]))
     _nudge_times_cache[str(p)] = (key, idx)
     return idx
 
@@ -29020,13 +29334,24 @@ def _push(targets, connect=False, tmux=None):
             build_order = sorted(chat_list, key=lambda s: 0 if s["sid"] in active
                                  or not os.path.exists(s["path"]) else 1)
             for s in build_order:
-                is_active = s["sid"] in active           # the watched tab(s) always rebuild → stay live
-                sig = _chat_build_sig(s)
+                is_active = s["sid"] in active           # the watched tab(s): rebuilt only when an input moved
+                sig = _chat_build_sig(s, tmux.get(s["sid"]))
                 hit = _built_chat.get(s["sid"])
-                if not is_active and hit is not None and sig is not None and hit[0] == sig:
-                    m, ms = hit[1], hit[2]               # unchanged background tab → reuse, no reshape/serialize
+                # The active tab is served from its last build when its EXACT key is unchanged and no
+                # kernel-side mutation postdates that build's start (2026-09-03; before, it rebuilt on
+                # every cycle by design — see _active_chat_sig). Background tabs keep their file-stat key.
+                asig = _active_chat_sig(s, tmux.get(s["sid"]), now, base=sig) if is_active else None
+                if is_active:
+                    fresh = (hit is not None and asig is not None and hit[3] == asig and _views_dirty[0] <= hit[4])
+                else:
+                    fresh = (hit is not None and sig is not None and hit[0] == sig)
+                if fresh:
+                    m, ms, asig, started = hit[1], hit[2], hit[3], hit[4]   # unchanged → reuse, no reshape/serialize
+                    _VIEW_STATS["chatServeActive" if is_active else "chatServeBg"] += 1
                     _perf("chatbuild", sid=str(s["sid"])[:8], cached=1, ms=0, active=int(is_active))
                 else:
+                    _VIEW_STATS["chatBuildActive" if is_active else "chatBuildBg"] += 1
+                    started = time.time()                # the _views_dirty floor for this build (start-keyed)
                     _t0 = time.monotonic()
                     m = build_session(s["sid"], now, tmux)
                     # The full serialization is LAZY (the 2026-08-10 CPU fix, round two): steady state
@@ -29075,9 +29400,9 @@ def _push(targets, connect=False, tmux=None):
                 # cache AFTER the sends, so a serialization a full send just paid for is kept — the next
                 # connect-push for this unchanged tab reuses it instead of dumping again
                 if sig is not None:
-                    if len(_built_chat) > 256:           # bounded by fleet size; a wholesale clear is fine
-                        _built_chat.clear()
-                    _built_chat[s["sid"]] = (sig, m, ms)
+                    while len(_built_chat) > 256:        # bounded by the session count; evict oldest-inserted, never clear
+                        _built_chat.pop(next(iter(_built_chat)))
+                    _built_chat[s["sid"]] = (sig, m, ms, asig, started)
             shown_sids = {s["sid"] for s in chat_list}
             for sid in list(_built_chat):                # drop cache for tabs no longer shown (closed/×-hidden)
                 if sid not in shown_sids:
@@ -29418,6 +29743,12 @@ def _producer_sig(browser):
 # dashboard re-does it every tick. Cache each payload, keyed on a fleet fingerprint; an UNCHANGED fleet (a
 # reload, an idle tick) reuses the last build instead of rebuilding.
 _built_feed = [None, None, 0.0, 0.0]              # [fleet_sig, payload, built_at, build_started_at]
+# How often each view is REBUILT vs SERVED from its cache — the pusher's cost, as numbers (2026-09-03).
+# Exposed on the version route beside the parse counters, so "the kernel is pegged" can be read as
+# "the timeline rebuilt 900 times in 30 min with 12 sessions idle" instead of inferred from top. A
+# rebuild is justified only by a changed input; a rising build count on a quiet board is a bug signature.
+_VIEW_STATS = {"feedBuild": 0, "feedServe": 0, "tlBuild": 0, "tlServe": 0,
+               "chatBuildActive": 0, "chatBuildBg": 0, "chatServeActive": 0, "chatServeBg": 0}
 _built_timeline = [None, None, 0.0, 0.0]          # [fleet_sig, payload, built_at, build_started_at]
 # Wire-form caches for the two heavy shared payloads (the 2026-08-10 CPU fix, round three): the last
 # (source-identity key, serialized bytes, dedup sig) for the feed and the timeline bars, so an unchanged
@@ -29459,19 +29790,33 @@ def _fleet_view_sig(now, tmux):
     or a 5s time bucket so 'X ago'/elapsed keeps advancing when nothing else changes."""
     sig = _producer_sig(True)
     sig["__judge__"] = _judge_gen[0]
-    sig["__bucket__"] = now // 5
+    sig["__jrun__"] = jd.active_change()     # a judge call starting/ending → the card's judging swirl (exact event)
+    sig["__bucket__"] = now // 5             # the one remaining CLOCK input — kept until the age tints, the
+    #                                          hostNow ages and the timeline live edge tick client-side and the
+    #                                          build-time thresholds arm due marks (see the 2026-09-03 audit)
     sig["__sdkp__"] = _sdk_problem_count()   # a fresh SDK failure is its own event → rebuild now, don't wait
     sig["__syncn__"] = _sync_notice_count()  # …and so is a finished automatic sync
     for p, k in ((jd.STATE / "colormap", "__cmap__"), (jd.STATE / "session-flags.json", "__flags__"),
                  (jd.STATE / "session-order.json", "__order__"),
-                 (jd.STATE / "notify-cards.json", "__ncards__")):   # per-card bell arming → the card's menu state
+                 (jd.STATE / "notify-cards.json", "__ncards__"),   # per-card bell arming → the card's menu state
+                 (jd.STATE / "auto-nudge.json", "__nudge__"),      # stalled section, nudge counts/failed stamps
+                 (jd.STATE / "nudge-events.jsonl", "__nudgev__"),  # ⚡ marks
+                 (jd.STATE / "judge-auth.json", "__jauth__"),      # judge billing refusal latch
+                 (jd.STATE / "judge-limit.json", "__jlimit__")):   # judge quota latch
         try:
             sig[k] = os.stat(p).st_mtime
         except OSError:
             pass
     for s in sorted(tmux):
         t = tmux[s]
-        sig["t:" + s] = (t.get("state"), t.get("model"), t.get("ctx"), t.get("effort"), t.get("mode"), t.get("fast"), t.get("since"))
+        # the badge fields, plus the SDK snapshot facts the feed/timeline render that touch no file: live
+        # subagent and background-task counts (lane pill, awaiting box), an interrupt in flight, a model/
+        # effort/auth switch resolving, a retry storm. Without them a change here was visible only via
+        # the time bucket (the 2026-09-03 audit).
+        sig["t:" + s] = (t.get("state"), t.get("model"), t.get("ctx"), t.get("effort"), t.get("mode"), t.get("fast"), t.get("since"),
+                         len(t.get("subagents") or ()), len(t.get("bgTasks") or ()), bool(t.get("interrupting")),
+                         bool(t.get("modelPending")), bool(t.get("effortPending")), bool(t.get("authPending")),
+                         int(t.get("retryCount") or 0), bool(t.get("connected")), bool(t.get("spawning")))
     return tuple(sorted(sig.items()))
 
 
@@ -29491,7 +29836,9 @@ def _cached_feed(now, tmux, sig, connect=False):
     # so back-to-back starts must not shrink its window.
     dirty = not connect and _views_dirty[0] > e[3]        # connect still serves the warmed build (never rebuilds)
     if e[1] is not None and not dirty and (connect or e[0] == sig or (time.time() - e[2]) < REBUILD_MIN_S):
+        _VIEW_STATS["feedServe"] += 1
         return e[1]
+    _VIEW_STATS["feedBuild"] += 1
     bid = _next_feed_build_id()          # claimed BEFORE the read, so an ack issued during this build outranks it
     started = time.time()                # …and the dirty floor for the NEXT check: mutations after this
     feed = build_feed(now, tmux)         # instant may be invisible to the build below → must rebuild
@@ -29909,7 +30256,9 @@ def _cached_timeline(now, tmux, sig, connect=False):
     e = _built_timeline
     dirty = not connect and _views_dirty[0] > e[3]        # start-keyed, same as _cached_feed above
     if e[1] is not None and not dirty and (connect or e[0] == sig or (time.time() - e[2]) < REBUILD_MIN_S):
+        _VIEW_STATS["tlServe"] += 1
         return e[1]
+    _VIEW_STATS["tlBuild"] += 1
     started = time.time()
     tl = build_timeline(now, tmux)
     _built_timeline[:] = [sig, tl, time.time(), started]
@@ -29954,6 +30303,8 @@ def _producer():
                 _episode_boundary_tick(time.time())    # this same pass's planner/closer/nudge see a settled store
             except Exception:                          # instead of carrying dead cards into the fresh conversation
                 sys.stderr.write("episode: %s\n" % traceback.format_exc())
+            _pass_fp = _judge_store_fp() if _last_judge_fp[0] is None else None   # the first pass anchors on the
+                                                       # pre-pass look; later passes anchor on the previous look
             _begin_goals_pass()                        # snapshot PRE-pass goal stores → the feed serves them for the
                                                        # whole pass, so no half-applied intermediate ever shows
             _own_frame = jd.begin_pass_frame()         # ONE evidence frame for BOTH tiers and their worker pools:
@@ -29979,9 +30330,10 @@ def _producer():
                 sys.stderr.write("rearm-on-recovery: %s\n" % traceback.format_exc())
             _end_goals_pass()      # pass + compact done → drop the snapshot BEFORE bumping the gen, so the cache-
                                    # busting rebuild below reads the fully-applied (post-pass) state, not pre-pass.
-            _judge_gen[0] += 1     # a judge pass may have changed goal/caption state WITHOUT touching any
-                                   # transcript → bump the generation so the chat-build cache re-builds the
-                                   # background tabs once, keeping their Fleet status/ledger fresh (≤ this cadence).
+            _bump_judge_gen_if_changed(_pass_fp)   # a judge pass may have changed goal/caption state WITHOUT
+                                   # touching any transcript → bump the generation so the chat-build cache
+                                   # re-builds the background tabs once. Only when a store actually moved: a
+                                   # quiet pass leaves every view's signature alone (2026-09-03).
             try:                      # sessions with ARMED TIMERS need a LIVE CLI (the user 2026-08-28:
                 _sbe = _sdk()         # crons/wakeups never fired on dormant sessions — the CLI's scheduler
                 if _sbe and _sdk_ready():   # is in-process; see SdkBackend.ensure_scheduled)
