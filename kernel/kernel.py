@@ -17738,10 +17738,358 @@ def _bg_tasks(path, spawned_at=None, live=None):
     elif spawned_at:
         scan = [tk for tk in scan if not (tk.get("t") and tk["t"] < spawned_at)]
     out = []
+    meta = None                                   # the subagents sidecar map, read once and only if an agent row needs it
     for tk in scan[:30]:    # show up to 30 lines (the flat list scrolls); count below reports the true total
-        out.append({"id": tk["id"], "status": tk["status"], "summary": tk["summary"], "command": tk["command"],
-                    "output": _read_task_output(tk["outputFile"])})
+        row = {"id": tk["id"], "status": tk["status"], "summary": tk["summary"], "command": tk["command"],
+               "output": _read_task_output(tk["outputFile"])}
+        # an AGENT row names the agent whose own transcript it writes, so the box can offer the same
+        # open-transcript arrow the Agent tool head has (plans/subagent-transcripts.md). Three sources,
+        # any one suffices: the launch ack's agentId, the sidecar map, the output symlink's basename.
+        # Shell tasks (`b…` ids, plain-text output) get no agentId and keep their treatment.
+        if tk.get("type") in ("local_agent", None) or tk.get("agentId"):
+            aid = tk.get("agentId")
+            if not aid:
+                meta = _subagent_meta_map(path) if meta is None else meta
+                aid = (meta.get(tk["id"]) or {}).get("agentId") or _agent_id_of_output(tk.get("outputFile"))
+            if aid and _AGENT_ID_RE.match(str(aid)):
+                row["agentId"] = str(aid)
+        out.append(row)
     return {"count": len(scan), "tasks": out}
+
+
+# ───────────────────────── subagent transcripts (plans/subagent-transcripts.md, 2026-09-05) ─────────────────────────
+# Claude Code writes every subagent (the Agent tool; older transcripts say Task) its OWN complete JSONL
+# beside the parent transcript — <proj>/<fsid>/subagents/agent-<agentId>.jsonl — plus a sidecar
+# agent-<agentId>.meta.json whose toolUseId is the parent's tool_use block id. The dashboard reads THAT
+# file (the authoritative copy; the background task's /tmp output file is a symlink to it) rather than
+# un-dropping the SDK's sidechain stream, which the backend deliberately filters out of the parent's
+# conversation (tests/test_sidechain_atoms.py). Everything below is event-based: directory mtimes, file
+# (mtime, size) keys, the transcript's own launch↔notification pairing, and the SDK's live sets.
+_AGENT_ID_RE = re.compile(r"^a[0-9a-f]{16}$")
+_SUBAGENT_META_CACHE = {}       # subagents dir -> (dir mtime_ns, {toolUseId: {agentId, agentType, description, spawnDepth}})
+_AGENT_GIST_CACHE = {}          # agent jsonl path -> em.fold_records entry (the live preview's fold state)
+_AGENT_LAUNCH_CACHE = {}        # parent jsonl path -> em.fold_records entry (foreground launches + their settles)
+_SUBAGENT_FRAMES = {}           # (sid, agentId) -> (change key, frame, serialized) — shared by every client with it open
+SUBAGENT_EVENT_CAP = 300        # events shipped per viewer frame — a bounded TAIL, honest about the cut (the episode fold's rule)
+SUBAGENT_RECENT = 3             # tool calls the live preview shows under the Agent head
+
+
+def _subagents_dir(path):
+    """The subagents directory for a transcript file: <dir>/<file stem>/subagents."""
+    return Path(str(path)).with_suffix("") / "subagents"
+
+
+def _subagent_meta_map(path):
+    """toolUseId → {agentId, agentType, description, spawnDepth} for every agent-*.meta.json beside the
+    transcript at `path`, cached on the DIRECTORY's mtime (a sidecar landing changes it — a stat, never a
+    timer). {} when the directory does not exist (older CLIs wrote no subagent files)."""
+    d = _subagents_dir(path)
+    try:
+        key = os.stat(d).st_mtime_ns
+    except OSError:
+        _SUBAGENT_META_CACHE.pop(str(d), None)
+        return {}
+    hit = _SUBAGENT_META_CACHE.get(str(d))
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    out = {}
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        names = []
+    for nm in names:
+        if not (nm.startswith("agent-") and nm.endswith(".meta.json")):
+            continue
+        aid = nm[len("agent-"):-len(".meta.json")]
+        if not _AGENT_ID_RE.match(aid):
+            continue
+        try:
+            meta = json.loads((d / nm).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict) or not meta.get("toolUseId"):
+            continue
+        out[str(meta["toolUseId"])] = {"agentId": aid, "agentType": meta.get("agentType") or "",
+                                       "description": meta.get("description") or "",
+                                       "spawnDepth": meta.get("spawnDepth")}
+    if len(_SUBAGENT_META_CACHE) > 256:
+        _SUBAGENT_META_CACHE.clear()
+    _SUBAGENT_META_CACHE[str(d)] = (key, out)
+    return out
+
+
+def _subagent_meta(path, agent_id):
+    """One agent's sidecar (agentType, description, spawnDepth, toolUseId) read directly; {} when absent."""
+    mp = _subagents_dir(path) / ("agent-%s.meta.json" % agent_id)
+    try:
+        meta = json.loads(mp.read_text())
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _subagent_file(path, agent_id):
+    """The agent's own transcript beside the parent transcript `path`, or — when the sidecar dir has moved
+    under a /clear fork's fsid — the one file of that name anywhere in the project dir. None when missing."""
+    if not path or not _AGENT_ID_RE.match(str(agent_id or "")):
+        return None
+    ap = _subagents_dir(path) / ("agent-%s.jsonl" % agent_id)
+    if ap.exists():
+        return ap
+    try:
+        for cand in Path(str(path)).parent.glob("*/subagents/agent-%s.jsonl" % agent_id):
+            return cand
+    except OSError:
+        pass
+    return None
+
+
+def _agent_id_of_output(output_file):
+    """The agent id a background task's output path names (…/tasks/<agentId>.output), else None."""
+    stem = os.path.splitext(os.path.basename(str(output_file or "")))[0]
+    return stem if _AGENT_ID_RE.match(stem) else None
+
+
+def _tool_gist_desc(name, inp):
+    """A tool call's one-line gist in the chat head's own vocabulary: input.description, else the file
+    path, else the command's first line, then a search's pattern/query before its scope path (the
+    pattern says what was looked for; the path only where), then url/skill/prompt — clipped."""
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("description", "file_path", "command", "pattern", "query", "path", "url", "skill", "prompt"):
+        v = inp.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip().splitlines()[0][:80]
+    return ""
+
+
+def _gist_fresh():
+    return {"recent": [], "calls": 0, "since": None, "last": None}
+
+
+def _gist_step(state, o):
+    ts = o.get("timestamp") if isinstance(o.get("timestamp"), str) else None
+    if ts:
+        state["since"] = state["since"] or ts
+        state["last"] = ts
+    if o.get("type") == "assistant":
+        c = (o.get("message") or {}).get("content")
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    state["calls"] += 1
+                    state["recent"] = (state["recent"] + [{"tool": b.get("name") or "tool",
+                                                           "desc": _tool_gist_desc(b.get("name"), b.get("input")),
+                                                           "ts": ts}])[-SUBAGENT_RECENT:]
+    return state
+
+
+def _agent_gist(agent_path):
+    """The live preview under a running Agent head: its last SUBAGENT_RECENT tool calls (newest last),
+    the tool-call count so far, and the first/last record stamps — folded append-incrementally over the
+    agent's own file (em.fold_records: a growing file steps only its new records). None when unreadable."""
+    try:
+        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step)
+    except Exception:
+        return None
+    if not st["since"]:
+        return None
+    return {"recent": [dict(r) for r in st["recent"]], "calls": st["calls"], "since": st["since"], "last": st["last"]}
+
+
+def _launch_fresh():
+    return {"launched": {}, "settled": set()}
+
+
+def _launch_step(state, o):
+    """FOREGROUND agent launches (a tool_use named Agent/Task) and the tool_results that settle them — an
+    async ack is a launch acknowledgement, not a settle, and leaves the id open for the bg scan's pairing."""
+    t = o.get("type")
+    c = (o.get("message") or {}).get("content")
+    if t == "assistant" and isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ("Agent", "Task") and b.get("id"):
+                state["launched"].setdefault(b["id"], em.parse_z(o.get("timestamp")))
+    elif t == "user" and isinstance(c, list):
+        tur = o.get("toolUseResult")
+        tur = tur if isinstance(tur, dict) else {}
+        if tur.get("isAsync") or tur.get("status") == "async_launched":
+            return state
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in state["launched"]:
+                state["settled"].add(b["tool_use_id"])
+    return state
+
+
+def _agent_launch_state(path):
+    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step)
+
+
+def _agent_alive(row, agent_id, tm, spawned_at):
+    """Is a launched agent still running? `row` is its bg-scan row ({id, status, t, …}; a foreground launch
+    passes a synthetic running row) — the transcript's own pairing says whether a result has landed. The
+    live gate then says whether the CLI that would deliver one is still around: an SDK session's snapshot
+    carries the SubagentStart/Stop set (agent ids) and the task-lifecycle set (tool-use ids) — the agent is
+    alive iff either names it; a tmux or dormant session falls to the spawned-at ghost gate _bg_tasks
+    applies (a launch older than the current CLI epoch died with the previous CLI). Never a clock."""
+    if not row or row.get("status") != "running":
+        return False
+    if tm is not None and ("subagents" in tm or "bgTasks" in tm):
+        live_agents = {str(x.get("agentId")) for x in (tm.get("subagents") or []) if x.get("agentId")}
+        live_tools = {str(x.get("toolUseId")) for x in (tm.get("bgTasks") or []) if x.get("toolUseId")}
+        return (str(agent_id) in live_agents) or (str(row.get("id")) in live_tools)
+    return not (spawned_at and row.get("t") and row["t"] < spawned_at)
+
+
+def _agent_running_for(parent_path, tool_use_id, agent_id, tm, spawned_at):
+    """The viewer's `running` flag for one agent, from the parent transcript: a background launch is read
+    off the bg scan's pairing (its notification ends it), a foreground one off its own tool_result."""
+    if not tool_use_id:
+        return False
+    rows = {r["id"]: r for r in _bg_scan_all_cached(parent_path)}
+    row = rows.get(tool_use_id)
+    if row is not None:
+        return _agent_alive(row, agent_id, tm, spawned_at)
+    st = _agent_launch_state(parent_path)
+    if tool_use_id not in st["launched"] or tool_use_id in st["settled"]:
+        return False
+    return _agent_alive({"id": tool_use_id, "status": "running", "t": st["launched"][tool_use_id]}, agent_id, tm, spawned_at)
+
+
+def _stamp_agents(by_tool, scan_path, tm, spawned_at, meta_path=None):
+    """Post-pass over one build's Agent/Task tool events (plans/subagent-transcripts.md): every one gets
+    toolUseId + agentId (from the ack's toolUseResult or the sidecar map); a BACKGROUND launch that is
+    still running drops its launch-ack output (the ack is not a report — the client's existing no-output
+    rule then reads it as running), takes agentRunning and the live agentGist preview; one whose
+    <task-notification> has landed takes the notification's <result> as its output, so the head's report
+    fold shows the closing summary instead of the ack. A foreground agent's tool_result was always the
+    report and is left alone. Returns {toolUseId: "sync"|"running"|"report"|"pending"} for the fold's
+    sealed-agent gate (pending = launched, no result, and not alive — the ack stays as the honest output)."""
+    meta = None
+    rows = None
+    out = {}
+    for tid, ev in by_tool.items():
+        if ev.get("name") not in ("Agent", "Task"):
+            continue
+        if meta is None:
+            meta = _subagent_meta_map(meta_path or scan_path)
+        aid = ev.get("agentId") or (meta.get(tid) or {}).get("agentId")
+        ev["agentId"] = str(aid) if aid else None
+        if not ev.get("agentAsync"):
+            out[tid] = "sync"
+            continue
+        if rows is None:
+            rows = {r["id"]: r for r in _bg_scan_all_cached(scan_path)}
+        row = rows.get(tid)
+        if row is not None and row.get("status") != "running":
+            if row.get("result"):
+                ev["output"] = row["result"]
+                ev["isError"] = row["status"] not in ("completed", "done", "success")
+            out[tid] = "report"
+        elif _agent_alive(row, aid, tm, spawned_at):
+            ev["output"] = ""
+            ev["agentRunning"] = True
+            ap = _subagent_file(meta_path or scan_path, aid) if aid else None
+            g = _agent_gist(ap) if ap is not None else None
+            if g:
+                ev["agentGist"] = g
+            out[tid] = "running"
+        else:
+            out[tid] = "pending"
+    return out
+
+
+def _chat_agent_open_at(events, lo):
+    """Index of the first RUNNING Agent card at/after `lo` — a launch turn the chat fold must not seal
+    while the agent runs (its preview and eventual report are rebuilt live in the tail). None when every
+    agent in range has settled. The undecided-seam rule's twin (see _chat_seam_open_at)."""
+    for i in range(lo, len(events)):
+        if events[i].get("kind") == "tool" and events[i].get("agentRunning"):
+            return i
+    return None
+
+
+def _chat_agents_moved(agents, path, tm, spawned_at):
+    """The fold's sealed-agent gate: True when a sealed Agent card would render differently now — a
+    launch sealed with no agent id has gained its sidecar, or a background launch sealed WITHOUT its
+    report (pending) has come to rest or is alive again. `agents` = [(toolUseId, agentId, pending)]."""
+    meta = None
+    rows = None
+    for tid, aid, pending in agents:
+        if aid is None:
+            meta = _subagent_meta_map(path) if meta is None else meta
+            if tid in meta:
+                return True
+        if pending:
+            rows = {r["id"]: r for r in _bg_scan_all_cached(path)} if rows is None else rows
+            row = rows.get(tid)
+            if row is not None and (row.get("status") != "running" or _agent_alive(row, aid, tm, spawned_at)):
+                return True
+    return False
+
+
+def build_subagent(sid, agent_id, now, tmux=None):
+    """The {type:"subagent"} viewer frame for one agent of session `sid`: its sidecar meta, whether it is
+    still running, and its transcript rendered through build_session's override mode — the SAME renderer
+    the chat uses, in sidechain mode (no parent side-store notes) — as a capped tail. FAIL LOUDLY (the
+    repo rule): a missing file is an `error` sentence the pane shows, never a blank."""
+    base = {"type": "subagent", "id": sid, "agentId": agent_id}
+    if not _AGENT_ID_RE.match(str(agent_id or "")):
+        return {**base, "error": "That is not a subagent id, so there is no transcript to open."}
+    tmux = _tmux_sessions() if tmux is None else tmux
+    ppath = _path_of(sid, now)
+    if not ppath:
+        return {**base, "error": "This session's transcript can't be found, so its agents can't be opened."}
+    apath = _subagent_file(ppath, agent_id)
+    if apath is None:
+        return {**base, "error": "The transcript file for agent %s is missing beside this session's transcript "
+                                 "(subagents/agent-%s.jsonl), so it can't be shown." % (agent_id, agent_id)}
+    meta = _subagent_meta(ppath, agent_id)
+    full = build_session(sid, now, tmux, path_override=str(apath), sidechain=True, meta_path=ppath)
+    if not full:
+        return {**base, "error": "This session isn't known to romp any more, so its agent can't be shown."}
+    evs = full.get("events") or []
+    return {**base,
+            "meta": {"agentType": meta.get("agentType") or "", "description": meta.get("description") or "",
+                     "spawnDepth": meta.get("spawnDepth"), "toolUseId": meta.get("toolUseId") or ""},
+            "running": _agent_running_for(ppath, meta.get("toolUseId"), agent_id, tmux.get(str(sid)), _sdk_spawned_at(sid)),
+            "events": evs[-SUBAGENT_EVENT_CAP:], "truncated": len(evs) > SUBAGENT_EVENT_CAP}
+
+
+def _subagent_frame_cached(sid, agent_id, now, tmux=None):
+    """(frame, serialized) for an OPEN viewer, rebuilt only when its change key moved: the agent file's
+    (mtime, size), the running flag, and whether the sidecar exists. Shared across clients; the per-client
+    dedup slot ("subagent", sid, agentId) absorbs an unchanged re-send."""
+    tmux = _tmux_sessions() if tmux is None else tmux
+    ppath = _path_of(sid, now)
+    apath = _subagent_file(ppath, agent_id) if ppath else None
+    meta = _subagent_meta(ppath, agent_id) if ppath else {}
+    running = (_agent_running_for(ppath, meta.get("toolUseId"), agent_id, tmux.get(str(sid)), _sdk_spawned_at(sid))
+               if ppath else False)
+    key = (ppath, _chat_stat_key(str(apath)) if apath is not None else None, running, bool(meta))
+    hit = _SUBAGENT_FRAMES.get((sid, agent_id))
+    if hit is not None and hit[0] == key:
+        return hit[1], hit[2]
+    fr = build_subagent(sid, agent_id, now, tmux)
+    pre = json.dumps(fr)
+    if len(_SUBAGENT_FRAMES) > 64:
+        _SUBAGENT_FRAMES.clear()
+    _SUBAGENT_FRAMES[(sid, agent_id)] = (key, fr, pre)
+    return fr, pre
+
+
+def _push_subagents(clients, now, tmux):
+    """Re-push every OPEN subagent viewer on these chat clients (client["subagents"], set by openSubagent,
+    cleared by closeSubagent or the socket going away). Rides the pusher's existing per-cycle chat pass —
+    no polling loop of its own — and costs a stat per open viewer when nothing changed."""
+    for c in clients:
+        for (ssid, aid) in list((c.get("subagents") or {}).keys()):
+            try:
+                fr, pre = _subagent_frame_cached(ssid, aid, now, tmux)
+            except Exception:
+                sys.stderr.write("subagent frame failed for %s/%s: %s\n" % (ssid, aid, traceback.format_exc()))
+                continue
+            _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
 
 
 # The MONTHLY SPEND CAP error (the user 2026-07-14): a billing limit ("You've hit your monthly spend
@@ -21440,9 +21788,14 @@ def _stamp_interrupt_causes(events):
     return events
 
 
-def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
+def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None):
     """A {type:"session"} message the render.js bundle consumes: the event tree reshaped to
     ChatEvent[], plus the TOC ledger (archiver headline + turn captions) and a status chip.
+
+    sidechain (build_subagent, plans/subagent-transcripts.md): the override file is a SUBAGENT's own
+    transcript — render it through the same pipeline, but keep the parent's side-store notes (retry
+    recoveries, orphan replies, effort/gesture chips — all sid-keyed) out of a conversation they never
+    belonged to. meta_path names the PARENT transcript whose subagents/ sidecars join nested Agent calls.
 
     path_override (build_episode, the user 2026-07-27): parse THAT transcript instead of the session's
     current one — the single sid→path resolution point the episode plan reserved (plans/clear-episodes.md).
@@ -21557,6 +21910,9 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
     # retry that re-replied must not double. Match exact, and either-way prefix (a partial stream vs its full
     # retry). NB: build the disk-text set from the SAME session["turns"] atoms this loop renders.
     orphans = _past_floor(_orphan_replies(sid)); _oi = 0
+    if sidechain:
+        # a subagent's transcript carries none of the parent's side-store notes (see the docstring)
+        recoveries, gaveups, efforts, gestures, orphans = [], [], [], [], []
     _disk_texts = set()
     _turn_texts = {}                          # turn index → that turn's disk texts (built on demand, see the fold)
     def _texts_of_turn(_i):
@@ -21615,6 +21971,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                 _fold_why = "gesture"                 # a gesture chip the live tail pruned now renders durably
             elif _fe["orphan_uuids"] & _landed_uuids:
                 _fold_why = "landed"                  # an interleaved orphan reply landed on some branch after all
+            elif _fe.get("agents") and _chat_agents_moved(_fe["agents"], sess["path"], tm0, _sdk_spawned_at(sid)):
+                _fold_why = "agent"                   # a sealed Agent card's report landed / sidecar appeared / liveness flipped
             else:
                 _k = _fe["n"]
                 _tail_tr = set()
@@ -21770,6 +22128,14 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                             ev["output"] = (c if isinstance(c, str) else json.dumps(c))[:16000]
                             ev["isError"] = bool(tr.get("is_error"))
                             ev["resultUuid"] = a.get("uuid")
+                            if tur and ev.get("name") in ("Agent", "Task"):
+                                # the ack names the agent whose own transcript this launch writes, and
+                                # says whether it was a BACKGROUND launch (the ack is then not the
+                                # report — _stamp_agents fills the real one when the notification lands)
+                                if tur.get("agentId"):
+                                    ev["agentId"] = str(tur["agentId"])
+                                if tur.get("isAsync") or tur.get("status") == "async_launched":
+                                    ev["agentAsync"] = True
                             # Edit/MultiEdit: Claude Code records a structuredPatch (toolUseResult) carrying REAL
                             # file line numbers + context — turn it into numbered diff rows so the chat shows a
                             # true line-number gutter (the user 2026-06-29). filePath-matched so the right result
@@ -21955,6 +22321,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                               "desc": str(inp.get("description") or "")[:200],
                               "input": json.dumps(inp) if _full else json.dumps(inp)[:4000], "output": "", "isError": False,
                               "uuid": a.get("uuid"), "ts": ts,
+                              "toolUseId": b.get("id"),   # the tool_use BLOCK id (uuid is the record's) — the join
+                              #   key a subagent's sidecar / a task-notification names (plans/subagent-transcripts.md)
                               "file": inp.get("file_path") or inp.get("path") or "",
                               "diff": _edit_diff(inp) if b.get("name") in ("Edit", "MultiEdit", "Write") else ""}
                         if b.get("name") == "AskUserQuestion":
@@ -21991,6 +22359,10 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                 events.append({"kind": "modelFallback", "uuid": a.get("uuid"), "ts": ts,
                                "from": a.get("fallback_from") or "", "to": a.get("fallback_to") or "",
                                "md": a.get("content") or ""})
+    # Agent/Task cards: the agent join, the running preview, the landed report (plans/subagent-transcripts.md).
+    # Tail events only in fold mode — the sealed prefix's cards are gated by _chat_agents_moved and held
+    # open by _chat_agent_open_at below.
+    _agent_states = _stamp_agents(by_tool, sess["path"], tm0, _sdk_spawned_at(sid), meta_path=meta_path)
     _flush_recoveries(tail_cap_t)                       # a recovery on the still-open tail turn (t past the last atom) → bottom of the flow
     #                                                     (tail_cap_t: an episode render stops at its /clear — later notes belong to the next episode)
     # The post-passes run over the TAIL only (issue 903): the prefix was hydrated, stamped and tlId'd
@@ -22034,6 +22406,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                 _b = next((_i for _i in range(_pref_len, len(events)) if _turn_of(events[_i]) >= _np),
                           len(events))
                 _open = _chat_seam_open_at(events[:_b], _pref_len)   # an undecided seam holds the boundary
+                if _open is None:
+                    _open = _chat_agent_open_at(events[:_b], _pref_len)   # …and so does a RUNNING agent's launch turn
                 if _open is None:
                     break
                 _np = _turn_of(events[_open])   # may equal _fk: the next pass then finds _b == _pref_len and no
@@ -22099,7 +22473,13 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None):
                     "open_tools": _open_tools, "skill_unfilled": _skill_unf,
                     "postal_raw": _praw, "postal_cards": _pcards,
                     "postal_key": _pk, "judge_gen": _judge_gen[0], "pl_pending": _plp,
-                    "task_outs": _touts})
+                    "task_outs": _touts,
+                    # the sealed Agent cards, for _chat_agents_moved: (toolUseId, agentId, pending) —
+                    # pending = a background launch sealed without its report (the ack stands as output)
+                    "agents": (list(_fe["agents"]) if _fold_ok and _fe.get("agents") else [])
+                              + [(_e.get("toolUseId"), _e.get("agentId"),
+                                  _agent_states.get(_e.get("toolUseId")) == "pending")
+                                 for _e in _newpart if _e.get("kind") == "tool" and _e.get("name") in ("Agent", "Task")]})
             _chat_fold_last.info["prefix_next"] = _b
         except Exception:
             with _chat_fold_lock:
@@ -29102,6 +29482,9 @@ def _push(targets, connect=False, tmux=None):
                 if fr:
                     for c in chat_clients:
                         _send_client(c, ("comments", s["sid"]), fr)
+            # OPEN SUBAGENT VIEWERS (plans/subagent-transcripts.md): each rides its own per-client dedup slot
+            # like the comment frames, rebuilt only when the agent's file or liveness moved.
+            _push_subagents(chat_clients, now, tmux)
         fsig = _fleet_view_sig(now, tmux) if (want_feed or want_tl) else None
         feed_src = _cached_feed(now, tmux, fsig, connect) if want_feed else None
         feed = feed_src
@@ -35580,6 +35963,26 @@ class Handler(BaseHTTPRequestHandler):
                 client["send"](json.dumps(build_episode(str(msg["id"]), int(time.time()))))
             except Exception:
                 sys.stderr.write("loadEpisode: %s\n" % traceback.format_exc())
+            return
+        if msg and msg.get("type") in ("openSubagent", "closeSubagent") and msg.get("id") and msg.get("agentId"):
+            # A subagent viewer opened/closed (plans/subagent-transcripts.md): openSubagent answers NOW with
+            # the frame and registers the viewer on this client, so the pusher's chat pass re-sends it while
+            # the agent's file changes (_push_subagents); closeSubagent unregisters it. The dedup slot is
+            # dropped on both, so a reopen of an UNCHANGED agent is never swallowed as a duplicate.
+            sid, aid = str(msg["id"]), str(msg["agentId"])
+            with _client_lock(client):
+                client.setdefault("sent", {}).pop(("subagent", sid, aid), None)
+            if msg["type"] == "closeSubagent":
+                (client.get("subagents") or {}).pop((sid, aid), None)
+                return
+            client.setdefault("subagents", {})[(sid, aid)] = True
+            try:
+                fr, pre = _subagent_frame_cached(sid, aid, int(time.time()))
+                _send_client(client, ("subagent", sid, aid), fr, pre=pre)
+            except Exception:
+                sys.stderr.write("openSubagent %s/%s: %s\n" % (sid, aid, traceback.format_exc()))
+                client["send"](json.dumps({"type": "subagent", "id": sid, "agentId": aid,
+                                           "error": "romp couldn't build this agent's transcript — the kernel log has the traceback."}))
             return
         if msg and msg.get("type") == "setGlobalRetryPaused":
             _set_retry_paused(msg.get("value"))

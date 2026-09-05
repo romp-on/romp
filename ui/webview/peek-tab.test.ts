@@ -16,7 +16,10 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("peek OPEN: every activation routes the peek decision — setActive derives peek-vs-normal from the CURRENT views", () => {
   // the single entry: setActive (tab clicks, the focus handler, jumpSession, cycleTab and
   // nav-history's apply all land here), before its already-active early-return
-  assert.match(RENDER, /function setActive\(id: string[\s\S]{0,500}?assertPeekFor\(id\);[\s\S]{0,400}?if \(activeId === id && anchor == null && anchorT == null\) return;/);
+  // the window between the derivation and the early return widened on 2026-09-05: the subagent viewer's
+  // two lines sit there (pruneSubViews — an activation is the event that closes an unpinned viewer — and the
+  // reopen of a viewer id whose tab is gone), both BEFORE the return by design, see plans/subagent-transcripts.md
+  assert.match(RENDER, /function setActive\(id: string[\s\S]{0,500}?assertPeekFor\(id\);[\s\S]{0,900}?if \(activeId === id && anchor == null && anchorT == null\) return;/);
   // the derivation: in-view → no peek; out-of-view → THIS session is the peek
   assert.match(RENDER, /const next = chatVisible\(id\) \? null : id;\s*\n\s*if \(next !== peekId\) \{ peekId = next; renderTabs\(\); \}/);
 });
@@ -34,7 +37,10 @@ test("peek AUTO-CLOSE: activating any other tab drops it — same derivation, no
   // views-arrival paths): setActive (every activation), the focus fast path (already-active),
   // captureViews (kernel-pushed views), postViews (local optimistic edit). Nothing else derives.
   const sites = RENDER.match(/assertPeekFor\(/g) || [];
-  assert.equal(sites.length, 6, "definition + 5 call sites: setActive, focus fast path, captureViews, postViews, and the feed click echo (2026-08-24 — the instant ack derives the peek before the kernel frame)");
+  // 6 → 7 on 2026-09-05: the subagent viewer's PIN control re-derives its own tab (pinned → in the chat
+  // lens → sheds the peek dress; unpinned → back to a peek) through the same derivation — no second
+  // peek mechanism (plans/subagent-transcripts.md; chatVisible() answers pinnedSubs for a viewer id)
+  assert.equal(sites.length, 7, "definition + 6 call sites: setActive, focus fast path, captureViews, postViews, the feed click echo (2026-08-24 — the instant ack derives the peek before the kernel frame), and the subagent viewer's pin toggle (2026-09-05)");
 });
 
 test("a view change that excludes the ACTIVE session converts it into the peek — never a bounce (the user 2026-08-24)", () => {
