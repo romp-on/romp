@@ -418,6 +418,39 @@ internet and your agents, with no device check in front of it.
     standing between other members and your agents. Either keep the tailnet to
     your own devices, or write an ACL restricting the kernel machine to them.
 
+#### Notifications on your phone
+
+Romp can buzz your phone when a session needs you or finishes a task, so you can
+put the phone down while the sessions work. On an iPhone, first add Romp to the
+Home Screen (share sheet, then **Add to Home Screen**) and open it from there:
+iOS only lets an installed app receive notifications, so in a plain Safari tab
+the option stays off and says so. On Android and on a desktop browser the page
+itself can receive them.
+
+Then tap the bell. On a phone it sits in the bar along the bottom; on a desktop
+it is in the bottom-right cluster. A small card opens with three switches and a
+button:
+
+- **All devices** is the main switch. It turns notifications on for every task,
+  on every device you have set up and on the desktop of every machine you have
+  attached. The bells on individual sessions and cards then work as mutes.
+- **This device** turns them on for the phone or browser you are holding. The
+  first time, the browser asks for permission. If you refuse, the row goes grey
+  and tells you where to allow it again (on an iPhone, Settings, then
+  Notifications, then Romp; in a desktop browser, the site permission beside the
+  address). Turning this off silences only this device.
+- **Also when a turn finishes** adds a notification every time any session
+  finishes a turn, with the session's name and the first line of what it said.
+  With many sessions running this is a lot of buzzing, so it is off unless you
+  want it. A turn that ends by asking you something buzzes once, not twice.
+- **Send a test notification** sends one notification to the device you are
+  holding and prints the push service's answer under the button, so you can see
+  at once whether the phone is set up or why it is not.
+
+The bell itself shows the state of the device you are looking at: lit when the
+main switch is on and this device is set up, and crossed out otherwise. Its
+tooltip says which of the two is off.
+
 ## Security and trust
 
 Romp drives agents that run tools and shell commands as you, so reaching its API
