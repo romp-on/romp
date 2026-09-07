@@ -217,6 +217,17 @@ class LaunchFailureText(unittest.TestCase):
         self.assertNotIn("romp-cli-scope", text)
         self.assertIn("exit code 1", text)
 
+    def test_the_wrappers_ignored_line_is_dropped_from_the_tail_too(self):
+        # the third form (2026-09-06): a per-session limit not applied; the CLI starts in its scope and
+        # the kernel logged the line at arrival (_note_cli_scope_ignored), so on the card it is noise
+        ignored = (sb.CLI_SCOPE_IGNORED_PREFIX + " ROMP_CLI_SCOPE_MEMORY_MAX is not a size (digits with an optional "
+                   "K, M, G or T suffix, or infinity) — the CLI runs in its scope without it")
+        exc = RuntimeError("Command failed with exit code 1")
+        exc.stderr = sb.SDK_STDERR_PLACEHOLDER
+        text = sb.launch_failure_text(exc, ignored + "\n" + self.NOTICE + "\nclaude: the CLI's own reason")
+        self.assertNotIn("romp-cli-scope", text)
+        self.assertTrue(text.startswith("claude: the CLI's own reason"), text)
+
     def test_the_wrappers_refusal_stays_on_the_card(self):
         # ROMP_CLI_REAL unset: the wrapper exits 127 before any CLI runs, so its line IS the reason and
         # nothing else reports it (the kernel logs no fallback for it: tests/test_cli_scope.py)

@@ -245,13 +245,23 @@ def _no_model_catalog_fetch():
 # tool shell of a session running on a self-hosted romp, so a suite run from one would probe the
 # live user manager at every backend construction and route every _options() through the wrapper.
 # Floored to the explicit off value; the truth-table tests pass their own environ and are unaffected.
-# Per-test re-assert below, on the same reasoning as the manager-port floor.
+# Per-test re-assert below, on the same reasoning as the manager-port floor. The per-session limits
+# (ROMP_CLI_SCOPE_MEMORY_MAX and the others, sdk_backend.CLI_SCOPE_LIMITS) are floored to unset the same
+# way: the kernel hands them to every session's CLI, whose tool shells inherit them, so a suite run from a
+# session on a self-hosted romp with limits in service.env would see them at every backend construction
+# and in every exact argv pin.
 os.environ["ROMP_CLI_SCOPE"] = "0"
+_CLI_SCOPE_LIMIT_VARS = ("ROMP_CLI_SCOPE_MEMORY_MAX", "ROMP_CLI_SCOPE_MEMORY_HIGH", "ROMP_CLI_SCOPE_MEMORY_SWAP_MAX",
+                         "ROMP_CLI_SCOPE_OOM_SCORE_ADJ")
+for _v in _CLI_SCOPE_LIMIT_VARS:
+    os.environ.pop(_v, None)
 
 
 @pytest.fixture(autouse=True)
 def _no_cli_scope():
     os.environ["ROMP_CLI_SCOPE"] = "0"
+    for v in _CLI_SCOPE_LIMIT_VARS:
+        os.environ.pop(v, None)
     yield
 
 
