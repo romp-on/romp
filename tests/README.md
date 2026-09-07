@@ -41,6 +41,11 @@ Every bug fix or feature change lands with a test (repo rule). Four suites:
   `conftest.py`; `test_cli_scope_floor.py` pins both halves of it on the
   source, since a test that reads the value cannot tell the floor from
   `test_cli_scope.py`'s own import-time set.
+  `conftest.py` also unsets the four `ROMP_CLI_SCOPE_*` limit variables
+  (`ROMP_CLI_SCOPE_MEMORY_MAX` and the others): the kernel hands them to every
+  session's CLI and a tool shell inherits them, so a suite run from a session on
+  a self-hosted install would otherwise see them at every backend construction
+  and in every exact argv pin.
   Any test whose subject binds a loopback port picks it with `load
   free-port` + `free_port VAR...`, never a literal: a literal shared by two
   files collided within one run (`romp-manager-ensure.bats` once used

@@ -807,6 +807,163 @@ also appears in the dashboard's error center, since every session then runs
 inside the service cgroup. The macOS launchd path is unchanged: there is no cgroup kill there,
 and the tmux server keeps its launchd lineage.
 
+#### Per-session memory limits (opt-in)
+
+A session's scope can carry a memory limit, so a runaway process is killed
+inside its own session before a machine-wide OOM killer has to pick a victim. On
+2026-09-06 a session's shell expanded a glob over a large `/tmp`, grew past 30
+GB, and the machine's userspace OOM killer (earlyoom) killed the largest process
+it saw at that instant: the romp kernel, which ended every session. No limit is
+set by default; the size is the user's choice, per machine. The kernel reads
+each of the variables below once at its start and hands it to the session's
+scope wrapper, so, like the other service variables, a change takes effect at
+the next manager restart. Four variables in the service environment
+(`~/.config/romp/service.env`) opt in:
+
+- `ROMP_CLI_SCOPE_MEMORY_MAX`: the hard limit (systemd `MemoryMax=`). Above it,
+  the cgroup's OOM killer sends SIGKILL to the largest process in the scope and
+  to nothing else (the wrapper's `OOMPolicy=continue`, below, confines the
+  kill). When that is a tool's process, as in the incident, the session sees a
+  failed tool call: the Bash tool reports the command killed (exit status 137),
+  and the scope keeps running with the CLI in it. When the CLI is itself the
+  largest process, it is the one killed, and the session is cut as after any CLI
+  death. The kernel and the other sessions are untouched either way.
+- `ROMP_CLI_SCOPE_MEMORY_HIGH`: the soft limit (`MemoryHigh=`). Above it, the
+  scope is throttled and its memory reclaimed; the limit itself kills nothing.
+  A throttled scope does raise memory pressure, and on a machine where
+  `systemd-oomd` is set to act on the user manager's pressure (`systemctl show
+  user@$(id -u).service -p ManagedOOMMemoryPressure` prints `kill`) it can kill
+  the whole scope, `OOMPolicy=continue` notwithstanding; check that setting
+  before relying on the soft limit alone.
+- `ROMP_CLI_SCOPE_MEMORY_SWAP_MAX`: the swap limit (`MemorySwapMax=`). Without
+  it, a scope at `MemoryMax` pushes pages to swap instead of being killed, until
+  the machine's swap is used up, and the swapping slows every other process. On
+  a machine with swap, set this too.
+- `ROMP_CLI_SCOPE_OOM_SCORE_ADJ`: an integer from -1000 to 1000, written to the
+  `oom_score_adj` of the process that becomes the CLI, before the CLI starts, on
+  every path that starts one: a launch that falls back to a direct run, outside
+  a scope, still carries it, since the write needs no scope. The CLI and
+  everything it spawns inherit it; the kernel keeps its own. Linux's OOM killer
+  and earlyoom rank processes by a score this value is added to, so a session
+  with a raised value is chosen before the kernel when the whole machine runs
+  out of memory. Raising the value needs no privilege. Lowering it below the
+  user manager's own `oom_score_adj` needs privilege and is refused (see the
+  note on `OOMScoreAdjust=` at the end of this section).
+
+Sizes are an integer with an optional `K`, `M`, `G` or `T` suffix (powers of
+1024, as systemd reads them) or `infinity`. The rule is narrower than systemd's
+own size syntax: systemd takes `50%` (a share of the machine's memory), `1.5G`,
+`16 G`, `16P` and `1G 512M` for `MemoryMax=`, and the rule refuses them all as
+not a size, along with a lowercase suffix (`16g`). Each is dropped before it
+reaches systemd, with the problem line described below; write `16G`. The
+adjustment takes no leading zero: Linux reads `0400` as octal. A value that
+fails its rule is dropped and reported, and the session still starts in its
+scope with the other limits. The kernel checks the rules once at its start: a
+value it refuses is a problem line (a kernel log entry that the dashboard's
+error center also shows) naming the variable and the rule, and the wrapper
+receives that variable empty, so the value is applied nowhere. The probe at the
+kernel's start, described below, catches a value that passes the rule but that
+systemd refuses (a size past its range; `OOMPolicy=` on a scope before systemd
+253) and reports it the same way, quoting systemd.
+The wrapper checks the same rule on every launch and reports a value it refuses
+on stderr as `romp-cli-scope: ignored: …`, which the kernel logs as a problem
+naming the session; on a launch the kernel drove, an `ignored:` line naming a
+rule means the value reached the wrapper some other way.
+
+The rules are syntax, and two kinds of value that pass them can still be refused
+by the machine: a memory property this systemd does not take on a scope
+(`OOMPolicy=` on scopes needs systemd 253), and an adjustment the process cannot
+write, because it is below the user manager's own `oom_score_adj` or because
+`/proc/self/oom_score_adj` cannot be opened for writing (a read-only `/proc` in
+a hardened container). Without a check at the kernel's start, each would be
+refused again on every launch, one `ignored:` line and one problem each, while
+the kernel's boot line said the value was in force. So with the scopes on, the
+kernel runs the wrapper's own steps once at its start: it starts a probe scope
+carrying the memory properties, and has a throwaway child write the adjustment
+to its own `oom_score_adj`. A refusal there is a problem line at the kernel's
+start and reaches the wrapper as an empty variable, so no launch repeats it. The
+adjustment's problem line quotes the shell and says which step failed: it names
+the floor only when the file opened and the write was refused; otherwise it says
+the file could not be opened, and why. The wrapper's `ignored:` line makes the
+same distinction. A probe that does not answer (the user bus away at that
+moment) settles nothing. The kernel says so in its log (a plain line, not a
+problem), hands the values down as read, and lists them in its boot line as set
+but not settled, naming the check; the values whose checks did answer keep their
+own verdict in the same line, so an unanswered check for one value never makes
+another unknown. Whether the values apply is then known from the wrapper's
+report on each launch. The wrapper keeps the same guard on every launch. Its
+pre-flight scope carries the properties. If that fails, it retries bare; if the
+bare scope starts, it tries once more with the properties, and only that second
+failure drops them, for that launch, with one `ignored:` line quoting the
+failure that decided. (A bare failure is the fallback described above.) The CLI
+then starts in its scope without the memory limits; the adjustment is still
+written. On a launch the kernel drove, an `ignored:` line quoting a systemd
+rejection means the machine changed under the running kernel.
+
+Whenever a memory limit is set, the wrapper also sets `OOMPolicy=continue` on
+the scope. A scope's default is `stop`: when Linux's OOM killer kills one
+process in it, systemd stops the whole scope, which ends the CLI and every tmux
+server and `setsid` job in it. With `continue`, only the killed process is gone.
+systemd logs each kill to the user journal as `<unit>: A process of this unit
+has been killed by the OOM killer` (`journalctl --user --since today | grep
+'romp-session-'`).
+
+The limits need the memory controller delegated to the systemd user manager;
+stock systemd delegates it (`systemctl show user@$(id -u).service -p
+DelegateControllers` lists `memory`). Without it, systemd accepts the
+properties, reports them from `systemctl --user show`, and applies nothing; the
+cases are an administrator's drop-in on `user@.service`, the legacy cgroup
+hierarchy, a kernel booted with the controller off, and a container whose cgroup
+subtree lacks it. The kernel checks for this at its start, inside the probe
+scope above: the scope's cgroup has a `memory.max` file when, and only when, the
+controller is there. A missing one is a problem line at the kernel's start. A
+probe that exits non-zero or does not answer (its scope fails to start, it does
+not finish, its command is killed or exits without a marker) is tried once more;
+one that exits 0 without printing a marker is not. When no try gives a verdict,
+that is a problem line too: it says what each try did (one try, or two) and
+quotes systemd's refusal, the exit status, or what was printed; and the check is
+left unsettled.
+Whether the memory limits apply is then unknown until the next kernel start. To
+check a live session, run from a shell inside it: `cat /sys/fs/cgroup$(cut -d:
+-f3 /proc/self/cgroup)/memory.max` prints the limit in bytes, `max` when none
+applies, and fails when the controller is not there.
+
+A suggested starting point for a shared 64 GB machine:
+`ROMP_CLI_SCOPE_MEMORY_MAX=16G`, `ROMP_CLI_SCOPE_MEMORY_HIGH=12G`,
+`ROMP_CLI_SCOPE_MEMORY_SWAP_MAX=0`, `ROMP_CLI_SCOPE_OOM_SCORE_ADJ=500`. One
+session can still take a quarter of the machine, more than any ordinary tool
+call needs; the kernel (a few GB), the other sessions and the system keep the
+rest. A session is throttled once it passes 12 GB and killed when it reaches 16
+GB, without swapping first. An adjustment of 500 adds 500 points to each
+session's OOM score, on a scale where 1000 points is the whole of the machine's
+memory, so the machine-wide killers also choose a runaway session before the
+kernel.
+
+The limits cover what runs in the session's scope: the CLI, its tool shells,
+their `setsid` children, and a private tmux server started directly from a tool
+shell (`tmux -L <name>`). Two kinds of work are outside it. Work a session hands
+to the server the manager started (`tmux new-session` on the default socket)
+runs in that server's scope (`romp-tmux-*`), not the session's. And anything a
+session starts as a transient unit of its own (`systemd-run --user --scope …`,
+or a `systemd-run --user` service) is a sibling of the session's scope under the
+user manager, outside its memory limits: a tmux server detached that way is
+outside them, whereas the same server started with a plain `tmux -L` is inside.
+A `--scope` job started that way still inherits the session's raised
+`oom_score_adj` (`systemd-run` runs the command in place); a transient service
+does not (the user manager spawns it, not the session).
+
+`OOMScoreAdjust=` on the manager unit cannot separate the kernel from the
+sessions, which is why the adjustment is a raised score on the session tree. A
+user unit's `OOMScoreAdjust=` cannot go below the user manager's own
+`oom_score_adj`: 100 on a typical machine, where the romp manager and the kernel
+sit at 200, so a drop-in asking for -500 lands at 100. It can bring the manager
+and the kernel down to that floor and no lower, and, with no session-side
+adjustment set, the sessions follow, because the kernel spawns them and they
+inherit its value: lowering the kernel's score lowers every session's by the
+same amount. The raise on the session side separates the tiers: the wrapper
+writes it in the session's own process, after the kernel has spawned it, so the
+kernel keeps its own. None of this subsection applies on the launchd path.
+
 ## Kernel performance counters
 
 `GET /perf` returns one JSON document of counters the kernel keeps at all
