@@ -3060,17 +3060,41 @@ class TimelinePanel {
     }
   }
 
+  // the host hook a remote-tag edit rides (the web dashboard, VS Code); the Obsidian panel has none
+  _remoteBridge() {
+    return typeof window !== 'undefined' && typeof window.__rompTimelineEditTag === 'function';
+  }
+
+  // the refusal for homes this panel cannot reach: ONE notice however many, every host named, and
+  // a remedy that covers each of them and, when the local half was held back too (`local`), that
+  // half (review find, 2026-09-08: the per-host notice overwrote itself across a fan-out, so a tag
+  // homed on two kernels named only the second and gave a remedy for it alone). The dialog's
+  // disabled actions and the chip wear the same text as their tooltip, so a gesture that can only
+  // end here says so before the click.
+  _unreachableText(hosts, local) {
+    const named = hosts.map((h) => h || 'the owner');
+    const cmds = hosts.map((h) => 'romp tag --host ' + (h || '<kernel>'));
+    if (local) cmds.push('romp tag (no --host) for this kernel');
+    return 'this panel cannot reach ' + named.join(' or ') + ', so nothing was changed. Edit with: ' + cmds.join(', then ');
+  }
+
+  _refuseUnreachable(hosts, name, local) {
+    this._tagEditErr = { host: hosts.filter(Boolean).join(', '), name: name, error: this._unreachableText(hosts, local) };
+    this.draw();
+  }
+
   // one remote-tag edit, dispatched to its HOME kernel and rendered optimistically meanwhile.
   // Ids ride viewer-relative; the kernel sends only the bare sid tails (sids are global) and the
   // owner resolves them into ITS frame. No hook (the Obsidian panel) → the tag stays read-only
-  // and the refusal is immediate and visible, never a silent drop.
+  // and the refusal is immediate and visible, never a silent drop — and, since _editTagUnion
+  // holds the local half back when a remote half is refused HERE, that refusal IS the outcome:
+  // nothing was changed anywhere, which the text says. With a hook the `true` answers for the
+  // POST, not for the owner's verdict: the bridge's editTag frame carries no id, and the kernel
+  // answers it only on failure (tagEditFailed, later) and never with an ack a caller could wait
+  // on, so a bridged home's refusal reverts its own overlay and nothing else (federation v1;
+  // review find, 2026-09-08).
   _editRemoteTag(rt, edit) {
-    if (typeof window === 'undefined' || typeof window.__rompTimelineEditTag !== 'function') {
-      this._tagEditErr = { host: rt.host, name: rt.name,
-                           error: 'this panel cannot reach ' + (rt.host || 'the owner') + " — edit with: romp tag --host " + (rt.host || '<kernel>') };
-      this.draw();
-      return false;
-    }
+    if (!this._remoteBridge()) { this._refuseUnreachable([rt.host], rt.name, false); return false; }
     let next = null;
     if (!edit.delete) {
       next = { id: rt.id, host: rt.host, name: edit.rename || rt.name, color: edit.color || rt.color,
@@ -3138,16 +3162,39 @@ class TimelinePanel {
   // write, and the renames and assignments were lost; by NAME, a recolor queued behind a refused
   // rename went looking for the name the rename would have given the tag and found the other tag
   // that already had it); remote writes ride _editRemoteTag (optimistic overlay + loud
-  // tagEditFailed, federation v1).
+  // tagEditFailed, federation v1). The REMOTE halves go first, and the local half commits only
+  // once every one of them was DISPATCHED (review find, 2026-09-08): with no remote bridge (the
+  // Obsidian panel) the dispatch is refused at once, and before this the local half had already
+  // been written — the tag renamed, its member dropped or the tag deleted in the local store
+  // alone, under an error that named only the remote. That synchronous refusal now leaves every
+  // store as it was, names every home it could not reach, and the error text says so. It is the
+  // dispatch the local half waits for, not the owner's verdict: a bridged home answers only on
+  // failure and only later (tagEditFailed, no ack to wait on), so its refusal reverts that home's
+  // overlay and finds the local half already posted (federation v1's optimistic design, unchanged).
   _editTagUnion(g, edit) {
     // a create still in flight has no id to address (its row wears the placeholder the ack
     // replaces): the builders offer no gesture on it, and one that arrives anyway does nothing
     // rather than posting a tid the kernel refuses as a tag that does not exist
     if (g.pending) return;
     const meta = { name: g.name, tid: g.localId };
+    // the local half's optimistic copy, taken BEFORE the remote fan-out: _curViews overlays the
+    // remote halves' pending copies, and those must not ride a local post
+    const localCopy = () => (g.localId ? JSON.parse(JSON.stringify(this._curViews())) : null);
+    // the fan-out to the remote halves a gesture reaches: every one is dispatched, and the local half
+    // rides only if every one was taken. The refused halves make ONE notice naming each of them and
+    // whether the local half was held back too (review find, 2026-09-08: each half's own notice
+    // overwrote the last, so a tag homed on two kernels named only the second and gave a remedy for
+    // it alone). The only synchronous refusal today is the no-bridge one, which refuses every half
+    // alike; a refusal with a bridge present keeps its own notice
+    const fanOut = (targets, mk, local) => {
+      const refused = [];
+      for (const rt of targets) if (!this._editRemoteTag(rt, mk())) refused.push(rt.host);
+      if (refused.length && !this._remoteBridge()) this._refuseUnreachable(refused, g.name, local);
+      return !refused.length;
+    };
     if (edit.add && edit.add.length) {
-      if (g.localId) {
-        const nv = JSON.parse(JSON.stringify(this._curViews()));
+      const nv = localCopy();
+      if (nv) {
         const t = viewTags(nv).find((x) => x.id === g.localId);
         if (t) {
           t.members = Array.from(new Set((t.members || []).concat(edit.add)));
@@ -3156,21 +3203,22 @@ class TimelinePanel {
       } else if (g.remotes.length) this._editRemoteTag(g.remotes[0], { add: edit.add.slice() });
     }
     if (edit.remove && edit.remove.length) {
-      if (g.localId) {
-        const nv = JSON.parse(JSON.stringify(this._curViews()));
-        const t = viewTags(nv).find((x) => x.id === g.localId);
-        if (t && (t.members || []).some((m) => edit.remove.indexOf(m) >= 0)) {
+      const nv = localCopy();
+      const t = nv ? viewTags(nv).find((x) => x.id === g.localId) : null;
+      const localHit = !!(t && (t.members || []).some((m) => edit.remove.indexOf(m) >= 0));
+      const ok = fanOut(g.remotes.filter((rt) => (rt.members || []).some((m) => edit.remove.indexOf(m) >= 0)),
+                        () => ({ remove: edit.remove.slice() }), localHit);
+      if (ok && nv) {
+        if (localHit) {
           t.members = (t.members || []).filter((m) => edit.remove.indexOf(m) < 0);
           this._postTagEdit(nv, { op: 'removeMember', tid: g.localId, sids: edit.remove.slice() }, meta);
         }
       }
-      for (const rt of g.remotes)
-        if ((rt.members || []).some((m) => edit.remove.indexOf(m) >= 0))
-          this._editRemoteTag(rt, { remove: edit.remove.slice() });
     }
     if (edit.rename || edit.color || edit.delete) {
-      if (g.localId) {
-        const nv = JSON.parse(JSON.stringify(this._curViews()));
+      const nv = localCopy();
+      const ok = fanOut(g.remotes, () => ({ rename: edit.rename, color: edit.color, delete: !!edit.delete }), !!g.localId);
+      if (ok && nv) {
         if (edit.delete) {
           nv.tags = viewTags(nv).filter((x) => x.id !== g.localId); delete nv.groups;
           if (nv.active === g.localId) nv.active = 'all';
@@ -3185,15 +3233,14 @@ class TimelinePanel {
           }
         }
       }
-      for (const rt of g.remotes)
-        this._editRemoteTag(rt, { rename: edit.rename, color: edit.color, delete: !!edit.delete });
     }
   }
 
   // the chips for ONE session — one solid chip per union tag holding it, ✕ = remove-everywhere.
   // Home-kernel detail lives in the tooltip at most (kernels are plumbing).
   _tagChips(box, s, rebuild) {
-    for (const g of viewTagUnion(this._curViews())) {
+    const cur = this._curViews();
+    for (const g of viewTagUnion(cur)) {
       if (g.members.indexOf(s.id) < 0) continue;
       const tc = g.color || MENU_FG;
       const ch = box.createSpan();
@@ -3208,6 +3255,17 @@ class TimelinePanel {
         // tag (the 2026-09-05 review) — the "creating…" the inputs read, in the tooltip
         ch.style.cursor = 'default';
         ch.setAttribute('title', 'creating "' + g.name + '"…');
+        ch.setAttribute('aria-disabled', 'true');
+        continue;
+      }
+      // the ✕ takes the pair off EVERY store holding it: with a remote half holding this session and
+      // no bridge, _editTagUnion can only refuse it, so the chip wears no ✕ and its tooltip says why
+      // (review find, 2026-09-08)
+      const homesHolding = (g.remotes || []).filter((rt) => (rt.members || []).indexOf(s.id) >= 0).map((rt) => rt.host);
+      if (homesHolding.length && !this._remoteBridge()) {
+        const localHolds = !!g.localId && viewTags(cur).some((t) => t.id === g.localId && (t.members || []).indexOf(s.id) >= 0);
+        ch.style.cursor = 'default';
+        ch.setAttribute('title', 'tagged "' + g.name + '": ' + this._unreachableText(homesHolding, localHolds));
         ch.setAttribute('aria-disabled', 'true');
         continue;
       }
@@ -3805,7 +3863,7 @@ class TimelinePanel {
       // NAME-KEYED (user ruling 2026-08-24): whichever store's id opened this, the header is the
       // tag's ONE identity — rename/recolor/delete fan out to every kernel defining the name
       // (_editTagUnion), and no host prefix appears; kernels are plumbing.
-      const canEdit = typeof window !== 'undefined' && typeof window.__rompTimelineEditTag === 'function';
+      const canEdit = this._remoteBridge();
       const head = card.createDiv();
       head.setAttribute('style', 'display:flex;align-items:center;gap:8px;margin:0 0 8px;');
       const ttl = head.createDiv({ text: 'Sessions & tags' });
@@ -3836,8 +3894,17 @@ class TimelinePanel {
         const tgrid = card.createDiv();
         tgrid.setAttribute('style', 'display:grid;grid-template-columns:max-content max-content max-content 1fr;'
           + 'column-gap:14px;row-gap:4px;align-items:center;margin:2px 0 6px;');
-        const action = (row, text, title) => {
+        // `held`: the reason a gesture cannot be honoured here; the action renders disabled (dim, no
+        // pointer, aria-disabled) wearing that reason as its tooltip, in place of a click that could
+        // only end in the refusal notice (review find, 2026-09-08)
+        const action = (row, text, title, held) => {
           const a = row.createSpan({ text });
+          if (held) {
+            a.setAttribute('style', 'cursor:default;opacity:0.35;color:' + MENU_FG + ';');
+            a.setAttribute('title', held);
+            a.setAttribute('aria-disabled', 'true');
+            return a;
+          }
           a.setAttribute('style', 'cursor:pointer;opacity:0.7;color:' + MENU_FG + ';');
           a.setAttribute('title', title);
           return a;
@@ -3847,6 +3914,11 @@ class TimelinePanel {
           // the placeholder id the ack replaces, and an op addressed by it would be refused as a tag
           // that does not exist (the 2026-09-05 review) — it reads "creating…" instead
           const editable = !tg.pending && (tg.localId || canEdit);
+          // rename, recolor and delete fan out to EVERY home the name is defined on: with remote halves
+          // and no bridge, _editTagUnion can only refuse them (the remote halves go first), so the row
+          // shows the three disabled with the refusal as their tooltip (review find, 2026-09-08)
+          const held = editable && !canEdit && (tg.remotes || []).length
+            ? this._unreachableText((tg.remotes || []).map((rt) => rt.host), !!tg.localId) : '';
           const tc = tg.color || MODEL_FG;
           // the tag itself: the normal pill, NO ✕ — actions live beside it, never on it.
           // DRAGGABLE (the user 2026-08-25): grab a pill to reorder the tags — the drop writes
@@ -3956,7 +4028,8 @@ class TimelinePanel {
           // delete — the destructive convention: dim at rest, red on hover
           const del = tgrid.createDiv();
           if (editable) {
-            const d = action(del, 'delete', 'DELETE the tag \u201c' + tg.name + '\u201d everywhere (members keep running, just untagged)');
+            const d = action(del, 'delete', 'DELETE the tag \u201c' + tg.name + '\u201d everywhere (members keep running, just untagged)', held);
+            if (!held) {
             d.addEventListener('mouseenter', () => { d.style.color = '#F85B5A'; d.style.opacity = '1'; });
             d.addEventListener('mouseleave', () => { d.style.color = MENU_FG; d.style.opacity = '0.7'; });
             d.addEventListener('click', () => {
@@ -3964,14 +4037,17 @@ class TimelinePanel {
               this._editTagUnion(tg, { delete: true });
               build();
             });
+            }
           }
           // rename — turns the pill into an input
           const ren = tgrid.createDiv();
           if (editable) {
-            const r = action(ren, 'rename', 'rename this tag (everywhere it is defined)');
+            const r = action(ren, 'rename', 'rename this tag (everywhere it is defined)', held);
+            if (!held) {
             r.addEventListener('mouseenter', () => { r.style.opacity = '1'; });
             r.addEventListener('mouseleave', () => { r.style.opacity = '0.7'; });
             r.addEventListener('click', () => { this._tagEditorFor = this._tagEditorFor === unionKey(tg) ? null : unionKey(tg); this._tagRenameDraft = null; build(); });
+            }
           }
           // the color — the identity-palette swatches inline in the row's last column
           const colCell = tgrid.createDiv();
@@ -3982,11 +4058,12 @@ class TimelinePanel {
           colCell.setAttribute('style', 'display:grid;grid-template-columns:repeat(' + swCols
             + ',14px);gap:6px;align-items:center;');
           if (editable) {
+            if (held) { colCell.setAttribute('title', held); colCell.setAttribute('aria-disabled', 'true'); }
             for (const c of (this._palette && this._palette.length ? this._palette : [tc])) {
               const sw = colCell.createSpan();
-              sw.setAttribute('style', 'width:14px;height:14px;border-radius:50%;cursor:pointer;background:' + c + ';'
-                + (c === tg.color ? 'outline:2px solid #ffffff;outline-offset:1px;' : 'opacity:0.7;'));
-              sw.addEventListener('click', () => { this._editTagUnion(tg, { color: c }); build(); });
+              sw.setAttribute('style', 'width:14px;height:14px;border-radius:50%;cursor:' + (held ? 'default' : 'pointer') + ';background:' + c + ';'
+                + (c === tg.color ? 'outline:2px solid #ffffff;outline-offset:1px;' : held ? 'opacity:0.35;' : 'opacity:0.7;'));
+              if (!held) sw.addEventListener('click', () => { this._editTagUnion(tg, { color: c }); build(); });
             }
           }
         }

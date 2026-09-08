@@ -429,7 +429,8 @@ test("federation v1+ruling source pins: header/chips route through the UNION dis
   assert.match(SRC, /this\._editTagUnion\(g, \{ add: rowIds\.filter\(\(id\) => g\.members\.indexOf\(id\) < 0\) \}\); rebuild\(\);/);
   // the remote transport underneath is unchanged: no hook (the Obsidian panel) → read-only + an
   // immediate visible refusal; the error line is dismissible and names the owner
-  assert.match(SRC, /typeof window\.__rompTimelineEditTag !== 'function'/);
+  assert.match(SRC, /_remoteBridge\(\) \{\n\s*return typeof window !== 'undefined' && typeof window\.__rompTimelineEditTag === 'function';/);
+  assert.match(SRC, /if \(!this\._remoteBridge\(\)\) \{ this\._refuseUnreachable\(\[rt\.host\], rt\.name, false\); return false; \}/);
   assert.match(SRC, /er\.createSpan\(\{ text: '⚠ ' \+ \(this\._tagEditErr\.host \? this\._tagEditErr\.host \+ ': ' : ''\) \+ this\._tagEditErr\.error \}\);/);
   // a NEW tag still mints locally, posting the whole blob (zero local-path change)
   assert.match(SRC, /nv\.tags = viewTags\(nv\)\.concat/);
@@ -472,6 +473,152 @@ test("executed: the union dispatcher — add prefers local, remove reaches every
   assert.equal(setViews.length, 1);
   assert.equal(setViews[0].tags.length, 0, "the local tag goes");
   assert.deepEqual(remote.map((r: any) => r[1].delete), [true, true], "…and every remote home");
+});
+
+test("executed: with no remote bridge, a union edit leaves the LOCAL half untouched and says why (review find, 2026-09-08)", () => {
+  // The Obsidian panel has no window.__rompTimelineEditTag, so _editRemoteTag refuses synchronously. Before
+  // 2026-09-08 _editTagUnion had already committed the local half by then — the tag renamed, its member
+  // dropped or the tag deleted in the local store alone, the remote halves untouched — under an error that
+  // named only the remote. The remote halves go first now and the local half commits only when every one
+  // of them was taken, so the error's "nothing was changed" is the truth.
+  const w = (globalThis as any).window;
+  assert.notEqual(typeof (w && w.__rompTimelineEditTag), "function", "this harness has no remote bridge (the Obsidian panel's shape)");
+  const p: any = Object.create(TimelinePanel.prototype);
+  const local: any[] = [];
+  p._setViews = (v: any) => local.push(v);   // the legacy local write _postTagEdit falls to without a targeted bridge
+  p.draw = () => {};
+  p._pendingViews = null; p._pendingTagEdits = {}; p._tagEditErr = null;
+  const rtA = { id: "TESTHOST-A:g1", host: "TESTHOST-A", name: "team", color: "#123456", members: ["m1"] };
+  const localTag = { id: "gL", name: "team", color: "#123456", members: ["m1", "m2"] };
+  p._views = { active: "all", hidden: [], tags: [localTag], remoteTags: [rtA] };
+  const g = { name: "team", color: "#123456", members: ["m1", "m2"], ids: ["gL", rtA.id], localId: "gL",
+              homes: ["TESTHOST-A"], remotes: [rtA] };
+  const refused = (gesture: string) => {
+    assert.equal(local.length, 0, gesture + ": the remote half was refused, so the local half did not commit");
+    assert.ok(p._tagEditErr, gesture + ": the refusal shows");
+    assert.equal(p._tagEditErr.host, "TESTHOST-A", gesture + ": it names the remote");
+    assert.match(p._tagEditErr.error, /cannot reach TESTHOST-A/, gesture + ": …and why");
+    assert.match(p._tagEditErr.error, /nothing was changed/, gesture + ": …and that the edit landed nowhere");
+    assert.match(p._tagEditErr.error, /romp tag --host TESTHOST-A/, gesture + ": …and the way to make it");
+    p._tagEditErr = null;
+  };
+  p._editTagUnion(g, { rename: "crew" }); refused("rename");
+  p._editTagUnion(g, { color: "#DD42FF" }); refused("recolor");
+  p._editTagUnion(g, { delete: true }); refused("delete");
+  p._editTagUnion(g, { remove: ["m1"] }); refused("remove of a member both halves hold");
+  assert.deepEqual(p._curViews().tags[0], localTag, "the local tag reads exactly as the store has it");
+  // a REMOVE of a member only the local half holds asks nothing of the remotes: the local half commits, as before
+  p._editTagUnion(g, { remove: ["m2"] });
+  assert.equal(local.length, 1, "no remote holds m2, nothing to refuse — the local half commits");
+  assert.deepEqual(local[0].tags[0].members, ["m1"]);
+  assert.equal(p._tagEditErr, null, "…and nothing is said");
+  // the remedy covers the LOCAL half too: it was held back, so the CLI has to make that half as well
+  p._editTagUnion(g, { rename: "crew" });
+  assert.match(p._tagEditErr.error, /romp tag \(no --host\) for this kernel/, "the local half is named in the remedy");
+  p._tagEditErr = null;
+  // …but a remote-only union asks nothing of a local half, so the remedy names the remotes alone
+  p._editTagUnion({ ...g, ids: [rtA.id], localId: null, members: ["m1"] }, { rename: "crew" });
+  assert.doesNotMatch(p._tagEditErr.error, /for this kernel/);
+  p._tagEditErr = null;
+  // TWO remote homes, the REAL _editRemoteTag (review find, 2026-09-08): before, each half's refusal
+  // overwrote the last, so the notice named only TESTHOST-B and gave a remedy for it alone. One notice
+  // names every home the panel cannot reach, with a remedy that covers each of them and the local half
+  const rtB = { id: "TESTHOST-B:g7", host: "TESTHOST-B", name: "team", color: "#123456", members: ["m1"] };
+  const g2 = { ...g, ids: ["gL", rtA.id, rtB.id], homes: ["TESTHOST-A", "TESTHOST-B"], remotes: [rtA, rtB] };
+  p._views = { active: "all", hidden: [], tags: [localTag], remoteTags: [rtA, rtB] };
+  local.length = 0;   // the m2 remove above committed, rightly; the recorder starts clean here
+  for (const [gesture, edit] of [["rename", { rename: "crew" }], ["recolor", { color: "#DD42FF" }],
+                                 ["delete", { delete: true }], ["remove", { remove: ["m1"] }]] as any[]) {
+    p._editTagUnion(g2, edit);
+    assert.equal(local.length, 0, gesture + ": no local commit");
+    assert.equal(p._tagEditErr.host, "TESTHOST-A, TESTHOST-B", gesture + ": the notice is headed by every unreachable home");
+    assert.match(p._tagEditErr.error, /cannot reach TESTHOST-A or TESTHOST-B, so nothing was changed/, gesture + ": both named, and the outcome");
+    assert.match(p._tagEditErr.error, /romp tag --host TESTHOST-A, then romp tag --host TESTHOST-B, then romp tag \(no --host\) for this kernel/,
+      gesture + ": a remedy for each home and for the local half");
+    p._tagEditErr = null;
+  }
+  // a remove only ONE remote holds names that one home alone: the other was never asked
+  p._editTagUnion({ ...g2, remotes: [rtA, { ...rtB, members: ["zz"] }] }, { remove: ["m1"] });
+  assert.equal(p._tagEditErr.host, "TESTHOST-A", "the home that does not hold the member is not named");
+  assert.deepEqual(p._curViews().tags[0], localTag, "the local tag still reads exactly as the store has it");
+});
+
+test("executed: WITH a bridge the REAL _editRemoteTag posts every remote half through it, then the local half commits (review find, 2026-09-08)", () => {
+  // The dispatcher's gate is _editRemoteTag's return: `true` once the bridge took the post. Before this test the
+  // bridge branch ran only through stubs, so a `return;` there would have passed the suite while every bridged
+  // union edit silently lost its local half. Here the bridge is the web dashboard's shape: a window hook that
+  // records the frame (ui/webview/timeline-boot.ts posts it as editTag).
+  const g: any = globalThis;
+  const had = "window" in g; const prev = g.window;
+  const frames: any[] = []; const order: string[] = []; const local: any[] = [];
+  g.window = { __rompTimelineEditTag: (e: any) => { frames.push(e); order.push(e.host); } };
+  try {
+    const p: any = Object.create(TimelinePanel.prototype);
+    p._setViews = (v: any) => { order.push("local"); local.push(v); };
+    p.draw = () => {}; p._pendingViews = null; p._pendingTagEdits = {}; p._tagEditErr = null;
+    p._viewsDialog = null; p._viewsDialogBuild = null; p._laneMenu = null;
+    const rtA = { id: "TESTHOST-A:g1", host: "TESTHOST-A", name: "team", color: "#123456", members: ["m1"] };
+    const rtB = { id: "TESTHOST-B:g7", host: "TESTHOST-B", name: "team", color: "#123456", members: ["m1"] };
+    const localTag = { id: "gL", name: "team", color: "#123456", members: ["m1", "m2"] };
+    p._views = { active: "all", hidden: [], tags: [localTag], remoteTags: [rtA, rtB] };
+    const u = { name: "team", color: "#123456", members: ["m1", "m2"], ids: ["gL", rtA.id, rtB.id], localId: "gL",
+                homes: ["TESTHOST-A", "TESTHOST-B"], remotes: [rtA, rtB] };
+    p._editTagUnion(u, { rename: "crew" });
+    assert.deepEqual(order, ["TESTHOST-A", "TESTHOST-B", "local"], "every remote half is posted first; the local half commits last");
+    assert.deepEqual(frames.map((f) => [f.host, f.name, f.rename, f.delete]),
+      [["TESTHOST-A", "team", "crew", false], ["TESTHOST-B", "team", "crew", false]], "the frames name the home and the tag, and carry the edit");
+    assert.equal(local.length, 1); assert.equal(local[0].tags[0].name, "crew");
+    assert.equal(p._pendingTagEdits["TESTHOST-A:g1"].tag.name, "crew", "each remote half renders its optimistic copy meanwhile");
+    assert.equal(p._pendingTagEdits["TESTHOST-B:g7"].tag.name, "crew");
+    assert.equal(p._tagEditErr, null, "nothing was refused");
+    // the wait is for the DISPATCH, not the owner's verdict (federation v1, pinned so a change here is deliberate):
+    // the bridge answers only on failure and only later; that refusal reverts ITS home's overlay and finds the
+    // local half already posted. Holding the local half on the owner's answer needs an ack the editTag frame does
+    // not have today.
+    p.tagEditFailed({ host: "TESTHOST-B", name: "team", error: "a tag named \"crew\" already exists there" });
+    assert.deepEqual(Object.keys(p._pendingTagEdits), ["TESTHOST-A:g1"], "only the refusing home's overlay reverts");
+    assert.equal(local.length, 1, "the local write stands; nothing here claims otherwise");
+    assert.equal(p._tagEditErr.host, "TESTHOST-B");
+    assert.doesNotMatch(p._tagEditErr.error, /nothing was changed/, "…and the notice does not say nothing changed, because something did");
+    // a REMOVE and a DELETE ride the same gate
+    frames.length = 0; order.length = 0; local.length = 0; p._tagEditErr = null;
+    p._editTagUnion(u, { remove: ["m1"] });
+    assert.deepEqual(order, ["TESTHOST-A", "TESTHOST-B", "local"]);
+    assert.deepEqual(frames.map((f) => f.remove), [["m1"], ["m1"]]);
+    frames.length = 0; order.length = 0; local.length = 0;
+    p._editTagUnion(u, { delete: true });
+    assert.deepEqual(order, ["TESTHOST-A", "TESTHOST-B", "local"]);
+    assert.deepEqual(frames.map((f) => f.delete), [true, true]);
+    assert.equal(local[0].tags.length, 0);
+  } finally {
+    if (had) g.window = prev; else delete g.window;
+  }
+});
+
+test("a gesture the host cannot honour is DISABLED with the reason as its tooltip, never offered (review find, 2026-09-08)", () => {
+  // executed: the one text the refusal notice and the tooltips share
+  const p: any = Object.create(TimelinePanel.prototype);
+  assert.equal(p._unreachableText(["TESTHOST-A"], false),
+    "this panel cannot reach TESTHOST-A, so nothing was changed. Edit with: romp tag --host TESTHOST-A");
+  assert.equal(p._unreachableText(["TESTHOST-A", "TESTHOST-B"], true),
+    "this panel cannot reach TESTHOST-A or TESTHOST-B, so nothing was changed. Edit with: romp tag --host TESTHOST-A, then romp tag --host TESTHOST-B, then romp tag (no --host) for this kernel");
+  assert.equal(p._unreachableText([""], false), "this panel cannot reach the owner, so nothing was changed. Edit with: romp tag --host <kernel>",
+    "a host-less remote falls back to the placeholder, as before");
+  // the dialog: rename, recolor and delete on a union with remote halves are held in a bridge-less host:
+  // the action renders disabled wearing the reason, and takes no click
+  assert.match(SRC, /const held = editable && !canEdit && \(tg\.remotes \|\| \[\]\)\.length\n\s*\? this\._unreachableText\(\(tg\.remotes \|\| \[\]\)\.map\(\(rt\) => rt\.host\), !!tg\.localId\) : '';/);
+  assert.match(SRC, /if \(held\) \{\n\s*a\.setAttribute\('style', 'cursor:default;opacity:0\.35;color:' \+ MENU_FG \+ ';'\);\n\s*a\.setAttribute\('title', held\);\n\s*a\.setAttribute\('aria-disabled', 'true'\);\n\s*return a;/,
+    "the disabled action: dim, no pointer, the reason as tooltip, no listeners");
+  assert.match(SRC, /action\(del, 'delete', [^\n]*, held\);\n\s*if \(!held\) \{/, "delete's hover and click ride only when not held");
+  assert.match(SRC, /action\(ren, 'rename', 'rename this tag \(everywhere it is defined\)', held\);\n\s*if \(!held\) \{/, "rename's too");
+  assert.match(SRC, /if \(held\) \{ colCell\.setAttribute\('title', held\); colCell\.setAttribute\('aria-disabled', 'true'\); \}/, "the swatch cell says why");
+  assert.match(SRC, /if \(!held\) sw\.addEventListener\('click', \(\) => \{ this\._editTagUnion\(tg, \{ color: c \}\); build\(\); \}\);/, "…and its swatches take no click");
+  // the chip: a ✕ that would remove the pair from a remote half no bridge can reach is not drawn; the tooltip says why
+  assert.match(SRC, /const homesHolding = \(g\.remotes \|\| \[\]\)\.filter\(\(rt\) => \(rt\.members \|\| \[\]\)\.indexOf\(s\.id\) >= 0\)\.map\(\(rt\) => rt\.host\);\n\s*if \(homesHolding\.length && !this\._remoteBridge\(\)\) \{/);
+  assert.match(SRC, /ch\.setAttribute\('title', 'tagged "' \+ g\.name \+ '": ' \+ this\._unreachableText\(homesHolding, localHolds\)\);\n\s*ch\.setAttribute\('aria-disabled', 'true'\);\n\s*continue;/);
+  // a local-only tag (no remote halves) keeps every gesture in every host: `held` is empty without remotes
+  const p2: any = Object.create(TimelinePanel.prototype);
+  assert.equal(p2._remoteBridge(), false, "this harness has no bridge");
 });
 
 test("the lane gear carries the SAME tag editor — the shared builders, never a fork (the user 2026-08-24)", () => {
