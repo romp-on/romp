@@ -36,12 +36,17 @@ if [ -d "$REAL_VENV" ]; then
 fi
 export ROMP_KERNEL_NO_OPEN=1
 export ROMP_SERVE_TOKEN="labtok-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-# a free port: bind 0 and read it back
-PORT=$(python3 - <<'PY'
+# a free port: bind 0 and read it back. A function, with only the call substituted: bash 3.2
+# (macOS's system bash) pairs quotes and parens in the raw text of a $( ... ) with no notion of
+# a heredoc, so a heredoc body inside one is read as shell and parses only while its quotes
+# happen to balance (tests/test_shell_bash32_portability.py bans the shape tree-wide).
+_lab_free_port() {
+  python3 - <<'PY'
 import socket
 s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
 PY
-)
+}
+PORT=$(_lab_free_port)
 export ROMP_KERNEL_PORT="$PORT"
 
 # serve the FRESH build, never a stale bundle (the T106 triage's first lesson)

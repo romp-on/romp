@@ -27,17 +27,12 @@
 # name` would assign the helper's own local and hand the caller an empty string, the exact failure the
 # helper exists to prevent.
 
-free_port() {   # free_port VAR...: assigns each VAR a distinct free loopback port
-    local _fp_ports _fp_picks _fp_i=0 _fp_name
-    if [ $# -eq 0 ]; then
-        echo "free-port: usage: free_port VAR..." >&2
-        return 1
-    fi
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "free-port: python3 not found on PATH; cannot probe for a free port" >&2
-        return 1
-    fi
-    _fp_ports="$(python3 - "$#" <<'PY'
+# The probe is a function of its own, with only the call substituted: bash 3.2 (macOS's system
+# bash) pairs quotes and parens in the raw text of a $( ... ) with no notion of a heredoc, so a
+# heredoc body inside one is read as shell and parses only while its quotes happen to balance
+# (tests/test_shell_bash32_portability.py bans the shape tree-wide).
+_fp_probe() {   # _fp_probe N: prints N distinct free loopback ports on one line, or fails
+    python3 - "$1" <<'PY'
 import random, socket, sys
 n = int(sys.argv[1])
 picked = []
@@ -59,7 +54,19 @@ if len(picked) < n:
     sys.exit(1)
 print(" ".join(str(p) for p in picked))
 PY
-)" || { echo "free-port: no free loopback port in 20000-24999 after 500 tries" >&2; return 1; }
+}
+
+free_port() {   # free_port VAR...: assigns each VAR a distinct free loopback port
+    local _fp_ports _fp_picks _fp_i=0 _fp_name
+    if [ $# -eq 0 ]; then
+        echo "free-port: usage: free_port VAR..." >&2
+        return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "free-port: python3 not found on PATH; cannot probe for a free port" >&2
+        return 1
+    fi
+    _fp_ports="$(_fp_probe "$#")" || { echo "free-port: no free loopback port in 20000-24999 after 500 tries" >&2; return 1; }
     read -ra _fp_picks <<< "$_fp_ports"
     for _fp_name in "$@"; do
         printf -v "$_fp_name" '%s' "${_fp_picks[_fp_i]}"

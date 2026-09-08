@@ -167,7 +167,15 @@ Reply with ONLY the <=8-word phrase capturing what they asked for. Nothing else.
       #   (nothing)        → the turn produced no text and used no tools; skip.
       #   VERBATIM\n<text> → short, tool-less reply (a direct answer): show as-is.
       #   MODEL\n<turn>    → real work: summarize with the model.
-      excerpt=$(python3 - "$transcript" <<'PY' 2>/dev/null || true
+      # The Python sits in a function and only the CALL is substituted: macOS's system
+      # bash (3.2) finds the end of a $( ... ) by pairing quotes and parens in the raw
+      # text, with no notion of a heredoc, so a heredoc opened inside the substitution
+      # is read as shell. Three apostrophes in the comments below left that scan inside
+      # an unclosed quote, and the whole detached compound failed to parse after the
+      # prelude above had already set the kind to "pending", a spinner that never ended.
+      # tests/test_shell_bash32_portability.py keeps every shell file clear of the shape.
+      _turn_excerpt() {
+        python3 - "$transcript" <<'PY'
 import sys, json
 lu = ""
 texts = []   # assistant text blocks in the latest turn (reset on each human prompt)
@@ -236,7 +244,8 @@ if tools:
             seen.append(t)
     print("TOOLS USED: " + ", ".join(seen[:12]))
 PY
-      )
+      }
+      excerpt=$(_turn_excerpt 2>/dev/null || true)
       [[ -n "${excerpt//[[:space:]]/}" ]] || exit 0
       mode="${excerpt%%$'\n'*}"
       payload="${excerpt#*$'\n'}"
