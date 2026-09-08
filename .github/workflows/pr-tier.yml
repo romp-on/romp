@@ -28,9 +28,21 @@ name: PR tier
 # runner's cancel grace is longer than this job), and a cancelled required
 # check blocks the merge. Queueing costs a few seconds; cancelling can wedge.
 # It re-runs when the labels change, and on every push to the PR, so the
-# status on the PR is always about the labels it carries now. Making it a
-# REQUIRED check on main is a branch-ruleset setting in the repository
-# settings, which is the maintainers' call, not something this file can do.
+# status on the PR is always about the labels it carries now.
+# A PR opened a moment ago may not carry its label yet: `gh pr create --label`
+# fires `opened` first and adds the label a second later, and a hand-labelled
+# PR takes longer still. Reading the API live made the ORDER of runs harmless,
+# but the opened run itself still failed whenever it read before the label
+# landed, and every such failure notified the author about a state that
+# lasted seconds (eighteen of them on 2026-09-08, one per PR opened). So the
+# opened and reopened runs, and only those, wait for a label when they find
+# none: they re-read the API every five seconds for up to a minute, then
+# judge. A PR that stays unlabelled still fails, just a minute later; two
+# labels never wait, because a doubly sorted PR is a real error, not a race;
+# and every later event's run judges at once, as before.
+# Making it a REQUIRED check on main is a branch-ruleset setting in the
+# repository settings, which is the maintainers' call, not something this file
+# can do.
 
 on:
   pull_request:
@@ -55,14 +67,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          ACTION: ${{ github.event.action }}
         run: |
           # The API is the authority; the payload is a snapshot (see the header). A failed read is a
-          # failed check, never a guessed label set.
-          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.labels[].name]') || {
-            echo "::error::Could not read this PR's labels from the API."
-            exit 1
-          }
-          count=$(jq '[.[] | select(. == "docs" or . == "tests-only" or . == "fix" or . == "feature" or . == "major-feature")] | length' <<<"$LABELS")
+          # failed check, never a guessed label set. The opened/reopened run alone waits for a label
+          # when it finds none (the header says why); TIER_GRACE_TRIES / TIER_GRACE_STEP_SECS exist so
+          # a test can run the wait in no time.
+          tries=0
+          while :; do
+            LABELS=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.labels[].name]') || {
+              echo "::error::Could not read this PR's labels from the API."
+              exit 1
+            }
+            count=$(jq '[.[] | select(. == "docs" or . == "tests-only" or . == "fix" or . == "feature" or . == "major-feature")] | length' <<<"$LABELS")
+            [ "$count" -ne 0 ] && break
+            case "$ACTION" in opened|reopened) ;; *) break ;; esac
+            [ "$tries" -ge "${TIER_GRACE_TRIES:-12}" ] && break
+            tries=$((tries + 1))
+            echo "no tier label yet on a just-opened PR; waiting for one ($tries)"
+            sleep "${TIER_GRACE_STEP_SECS:-5}"
+          done
           if [ "$count" -eq 1 ]; then
             exit 0
           fi

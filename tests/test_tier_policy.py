@@ -25,10 +25,14 @@ DISMISSED review (comment-only reviews never change standing; a dismissed approv
 dismissed it; a dismissed objection clears only when the reviewer dismissed it THEMSELVES, so the author
 cannot dismiss the peer's objection away), by an admin other than the author, APPROVED, on the CURRENT
 head. A renamed file counts under both paths; a file listing the API truncated makes the unseen files
-guarded.
+guarded. An opened or reopened run waits up to a minute for the PR's tier label before judging
+(OpenedGrace): the wait is the driver's, never the policy's, and what it hands the policy is whatever the
+API reported last.
 
 Synthetic only: invented logins, placeholder shas, TESTHOST-free."""
+import contextlib
 import importlib.util
+import io
 import os
 import re
 import tempfile
@@ -662,6 +666,12 @@ class WorkflowPins(unittest.TestCase):
         self.assertIn("    name: Tier policy evaluation", jobs)
         self.assertNotRegex(jobs, r"name: Tier policy[ \t]*\n")
 
+    def test_the_step_hands_the_fetcher_the_event_action(self):
+        # the opened/reopened grace keys on the EVENT; the payload's labels are never read (the API is)
+        self.assertIn("ACTION: ${{ github.event.action }}", self.wf)
+        self.assertNotIn("github.event.pull_request.labels", self.wf)
+        self.assertIn('os.environ.get("ACTION")', self.fetch)
+
     def test_the_three_tier_label_lists_agree(self):
         wf = open(os.path.join(os.path.dirname(HERE), ".github", "workflows", "pr-tier.yml")).read()
         tmpl = open(os.path.join(os.path.dirname(HERE), ".github", "PULL_REQUEST_TEMPLATE.md")).read()
@@ -843,3 +853,150 @@ class FetcherShapes(unittest.TestCase):
         self.assertEqual(self.tc.evaluate(rec)["conclusion"], "failure", "unapproved, the unseen files hold it")
         rec["labels"] = ["docs"]
         self.assertEqual(self.tc.evaluate(rec)["conclusion"], "failure", "docs cannot vouch for unseen files either")
+
+
+class OpenedGrace(unittest.TestCase):
+    """The opened/reopened run's wait for a label - wait_for_tier_label, run_one's first step - against a
+    _req stub that serves the PR's labels BY READ COUNT: the world in which `gh pr create --label` lands the
+    label a moment after the run's first read (the label check failed eighteen PRs that way on 2026-09-08;
+    this check raced the same way). The policy stays pure: the wait is the driver's, and what it hands
+    evaluate() is whatever the API reported last. TIER_GRACE_STEP_SECS=0 runs every wait in no time; the
+    default knobs are pinned once, through a recording pause, as a minute. As in FetcherShapes, a request
+    the stub does not know is an AssertionError: the wait re-reads the PR and nothing else."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "tier_policy_check", os.path.join(os.path.dirname(HERE), "scripts", "ci", "tier_policy_check.py"))
+        self.tc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.tc)
+        self.reads = 0                      # GETs of the PR itself; the record's other reads are not counted
+        self.posted = []
+        self.labels_by_read = [[]]          # the labels served on read 1, 2, ...; the last entry repeats
+        self.files = [{"filename": "kernel/kernel.py", "status": "modified"}]
+        test = self
+
+        def fake_req(method, path, token, body=None):
+            p = path.split("?")[0]
+            if method == "POST":
+                test.posted.append(body)
+                return {}, {}
+            if p.endswith("/pulls"):
+                return [{"number": 42}], {}
+            if p.endswith("/pulls/42"):
+                test.reads += 1
+                labels = test.labels_by_read[min(test.reads, len(test.labels_by_read)) - 1]
+                return {"head": {"sha": HEAD}, "user": {"login": "author-a"}, "labels": [{"name": l} for l in labels],
+                        "created_at": "2026-08-30T00:00:00Z", "body": "", "changed_files": len(test.files)}, {}
+            if p.endswith("/files"):
+                return test.files, {}
+            if p.endswith("/reviews") or p.endswith("/events"):
+                return [], {}
+            if p.endswith("/collaborators/author-a/permission"):
+                return {"permission": "write"}, {}          # a member: docs and fix merge on green
+            raise AssertionError("unexpected request " + path)
+        self.tc._req = fake_req
+        self.saved = {k: os.environ.get(k) for k in ("TIER_GRACE_STEP_SECS", "TIER_GRACE_TRIES", "ACTION", "GITHUB_TOKEN")}
+        os.environ["TIER_GRACE_STEP_SECS"] = "0"
+        for k in ("TIER_GRACE_TRIES", "ACTION", "GITHUB_TOKEN"):
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _run_one(self, action, labels_by_read, tries=None):
+        """run_one for PR 42 with the labels the API will report on each read: (verdict, how many times the
+        driver said it was waiting)."""
+        self.labels_by_read = labels_by_read
+        self.reads, self.posted = 0, []
+        if tries is not None:
+            os.environ["TIER_GRACE_TRIES"] = str(tries)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            v = self.tc.run_one("romp-on/romp", 42, "tok", action=action)
+        return v, out.getvalue().count("waiting for one")
+
+    # the label lands on the FOURTH read of the PR: a run that waits sees it; a run that judges at once
+    # reads the PR three times (the head, the record, the closing head check) and never does
+    LANDS_LATE = [[], [], [], ["fix"]]
+
+    def test_a_just_opened_pr_waits_for_its_label_and_is_judged_on_it(self):
+        v, waits = self._run_one("opened", self.LANDS_LATE)
+        self.assertEqual((v["conclusion"], v["title"]), ("success", "Tier policy: fix"), v)
+        self.assertIn("merges on green", v["summary"])
+        self.assertEqual(waits, 3, "one wait per empty re-read until the label landed")
+        self.assertEqual(self.posted[-1]["conclusion"], "success", "the verdict posted is the sorted PR's")
+
+    def test_a_docs_pr_whose_label_lands_on_the_second_read_is_judged_as_docs(self):
+        self.files = [{"filename": "docs/pr-tiers.md", "status": "modified"}]
+        v, waits = self._run_one("opened", [[], ["docs"]])
+        self.assertEqual((v["conclusion"], v["title"]), ("success", "Tier policy: docs"), v)
+        self.assertEqual(waits, 1)
+        v, waits = self._run_one("reopened", [[], ["tests-only"]])
+        self.assertEqual((v["conclusion"], v["title"]), ("success", "Tier policy: docs"),
+                         "the pre-rename spelling ends the wait too")
+        self.assertEqual(waits, 1)
+
+    def test_a_pr_that_stays_unlabelled_still_fails_after_the_bounded_wait(self):
+        v, waits = self._run_one("reopened", [[]], tries=3)
+        self.assertEqual((v["conclusion"], v["title"]), ("failure", "Tier policy: 0 tier labels"), v)
+        self.assertEqual(waits, 3, "the bounded retries, then the verdict")
+        self.assertEqual(self.posted[-1]["conclusion"], "failure")
+
+    def test_every_other_event_judges_at_once(self):
+        for action in ("labeled", "unlabeled", "synchronize", "edited", "", None):
+            v, waits = self._run_one(action, self.LANDS_LATE)
+            self.assertEqual((v["conclusion"], v["title"]), ("failure", "Tier policy: 0 tier labels"),
+                             "%r: a label removed, or a push to an unsorted PR, is not a race to wait out" % (action,))
+            self.assertEqual(waits, 0, action)
+
+    def test_two_labels_on_an_opened_pr_never_wait(self):
+        v, waits = self._run_one("opened", [["fix", "feature"]])
+        self.assertEqual((v["conclusion"], v["title"]), ("failure", "Tier policy: 2 tier labels"), v)
+        self.assertEqual(waits, 0, "a doubly sorted PR is a sort error, never a race")
+
+    def test_the_wait_reads_exactly_until_the_label_lands_and_no_further(self):
+        # the helper itself, with a counting fetcher: the first read is the caller's; the wait's own reads
+        # stop on the read that shows the label
+        self.labels_by_read = [[], [], ["fix"]]
+        pr = self.tc.wait_for_tier_label("romp-on/romp", 42, "tok", {"labels": []}, "opened")
+        self.assertEqual(self.reads, 3)
+        self.assertEqual([l["name"] for l in pr["labels"]], ["fix"], "the PR object as last read comes back")
+        self.reads, self.labels_by_read = 0, [[]]       # a PR that never gets its label
+        os.environ["TIER_GRACE_TRIES"] = "4"
+        pr = self.tc.wait_for_tier_label("romp-on/romp", 42, "tok", {"labels": []}, "reopened")
+        self.assertEqual(self.reads, 4, "bounded: the retries, no more")
+        self.assertEqual(pr["labels"], [], "...and what comes back is the unlabelled PR, for the caller to fail")
+        self.reads = 0
+        bare, two = {"labels": []}, {"labels": [{"name": "fix"}, {"name": "docs"}]}
+        for action in ("labeled", "unlabeled", "synchronize", "edited", "", None):
+            self.assertIs(self.tc.wait_for_tier_label("romp-on/romp", 42, "tok", bare, action), bare)
+        self.assertIs(self.tc.wait_for_tier_label("romp-on/romp", 42, "tok", two, "opened"), two)
+        self.assertEqual(self.reads, 0, "no other event, and no PR with a label, reads again")
+
+    def test_the_default_wait_is_a_minute_of_five_second_pauses(self):
+        os.environ.pop("TIER_GRACE_STEP_SECS", None)
+        paused = []
+        self.tc.wait_for_tier_label("romp-on/romp", 42, "tok", {"labels": []}, "opened", pause=paused.append)
+        self.assertEqual(paused, [5.0] * 12, "twelve five-second pauses: a minute, then the verdict")
+        self.assertEqual(self.reads, 12)
+
+    def test_main_hands_run_one_the_events_action_and_the_sweep_never_waits(self):
+        os.environ["GITHUB_TOKEN"] = "tok"
+        os.environ["ACTION"] = "opened"
+        self.labels_by_read = self.LANDS_LATE
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.tc.main(["--pr", "42"])
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(out.getvalue().count("waiting for one"), 3, "the --pr run read ACTION and waited")
+        self.reads, self.posted = 0, []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.tc.main(["--all-open"])
+        self.assertEqual(self.posted[-1]["output"]["title"], "Tier policy: 0 tier labels",
+                         "the sweep judged the unlabelled PR at once...")
+        self.assertEqual(out.getvalue().count("waiting for one"), 0, "...and never waited, whatever ACTION says")

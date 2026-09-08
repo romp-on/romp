@@ -36,6 +36,16 @@ name: Tier policy
 #   scripts/ci/ whose author is not an admin (a human looks), but that rule rides the check the forged
 #   run competes with; what closes it is a CODEOWNERS entry for those paths with code-owner review
 #   required in the ruleset.
+#
+# A PR opened a moment ago may not carry its tier label yet: `gh pr create --label` fires `opened`
+# before the label lands, so a run that reads at once posts a failure on a PR sorted a second later
+# (the label check races the same way, and failed eighteen PRs that way on 2026-09-08, one per PR
+# opened). The step hands the fetcher the event's ACTION: on opened and reopened, and only those, a PR
+# with no tier label is re-read every five seconds for up to a minute before it is judged
+# (wait_for_tier_label in scripts/ci/tier_policy_check.py; TIER_GRACE_STEP_SECS / TIER_GRACE_TRIES let
+# a test run the wait in no time). A PR that stays unlabelled still fails, a minute later; two labels,
+# every other event, the hourly sweep and a dispatch judge at once. Until the verdict posts the PR
+# shows a pending check, never a red one. The pause is not a clock: nothing in the policy is timed.
 
 on:
   pull_request_target:
@@ -67,6 +77,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+          ACTION: ${{ github.event.action }}
         run: |
           if [ -n "$PR_NUMBER" ]; then
             python3 scripts/ci/tier_policy_check.py --pr "$PR_NUMBER"

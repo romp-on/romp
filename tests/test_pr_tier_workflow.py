@@ -15,8 +15,16 @@ Cancel-in-progress is deliberately off: cancelling the in-progress run risks its
 completing after the survivor's, and a cancelled required check blocks; GitHub also refuses
 `queue: max` beside `cancel-in-progress: true`.
 
+The opened run's grace (2026-09-08, later the same day): live reads made the ORDER harmless, but the
+opened run itself still failed whenever it read before `gh pr create --label` landed the label, and each
+failure notified the author about a state that lasted seconds (eighteen that day, one per PR opened). So an
+opened or reopened run that finds NO tier label re-reads the API every five seconds for up to a minute
+(TIER_GRACE_STEP_SECS / TIER_GRACE_TRIES, so these tests run the wait in no time) and then judges; a PR
+that stays unlabelled still fails, two labels never wait, and every other event's run judges at once.
+
 The step's script is run for real, with `gh` replaced by a shim on PATH that prints a canned label list
-(or fails), so the zero / one / two / alias / unreadable cases are behaviour, not a grep. Source pins
+(or fails, or answers each read with the next list in a sequence and counts the reads), so the zero /
+one / two / alias / unreadable / waiting cases are behaviour, not a grep. Source pins
 cover what the script cannot show: the trigger types, the read-only token (the workflow's one
 permissions block, no job-level override), the concurrency stanza and the check's name, which the
 ruleset requires by name and app and so must never change. The accepted label SET is read back from the
@@ -69,10 +77,38 @@ class LabelCountBehaviour(unittest.TestCase):
             fh.write("#!/bin/sh\n" + ("exit 1\n" if fail else "printf '%s' '" + body + "'\n"))
         os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
 
-    def _run(self):
+    def _run(self, **extra):
+        """The step's script as the workflow runs it; `extra` is the step env a case adds (ACTION,
+        TIER_GRACE_TRIES). No ACTION means a run that belongs to no event, which judges at once."""
         env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ.get("PATH", ""),
-                   GITHUB_REPOSITORY="example/repo", PR_NUMBER="7", GH_TOKEN="synthetic")
+                   GITHUB_REPOSITORY="example/repo", PR_NUMBER="7", GH_TOKEN="synthetic",
+                   TIER_GRACE_STEP_SECS="0")
+        for k in ("ACTION", "TIER_GRACE_TRIES"):
+            env.pop(k, None)               # hermetic: the caller's shell lends the step nothing
+        env.update(extra)
         return subprocess.run(["bash", "-e", "-c", self.script], env=env, capture_output=True, text=True, timeout=60)
+
+    def _gh_sequence(self, bodies):
+        """A `gh` that answers each call with the next canned body (the last one repeats), counting calls
+        in a file beside it: the opened run's world, in which the label lands a moment after the read."""
+        p = os.path.join(self.bin, "gh")
+        counter = os.path.join(self.bin, "calls")
+        if os.path.exists(counter):
+            os.unlink(counter)             # a fresh shim starts its count at zero
+        lines = ["#!/bin/sh", "n=$(cat '%s' 2>/dev/null || echo 0)" % counter, "n=$((n + 1))",
+                 "printf '%%s' \"$n\" > '%s'" % counter, "case \"$n\" in"]
+        for i, b in enumerate(bodies[:-1]):
+            lines.append("  %d) printf '%%s' '%s' ;;" % (i + 1, b))
+        lines.append("  *) printf '%%s' '%s' ;;" % bodies[-1])
+        lines.append("esac")
+        with open(p, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
+        return counter
+
+    def _calls(self, counter):
+        with open(counter) as fh:
+            return int(fh.read().strip() or 0)
 
     def test_exactly_one_tier_label_passes(self):
         self._gh('["%s"]' % self.accepted[0])
@@ -95,6 +131,36 @@ class LabelCountBehaviour(unittest.TestCase):
         r = self._run()
         self.assertEqual(r.returncode, 1)
         self.assertIn("2 tier labels", r.stdout)
+
+    def test_a_just_opened_pr_waits_for_its_label_and_then_passes(self):
+        # `gh pr create --label` fires `opened` before the label lands: the first two reads see none,
+        # the third sees the label. The opened run waits and judges the sorted PR.
+        counter = self._gh_sequence(['[]', '[]', '["%s"]' % self.accepted[0]])
+        r = self._run(ACTION="opened", TIER_GRACE_TRIES="5")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._calls(counter), 3)
+        self.assertIn("waiting for one", r.stdout)
+
+    def test_a_just_opened_pr_that_stays_unlabelled_still_fails_after_the_wait(self):
+        counter = self._gh_sequence(['[]'])
+        r = self._run(ACTION="reopened", TIER_GRACE_TRIES="3")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("0 tier labels", r.stdout)
+        self.assertEqual(self._calls(counter), 4, "the first read plus three bounded retries")
+
+    def test_a_label_event_with_no_label_fails_at_once_and_two_labels_never_wait(self):
+        counter = self._gh_sequence(['[]', '["%s"]' % self.accepted[0]])
+        r = self._run(ACTION="unlabeled", TIER_GRACE_TRIES="5")
+        self.assertEqual(r.returncode, 1, "a label was removed: the PR is unsorted now, no race to wait out")
+        self.assertEqual(self._calls(counter), 1)
+        counter = self._gh_sequence(['["%s", "%s"]' % (self.accepted[0], self.accepted[1]), '["%s"]' % self.accepted[0]])
+        r = self._run(ACTION="opened", TIER_GRACE_TRIES="5")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self._calls(counter), 1, "two labels is a sort error, never a race")
+
+    def test_the_opened_run_reads_the_event_action_from_the_workflow(self):
+        self.assertIn("ACTION: ${{ github.event.action }}", self.src)
+        self.assertNotIn("github.event.pull_request.labels", self.src)
 
     def test_an_unreadable_api_is_a_failed_check_not_a_guess(self):
         self._gh("", fail=True)

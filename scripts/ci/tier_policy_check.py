@@ -18,10 +18,15 @@ The workflow's own job carries a DIFFERENT name so exactly one family of same-na
 or copied file is recorded under both its paths, and a listing the API truncated (3000-file cap, checked
 against the PR's changed_files) is flagged; the head is re-read at the end so a push during evaluation
 raises instead of grading a mixed record. Commit dates are never read.
+An opened or reopened run first waits for the PR's tier label (wait_for_tier_label): `gh pr create --label`
+fires `opened` before the label lands, and a check that read at once failed the PR for a state that lasted
+seconds; every other event, the hourly sweep and a dispatch judge at once. The pause between re-reads is
+the fetcher's only use of the clock, and it reads nothing from it.
 GITHUB_TOKEN is the GitHub Actions app's installation token, which is what the Checks API's "GitHub Apps
 only" write rule admits; the ruleset requiring this check must select the run posted by the GitHub Actions
 app (a bare context match would accept any write-holder's commit status of the same name).
-Usage: tier_policy_check.py --pr N | --all-open (env GITHUB_TOKEN, GITHUB_REPOSITORY)."""
+Usage: tier_policy_check.py --pr N | --all-open (env GITHUB_TOKEN, GITHUB_REPOSITORY; ACTION, the workflow
+event's action, is what makes a --pr run wait)."""
 import json
 import os
 import re
@@ -31,14 +36,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from time import sleep             # the pause between re-reads of a just-opened PR; no clock is read
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
-from tier_policy import evaluate  # noqa: E402
+from tier_policy import TIERS, TIER_ALIASES, evaluate  # noqa: E402
 
 API = "https://api.github.com"
 CHECK_NAME = "Tier policy"
 MAX_ISSUE_REFS = 5                 # a body can be 64 KiB of "#1 " - bound the work (and the token budget)
+GRACE_ACTIONS = ("opened", "reopened")  # the events whose run can read before `gh pr create --label` lands the label
+GRACE_TRIES = 12                   # re-reads after the first when a just-opened PR has no tier label (TIER_GRACE_TRIES)
+GRACE_STEP_SECS = 5                # seconds between them (TIER_GRACE_STEP_SECS): twelve of five is the minute
 
 
 def _iso(s):
@@ -158,14 +167,47 @@ def post_check(repo, head, verdict, token, number):
     _req("POST", "/repos/%s/check-runs" % repo, token, body)
 
 
-def run_one(repo, n, token):
-    """Evaluate one PR and post its verdict. A failure while BUILDING the record posts a failing verdict
-    naming the error when the head is known (never a silent gap on a required check), and re-raises so
-    the job reads red; in --all-open the caller isolates it so one PR cannot starve the others."""
+def _tier_label_count(pr):
+    """How many tier labels a PR object carries, counted the way the policy counts them (the alias included)."""
+    return sum(1 for l in pr.get("labels") or [] if TIER_ALIASES.get(l["name"], l["name"]) in TIERS)
+
+
+def wait_for_tier_label(repo, n, token, pr, action, pause=sleep):
+    """The opened/reopened run's grace, and only theirs. `gh pr create --label` fires `opened` before the
+    label lands (a hand-labelled PR takes longer still), so a run that judged at once failed a PR that was
+    sorted a second later and notified its author about a state that lasted seconds: the label check did
+    that eighteen times on 2026-09-08, one per PR opened, and this check races the same way. When `action`
+    is opened or reopened and `pr` (as the caller just read it) carries no tier label, re-read the PR every
+    TIER_GRACE_STEP_SECS seconds for up to TIER_GRACE_TRIES more reads (five and twelve: a minute) and return
+    it as last read; the caller then judges what the API reports, so a PR that stays unlabelled still
+    fails, a minute later. Two labels never wait (a doubly sorted PR is a real error, not a race), and every
+    other event - labeled, unlabeled, synchronize, edited - plus the hourly sweep and a dispatch judge at
+    once. The knobs exist so a test runs the wait in no time; `pause` so one can pin the default minute."""
+    if action not in GRACE_ACTIONS or _tier_label_count(pr) != 0:
+        return pr
+    tries = int(os.environ.get("TIER_GRACE_TRIES") or GRACE_TRIES)
+    step = float(os.environ.get("TIER_GRACE_STEP_SECS") or GRACE_STEP_SECS)
+    for i in range(1, tries + 1):
+        print("PR #%d: no tier label yet on a just-opened PR; waiting for one (%d)" % (n, i))
+        pause(step)
+        pr, _ = _req("GET", "/repos/%s/pulls/%d" % (repo, n), token)
+        if _tier_label_count(pr) != 0:
+            break
+    return pr
+
+
+def run_one(repo, n, token, action=None):
+    """Evaluate one PR and post its verdict. `action` is the workflow event's action (None for the sweep and
+    a dispatch): an opened/reopened run first waits for the PR's tier label (wait_for_tier_label). A failure
+    while BUILDING the record posts a failing verdict naming the error when the head is known (never a
+    silent gap on a required check), and re-raises so the job reads red; in --all-open the caller isolates
+    it so one PR cannot starve the others."""
     head = None
     try:
         pr, _ = _req("GET", "/repos/%s/pulls/%d" % (repo, n), token)
         head = pr["head"]["sha"]
+        pr = wait_for_tier_label(repo, n, token, pr, action)
+        head = pr["head"]["sha"]           # a push during the wait: a failing verdict lands on the head the PR has now
         rec = build_record(repo, n, token)
         v = evaluate(rec)
     except Exception as e:
@@ -194,7 +236,7 @@ def main(argv):
                 sys.stderr.write("PR #%s: %s\n" % (p["number"], traceback.format_exc().strip().splitlines()[-1]))
                 rc = 1
         return rc
-    v = run_one(repo, int(argv[argv.index("--pr") + 1]), token)
+    v = run_one(repo, int(argv[argv.index("--pr") + 1]), token, action=os.environ.get("ACTION"))
     return 1 if v["conclusion"] != "success" else 0
 
 
