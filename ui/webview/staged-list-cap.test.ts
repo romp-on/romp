@@ -95,6 +95,7 @@ function lift(): (hooks: Hooks) => Api {
     const persistDrafts = () => { H.persists++; };
     const hostIsDown = (id) => H.down.has(id); const isProvisionalId = (id) => H.provisional.has(id);
     const warnToast = (msg) => { H.toasts.push(msg); };
+    const ephemeralWarnToast = (msg) => { H.toasts.push(msg); };   // the unreachable-session word rides the ephemeral toast (reload-notices)
   `;
   const epilogue = `return { routeUserMessage, flushStaged, renderStagedStrip, stagedMsgs, stagedOpen, stagedCollapsed, stagedScroll };`;
   return new Function("HOOKS", prelude + js + epilogue) as (hooks: Hooks) => Api;
