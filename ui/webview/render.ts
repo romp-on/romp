@@ -11163,8 +11163,10 @@ window.addEventListener("resize", updateJumpBtn);
 // isReplyReady: the mark's own .unread rule) whose marks sit wholly above / below the viewport; a mark on
 // screen counts in neither. Each chip exists only while its count is > 0. Click = land the NEAREST one in
 // that direction through the chat's own scroll-to-uuid route (scrollToAnchor → landOn's one flash, the rail
-// tick's and the notch's route) and pulse the mark itself — and NOT mark it read: opening the thread does,
-// as today. Same dress and home as #jump-bottom (body-level, fixed, bottom-left, the menu-card vocabulary),
+// tick's and the notch's route), pulse the mark itself, and OPEN its thread (the user 2026-09-10: the reply
+// lives in the popover, and stopping at the mark left a second click — one that, on two threads sharing a
+// passage, could open the wrong thread). The open is what marks it read, through openCommentPopover, the bit's
+// one clearer. Same dress and home as #jump-bottom (body-level, fixed, bottom-left, the menu-card vocabulary),
 // placed by measurement over the jump chip's slot so the three never overlap. The box is created once and
 // its two chips update IN PLACE (label, tip, data-tid/uuid), so a re-render can never eat a click (the
 // delegate rides the stable box). Every input is an event the chat already listens for: the jump chip's
@@ -11256,7 +11258,12 @@ function updateReplyChips(): void {
           const m = views.get(activeId)?.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
           if (m) flash(m);                     // …and the mark itself pulses once (.romp-acted) — the thing you came for
         }
-        // deliberately NO commentSeen here: the chip brings you to the reply; reading it is opening the thread
+        // …and the thread opens (the user 2026-09-10): the reply is in the popover, so landing on the mark and
+        // stopping handed you a second click. By tid, not from the mark — the popover's geometry is fixed and
+        // this must not hang on the landing (an anchor the route could not scroll to still shows its reply).
+        // Opening is what marks it read: openCommentPopover's optimistic drop + commentSeen, the bit's ONE
+        // clearer, so the chip's count falls by the thread it opened and nothing here writes the bit itself.
+        openCommentPopover(activeId, tid);
       },
     });
     if (typeof ResizeObserver === "function") new ResizeObserver(updateReplyChips).observe(c);   // a pane measuring 0 drops the chips

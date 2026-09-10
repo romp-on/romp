@@ -1,8 +1,9 @@
 // Replies ready (the user 2026-09-08): a reply lands on a comment you scrolled away from and you forget to
 // come back. Two chips stacked over the go-to-bottom chip — "↑ 2 replies unread" / "↓ 1 reply unread" —
 // count the unread landed replies whose marks sit wholly above / below the viewport; a click lands the
-// nearest one in that direction through the chat's own scroll-to-uuid route and does NOT mark it read
-// (opening the thread does, as today). The pure half (reply-ready.ts) is driven behaviorally; the
+// nearest one in that direction through the chat's own scroll-to-uuid route and OPENS its thread, which is
+// what marks it read (the user 2026-09-10: until then the chip only brought you to the mark and left you a
+// second click to reach the reply). The pure half (reply-ready.ts) is driven behaviorally; the
 // render.ts / CSS wiring is pinned at the source (no jsdom harness for the renderers — the repo
 // convention). Synthetic text only.
 import { test } from "node:test";
@@ -168,13 +169,25 @@ test("every input is an event the chat already listens for — no timers, no pol
   assert.match(UPDATE, /if \(sig === replyChipSig\) return;/, "a signature skips unchanged paints (pure scrolls do no DOM work)");
 });
 
-test("click = the chat's own scroll-to-uuid landing + one pulse on the mark; the thread is NOT marked read", () => {
+test("click = the chat's own scroll-to-uuid landing + one pulse on the mark, then the thread OPENS — which is what marks it read", () => {
+  // WHY the open (the user 2026-09-10): the chip's job is to get you to the reply, and the reply lives in the
+  // thread's popover, not on the mark — landing on the mark and stopping handed you a second click, and that
+  // click (on nested marks, #1249) could open the wrong thread. Opening goes through openCommentPopover, the
+  // ONE clearer of unread (its optimistic drop + commentSeen), so the chip's count falls by the thread it
+  // opened and nothing here writes the bit itself.
   assert.match(CLICK, /flashedAnchor = null;/, "fresh navigation → landOn's one flash, the tick's and the notch's route");
   assert.match(CLICK, /if \(scrollToAnchor\(uuid\)\) \{/);
   assert.match(CLICK, /applyCommentMarks\(activeId\);/, "a re-windowed anchor turn gets its highlight back before the pulse");
   assert.match(CLICK, /if \(m\) flash\(m\);/, "the mark itself pulses (.romp-acted)");
-  assert.doesNotMatch(CLICK, /"commentSeen"|openCommentPopover\(|\.unread = false/, "reading the reply is opening the thread — the chip only brings you to it");
+  assert.match(CLICK, /openCommentPopover\(activeId, tid\);/, "opens the thread the chip named, by tid — the popover's geometry is fixed, no click point needed");
+  assert.doesNotMatch(CLICK, /"commentSeen"|\.unread = false/, "the bit keeps its ONE clearer (openCommentPopover); the chip never writes it directly");
   assert.doesNotMatch(CLICK, /scrollTop =|scrollBy|scrollIntoView/, "never pixel arithmetic — the uuid route only");
+  // the open does not hang on the landing: an anchor the route could not scroll to (windowed out, an older-history
+  // fetch pending) still gets its reply shown — the open sits AFTER the scroll block, outside it
+  const scrollBlock = CLICK.indexOf("if (scrollToAnchor(uuid)) {");
+  const scrollEnd = CLICK.indexOf("\n        }", scrollBlock);
+  assert.ok(scrollBlock > 0 && scrollEnd > scrollBlock, "the scroll block is where the test expects it");
+  assert.ok(CLICK.indexOf("openCommentPopover(activeId, tid);") > scrollEnd, "the open follows the scroll block unconditionally");
 });
 
 test("the chips stack OVER the jump chip in its slot: same bottom measure, lifted by the jump chip's real height while it shows", () => {

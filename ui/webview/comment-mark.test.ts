@@ -47,10 +47,12 @@ test("unread is the kernel's bit on an open thread, cleared by opening the threa
   assert.match(RENDER, /m\.classList\.toggle\("unread", !!th\.unread && th\.status === "open"\);/);
   assert.match(RENDER, /if \(th\) th\.unread = false;\s*\/\/ optimistic; the kernel's watermark reconciles/);
   assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "commentSeen", id: sid, tid \}\);/);
-  // the reply chips' click never touches it (reply-ready.test.ts pins the handler); the state has ONE clearer
+  // the reply chips' click OPENS the thread (the user 2026-09-10; reply-ready.test.ts pins the handler) and
+  // that open is the one clearer — the chip itself never writes the bit
   const at = RENDER.indexOf("replyjump: (elx) => {");
   assert.ok(at > 0, "the chip's click handler exists");
   const click = RENDER.slice(at, RENDER.indexOf("new ResizeObserver(updateReplyChips)", at));
+  assert.match(click, /openCommentPopover\(activeId, tid\);/, "the chip reaches the bit only through the thread's open");
   assert.doesNotMatch(click, /"commentSeen"|\.unread = false/);
 });
 
