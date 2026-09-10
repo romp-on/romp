@@ -1003,6 +1003,16 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   flex: 0 0 auto; font-size: 0.7em; font-weight: 800; letter-spacing: 0.03em; white-space: nowrap;
   color: #fff; background: #c0392b; border: 1px solid #c0392b; border-radius: 5px; padding: 1px 6px;
 }
+/* ⚑ waiting on you — the quiet USER-TODO marker (plans/user-todos.md, slice 2): the owning session
+   flagged something it needs from you. Session furniture on the name row like its badge siblings, but
+   DIM by default: a marker (the same words the card by the session's composer uses), never an alarm —
+   the escalated card's red blocked badge is the loud form. Same pill chrome as its row-mates; brightens
+   on hover to say it's clickable. Border through --box-border (defined in both theme blocks): a white
+   alpha read on the dark page and was invisible on the light one. */
+.fask-usertodo { flex: 0 0 auto; font-size: 0.66em; font-weight: 700; letter-spacing: 0.04em;
+  padding: 1px 6px; border-radius: var(--radius-pill); line-height: 1.4; cursor: pointer; text-decoration: none;
+  color: var(--dim); border: 1px solid var(--box-border); }
+.fask-usertodo:hover { color: var(--fg); border-color: var(--dim); }
 .fdismiss.fretry { color: #e5484d; border-color: #e5484d; }
 .fdismiss.fretry:hover:not(:disabled) { color: #fff; background: #e5484d; border-color: #e5484d; }
 .fdismiss.fretry:disabled { opacity: 0.55; cursor: default; }

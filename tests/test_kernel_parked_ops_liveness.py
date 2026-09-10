@@ -177,7 +177,7 @@ class DeliveryRidesTheSettle(unittest.TestCase):
             self.assertFalse(producer.is_alive(), "the producer ended on the stop seam once its pass finished")
 
     def test_two_parks_drain_one_per_settle_in_park_order(self):
-        self.assertTrue(km._send_or_park(self.be, SID, "one", echo="human"))   # tmux-shaped: a send parks mid-turn
+        self.assertEqual(km._send_or_park(self.be, SID, "one", echo="human"), "parked")   # tmux-shaped: a send parks mid-turn
         self.assertTrue(km._compact_or_park(self.be, SID), "the compact parks behind it (queued)")
         self.assertEqual([op[0] for op in km._pending_ops[SID]], ["send", "compact"])
         self.be.open = False                                                    # settle #1
@@ -422,7 +422,7 @@ class TmuxBusyFromHookState(unittest.TestCase):
         # compact. The clock fallback is pinned out of reach: only the event can carry this test.
         with mock.patch.object(km, "_TMUX_PROMPT_HOLD_S", 3600.0):
             self.rows[SID] = _tmux_row("working")
-            self.assertTrue(km._send_or_park(km._TMUX, SID, "one", echo="human"), "mid-turn per the hook → parked")
+            self.assertEqual(km._send_or_park(km._TMUX, SID, "one", echo="human"), "parked", "mid-turn per the hook → parked")
             self.assertTrue(km._compact_or_park(km._TMUX, SID), "…and the compact parks behind it")
             self.assertEqual([op[0] for op in km._pending_ops[SID]], ["send", "compact"])
             self.assertEqual(self.sent, [])
@@ -497,7 +497,7 @@ class TmuxBusyFromHookState(unittest.TestCase):
                                    "message": {"role": "user", "content": "[Request interrupted by user]"}}]}]
         with self._cached(interrupted), mock.patch.object(km, "_downtime", []):
             self.assertIs(km._TMUX.busy(SID), False)
-            self.assertFalse(km._send_or_park(km._TMUX, SID, "a correction", echo="human"), "delivered, not parked")
+            self.assertNotEqual(km._send_or_park(km._TMUX, SID, "a correction", echo="human"), "parked", "delivered, not parked")
             self.assertEqual(self.sent, [(SID, "a correction")])
         # the kernel's OWN Stop button writes no interrupt record but an idle record (_record_idle), which the
         # parse turns into an idle span at the tail — same verdict, dated by the record's t, not the span's end
@@ -552,7 +552,7 @@ class TmuxBusyFromHookState(unittest.TestCase):
         self.assertNotIn(SID, km._pending_ops)
         self.assertNotIn(SID, km._drain_hold, "no op behind → no hold")
         self.rows[SID] = _tmux_row("working")             # later: a new op parks because a turn is open…
-        self.assertTrue(km._send_or_park(km._TMUX, SID, "two", echo="human"))
+        self.assertEqual(km._send_or_park(km._TMUX, SID, "two", echo="human"), "parked")
         buf = io.StringIO()
         with redirect_stderr(buf):
             km._pusher_cycle()

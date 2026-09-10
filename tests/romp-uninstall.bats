@@ -56,7 +56,7 @@ try:
 except (IOError, OSError, ValueError):
     print(0); raise SystemExit
 OURS = ("tmux-status.sh", "romp-summarize.sh", "romp-postal-drain.sh", "romp-postal-ensure.sh",
-        "romp-postal-revive.sh", "romp-postal-context.sh", "romp-wake.sh")
+        "romp-postal-revive.sh", "romp-postal-context.sh", "romp-usertodo-context.sh", "romp-wake.sh")
 n = sum(1 for rules in (s.get("hooks") or {}).values() for r in rules for h in r.get("hooks", [])
         if h.get("command", "").rsplit("/", 1)[-1] in OURS)
 print(n)
@@ -80,6 +80,41 @@ PY
     [ ! -e "$HOME/.claude/skills/romp-postal" ]
     [ ! -e "$HOME/.claude/romp-postal.mcp.json" ]
     [ "$(hook_count)" -eq 0 ]
+}
+
+# One hook per registered name, counted by its exact command string — hook_count folds every romp
+# hook into one number, which cannot tell a name the uninstaller forgot from the ones it removed.
+cmd_count() {   # $1 = hook basename
+    python3 - "$HOME/.claude/settings.json" "$1" <<'PY'
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except (IOError, OSError, ValueError):
+    print(0); raise SystemExit
+print(sum(1 for rules in (s.get("hooks") or {}).values() for r in rules for h in r.get("hooks", [])
+          if h.get("command", "") == "~/.claude/hooks/" + sys.argv[2]))
+PY
+}
+
+@test "romp-uninstall: the user-todos SessionStart hook goes with the rest (link and registration)" {
+    # romp-usertodo-context.sh is registered by install.sh (plans/user-todos.md slice 3); the
+    # uninstaller's rm loop and its OURS set must name it too, or an uninstall leaves its
+    # ~/.claude/hooks link and its SessionStart entry behind: a hook pointing into a clone that may
+    # be gone, firing on every session start until settings.json is edited by hand.
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ -L "$HOME/.claude/hooks/romp-usertodo-context.sh" ]
+    [ "$(cmd_count romp-usertodo-context.sh)" = "1" ]
+
+    run "$CLONE/bin/romp-uninstall" --yes
+    [ "$status" -eq 0 ]
+    [ ! -e "$HOME/.claude/hooks/romp-usertodo-context.sh" ]
+    [ "$(cmd_count romp-usertodo-context.sh)" = "0" ]
+    # every hook install.sh links has a matching rm: the two lists are read from the scripts themselves
+    for h in $(grep -o '"[a-z-]*\.sh"' "$ROMP_DIR/install.sh" | tr -d '"' | sort -u); do
+        [ ! -e "$HOME/.claude/hooks/$h" ]
+        [ "$(cmd_count "$h")" = "0" ]
+    done
 }
 
 @test "romp-uninstall: leaves the user's OWN hooks in settings.json untouched" {

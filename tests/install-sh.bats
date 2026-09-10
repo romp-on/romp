@@ -45,6 +45,8 @@ PY
     [ "$(count_cmd Stop romp-summarize.sh)" = "1" ]
     [ "$(count_cmd Stop romp-postal-drain.sh)" = "1" ]
     [ "$(count_cmd SessionStart romp-postal-ensure.sh)" = "1" ]
+    [ "$(count_cmd SessionStart romp-usertodo-context.sh)" = "1" ]
+    [ -L "$HOME/.claude/hooks/romp-usertodo-context.sh" ]
     [ "$(count_cmd PostToolUse tmux-status.sh)" = "1" ]
     # a compaction's END wakes the kernel too: a parked op behind a tmux /compact delivers on this event
     [ "$(count_cmd PostCompact tmux-status.sh)" = "1" ]

@@ -221,6 +221,7 @@ test("every input the strip paints repaints it, once, when it changes", () => {
     ["context color", () => { a.status.ctxColor = [200, 100, 0]; }],
     ["context tone", () => { a.status.ctxTone = [20, 20, 220]; }],
     ["the viewer flag", () => { a.sub = true; }],
+    ["the user-todo glyph (the session flagged something it needs from you)", () => { a.userTodos = [{ id: "t1", text: "pick a name for the health route" }]; }],
     ["the host-down mark", () => { H.down.add("a"); }],
     ["the host-down note while the mark stands", () => { H.notes.a = "web-host is disconnected, last reached 10:00"; }],
     ["the active tab", () => { api.set({ activeId: "b" }); }],

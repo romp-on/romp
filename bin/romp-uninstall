@@ -77,7 +77,8 @@ pkill -f "$ROMP_DIR/bin/romp-kernel"  2>/dev/null || true
 # ── 2. ~/.claude wiring ────────────────────────────────────────────────
 echo "==> ~/.claude hook + skill symlinks"
 for h in romp-summarize.sh romp-postal-drain.sh romp-postal-ensure.sh \
-         romp-postal-revive.sh romp-postal-context.sh romp-wake.sh tmux-status.sh; do
+         romp-postal-revive.sh romp-postal-context.sh romp-usertodo-context.sh \
+         romp-wake.sh tmux-status.sh; do
     rm -f "$HOME/.claude/hooks/$h"
 done
 rm -f "$HOME/.claude/skills/romp" "$HOME/.claude/skills/romp-postal"
@@ -93,7 +94,7 @@ import json, os
 
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 OURS = {"tmux-status.sh", "romp-summarize.sh", "romp-postal-drain.sh", "romp-postal-ensure.sh",
-        "romp-postal-revive.sh", "romp-postal-context.sh", "romp-wake.sh"}
+        "romp-postal-revive.sh", "romp-postal-context.sh", "romp-usertodo-context.sh", "romp-wake.sh"}
 
 try:
     with open(SETTINGS) as f:

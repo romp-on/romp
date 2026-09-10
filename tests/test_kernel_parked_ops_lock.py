@@ -604,7 +604,7 @@ class OneLockAroundEveryMutation(_Drain):
         with mock.patch.object(km, "_working_now", gate_probe), \
              mock.patch.object(km, "_park_op_locked", park_probe):
             km._pending_ops[SID] = [("compact",)]          # …but a queue exists: everything parks BEHIND it
-            self.assertTrue(km._send_or_park(self.be, SID, "hello"))
+            self.assertEqual(km._send_or_park(self.be, SID, "hello"), "parked")
             km._set_model_or_park(self.be, SID, "opus")
             self.assertTrue(km._compact_or_park(self.be, SID))
             self.assertEqual([op[0] for op in km._pending_ops[SID]], ["compact", "send", "model", "compact"],
@@ -612,7 +612,7 @@ class OneLockAroundEveryMutation(_Drain):
             self.assertEqual(owned["park"], [True] * 3, "the queue check + park is one locked step")
             self.assertEqual(self.be.calls, [])
             km._pending_ops.clear()                        # no queue: everything hands over
-            self.assertFalse(km._send_or_park(self.be, SID, "hello"))
+            self.assertNotEqual(km._send_or_park(self.be, SID, "hello"), "parked")   # handed over: the send's own result
             km._set_model_or_park(self.be, SID, "opus")
             self.assertEqual(owned["handover"], [False, False], "the handover to the backend is outside the lock")
             self.assertEqual(self.be.calls, [("send", "hello"), ("model", "opus")])

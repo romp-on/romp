@@ -117,7 +117,9 @@ class SessionBackend(ABC):
     @abstractmethod
     def send(self, sid: str, text: str) -> bool:
         """Deliver a user message / command to `sid` (the chat composer, /compact, retry, an injected
-        nudge). True if delivered/queued."""
+        nudge). Truthy if delivered/queued — a backend may answer with a richer truthy value than
+        True (a handle its caller threads into later bookkeeping about that delivery), so callers
+        gate on truthiness, never on `is True`."""
 
     @abstractmethod
     def interrupt(self, sid: str) -> bool:

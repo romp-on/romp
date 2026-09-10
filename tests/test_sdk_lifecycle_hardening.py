@@ -488,6 +488,177 @@ class QueuePersistence(unittest.TestCase):
                          "restores strings only — junk entries never wedge delivery")
 
 
+class TodoIdsRideTheQueue(unittest.TestCase):
+    """A queued message may ANSWER a user todo (SdkBackend.send's user_todo): the id travels WITH the
+    message — on the in-memory entry (_TodoText), through the reg mirror and back through the boot
+    seed — so whoever removes or loses the entry later reads the id off the entry itself, with no
+    kernel-side table to lose across a restart. The mirror keeps reg['queue'] as bare strings and
+    carries the id BESIDE the copy's identity, in reg['queueMeta'] (the T252c sidecar: one entry per
+    position, text alone for an id-less copy), so every reader of the queue's texts is untouched and
+    the mirror is byte-identical to the pre-todo shape for every other send; the sidecar's block
+    alignment (queue_meta_from_reg) carries the id through every text-only rewrite of reg['queue']."""
+
+    ANSWER = "Re: need the staging port — 8443."
+
+    def _session(self, queue=None, queue_meta=None):
+        d = tempfile.mkdtemp()
+        be = _backend(d)
+        sid = "11111111-2222-3333-4444-888888888888"
+        extra = {}
+        if queue is not None:
+            extra["queue"] = queue
+        if queue_meta is not None:
+            extra["queueMeta"] = queue_meta
+        reg = _reg(d, sid, **extra)
+        return d, be, sid, sb.SdkSession(be, reg)
+
+    def test_an_answer_entry_mirrors_its_id_beside_the_copy_and_the_queue_stays_bare(self):
+        d, be, sid, s = self._session()
+        s.enqueue("plain message")
+        s.enqueue(self.ANSWER, todo="ut-9f2c1a34")
+        reg = sb.read_reg(Path(d), sid)
+        self.assertEqual(reg.get("queue"), ["plain message", self.ANSWER], "bare strings, both")
+        self.assertEqual(reg.get("queueMeta"),
+                         [{"text": "plain message"}, {"text": self.ANSWER, "todo": "ut-9f2c1a34"}])
+
+    def test_a_send_minted_identity_and_the_id_share_one_sidecar_entry(self):
+        d, be, sid, s = self._session()
+        s.enqueue(self.ANSWER, qid="echo:a1", qts=1234, todo="ut-9f2c1a34")
+        self.assertEqual(sb.read_reg(Path(d), sid).get("queueMeta"),
+                         [{"text": self.ANSWER, "qid": "echo:a1", "qts": 1234, "todo": "ut-9f2c1a34"}])
+        s2 = sb.SdkSession(be, sb.read_reg(Path(d), sid))    # "kernel restart"
+        self.assertEqual([getattr(t, "todo", "") for t in s2.pending()], ["ut-9f2c1a34"])
+        self.assertEqual([m["qid"] for m in s2.pending_meta()], ["echo:a1"], "the copy's identity too")
+
+    def test_a_plain_queue_serializes_exactly_as_before(self):
+        # byte-stability: with no answer queued, the mirror is the pre-todo shape — bare strings and the
+        # T252c sidecar without a "todo" key anywhere
+        d, be, sid, s = self._session()
+        s.enqueue("first")
+        s.enqueue("second")
+        reg = sb.read_reg(Path(d), sid)
+        self.assertEqual(json.dumps(reg.get("queue"), sort_keys=True),
+                         json.dumps(["first", "second"], sort_keys=True))
+        self.assertEqual(reg.get("queueMeta"), [{"text": "first"}, {"text": "second"}])
+
+    def test_the_seed_restores_the_id_onto_the_entry(self):
+        d, be, sid, s = self._session(queue=["held over", self.ANSWER, "", 42],
+                                      queue_meta=[{"text": "held over"},
+                                                  {"text": self.ANSWER, "todo": "ut-11112222"}])
+        self.assertEqual(s.pending(), ["held over", self.ANSWER],
+                         "the texts seed as before; junk is filtered exactly as before")
+        self.assertEqual([getattr(t, "todo", "") for t in s.pending()], ["", "ut-11112222"])
+
+    def test_an_older_mirror_without_the_sidecar_seeds_id_less_copies(self):
+        d, be, sid, s = self._session(queue=["held over", self.ANSWER])
+        self.assertEqual([getattr(t, "todo", "") for t in s.pending()], ["", ""])
+
+    def test_unqueue_returns_the_id_bearing_text_and_cleans_the_mirror(self):
+        d, be, sid, s = self._session()
+        s.enqueue(self.ANSWER, todo="ut-9f2c1a34")
+        got = s.unqueue(0)
+        self.assertEqual(got, self.ANSWER, "the text contract is unchanged")
+        self.assertEqual(getattr(got, "todo", ""), "ut-9f2c1a34",
+                         "the id rides the returned entry — a recall's caller reads it here")
+        reg = sb.read_reg(Path(d), sid)
+        self.assertEqual(reg.get("queue"), [])
+        self.assertEqual(reg.get("queueMeta"), [])
+
+    def test_replace_queued_keeps_the_id_on_the_new_words(self):
+        # an in-place edit of a queued answer (T306) swaps the words, not the ask they answer: the id
+        # stays on the entry and in the mirror, and a plain entry's edit stays a bare string
+        d, be, sid, s = self._session()
+        s.enqueue("plain message")
+        s.enqueue(self.ANSWER, todo="ut-9f2c1a34")
+        self.assertEqual(s.replace_queued(1, "Re: the same ask, fuller answer", expect=self.ANSWER), self.ANSWER)
+        self.assertEqual([getattr(t, "todo", "") for t in s.pending()], ["", "ut-9f2c1a34"])
+        self.assertEqual(s.replace_queued(0, "plain, edited", expect="plain message"), "plain message")
+        self.assertEqual(type(s.pending()[0]), str, "a plain entry's edit stays a bare str")
+        reg = sb.read_reg(Path(d), sid)
+        self.assertEqual(reg.get("queue"), ["plain, edited", "Re: the same ask, fuller answer"])
+        self.assertEqual(reg.get("queueMeta"),
+                         [{"text": "plain, edited"}, {"text": "Re: the same ask, fuller answer", "todo": "ut-9f2c1a34"}])
+
+    def test_backend_unqueue_hands_the_id_through(self):
+        d, be, sid, s = self._session()
+        with be._lock:
+            be.sessions[sid] = s
+        s.enqueue(self.ANSWER, todo="ut-9f2c1a34")
+        got = be.unqueue(sid, 0)
+        self.assertEqual(got, self.ANSWER)
+        self.assertEqual(getattr(got, "todo", ""), "ut-9f2c1a34")
+
+    def _restored_todos(self, d, sid):
+        return [getattr(t, "todo", "") for t in sb.SdkSession(_backend(d), sb.read_reg(Path(d), sid)).pending()]
+
+    def test_boot_prepend_keeps_the_id_on_its_entry(self):
+        # the cut-turn nudge prepend rewrites reg['queue'] by text — the sidecar's block alignment must
+        # still put the id back on the answer, now one position down
+        d = tempfile.mkdtemp()
+        be = _backend(d)
+        be._ensure = lambda sid, on_boot_settled=None: on_boot_settled and on_boot_settled()
+        cut = "11111111-aaaa-0000-0000-0000000000f0"
+        _reg(d, cut, queue=[self.ANSWER, "plain backlog"],
+             queueMeta=[{"text": self.ANSWER, "todo": "ut-33334444"}, {"text": "plain backlog"}])
+        sb.append_state(Path(d), cut, "working")
+        with mock.patch.object(sb.subprocess, "run", return_value=mock.Mock(stdout="")):
+            be._boot_reconcile([sb.read_reg(Path(d), cut)])
+        self.assertEqual(sb.read_reg(Path(d), cut).get("queue"),
+                         [sb.BOOT_RESUME_NUDGE, self.ANSWER, "plain backlog"])
+        self.assertEqual(self._restored_todos(d, cut), ["", "ut-33334444", ""])
+
+    def test_crash_heal_prepend_keeps_the_id_on_its_entry(self):
+        d = tempfile.mkdtemp()
+        be = _backend(d)
+        be._ensure = lambda sid, on_boot_settled=None: None
+        sid = "11111111-aaaa-0000-0000-0000000000f1"
+        _reg(d, sid, queue=[self.ANSWER], queueMeta=[{"text": self.ANSWER, "todo": "ut-55556666"}])
+        s = sb.SdkSession(be, sb.read_reg(Path(d), sid))
+        be._heal_cut_session(s)
+        self.assertEqual(sb.read_reg(Path(d), sid).get("queue"), [sb.CRASH_RESUME_NUDGE, self.ANSWER])
+        self.assertEqual(self._restored_todos(d, sid), ["", "ut-55556666"])
+
+    def test_thread_wake_notice_keeps_the_id_on_its_entry(self):
+        # a dormant comment thread woken with a killed question: _ensure rewrites reg['queue'] to put
+        # the notice first — the id must still land on the answer, in the reg the SdkSession seed reads
+        d = tempfile.mkdtemp()
+        be = _backend(d)
+        sid = "11111111-aaaa-0000-0000-0000000000f2"
+        owner = "11111111-aaaa-0000-0000-0000000000f3"
+        _reg(d, sid, threadOf=owner, pendingAsk=True, queue=[self.ANSWER, "plain reply"],
+             queueMeta=[{"text": self.ANSWER, "todo": "ut-99990000"}, {"text": "plain reply"}])
+        seeded = []
+
+        class _Fake:
+            def __init__(self, backend, reg):
+                seeded.append(reg)
+                self.thread = types.SimpleNamespace(is_alive=lambda: True)
+
+            def start(self):
+                pass
+
+        with mock.patch.object(sb, "SdkSession", _Fake):
+            be._ensure(sid)
+        self.assertEqual(sb.read_reg(Path(d), sid).get("queue"), [sb.ASK_DIED_NOTICE, self.ANSWER, "plain reply"])
+        self.assertEqual([getattr(t, "todo", "") for t in sb.SdkSession(be, seeded[0]).pending()],
+                         ["", "ut-99990000", ""], "the seed reads THIS dict")
+
+    def test_reconcile_strand_rehead_keeps_the_id(self):
+        # the fed-turn twin (_inflight_texts) re-heads the queue when no conversation ever
+        # materialized — the restored entry must still carry its id into the mirror
+        d, be, sid, s = self._session()
+        s.resume_sid = None                          # no init ever streamed: the re-head arm
+        s.enqueue(self.ANSWER, todo="ut-77778888")
+        with s._lock:
+            fed = s._pop_for_feed_locked()[0]        # the input generator feeds the entry…
+        s.inflight = 1
+        s._inflight_texts.append(fed)                # …and its twin carries it, id and all
+        s._reconcile_stranded()
+        self.assertEqual([getattr(t, "todo", "") for t in s.pending()], ["ut-77778888"])
+        self.assertEqual(sb.read_reg(Path(d), sid).get("queueMeta"),
+                         [{"text": self.ANSWER, "todo": "ut-77778888"}])
+
+
 def _procps() -> bool:
     """Whether this box's ps is procps (Linux; BSD ps has no --version). The truncation control below
     pins procps behaviour, so it runs only there."""

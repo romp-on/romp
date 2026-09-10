@@ -52,7 +52,11 @@ test("the ⏸ blocked (permission/picker) badge is a rounded-rect pill outlined 
 test("the ⏸ picker/approval chip jumps to the LIVE prompt in the chat (openSession + live, the user 2026-07-08)", () => {
   // the prompt is the session's live bottom, so the chip posts `live: true` → the chat lands right on it
   assert.match(FEED, /vscodeApi\?\.postMessage\(\{ type: "openSession", id: it\.sid, live: true \}\);/);
-  assert.match(FEED, /setTip\(a\._blocked as HTMLElement, it\.blocked\.what \+ " — click to jump to the prompt in the chat"\);/);
+  // the badge tip stays what+suffix, through the ONE-tooltip helper (setTip); the userTodos
+  // escalation (plans/user-todos.md) gets its own reply-flavored suffix while permission/picker
+  // keep the jump-to-prompt one
+  assert.match(FEED, /setTip\(a\._blocked as HTMLElement, it\.blocked\.what \+ \(it\.blocked\.state === "userTodos"/);
+  assert.match(FEED, /: " — click to jump to the prompt in the chat"\)\);/);
 });
 
 test("courier handoff: the '↪ from <sender>' origin marker is wired and styled", () => {
@@ -144,4 +148,15 @@ test("every session-state badge is a direct row2 child — visible in grouped AN
   assert.match(FEED, /const r2live = \(Array\.from\(r2\.children\) as HTMLElement\[\]\)\.some\(\(c\) => c\.style\.display !== "none"\);/);
   // …and only idwrap (the name) is what grouped mode drops
   assert.match(FEED, /\(\(a\._name as HTMLElement\)\.parentElement as HTMLElement\)\.style\.display = gmode \? "none" : "";/);
+});
+
+// ── the quiet user-todo marker rides row2 DIRECTLY too (plans/user-todos.md, re-homed with the
+// 2026-08-24 badge move): inside idwrap it would vanish on grouped-mode cards exactly like the state
+// badges above did, and as a direct child it counts toward row2's grouped-mode liveness. It is
+// appended in its own call so the pinned all-badges list above stays byte-stable.
+test("the user-todo marker is a direct row2 child, never back inside idwrap", () => {
+  assert.match(FEED, /const utMark = el\("a", "fask-usertodo"\); utMark\.style\.display = "none";/);
+  assert.match(FEED, /row2\.append\(utMark\);/, "its own append — a direct row2 child in both modes");
+  assert.doesNotMatch(FEED, /idwrap\.append\([^)]*utMark/, "the marker never returns to the grouped-mode-hidden wrap");
+  assert.match(FEED, /a\._utMark = utMark;/, "kept on the card like its badge siblings, so updateAskCard repaints it per push");
 });

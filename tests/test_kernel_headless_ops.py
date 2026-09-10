@@ -213,6 +213,41 @@ class HeadlessRoutes(unittest.TestCase):
             code, resp = self._post("/send", {"id": "sid-r", "text": "hello"})
         self.assertEqual((code, resp), (200, refusal))
 
+    def test_send_route_queued_is_the_arm_not_the_send_result(self):
+        # `queued` reports WHICH ARM the send took, never the backend's own verdict. _send_or_park
+        # now returns the backend's own result on hand-over and "parked" only for the FIFO, so the
+        # route must compare against "parked", not read truthiness — a completed send is truthy
+        # too and would read as queued. A regression pin for that return shape, not a base bug:
+        # the route it replaced read a True/False shape, where truthiness was the right read. A
+        # refused send (falsy) is still not a park either; ok:true means accepted, as it always
+        # did here.
+        fake = mock.Mock()
+        fake.busy.return_value = None
+        km._pending_ops.clear()
+        try:
+            for verdict in (True, "a-delivery-handle", False, None):
+                fake.send.reset_mock()
+                fake.send.return_value = verdict
+                with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: fake)), \
+                     mock.patch.object(km, "_compacting_now", lambda sid, **k: False), \
+                     mock.patch.object(km, "_working_now", lambda sid: False):
+                    code, resp = self._post("/send", {"id": "sid-v", "text": "plain words"})
+                self.assertEqual((code, resp), (200, {"ok": True, "queued": False}),
+                                 "delivered now, whatever the backend answered (%r)" % (verdict,))
+                fake.send.assert_called_once_with(mock.ANY, "plain words")   # the plain two-argument send
+                self.assertNotIn("sid-v", km._pending_ops)
+            fake.send.reset_mock()
+            with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: fake)), \
+                 mock.patch.object(km, "_compacting_now", lambda sid, **k: True), \
+                 mock.patch.object(km, "_working_now", lambda sid: False):
+                code, resp = self._post("/send", {"id": "sid-v", "text": "plain words"})
+            self.assertEqual((code, resp), (200, {"ok": True, "queued": True}))
+            self.assertEqual(list(km._pending_ops.values()), [[("send", "plain words", None)]],
+                             "a plain park keeps the three-slot op shape")
+            fake.send.assert_not_called()
+        finally:
+            km._pending_ops.clear()
+
     def test_missing_who_is_a_400(self):
         code, resp = self._post("/interrupt", {})
         self.assertEqual(code, 400)

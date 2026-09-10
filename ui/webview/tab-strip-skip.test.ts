@@ -50,7 +50,7 @@ test("every input the strip renders is in the signature", () => {
     "snapView",   // the section the pane shows at a glance: a header's mark, its way-back act and its words derive from it
     "m?.name", "m?.color?.bg", "m?.color?.fg",
     "s.name", "s.color?.bg", "s.color?.fg", "st.state", "tabStateClass(st)", "!!st.faded",
-    "st.ctx", "st.ctxColor", "st.ctxTone", "!!s.sub", "hostIsDown(id)", "hostDownNote(id)",
+    "st.ctx", "st.ctxColor", "st.ctxTone", "!!s.sub", "!!s.userTodos?.length", "hostIsDown(id)", "hostDownNote(id)",
   ]) assert.ok(sig.includes(needle), "the signature reads " + needle);
   assert.match(fn, /const unions = viewTagUnion\(effViews\(\)\);\s*\n\s*const plan = planStrip\(visibleIds, unions, readTabGroups\(unions\), activeId, phoneLayout\(\),/,
     "the plan reads the unions the signature carries");

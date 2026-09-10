@@ -74,8 +74,11 @@ const OBJ_ID = ["tabs"]; //                       an array of objects keyed by `
 // no mixed state for this setting, ever; one click writes every machine, so the mark can only be
 // transient). Deliberately NOT here: setDefaultDir (a path on one machine, meaningless on another),
 // setColormap/setPalette (the viewer's display prefs, which the local kernel persists for this browser)
-// and the Thinking summaries toggle (per-install: whoever reads the summaries turns it on where they read
-// them).
+// and the PER-INSTALL gear rows — the Thinking summaries toggle (whoever reads the summaries turns it on
+// where they read them) and the User todos switch (off by default; each kernel's answer is its own — its
+// sub-copy says "this kernel keeps its own copy"): their ops post to the local kernel only, are never
+// queued for or broadcast to another, and are not named anywhere in this file (gear.test.ts's
+// PER_INSTALL pin holds that absence).
 const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel",
                                 "setJudgeEffort", "setIndexEffort", "setUpdateMode",
                                 "setJudgeConcurrency",   // T277: the judges' pool width, one value across machines
@@ -189,6 +192,14 @@ export function prefixInbound(host: string, msg: any): any {
   if (out.type === "glowTurns" && Array.isArray(out.groups))
     out.groups = out.groups.map((g: any) =>
       (g && typeof g === "object" && typeof g.sid === "string" ? { ...g, sid: prefixId(host, g.sid) } : g));
+  // the feed's user-todo map (plans/user-todos.md) is keyed BY sid — a map, not an id-bearing array,
+  // so the generic passes above can't reach its keys; unprefixed they'd never match the merged asks'
+  // prefixed sids and a remote session's marker would silently not render.
+  if (out.type === "feed" && out.userTodos && typeof out.userTodos === "object" && !Array.isArray(out.userTodos)) {
+    const ut: Record<string, number> = {};
+    for (const [k, v] of Object.entries(out.userTodos)) ut[prefixId(host, k)] = v as number;
+    out.userTodos = ut;
+  }
   // timeline payloads: the lanes skeleton nests everything under `data`; the bars detail is top-level.
   if (out.type === "data" && out.data && typeof out.data === "object") out.data = prefixTimelineData(host, out.data);
   else if (out.type === "bars") return { ...out, ..._prefixTimelineDetail(host, out) };
@@ -507,7 +518,7 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
                                view: readonly string[] = [], deadHosts: readonly string[] = [],
                                arrivedAt: Record<string, number> = {}): any {
   const local = perHost[LOCAL] || {};
-  const merged: any = { ...local, type: "feed", items: [], asks: [], working: [], awaiting: [], stateUnknown: [], order: [], sessions: [] };
+  const merged: any = { ...local, type: "feed", items: [], asks: [], working: [], awaiting: [], stateUnknown: [], order: [], sessions: [], userTodos: {} };
   let anchor = typeof local.now === "number" ? LOCAL : null;
   if (anchor === null) {
     for (const h of hostSeq) {
@@ -561,6 +572,8 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
     if (Array.isArray(f.stateUnknown)) merged.stateUnknown.push(...f.stateUnknown);
     if (Array.isArray(f.order)) merged.order.push(...f.order);   // grouped-mode session rank: local first, ids pre-prefixed
     if (Array.isArray(f.sessions)) merged.sessions.push(...f.sessions);   // the tab-strip session list (footer filter menu), sid+name pre-prefixed
+    if (f.userTodos && typeof f.userTodos === "object" && !Array.isArray(f.userTodos))
+      Object.assign(merged.userTodos, f.userTodos);   // sid-keyed open user-todo counts, keys pre-prefixed (the quiet card marker; a host too old to send it contributes nothing)
     if (Array.isArray(f.ledgers)) { anyLedgers = true; ledgers.push(...f.ledgers); }
     if (typeof f.dismissedCount === "number") { anyDismissed = true; dismissed += f.dismissedCount; }
     if (f.canUndoClear) canUndo = true;

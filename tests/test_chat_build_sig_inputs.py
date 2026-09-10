@@ -117,6 +117,7 @@ CENSUS = {
     "_norm_branch": ("pure", "over a branch string"),
     "_notify_session_effective": ("sig", "ncards", "the master bell; the session's own override is in flags"),
     "_op_qid": ("pure", "over a parked op"),
+    "_open_user_todos": ("sig", "usertodos", "this session's open rows in the user-todo store, gated by the switch; the rows, the switch and the flagged-store state are one fold (_user_todo_fp)"),
     "_orphan_replies": ("sig", "states"),
     "_parked_held": ("pure", "over a parked op and the parked holds, which the ops component folds (T306: a held send reads 'editing')"),
     "_parked_md": ("pure", "over a parked op"),
@@ -165,6 +166,9 @@ CENSUS = {
     "_tmux_sessions": ("sig", "row", "the liveness map when the caller passed none"),
     "_tree_of": ("sig", "cwd"),
     "_user_images": ("pure", "over a turn's blocks and text"),
+    "_user_todo_session_ended": ("pure", "over the reg's alive bit (reg), the death marker (gone) and the states file's newest row (states)"),
+    "_user_todos_on": ("sig", "usertodos", "the per-install switch file, the fold's on/off prefix"),
+    "_user_todos_unreadable": ("sig", "usertodos", "whether the store on disk is the version its shape guard flagged, the fold's 'unreadable' value"),
     "iso": ("pure", "over a timestamp"),
 }
 
@@ -200,6 +204,7 @@ DOTTED = {
     "os.path.exists": ("sig", "transcript", "whether the transcript exists yet"),
     "os.path.realpath": ("sig", "cwd", "the two tree tops compared through the filesystem"),
     "os.path.expanduser": ("const", "the home directory"),
+    "Path.home": ("const", "the home directory"),
     "os.path.basename": ("pure", "over a path string"),
     "os.path.dirname": ("pure", "over a path string"),
     "json.dumps": ("pure", "over a value"),
@@ -211,10 +216,12 @@ DOTTED = {
 
 # Module globals build_session reads without calling.
 GLOBALS = {
+    "Path": ("const", "the pathlib class; its calls are in DOTTED"),
     "Sessions": ("const", "the backend-agnostic session API class; its calls are in DOTTED"),
     "_CHAT_FOLD_STATS": ("out", "counters"),
     "_PATH_LINK_CACHE": ("sig", "pathlink"),
     "_SEND_TOOL_RE": ("const", "a module regex"),
+    "_USER_TODOS_UNREADABLE_CARD": ("const", "the to-do card's wording for a flagged user-todo store"),
     "_chat_fold": ("memo", "see _chat_fold_get"),
     "_chat_fold_last": ("out", "the perf line's per-thread record"),
     "_chat_fold_lock": ("const", "a lock"),
@@ -561,6 +568,43 @@ class Differential(_World):
         d.mkdir(parents=True)
         (d / "1.json").write_text(json.dumps({"id": "1", "subject": "write the tests", "status": "pending"}))
         self.assertEqual(self.moved(a, self.sig()), ("tasks",))
+
+    def test_a_user_todo_write_misses_under_usertodos_for_its_own_session_alone(self):
+        a = self.sig()
+        km._add_user_todo(PEER, "need the auth scheme picked")
+        self.assertEqual(self.moved(a, self.sig()), (), "another session's request moves nothing of this tab's key")
+        tid = km._add_user_todo(SID, "need the plural form confirmed for the collection route")
+        b = self.sig()
+        self.assertEqual(self.moved(a, b), ("usertodos",), "a register changes the card with no transcript write")
+        self.assertEqual(self.moved(b, self.sig()), ())
+        km._resolve_user_todo(SID, tid, "withdrawn")
+        self.assertEqual(self.moved(b, self.sig()), ("usertodos",), "...and so does the stamp that clears it")
+
+    def test_the_user_todo_switch_and_the_flagged_store_each_miss_under_usertodos(self):
+        # the switch: a flip changes the split card with no store write, so it rides the same fold, for a
+        # session with rows of its own (a sid with none folds None either way: the switch changes nothing
+        # its card shows)
+        km._add_user_todo(SID, "need the plural form confirmed for the collection route")
+        a = self.sig()
+        try:
+            km._set_user_todos(True)
+            b = self.sig()
+            self.assertEqual(self.moved(a, b), ("usertodos",), "the switch flipping on is a component")
+            km._set_user_todos(False)
+            self.assertEqual(self.moved(a, self.sig()), (), "...and off again restores the key")
+            # the flagged store: a file that is not sid -> list reads empty, and while the switch is on the card
+            # wears the cause in place of the rows, so the tab must rebuild the moment the file goes bad
+            km._set_user_todos(True)
+            c = self.sig()
+            (jd.STATE / "user-todos.json").write_text(json.dumps({"enabled": True, "gt": 1}))
+            with contextlib.redirect_stderr(io.StringIO()):
+                d = self.sig()
+            self.assertEqual(self.moved(c, d), ("usertodos",), "the store going bad is news to the tab")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(self.moved(d, self.sig()), (), "...and byte-stable while the bad file stands")
+        finally:
+            km._set_user_todos(False)
+            km._user_todos_bad.clear()
 
     def test_the_live_tail_misses_under_live_for_an_echo_and_for_its_dropped_mark(self):
         a = self.sig()

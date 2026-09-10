@@ -484,6 +484,23 @@ test("a colour echo (an in-place write into the shared objects) repaints that se
   assert.deepEqual(nameRebuilds(), { g1: before.g1, g2: before.g2 + 1, g3: before.g3 }, "the echoed colour is in the key: no flap, no second rebuild");
 });
 
+test("the frame's user-todo map is a paint input: the flagged session's cards repaint (the quiet marker appears) and no other card does", async () => {
+  // the marker reads userTodosMap[it.sid], outside the ask object (plans/user-todos.md), and the delivery path
+  // keeps an unchanged card's object — so the count must reach the gate through the key, or a todo registered
+  // or withdrawn leaves a stale marker until the kernel happens to re-send the card
+  const before = nameRebuilds();
+  await dispatch(frame([g1, card("g2")._it, g3], { working: ["web"], userTodos: { [API]: 2 } }));
+  assert.deepEqual(nameRebuilds(), { g1: before.g1, g2: before.g2 + 1, g3: before.g3 }, "api's card alone repainted");
+  assert.equal(card("g2")._utMark.style.display, "", "the marker shows");
+  assert.equal(card("g2")._utMark.textContent, "⚑ waiting on you · 2");
+  assert.equal(card("g1")._utMark.style.display, "none", "no marker on a session with nothing open");
+  await dispatch(frame([g1, card("g2")._it, g3], { working: ["web"], userTodos: { [API]: 2 } }));
+  assert.deepEqual(nameRebuilds(), { g1: before.g1, g2: before.g2 + 1, g3: before.g3 }, "the same count again: no repaint");
+  await dispatch(frame([g1, card("g2")._it, g3], { working: ["web"] }));   // the todo withdrawn: the map empties, the same objects
+  assert.deepEqual(nameRebuilds(), { g1: before.g1, g2: before.g2 + 2, g3: before.g3 }, "the marker leaves through the key too");
+  assert.equal(card("g2")._utMark.style.display, "none");
+});
+
 test("the 15 s live pass moves ages and durations on cards no frame touched, writing only the labels whose text changed", () => {
   // 16.7 s have elapsed since boot (frame C's 700 ms, the 16 s boundary), so one pass has run, at 15 s. The pass
   // runs at every 15 s multiple on the kernel's clock — the frame's `now` plus the local time since its `nowAt`.

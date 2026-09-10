@@ -872,10 +872,14 @@ class DeliveryTargets(unittest.TestCase):
     def test_send_or_park_tells_a_refused_handover_apart_and_echoes_nothing_for_it(self):
         echoed = []
         km._optimistic_echo = lambda sid, text, author="human": echoed.append(text)
-        self.assertIsNone(km._send_or_park(self.be, SID, "hello", echo="human"), "refused: neither parked nor handed")
+        # the return is "parked" for the FIFO arm, else the backend's own send result: a refusal is the
+        # backend's False, handed over is its truthy result — never the bare bool the first cut answered
+        self.assertIs(km._send_or_park(self.be, SID, "hello", echo="human"), False, "refused: neither parked nor handed")
         self.assertEqual(echoed, [], "no echo for a message the session never got")
         self.be.regs = {SID: True}
-        self.assertIs(km._send_or_park(self.be, SID, "hello", echo="human"), False, "handed over now")
+        got = km._send_or_park(self.be, SID, "hello", echo="human")
+        self.assertNotEqual(got, "parked", "handed over now")
+        self.assertTrue(got, "the backend's own truthy result")
         self.assertEqual(echoed, ["hello"])
 
 

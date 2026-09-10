@@ -6,9 +6,13 @@ parked message rendering BEFORE the model change parked ahead of it). A repeated
 replaces its earlier parked op in place. Same event-corroborated _compacting_now gate as ever; a parked
 send stamps its optimistic echo only when it actually fires (an early echo killed the compacting cue).
 SYNTHETIC fixtures only."""
+import contextlib
+import io
 import json
 import os
 import unittest
+from pathlib import Path
+from unittest import mock
 from romp_load import load_source
 import tempfile
 
@@ -874,6 +878,238 @@ class SlashCommandParksWhileTurnOpen(unittest.TestCase):
                          "idle → a fresh top-level prompt already, nothing to park")
         self.assertEqual(self.echoes, [("/autocompact auto", "human")])
         self.assertNotIn(SID, km._pending_ops)
+
+
+class _FakeTodoQueueBackend(_FakeForwardBackend):
+    """An SDK-like backend whose queue entries can carry the id of the user todo a message ANSWERS
+    (queue_carries_todos): send() records the id it was handed, the way SdkBackend.send rides it on
+    the queue entry."""
+
+    queue_carries_todos = True
+
+    def send(self, sid, text, user_todo=None):
+        self.calls.append(("send", text, user_todo))
+        self._q.append(text)
+        return True
+
+
+class SendReturnShape(unittest.TestCase):
+    """_send_or_park reports WHICH ARM it took — "parked" when the text joined the FIFO, else the
+    backend send's own result — so a caller whose side effect must key on DELIVERY can tell parked,
+    sent and refused apart, and a route compares against "parked" rather than reading truthiness (a
+    completed send is truthy too). A plain send is byte-for-byte what it was: a three-slot op on
+    disk and the two-argument backend send; only a send that answers a user todo (user_todo) grows to
+    five slots (the press id's fourth, None when none rode, then the answered ask), and only a backend
+    that can carry the id is handed it (_backend_send)."""
+
+    def setUp(self):
+        self.be = _FakeBackend()
+        self._saved = (km._compacting_now, km.Sessions.backend_for, km._push_all, km._optimistic_echo,
+                       km._working_now)
+        km._push_all = lambda: None
+        km._optimistic_echo = lambda sid, text, author="human": None
+        km._compacting_now = lambda sid: False
+        km._working_now = lambda sid: False
+        km._pending_ops.clear()
+        try:
+            os.unlink(km._PENDING_OPS_FILE)
+        except OSError:
+            pass
+
+    def tearDown(self):
+        (km._compacting_now, km.Sessions.backend_for, km._push_all, km._optimistic_echo,
+         km._working_now) = self._saved
+        km._pending_ops.clear()
+
+    def test_parked_reports_parked_and_a_delivery_reports_the_backends_result(self):
+        km._compacting_now = lambda sid: True
+        self.assertEqual(km._send_or_park(self.be, SID, "hello", echo="human"), "parked")
+        self.assertEqual(self.be.calls, [], "parked: the backend was not touched")
+        km._pending_ops.clear()
+        km._compacting_now = lambda sid: False
+        self.assertIs(km._send_or_park(self.be, SID, "hello", echo="human"), True,
+                      "delivered: the backend's own truthy result comes back, not a park verdict")
+        self.be.send = lambda sid, text: "a-delivery-handle"
+        self.assertEqual(km._send_or_park(self.be, SID, "hello"), "a-delivery-handle",
+                         "a richer truthy result rides through untouched")
+        self.be.send = lambda sid, text: False
+        self.assertIs(km._send_or_park(self.be, SID, "hello"), False,
+                      "a refused send comes back falsy — and is not 'parked' either")
+        self.assertNotIn(SID, km._pending_ops)
+
+    def test_a_plain_op_keeps_three_slots_on_disk_and_an_answer_adds_the_id(self):
+        km._compacting_now = lambda sid: True
+        km._send_or_park(self.be, SID, "hello", echo="human")
+        self.assertEqual(km._pending_ops[SID], [("send", "hello", "human")])
+        on_disk = json.loads(km._PENDING_OPS_FILE.read_text())
+        self.assertEqual(on_disk, {SID: [["send", "hello", "human"]]},
+                         "a plain park's disk mirror is the pre-todo three-slot list, byte for byte")
+        self.assertEqual(km._send_or_park(self.be, SID, "Re: the port — 8443.", echo="human",
+                                          user_todo="ut-9f2c1a34"), "parked")
+        self.assertEqual(km._pending_ops[SID][1], ("send", "Re: the port — 8443.", "human", None, "ut-9f2c1a34"),
+                         "an answer rides its todo id as the op's fifth slot, after the press id's empty fourth")
+        self.assertEqual(km._load_pending_ops()[SID][1], ("send", "Re: the port — 8443.", "human", None, "ut-9f2c1a34"),
+                         "…and the id survives the disk round trip")
+        self.assertEqual(km._op_todo(km._pending_ops[SID][1]), "ut-9f2c1a34")
+        self.assertIsNone(km._op_qid(km._pending_ops[SID][1]), "no client id rode: the fourth slot reads as none")
+        self.assertEqual(km._parked_md(km._pending_ops[SID][1]), "Re: the port — 8443.",
+                         "the queued bubble renders the text exactly as a three-slot op's")
+
+    def test_backend_send_hands_the_id_only_to_a_backend_that_can_use_it(self):
+        plain = _FakeBackend()
+        self.assertTrue(km._backend_send(plain, SID, "hello", user_todo="ut-9f2c1a34"))
+        self.assertEqual(plain.calls, [("send", "hello")],
+                         "no capability flag → the plain two-argument send, the id stays with the kernel")
+        carrying = _FakeTodoQueueBackend()
+        self.assertTrue(km._backend_send(carrying, SID, "hello", user_todo="ut-9f2c1a34"))
+        self.assertEqual(carrying.calls, [("send", "hello", "ut-9f2c1a34")], "queue_carries_todos → the id rides")
+        carrying.calls.clear()
+        self.assertTrue(km._backend_send(carrying, SID, "hello"))
+        self.assertEqual(carrying.calls, [("send", "hello", None)],
+                         "no id → the same call shape it always got")
+
+        class _Refusing:
+            send_reports_refusal = True
+
+            def __init__(self):
+                self.calls = []
+
+            def send(self, sid, text, user_todo=None):
+                self.calls.append((text, user_todo))
+                return "nonce-1"
+
+        refusing = _Refusing()
+        self.assertEqual(km._backend_send(refusing, SID, "hello", user_todo="ut-9f2c1a34"), "nonce-1")
+        self.assertEqual(refusing.calls, [("hello", "ut-9f2c1a34")],
+                         "send_reports_refusal → the id rides too, and the backend's handle comes back")
+
+    def test_an_immediate_send_hands_the_id_to_the_backend_entry(self):
+        be = _FakeTodoQueueBackend()
+        self.assertIs(km._send_or_park(be, SID, "Re: the port — 8443.", user_todo="ut-9f2c1a34"), True)
+        self.assertEqual(be.calls, [("send", "Re: the port — 8443.", "ut-9f2c1a34")])
+        self.assertIs(km._send_or_park(be, SID, "plain words"), True)
+        self.assertEqual(be.calls[-1], ("send", "plain words", None))
+
+    def test_the_drain_hands_a_parked_answers_id_to_the_backend(self):
+        be = _FakeTodoQueueBackend()
+        km._deliver_send_batch(be, SID, [("send", "Re: the port — 8443.", None, None, "ut-9f2c1a34"),
+                                         ("send", "plain words", None)])
+        self.assertEqual(be.calls, [("send", "Re: the port — 8443.", "ut-9f2c1a34"), ("send", "plain words", None)],
+                         "a drained answer's queue entry carries the id exactly like an immediate send's")
+
+    def test_a_non_forwarding_backend_merges_a_run_carrying_an_id_as_before(self):
+        km._deliver_send_batch(self.be, SID, [("send", "alpha", None, None, "ut-9f2c1a34"), ("send", "beta", None)])
+        self.assertEqual(self.be.calls, [("send", "alpha\n\nbeta")],
+                         "tmux-shaped: the fifth slot changes nothing about the merged paste")
+
+    def test_a_queue_filled_during_the_gates_parks_the_answer_behind_it(self):
+        # The race _park_behind_queue exists for (2026-09-05): the advisory queue read at the first
+        # gate saw no queue, then a peer handler parked an op before the locked re-check, so this
+        # send must line up BEHIND that op — never hand over ahead of it. _working_now is the last
+        # gate before the locked step, so a peer's park landing inside it is the race exactly. Fails
+        # if the arm is dropped (the backend gets the send) or if it claims "parked" without parking
+        # (the op is missing from the queue).
+        def peer_parks_then_idle(sid):
+            km._park_op(sid, ("compact",))
+            return False
+        km._working_now = peer_parks_then_idle
+        self.assertEqual(km._send_or_park(self.be, SID, "Re: the port — 8443.", user_todo="ut-9f2c1a34"), "parked")
+        self.assertEqual(self.be.calls, [], "not handed over: the queue that appeared owns the order")
+        self.assertEqual(km._pending_ops[SID],
+                         [("compact",), ("send", "Re: the port — 8443.", None, None, "ut-9f2c1a34")],
+                         "behind the peer's op, id intact")
+
+
+class DrainStampFailure(unittest.TestCase):
+    """A parked answer's 'answered' stamp fires at the DRAIN, after the send reached the backend. If
+    the stamp's store write fails — a store the shape guard refuses to write, a disk error — the
+    answer is delivered all the same, so the failure is said on stderr and the drain goes on.
+    Raised, it landed in _apply_pending_ops's failure contract ("a raise anywhere in a sid's pass
+    drops that sid's queue once"), which took a parked /compact or a second message down with it
+    for a bookkeeping error that had nothing to do with them."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.saved_state = km.jd.STATE
+        km.jd.STATE = Path(self.td.name)
+        km._user_todos_cache.clear()
+        km._user_todos_bad.clear()
+        km._UT_FLOOR_ARM.clear()                       # the floor's arm record is process state (tests/README)
+        km._set_user_todos(True)                       # the switch is OFF by default (2026-09-03)
+        self.tid = km._add_user_todo(SID, "Need the staging port")
+        self._saved = (km._compacting_now, km.Sessions.backend_for, km._push_all, km._optimistic_echo,
+                       km._working_now)
+        km._push_all = lambda: None
+        km._optimistic_echo = lambda sid, text, author="human": None
+        km._compacting_now = lambda sid: False
+        km._working_now = lambda sid: False
+        km._pending_ops.clear()
+        km._drain_hold.clear()                         # a hold another test's delivery armed is not this story
+
+    def tearDown(self):
+        (km._compacting_now, km.Sessions.backend_for, km._push_all, km._optimistic_echo,
+         km._working_now) = self._saved
+        km._pending_ops.clear()
+        km._drain_hold.clear()
+        km.jd.STATE = self.saved_state
+        km._user_todos_cache.clear()
+        km._user_todos_bad.clear()
+        km._UT_FLOOR_ARM.clear()
+        self.td.cleanup()
+
+    def test_a_failed_stamp_after_an_immediate_delivery_warns_and_keeps_the_dispatch_alive(self):
+        # the drive handler's own stamp (sent now -> stamp now) had no such guard: a store that went
+        # bad between the handler's pre-check and the stamp, or a disk error in the write, raised
+        # out of _drive into the WS dispatch's per-message except — the answer was delivered, the
+        # exception logged, the repaint skipped, and the client heard nothing about the row that
+        # stayed open. Same contract as the drain: said on stderr, said to the client, and on.
+        sent, injected, pushed = [], [], []
+        client = {"send": lambda s: sent.append(json.loads(s))}
+        err = io.StringIO()
+        with mock.patch.object(km, "_name_of", lambda sid: "web"), \
+                mock.patch.object(km, "_sdk", lambda: None), \
+                mock.patch.object(km, "_send_or_park",
+                                  lambda be, sid, text, echo=None, user_todo=None: injected.append(text) or True), \
+                mock.patch.object(km, "_push_soon", lambda: pushed.append(1)), \
+                mock.patch.object(km, "_write_user_todos", side_effect=RuntimeError("write refused")), \
+                contextlib.redirect_stderr(err):
+            handled = km._drive({"type": "userTodoAnswer", "id": SID, "todoId": self.tid, "text": "8443"}, client)
+        self.assertTrue(handled)
+        self.assertEqual(len(injected), 1, "the answer was delivered")
+        warns = [m["text"] for m in sent if m.get("type") == "warn"]
+        self.assertEqual(len(warns), 1, sent)
+        self.assertIn("reached the session", warns[0])
+        self.assertIn("stays listed", warns[0])
+        self.assertEqual(pushed, [1], "the dispatch went on to its repaint")
+        self.assertIn("answered stamp for %s failed after delivery" % self.tid, err.getvalue())
+        self.assertNotIn("resolved", km._user_todos()[SID][0], "the ask still stands, visibly")
+
+    def test_a_failed_stamp_after_an_sdk_delivery_keeps_the_rest_of_the_queue(self):
+        be = _FakeTodoQueueBackend()
+        km.Sessions.backend_for = lambda sid: be
+        km._pending_ops[SID] = [("send", "Re: the port — 8443.", None, None, self.tid), ("compact",)]
+        err = io.StringIO()
+        with mock.patch.object(km, "_write_user_todos", side_effect=RuntimeError("write refused")), \
+                contextlib.redirect_stderr(err):
+            km._apply_pending_ops()
+        self.assertEqual(be.calls, [("send", "Re: the port — 8443.", self.tid)], "the answer was delivered")
+        self.assertEqual(km._pending_ops.get(SID), [("compact",)],
+                         "the op parked behind it survives — its turn comes at the next quiet cycle")
+        lines = [l for l in err.getvalue().splitlines() if l.startswith("user-todos:")]
+        self.assertEqual(len(lines), 1, err.getvalue())
+        self.assertIn("answered stamp for %s failed after delivery" % self.tid, lines[0])
+        self.assertNotIn("pending ops apply", err.getvalue(), "no traceback: the drain never saw a raise")
+        self.assertNotIn("resolved", km._user_todos()[SID][0],
+                         "nothing stamped — the ask stands until the store can be written")
+
+    def test_a_failed_stamp_after_a_tmux_merged_paste_is_said_and_swallowed(self):
+        be = _FakeBackend()
+        err = io.StringIO()
+        with mock.patch.object(km, "_write_user_todos", side_effect=RuntimeError("write refused")), \
+                contextlib.redirect_stderr(err):
+            km._deliver_send_batch(be, SID, [("send", "alpha", None, None, self.tid), ("send", "beta", None)])
+        self.assertEqual(be.calls, [("send", "alpha\n\nbeta")], "the merged paste went out")
+        self.assertIn("answered stamp for %s failed after delivery" % self.tid, err.getvalue())
 
 
 if __name__ == "__main__":

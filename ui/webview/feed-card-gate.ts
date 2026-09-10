@@ -65,6 +65,10 @@ export interface GateEnv {
    *  frame's session rows; the title, checklist, takeaway and tree link their `#123` to it (pr-links.ts). A
    *  session whose repository arrives or changes must relink an otherwise unchanged card. */
   repo: (sid: string) => string | null;
+  /** userTodosMap[sid]: the session's OPEN user-todo count (plans/user-todos.md) — the quiet "waiting on you"
+   *  marker every card of that session wears. The count is board-level (the frame's userTodos map), so a
+   *  todo registered or withdrawn changes it and not the ask object; it reaches the gate through the key. */
+  userTodos: (sid: string) => number;
   /** A per-render counter for cards that must never skip: a quarantine card reads sessionColors by
    *  name, a map the payload rebuilds every frame, so its key is unique per render. */
   seq: number;
@@ -84,6 +88,7 @@ export function cardInputsKey(it: GateItem, env: GateEnv): string {
     env.hostDown(it.sid) ? "d" : "",
     env.selfHost,
     env.repo(it.sid) || "",
+    String(env.userTodos(it.sid) || ""),
     // the colour echo (feed.ts applyColorEcho) writes `a.color` IN PLACE — the one write into a shared
     // ask object — so identity cannot carry it; the colour rides the key instead
     (it.color && it.color.bg) || "",

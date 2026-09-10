@@ -79,6 +79,7 @@ NAMES_DIR = Path(os.environ.get("ROMP_STATE_DIR")
                  or Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp") / "names"
 TLDIR = STATE.parent / "timeline"     # append-only logs for the timeline view (messages.jsonl)
 SESSION_FLAGS = STATE.parent / "session-flags.json"   # the kernel's per-session view flags {sid:{flag:true}}; we honour postalServiceOff (legacy: postalOff)
+USER_TODOS_SWITCH = STATE.parent / "user-todos-enabled.json"   # the kernel's per-install user-todos switch {"enabled": bool, "gt": ms} (kernel USER_TODOS_SWITCH_FILE); NOT user-todos.json, which is the todo STORE
 
 
 # ── serve-token gate (Jupyter's model; the same 0600 file the kernel mints) ─────
@@ -946,6 +947,30 @@ def _hhmm_epoch(t):
     try: return datetime.fromtimestamp(int(t)).strftime("%H:%M")
     except Exception: return "?"
 
+
+def _when_words(t, now=None):
+    """An epoch as a phrase a reader can place without a date table: " at 14:05 today",
+    " at 14:05 yesterday", or " on 2026-09-05 at 14:05" (local time, leading space so it drops
+    into a sentence); "" for no time (None, 0, junk). `now` is the reference epoch (tests pin it).
+    Bare "at 14:05" is ambiguous the moment a day boundary passes."""
+    try:
+        t = int(t)
+    except (TypeError, ValueError):
+        return ""
+    if t <= 0:
+        return ""
+    try:
+        d = datetime.fromtimestamp(t)
+        ref = datetime.fromtimestamp(time.time() if now is None else now)
+    except (OverflowError, OSError, ValueError):     # an epoch no calendar holds: say nothing about the time
+        return ""
+    days = (ref.date() - d.date()).days
+    if days == 0:
+        return " at %s today" % d.strftime("%H:%M")
+    if days == 1:
+        return " at %s yesterday" % d.strftime("%H:%M")
+    return " on %s at %s" % (d.strftime("%Y-%m-%d"), d.strftime("%H:%M"))
+
 def format_receipts(recs):
     if not recs:
         return "No messages sent yet."
@@ -1208,6 +1233,40 @@ def _postal_off(sid):
         return bool(isinstance(f, dict) and (f.get("postalServiceOff") or f.get("postalOff")))
     except Exception:
         return False
+
+_user_todos_switch_bad = {}   # str(path) -> (mtime_ns, size) of a switch-file version already reported (below)
+# The kernel's bounds on a note (_USER_TODO_TEXT_CAP / _USER_TODO_DETAIL_CAP, kernel.py), mirrored by
+# name: the route answers 400 over them, but _kernel_post reads every non-2xx as None, so the tool
+# checks first and words the refusal itself — over the cap is refused, never trimmed (2026-09-07).
+USER_TODO_TEXT_CAP = 500
+USER_TODO_DETAIL_CAP = 4000
+
+def _user_todos_on():
+    """The kernel's per-install USER TODOS switch (the user 2026-09-03: the feature is off by default
+    and per machine). Read from the file on EVERY call — the bus is a separate long-lived process, so
+    the file is the seam, and a gear flip must take effect at the next tools/list or call with no
+    restart. Absent, unreadable or malformed all read False (the opt-in must be provable), the
+    kernel's own _user_todos_on rule; reading never creates the file. Absent is the shipped default
+    and silent; a file that is not a {"enabled": …} object is said on stderr once per file version,
+    as the kernel says it (2026-09-07), so a hand-edit that turned the tools off is not a mystery."""
+    try:
+        d = json.loads(USER_TODOS_SWITCH.read_text())
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        d, why = None, "unparsable (%s)" % e
+    else:
+        why = None if isinstance(d, dict) else "a JSON %s, not an object" % type(d).__name__
+    if why is None:
+        return bool(d.get("enabled"))
+    try:
+        st = USER_TODOS_SWITCH.stat(); key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if _user_todos_switch_bad.get(str(USER_TODOS_SWITCH)) != key:
+        _user_todos_switch_bad[str(USER_TODOS_SWITCH)] = key
+        sys.stderr.write("user-todos: %s is not a switch file (%s); reading it as OFF\n" % (USER_TODOS_SWITCH, why))
+    return False
 
 def _git_branch(d):
     """Current git branch of a dir (for the agent list — same-branch is what makes
@@ -4608,6 +4667,58 @@ def _heartbeat_loop(interval=None, stop=None):
             stop.wait(interval)
         else:
             time.sleep(interval)
+SWITCH_POLL = max(0.05, float(os.environ.get("ROMP_POSTAL_SWITCH_POLL", "2")))   # seconds between stats of the user-todos switch file (_SwitchWatch); the tools/list_changed latency a connected session sees. Floored: never a busy loop
+
+class _SwitchWatch:
+    """Change detector for the user-todos switch, behind the stdio server's tools/list_changed
+    poll (2026-09-07). tools/list reads the file live, so a NEW connection always sees the right
+    list; a session ALREADY connected keeps the list it was given until told to re-list, and the
+    kernel writes the file from another process, so the file is the only seam — polled, cheaply:
+    flipped() is one stat per call, reads the file only when its (mtime, size) moved, and answers
+    True only when the OFFERED list changed (_user_todos_on flipped). A rewrite that keeps the
+    value — the kernel restamping `gt` — is not a list change. The first call baselines."""
+
+    def __init__(self):
+        self.sig = self._sig()
+        self.on = _user_todos_on()
+
+    @staticmethod
+    def _sig():
+        try:
+            st = USER_TODOS_SWITCH.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None                        # absent (the shipped default) is a signature too
+
+    def flipped(self):
+        sig = self._sig()
+        if sig == self.sig:
+            return False
+        self.sig = sig
+        on = _user_todos_on()
+        if on == self.on:
+            return False
+        self.on = on
+        return True
+
+def _switch_poll_loop(on_switch_flip, stop=None):
+    """The user-todos switch poll (2026-09-07), on a thread of its own: every SWITCH_POLL seconds stat the
+    switch file (_SwitchWatch) and call `on_switch_flip` once per flip of the OFFERED tool list, so a session
+    connected while the gear is flipped gains or loses the pair within seconds in both directions. Its own
+    thread, not the heartbeat's: in peer mode _heartbeat_loop ENDS on the bus's first `local: true`, while
+    this poll must run for the life of the stdio server. `stop` (a threading.Event) is a test seam."""
+    watch = _SwitchWatch()
+    while not (stop is not None and stop.is_set()):
+        try:
+            if watch.flipped():
+                on_switch_flip()
+        except Exception as e:
+            _log("switch poll: %s" % e)
+        if stop is not None:
+            stop.wait(SWITCH_POLL)
+        else:
+            time.sleep(SWITCH_POLL)
+
 
 # ───────────────────────── stdio MCP server ─────────────────────────
 
@@ -4657,6 +4768,23 @@ MCP_TOOLS = [
      "description": "Publish what you're working on (files/surface) so peers steer clear; your branch shows automatically. Empty text clears it (romp also auto-clears once your work is done and the session idles).",
      "inputSchema": {"type": "object",
                      "properties": {"text": {"type": "string", "description": "short note, e.g. 'editing scripts/romp-postal + tmux.conf'"}}}},
+    # The two user-todo tools (plans/user-todos.md) describe an obligation to the PERSON THE AGENT
+    # WORKS FOR, so unlike the peer-mail tools above their descriptions follow the veil: no romp
+    # machinery named (test_injected_voice.py scans them). Note the caller-identity caveat: postal
+    # resolves who's calling from the CLI process env, so a SUBAGENT's call registers the todo as
+    # its parent session — the right behavior (the need belongs to the session the user talks to),
+    # it just means "who filed this" is always the session, never an individual subagent.
+    {"name": "add_user_todo",
+     "description": "Flag something you need from the person you work for — a decision, an input, or an action only they can provide — while you keep working on what you can. Give one short line saying what you need and why; add detail only if the line can't carry it. Returns an id: withdraw it (withdraw_user_todo) the moment the need is met or moot. Not for status updates or FYIs — only things you are waiting on them for.",
+     "inputSchema": {"type": "object",
+                     "properties": {"text": {"type": "string", "description": "one short line: what you need from them and why"},
+                                    "detail": {"type": "string", "description": "optional longer context, only when the short line can't carry it"}},
+                     "required": ["text"]}},
+    {"name": "withdraw_user_todo",
+     "description": "Take back a need you flagged (by id) once it's met, answered some other way, or no longer applies — so the person you work for doesn't act on a stale request.",
+     "inputSchema": {"type": "object",
+                     "properties": {"id": {"type": "string", "description": "the id add_user_todo returned"}},
+                     "required": ["id"]}},
     {"name": "check_sent",
      "description": "See your recently sent messages and whether each was read/acted on by the recipient yet, or is still pending — instead of asking 'did you get it?'.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -4666,6 +4794,24 @@ MCP_TOOLS = [
                      "properties": {"to": {"type": "string", "description": "recipient session name (or UUID) whose queued message(s) from you to cancel"},
                                     "id": {"type": "string", "description": "optional specific message id (from check_sent) to recall just that one"}}}},
 ]
+
+USER_TODO_TOOLS = ("add_user_todo", "withdraw_user_todo")   # the pair the user-todos switch governs
+# What a call anyway hears while the switch is off (a session that connected while it was on still
+# holds the tool). Plain and LOUD — the agent must not believe the need was filed — and in the voice
+# the descriptions use (test_injected_voice.py scans it): no tracking-system nouns.
+USER_TODOS_OFF_ADD = ("User todos are turned off on this machine, so this was not saved and the person you "
+                      "work for will NOT see it. Say what you need in your next reply instead.")
+USER_TODOS_OFF_WITHDRAW = ("User todos are turned off on this machine, so there is nothing to withdraw. "
+                           "Nothing changed.")
+
+
+def _tools_offered():
+    """The tools/list answer: MCP_TOOLS, minus the two user-todo tools while the kernel's per-install
+    switch is off (the user 2026-09-03) — a tool that cannot succeed is not offered, so no session
+    learns a capability this machine has turned off. Read at LIST time, per call (_user_todos_on)."""
+    if _user_todos_on():
+        return MCP_TOOLS
+    return [t for t in MCP_TOOLS if t["name"] not in USER_TODO_TOOLS]
 
 def _mcp_call(name, args):
     mid, me = _self_identity()               # one GET /sessions for both halves, not one each
@@ -4743,6 +4889,87 @@ def _mcp_call(name, args):
         _publish_working(mid, text)        # backend-agnostic kernel store (POST /working), not the @romp-working var
         return ("Cleared your 'working on' note." if not text.strip()
                 else "Published — others see: working on '%s'." % text), False
+    if name == "add_user_todo":
+        # Register a need with the person the agent works for (plans/user-todos.md) — the kernel
+        # owns the store (POST /usertodo, the set_working/_publish_working shape) and mints the id.
+        # `mid` is the calling SESSION (a subagent's call files under its parent — see MCP_TOOLS).
+        if not _user_todos_on():
+            # the per-install switch (the user 2026-09-03): refused BEFORE any post, plainly — the
+            # kernel's route would answer 409 anyway, but the agent hears why, not "try again"
+            return USER_TODOS_OFF_ADD, True
+        if not mid:
+            return "Not inside a romp session.", True
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return "Need 'text' — one short line: what you need from them and why.", True
+        detail = str(args.get("detail") or "").strip()
+        if len(text) > USER_TODO_TEXT_CAP or len(detail) > USER_TODO_DETAIL_CAP:
+            # the kernel's caps, refused HERE so the agent hears why (its 400 would reach this
+            # tool as None): the note is one short line, the rest belongs in the reply
+            return ("Not saved — that is too long for a note (the line holds %d characters, the "
+                    "detail %d). Keep the note to one line and put the rest in your reply."
+                    % (USER_TODO_TEXT_CAP, USER_TODO_DETAIL_CAP)), True
+        res = _kernel_post("/usertodo", {"id": mid, "text": text, "detail": detail})
+        tid = res.get("todoId") if isinstance(res, dict) else None
+        if not tid:
+            # LOUD, never a silent drop: an unsaved need the agent believes is filed is exactly
+            # the vanishing this tool exists to stop. _kernel_post answers None for every non-2xx,
+            # so the one refusal this tool can tell apart is the kernel's 409: the switch flipped
+            # between the check above and the post — a re-read of the same file names it, and
+            # spares the agent a retry that would refuse forever (2026-09-07).
+            if not _user_todos_on():
+                return USER_TODOS_OFF_ADD, True
+            return ("Couldn't save that — the person you work for will NOT see it. Say what you "
+                    "need directly in your next reply instead, or try again shortly."), True
+        return ("Noted (id %s) — the person you work for will see it. Withdraw it "
+                "(withdraw_user_todo) the moment the need is met or moot." % tid), False
+    if name == "withdraw_user_todo":
+        # Take back a flagged need, by id. An unknown or already-cleared id is a LOUD, plain
+        # answer — never a silent success (plans/user-todos.md).
+        if not _user_todos_on():
+            return USER_TODOS_OFF_WITHDRAW, True     # the switch, as for add_user_todo above
+        if not mid:
+            return "Not inside a romp session.", True
+        tid = str(args.get("id") or "").strip()
+        if not tid:
+            return "Need 'id' — the one add_user_todo returned when you flagged the need.", True
+        res = _kernel_post("/usertodo/withdraw", {"id": mid, "todoId": tid})
+        if not isinstance(res, dict):
+            return "Couldn't withdraw '%s' — it still stands. Try again shortly." % tid, True
+        if res.get("ok"):
+            return "Withdrawn — '%s' no longer stands." % tid, False
+        # ok:false: the kernel's ACCOUNT (state / at / owner, 2026-09-07) says which kind of
+        # nothing-to-do this was, and only one is the agent's error. A row the person already
+        # answered or dismissed, or one this session already withdrew, means the need no longer
+        # stands, which is what the caller wanted: a plain answer, said in full (never a silent
+        # success), but NOT flagged as an error. Two sessions read the old one-size error as a
+        # failure and folded a met need into an error path. An id that is not this session's own,
+        # or unknown, stays the error it always was.
+        state = str(res.get("state") or "")
+        if state == "unknown" and "owner" in res and res["owner"] is None:
+            # the kernel could not LOOK: the store on disk is not one it can read (its shape
+            # guard flagged the file, 2026-09-07). Neither "not yours" nor closed — the row, if
+            # there is one, still stands, and nothing was stamped.
+            return ("Couldn't read the store that holds these notes, so '%s' was not withdrawn. "
+                    "Nothing changed; if the need is met, say so in your next reply." % tid), True
+        if state == "unknown" and res.get("owner") is True:
+            # the asker's OWN row, in a shape the kernel could not read (a damaged or hand-edited
+            # record): neither "not yours" nor closed. The kernel's error names the part it could
+            # not read; the agent's move is to say the need aloud.
+            return ("Couldn't read the record of '%s' (%s). Nothing changed; if the need still "
+                    "stands, say it directly in your next reply."
+                    % (tid, res.get("error") or "its closing record is unreadable")), True
+        if res.get("owner") is False or state == "unknown":
+            return "No note '%s' of yours. Nothing changed." % tid, True
+        when = _when_words(res.get("at"))
+        if state in ("answered", "dismissed"):
+            return ("Already closed: the person you work for %s '%s'%s. Nothing to withdraw."
+                    % (state, tid, when)), False
+        if state == "withdrawn":
+            return "Already withdrawn: '%s' was taken back%s. Nothing changed." % (tid, when), False
+        # a kernel that predates the account answers ok:false alone: the old one-size answer
+        return ("No open note '%s' of yours — it was already answered, dismissed, or "
+                "withdrawn. Nothing changed." % tid), True
     if name == "check_sent":
         if not mid:
             return "Not inside a romp session.", True
@@ -4776,17 +5003,34 @@ def _mcp_call(name, args):
 
 def mcp():
     """Hand-rolled stdio MCP server (newline-delimited JSON-RPC). stdout carries
-    ONLY protocol messages; everything else goes to stderr."""
+    ONLY protocol messages; everything else goes to stderr. Two threads write it — the
+    request loop's replies and the poll thread's unsolicited tools/list_changed — so every
+    write goes through reply(), one whole line per acquisition of out_lock."""
     ensure()
     # Heartbeat presence while this session lives, so an idle REMOTE (federated) session stays addressable
     # over the -R tunnel even before it uses a postal tool. A LOCAL session's loop ends on the bus's first
     # `local: true` answer (the bus ignores local beats anyway; see _heartbeat_loop).
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
     out = sys.stdout
+    out_lock = threading.Lock()
+    ready = threading.Event()      # the client finished initializing; unsolicited notices wait for it
 
     def reply(obj):
-        out.write(json.dumps(obj) + "\n")
-        out.flush()
+        with out_lock:
+            out.write(json.dumps(obj) + "\n")
+            out.flush()
+
+    def list_changed():
+        # The user-todos switch flipped under a connected session: tell the client to re-list
+        # (the listChanged capability declared at initialize). Before the handshake completes
+        # the flip needs no notice — the first tools/list reads the file live — and _SwitchWatch
+        # has already consumed it, so it is not replayed later.
+        if ready.is_set():
+            reply({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+
+    # The user-todos switch poll: fires list_changed on a flip (_switch_poll_loop). Its own thread — the
+    # heartbeat's ends once the bus calls this session local, and the poll must outlive it.
+    threading.Thread(target=_switch_poll_loop, args=(list_changed,), daemon=True).start()
 
     for line in sys.stdin:
         line = line.strip()
@@ -4803,15 +5047,17 @@ def mcp():
                 pv = (msg.get("params") or {}).get("protocolVersion", "2025-06-18")
                 reply({"jsonrpc": "2.0", "id": mid_, "result": {
                     "protocolVersion": pv,
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {"listChanged": True}},   # the switch poll's notification (list_changed)
                     "instructions": MCP_INSTRUCTIONS,
                     "serverInfo": {"name": "romp-postal-service", "version": "1.0"}}})
             elif method == "notifications/initialized":
-                pass   # notification: no response
+                ready.set()   # notification: no response; unsolicited notices may flow from here on
             elif method == "ping":
                 reply({"jsonrpc": "2.0", "id": mid_, "result": {}})
             elif method == "tools/list":
-                reply({"jsonrpc": "2.0", "id": mid_, "result": {"tools": MCP_TOOLS}})
+                ready.set()   # a client that lists has initialized (set BEFORE the read: a flip the poller
+                              # sees from here on is notified; one it saw earlier is in this answer)
+                reply({"jsonrpc": "2.0", "id": mid_, "result": {"tools": _tools_offered()}})   # the user-todo pair only while the switch is on
             elif method == "tools/call":
                 params = msg.get("params") or {}
                 text, is_err = _mcp_call(params.get("name", ""), params.get("arguments") or {})

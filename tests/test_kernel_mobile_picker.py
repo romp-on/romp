@@ -71,6 +71,11 @@ class MobilePickerClickSafe(unittest.TestCase):
         self.assertIn("body.theme-light #mcur{color:var(--menu-fg)}", css)
         self.assertIn("body.theme-light #mcur.colored{color:var(--cbg)}", css)
         self.assertIn("body.theme-light #madd{color:var(--text-muted)}", css)
+        # the two user-todo flags are text tiers too (white-on-dark literals in the dark sheet): the
+        # light block re-skins them like .mclose/#madd, or the flag shows on a dark phone and vanishes
+        # on a light one (white on the light chip and on the cream dropdown)
+        self.assertIn("body.theme-light #mcur .utf{color:var(--text-muted)}", css)
+        self.assertIn("body.theme-light .mrow .utflag{color:var(--text-muted)}", css)
 
 
 if __name__ == "__main__":

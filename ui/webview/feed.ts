@@ -108,6 +108,7 @@ interface AskItem {
               mode?: string; since?: number;   // judgeAuth adds these: which billing its judges ride ('key'|'login') + the first refusal time — romp can't analyze the session until the credential is fixed (the user 2026-08-12)
               capOffer?: { resetsAt: number; window?: string };   // apiError: login-billed session dead on the account's cap + a key on hand → the explicit switch OFFER; the pick is yours alone, both directions (2026-08-30)
               toName?: string; toSid?: string;    // parkedHandoff adds to*
+              count?: number;   // userTodos (the idle-escalation floor, plans/user-todos.md): how many open asks the floored card presents — the badge treats them as already counted
               mid?: string; frm?: string; to?: string; origin?: string; body?: string; gist?: string };   // quarantine (held peer mail) adds these; gist = the bus's 90-char collapse for the compact card line
   summary?: string | null;                         // distiller's key takeaway for a COMPLETED goal → the done card's one auto-written line (kernel asks.append); null until produced
   distillState?: "completed" | "blocked" | null;   // the GENUINE resolution state the distiller line keys on, so the brief/takeaway rides the real block instead of the transient `column` (which recheck/rejudging flicker to working) — the user 2026-07-21; absent from older/remote payloads → fall back to column
@@ -673,6 +674,10 @@ const sessionColors = new Map<string, string>();
 // Rendered as a neutral chip on the grouped-mode session header; flat mode has no headers (the chat view's
 // background-task box still lists the processes there).
 let bgServicesMap: Record<string, string[]> = {};
+// sid -> OPEN user-todo count (kernel build_feed userTodos; plans/user-todos.md slice 2): todos are
+// session-scoped, so EVERY card of the owning session wears the quiet marker — the split card by the
+// session's composer is where Reply/Dismiss live, one click away.
+let userTodosMap: Record<string, number> = {};
 const openBgSvc = new Set<string>();   // sids with the chip's process list expanded — survives re-renders
 // COLLAPSED threads (the user 2026-07-31): grouped mode's session header carries a caret, and folding one
 // leaves the header alone in every column that thread appears in, with a count of what is folded away.
@@ -1235,6 +1240,10 @@ function makeAskCard(it: AskItem): HTMLElement {
   // name — they describe the session's live state, and keeping them OFF the action row stops them shoving
   // the buttons past the card's right edge on a narrow card (the user 2026-06-19; mirrors the ↻ Followed-up
   // chip moved up 2026-06-18). idwrap is flex:1 so the name ellipsizes before the badge is ever clipped.
+  // quiet USER-TODO marker (plans/user-todos.md, slice 2): the owning session flagged something it
+  // needs from you. Session furniture like the state badges, so it rides the name row; dim by
+  // default (a marker, never an alarm — the escalated card's blocked badge is the loud form).
+  const utMark = el("a", "fask-usertodo"); utMark.style.display = "none";
   // COMPACTNESS (the user 2026-07-07): Clear rides the NAME row (right side, after the chips) and the
   // Background/Summary toggles ride the TIME row — freeing a whole action row. So the action row holds only
   // Retry / Revive (rare states); both rows flex-WRAP so nothing overflows or overlaps on a narrow card.
@@ -1251,6 +1260,11 @@ function makeAskCard(it: AskItem): HTMLElement {
   // API badge stays immediately before its Retry button — one visual unit. idwrap keeps only the
   // name. Placement only; every badge's mint/retire semantics are untouched.
   row2.append(idwrap, retryBadge, apiBadge, apiRetry, apiLogin, capLine, capBtn, jauthBadge, blkBadge, origin, fupBadge, dcBadge, nfBadge, intingBadge, intBadge, warnChip, waitOnBadge);
+  // …and the quiet user-todo marker joins those badges as a DIRECT row2 child for the same
+  // grouped-mode reason (inside idwrap it would vanish on grouped cards, and as a direct child it
+  // counts toward row2's liveness). Appended separately so the pinned list above stays exactly the
+  // shape the layout tests match on.
+  row2.append(utMark);
   // the bell BUTTON (the user 2026-07-28): INLINE in row1's metadata cluster, right after the
   // timestamp (the last line's tail), the one spot that never shoves the title — and in-flow, so it
   // cannot overlap the floated Clear. It hides with VISIBILITY, so its slot is reserved whether or
@@ -1461,6 +1475,7 @@ function makeAskCard(it: AskItem): HTMLElement {
   a._warnChip = warnChip;
   a._waitOn = waitOnBadge;
   a._blocked = blkBadge;
+  a._utMark = utMark;
   a._apiBadge = apiBadge; a._apiRetry = apiRetry; a._apiLogin = apiLogin; a._retryBadge = retryBadge; a._revive = revive; a._clr = clr;
   a._capLine = capLine; a._capBtn = capBtn;
   a._jauthBadge = jauthBadge;
@@ -2137,13 +2152,34 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   a._blocked.style.display = showBlk ? "" : "none";
   if (showBlk && it.blocked) {
     // live prompts only — the paused-stall badge retired with the floor (2026-07-07; a failed nudge now
-    // records a real block and the follow-up-failed CHIP carries that story)
+    // records a real block and the follow-up-failed CHIP carries that story). "userTodos" is the
+    // idle-escalation floor (plans/user-todos.md): the session ran out of work it can do alone and
+    // its open asks of you are the frontier — its own badge text, never the ⏸ picker fallthrough.
     a._blocked.textContent = it.blocked.state === "permission" ? "⏸ approval"
+      : it.blocked.state === "userTodos" ? "⚑ waiting on you"
       : "⏸ picker";
-    setTip(a._blocked as HTMLElement, it.blocked.what + " — click to jump to the prompt in the chat");
-    // the prompt (a picker / permission approval) is the session's LIVE bottom → `live` lands the chat right
-    // on it, not wherever it was last scrolled (the user 2026-07-08).
+    setTip(a._blocked as HTMLElement, it.blocked.what + (it.blocked.state === "userTodos"
+      ? " — click to open its chat and reply"
+      : " — click to jump to the prompt in the chat"));
+    // the prompt (a picker / permission approval / the waiting-on-you card by the composer) is the
+    // session's LIVE bottom → `live` lands the chat right on it, not wherever it was last scrolled
+    // (the user 2026-07-08).
     a._blocked.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: it.sid, live: true }); };
+  }
+  // quiet USER-TODO marker: every card of the owning session wears it — except the escalated card,
+  // whose blocked badge above carries the story (one card never says it twice). Rewired on every repaint
+  // (click-safe: the handler lives on the card's own kept element, refreshed per update); the count is in
+  // the card gate's key (feed-card-gate.ts), so a todo registered or withdrawn reaches an unchanged card.
+  const utn = userTodosMap[it.sid] || 0;
+  const utMark = a._utMark as HTMLElement;
+  if (utn > 0 && it.blocked?.state !== "userTodos") {
+    utMark.style.display = "";
+    utMark.textContent = utn > 1 ? `⚑ waiting on you · ${utn}` : "⚑ waiting on you";
+    utMark.title = (utn > 1 ? `this session flagged ${utn} things it needs from you`
+      : "this session flagged something it needs from you") + " — click to open its chat and reply";
+    utMark.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: it.sid, live: true }); };
+  } else {
+    utMark.style.display = "none";
   }
   // The DISTILLER's line (restored 2026-06-29): completed card → takeaway (it.summary), blocked card → decision
   // brief (it.blockSummary), shown ONLY when produced; never a generating placeholder, never the planner's why.
@@ -4988,6 +5024,7 @@ function render() {
     focusId: hoverAskId ?? pinnedAskId, pinnedId: pinnedAskId, notifyOn: cardNotifyOn,
     prefs: { grouped: gprefs.grouped, collapsed: gprefs.collapsed, colormap: gprefs.colormap },
     hostDown: hostIsDown, selfHost: feedSelfHost, repo: prRepoOf, seq: ++renderSeq,
+    userTodos: (sid) => userTodosMap[sid] || 0,   // the quiet per-card marker's count (plans/user-todos.md)
   };
   const desired = new Set<string>();
   reconcileCol(cols.asks, buckets.asks, desired, gate);
@@ -5567,6 +5604,7 @@ function applyFeedPayload(m: any): void {
   awaitingSet = new Set(Array.isArray(m.awaiting) ? m.awaiting : []);   // await-green awaiting dots (the user 2026-07-13)
   unknownSet = new Set(Array.isArray(m.stateUnknown) ? m.stateUnknown : []);   // listed-but-unreadable → gray ring, never a blank
   bgServicesMap = m.bgServices && typeof m.bgServices === "object" ? m.bgServices : {};   // session name -> judge-classified service descs → the session-header chip (2026-07-24)
+  userTodosMap = m.userTodos && typeof m.userTodos === "object" && !Array.isArray(m.userTodos) ? m.userTodos : {};   // sid -> open user-todo count → the quiet per-card marker (plans/user-todos.md); a board-level input, so it rides the card gate's key
   if (Array.isArray(m.order)) sessionOrder = m.order.filter((x: any) => typeof x === "string");   // grouped-mode session rank (tab/lane order)
   pendingHosts = Array.isArray(m.pendingHosts) ? m.pendingHosts.filter((h: any) => typeof h === "string") : [];
   pendingDead = Array.isArray(m.pendingDead) ? m.pendingDead.filter((h: any) => typeof h === "string") : [];

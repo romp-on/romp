@@ -288,6 +288,197 @@ class EchoesSurviveARestart(unittest.TestCase):
                          "a stale /model confirmation must not replay after a restart")
 
 
+class AnswerEchoesKeepTheirId(unittest.TestCase):
+    """A send that ANSWERS a user todo (SdkBackend.send's user_todo) stamps the id on its echo
+    (`_todo`), mirrors it to the registry (`todo`) and gets it back at the boot reseed — the id
+    rides the echo the way it rides the queue entry, so a loss detected later can be tied back to
+    the ask. Every other echo mirrors exactly as before: the plain entry's keys are the pre-todo
+    ones, byte for byte."""
+
+    PLAIN_KEYS = ["t", "text", "author", "rompAuto", "dropped", "uuid"]
+
+    def _backend(self, state):
+        be = sb.SdkBackend(state, "/bin/true", lambda *a, **k: None)
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        return be
+
+    def test_send_stamps_the_id_on_the_echo_and_the_queue_entry(self):
+        be = self._backend(tempfile.mkdtemp())
+        fed = []
+        be._ensure = lambda sid: type("S", (), {
+            "enqueue": lambda self, t, qid=None, qts=None, todo="": fed.append((t, todo))})()
+        self.assertTrue(be.send(SID, "Re: the staging port — 8443.", user_todo="ut-9f2c1a34"))
+        self.assertTrue(be.send(SID, "plain words"))
+        self.assertEqual(fed, [("Re: the staging port — 8443.", "ut-9f2c1a34"), ("plain words", "")],
+                         "the id reaches the queue entry; a plain send hands an empty id")
+        by_text = {a["_echo_text"]: a for a in be.live_atoms(SID) if a.get("_echo_text")}
+        self.assertEqual(by_text["Re: the staging port — 8443."].get("_todo"), "ut-9f2c1a34")
+        self.assertNotIn("_todo", by_text["plain words"], "a plain echo carries no id key at all")
+
+    def test_the_mirror_carries_the_id_and_a_plain_entry_is_byte_identical(self):
+        state = tempfile.mkdtemp()
+        be = self._backend(state)
+        k1, e1 = _echo("plain words", t=1000, key="echo:p")
+        k2, e2 = _echo("Re: the staging port — 8443.", t=1001, key="echo:a")
+        e2["_todo"] = "ut-9f2c1a34"
+        be._live[SID] = {k1: e1, k2: e2}
+        be._persist_echoes(SID)
+        mirror = sb.read_reg(be.state_dir, SID).get("echoes")
+        plain = next(x for x in mirror if x["text"] == "plain words")
+        self.assertEqual(list(plain.keys()), self.PLAIN_KEYS, "the pre-todo shape, key for key, in order")
+        self.assertEqual(plain, {"t": 1000, "text": "plain words", "author": "human",
+                                 "rompAuto": False, "dropped": False, "uuid": "echo:p"})
+        answer = next(x for x in mirror if x["text"] != "plain words")
+        self.assertEqual(answer.get("todo"), "ut-9f2c1a34")
+        # "kernel restart": the reseeded atom carries the id again; the plain one still has no key
+        be2 = sb.SdkBackend(state, "/bin/true", lambda *a, **k: None)
+        atoms = {a["_echo_text"]: a for a in be2.live_atoms(SID) if a.get("_echo_text")}
+        self.assertEqual(atoms["Re: the staging port — 8443."].get("_todo"), "ut-9f2c1a34")
+        self.assertNotIn("_todo", atoms["plain words"])
+
+    def test_boot_reseed_spares_an_answer_still_queued(self):
+        # the persisted queue holds the answer (its id beside it in the sidecar): the reseed's "is it
+        # still queued?" check must see it, or the answer's echo is flagged dropped (and re-delivered a
+        # second time) while its message sits in the queue about to go out
+        state = tempfile.mkdtemp()
+        be = self._backend(state)
+        meta = [{"text": "Re: the staging port — 8443.", "qid": "echo:k1", "qts": 1000000, "todo": "ut-9f2c1a34"}]
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True,
+                                         "queue": ["Re: the staging port — 8443."], "queueMeta": meta})
+        k, e = _echo("Re: the staging port — 8443.")
+        e["_todo"] = "ut-9f2c1a34"
+        be._live[SID] = dict([(k, e)])
+        be._persist_echoes(SID)
+        be2 = sb.SdkBackend(state, "/bin/true", lambda *a, **k: None)
+        atoms = be2.live_atoms(SID)
+        self.assertTrue(atoms and not atoms[0].get("dropped"),
+                        "a queued answer is in flight, not lost")
+        reg = sb.read_reg(state, SID)
+        self.assertEqual(reg.get("queue"), ["Re: the staging port — 8443."],
+                         "and the reseed never rewrote the queue (no duplicate)")
+        self.assertEqual(reg.get("queueMeta"), meta, "id intact")
+
+
+class TodoAnswersAnnounceTheirLoss(unittest.TestCase):
+    """The echo of a user-todo ANSWER carries the todo id (send(user_todo=...) — pinned above by
+    AnswerEchoesKeepTheirId), and the drop-marking hands (sid, tid, text) to the constructor's
+    todo_lost callback — the seam that returns a restart-lost answer to the asks the user still
+    owes. Constructor-wired on purpose: the boot reseed fires drop marks from __init__, before any
+    post-construction assignment could arm it. The rewind's dropped head takes the same seam."""
+
+    ANSWER = "Re: need the staging port — 8443."
+    TID = "ut-9f2c1a34"
+
+    def _backend(self, state=None, lost=None):
+        return sb.SdkBackend(state or tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None,
+                             todo_lost=lost)
+
+    def _todo_echo(self, dropped=False):
+        k, e = _echo(self.ANSWER)
+        e["_todo"] = self.TID
+        if dropped:
+            e["dropped"] = True
+        return k, e
+
+    def test_the_drop_marking_hands_the_id_to_the_callback(self):
+        calls = []
+        be = self._backend(lost=lambda sid, tid, text: calls.append((sid, tid, text)))
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        k, e = self._todo_echo()
+        be._live[SID] = dict([(k, e)])
+        be._mark_dropped_echoes(SID, [])
+        self.assertEqual(calls, [(SID, self.TID, self.ANSWER)])
+        self.assertTrue(be._live[SID][k].get("dropped"), "the visible marking still happens")
+
+    def test_an_echo_still_queued_fires_nothing(self):
+        calls = []
+        be = self._backend(lost=lambda *a: calls.append(a))
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        k, e = self._todo_echo()
+        be._live[SID] = dict([(k, e)])
+        be._mark_dropped_echoes(SID, [self.ANSWER])
+        self.assertEqual(calls, [], "still in the surviving queue → in flight, not lost")
+
+    def test_an_already_dropped_echo_never_refires(self):
+        calls = []
+        be = self._backend(lost=lambda *a: calls.append(a))
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        k, e = self._todo_echo(dropped=True)
+        be._live[SID] = dict([(k, e)])
+        be._mark_dropped_echoes(SID, [])
+        self.assertEqual(calls, [], "the loss was already announced — marking is one-shot")
+
+    def test_a_plain_dropped_echo_fires_nothing(self):
+        calls = []
+        be = self._backend(lost=lambda *a: calls.append(a))
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        k, e = _echo("an ordinary lost send")
+        be._live[SID] = dict([(k, e)])
+        be._mark_dropped_echoes(SID, [])
+        self.assertEqual(calls, [], "no id on the echo → nothing to reopen")
+
+    def test_a_backend_built_without_the_seam_keeps_marking(self):
+        # tests and older kernels: no callback → the drop marking is unchanged, nothing raised
+        be = self._backend()
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        k, e = self._todo_echo()
+        be._live[SID] = dict([(k, e)])
+        be._mark_dropped_echoes(SID, [])
+        self.assertTrue(be._live[SID][k].get("dropped"))
+
+    def test_the_id_reseeds_across_a_restart_and_the_boot_mark_fires(self):
+        state = tempfile.mkdtemp()
+        be = self._backend(state=state)
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        k, e = self._todo_echo()
+        be._live[SID] = dict([(k, e)])
+        be._persist_echoes(SID)
+        calls = []
+        be2 = self._backend(state=state, lost=lambda sid, tid, text: calls.append((sid, tid)))
+        self.assertEqual(calls, [(SID, self.TID)],
+                         "the boot reseed hands the lost answer's id to the kernel")
+        self.assertEqual(be2.live_atoms(SID)[0].get("_todo"), self.TID)
+
+    def test_a_callback_error_never_breaks_the_marking(self):
+        def boom(*a):
+            raise RuntimeError("kernel side failed")
+
+        be = self._backend(lost=boom)
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        k, e = self._todo_echo()
+        be._live[SID] = dict([(k, e)])
+        be._mark_dropped_echoes(SID, [])
+        self.assertTrue(be._live[SID][k].get("dropped"),
+                        "the loss stays visible even when the reopen seam raises")
+
+    def test_a_rewind_dropped_answer_head_is_handed_to_the_callback(self):
+        # the other loss event: the CLI refuses a rewind connect and the held edit turn is pulled
+        # off the queue — when that head is an answer, its ask must visibly return too
+        calls = []
+        be = self._backend(lost=lambda sid, tid, text: calls.append((sid, tid, text)))
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        s = sb.SdkSession(be, sb.read_reg(be.state_dir, SID))
+        s.enqueue(self.ANSWER, todo=self.TID)
+        s._rewind_bare = False
+        s._rewind_failed(RuntimeError("refused"))
+        self.assertEqual(calls, [(SID, self.TID, self.ANSWER)])
+        self.assertEqual(s.pending(), [], "the head was dropped, as before")
+
+    def test_a_bare_rollback_or_a_plain_head_hands_nothing_over(self):
+        calls = []
+        be = self._backend(lost=lambda *a: calls.append(a))
+        sb.write_reg(be.state_dir, SID, {"sid": SID, "alive": True})
+        s = sb.SdkSession(be, sb.read_reg(be.state_dir, SID))
+        s.enqueue("an unrelated held message")
+        s._rewind_bare = True
+        s._rewind_failed(RuntimeError("refused"))
+        self.assertEqual(s.pending(), ["an unrelated held message"], "a bare rollback drops no head")
+        s._rewind_bare = False
+        s._rewind_failed(RuntimeError("refused"))
+        self.assertEqual(s.pending(), [])
+        self.assertEqual(calls, [], "a plain head carries no id → nothing to reopen")
+
+
 class DroppedSendsAnnounceThemselves(unittest.TestCase):
     """Guarantee 4 (the user 2026-07-29): an echo that survives its holder is marked `dropped` at the
     exact event that orphaned it — the boot reseed, or a fresh CLI spawning — so the chat can render

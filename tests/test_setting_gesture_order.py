@@ -754,6 +754,9 @@ class StaleGestureAnswersTheDeliveringSocket(_Base):
                  # gt-gates and answers like the rest (2026-09-01)
                  ({"type": "setThinkingSummaries", "enabled": True}, {"type": "setThinkingSummaries", "enabled": False},
                   "thinking-summaries", True),
+                 # the user-todos switch (2026-09-03) is the same per-install class
+                 ({"type": "setUserTodos", "enabled": True}, {"type": "setUserTodos", "enabled": False},
+                  "user-todos", True),
                  ({"type": "setIndexEffort", "effort": "high"}, {"type": "setIndexEffort", "effort": "low"},
                   "index-effort", "high"),
                  ({"type": "setDistillModel", "model": "haiku"}, {"type": "setDistillModel", "model": "triage"},
@@ -795,7 +798,7 @@ class VersionReportsEveryStoredStamp(_Base):
     def test_a_fresh_install_reports_every_store_at_zero(self):
         gts = km._version_info()["settingsGt"]
         self.assertEqual(set(gts), set(km._GT_STORES), "one key per gt-gated store, no more, no less")
-        self.assertEqual(len(km._GT_STORES), 19, "five toggles/modes + fourteen kernel-side stores (judge-concurrency since T277, tmux-backend since T288, judge-fast with the judges' fast mode, distill-fast and index-fast with T300's box per tier)")
+        self.assertEqual(len(km._GT_STORES), 20, "six toggles/modes + fourteen kernel-side stores (judge-concurrency since T277, tmux-backend since T288, judge-fast with the judges' fast mode, distill-fast and index-fast with T300's box per tier)")
         self.assertEqual(set(gts.values()), {0}, "nothing applied yet reads 0 — nothing to outrank")
         self.assertEqual(json.loads(json.dumps(gts)), gts, "plain JSON — ints, no paths, nothing to redact")
 
@@ -810,10 +813,12 @@ class VersionReportsEveryStoredStamp(_Base):
         self.assertEqual(km._set_judge_fast("on", gt=T_NEW + 10), T_NEW + 10)
         self.assertEqual(km._set_distill_fast("on", gt=T_NEW + 11), T_NEW + 11)
         self.assertEqual(km._set_index_fast("on", gt=T_NEW + 12), T_NEW + 12)
+        self.assertEqual(km._set_user_todos(True, gt=T_NEW + 13), T_NEW + 13)
         gts = km._version_info()["settingsGt"]
         want = {"judge-model": T_NEW, "auto-nudge": T_OLD, "compact-suggest": T_NEW + 5,
                 "file-editing": T_NEW + 6, "update-mode": T_NEW + 7, "thinking-summaries": T_NEW + 8,
-                "comment-fast": T_NEW + 9, "judge-fast": T_NEW + 10, "distill-fast": T_NEW + 11, "index-fast": T_NEW + 12}
+                "comment-fast": T_NEW + 9, "judge-fast": T_NEW + 10, "distill-fast": T_NEW + 11, "index-fast": T_NEW + 12,
+                "user-todos": T_NEW + 13}
         for store, gt in want.items():
             self.assertEqual(gts[store], gt, store)
         for store in set(km._GT_STORES) - set(want):
@@ -834,7 +839,8 @@ class VersionReportsEveryStoredStamp(_Base):
         client = {"send": lambda s: sent.append(json.loads(s)), "alive": True}
         newer = [{"type": "setAutoNudge", "enabled": False}, {"type": "setCompactSuggest", "enabled": True},
                  {"type": "setFileEditing", "enabled": True}, {"type": "setUpdateMode", "mode": "auto"},
-                 {"type": "setThinkingSummaries", "enabled": True}, {"type": "setJudgeModel", "model": "fable"},
+                 {"type": "setThinkingSummaries", "enabled": True}, {"type": "setUserTodos", "enabled": True},
+                 {"type": "setJudgeModel", "model": "fable"},
                  {"type": "setIndexModel", "model": "fable"}, {"type": "setJudgeEffort", "effort": "high"},
                  {"type": "setIndexEffort", "effort": "high"}, {"type": "setJudgeConcurrency", "value": "4"},
                  {"type": "setDistillModel", "model": "haiku"},
@@ -844,7 +850,8 @@ class VersionReportsEveryStoredStamp(_Base):
                  {"type": "setDistillFast", "enabled": True}, {"type": "setIndexFast", "enabled": True}]
         older = [{"type": "setAutoNudge", "enabled": True}, {"type": "setCompactSuggest", "enabled": False},
                  {"type": "setFileEditing", "enabled": False}, {"type": "setUpdateMode", "mode": "off"},
-                 {"type": "setThinkingSummaries", "enabled": False}, {"type": "setJudgeModel", "model": "opus"},
+                 {"type": "setThinkingSummaries", "enabled": False}, {"type": "setUserTodos", "enabled": False},
+                 {"type": "setJudgeModel", "model": "opus"},
                  {"type": "setIndexModel", "model": "opus"}, {"type": "setJudgeEffort", "effort": "low"},
                  {"type": "setIndexEffort", "effort": "low"}, {"type": "setJudgeConcurrency", "value": "2"},
                  {"type": "setDistillModel", "model": "triage"},
@@ -858,7 +865,7 @@ class VersionReportsEveryStoredStamp(_Base):
                 km.Handler._dispatch_ws(types.SimpleNamespace(), dict(o, gt=T_OLD), client)
         named = {m["setting"] for m in sent if m.get("type") == "settingStale"}
         self.assertEqual(named, set(km._version_info()["settingsGt"]), "frames and the report share one vocabulary")
-        self.assertEqual(len(named), 19)   # fourteen kernel-side stores since T300's box per judge tier
+        self.assertEqual(len(named), 20)   # six toggles/modes + fourteen kernel-side stores since T300's box per judge tier
 
 
 class ASkewedClockCannotLockTheStore(_Base):

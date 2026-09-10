@@ -50,8 +50,9 @@ class BlockedNoGoal(unittest.TestCase):
 
     def test_build_feed_synthesizes_it_only_when_blocked_with_no_floorable_goal(self):
         src = inspect.getsource(km.build_feed)
-        # the synthesis is gated: no working card AND no top goal to floor under BLOCKED (perm_top None) ...
-        self.assertIn("if not had_working and perm_top is None and ps:", src)
+        # the synthesis is gated: no working card AND no top goal to floor under BLOCKED (perm_top
+        # None; todo_top joined the guard 2026-08-22 — a todo-floored card is had-working-equivalent) ...
+        self.assertIn("if not had_working and perm_top is None and todo_top is None and ps:", src)
         # ... and only as the fallback when there's no provisional card and a live perm/picker state
         self.assertIn("elif perm_state in _NEEDS_INPUT_STATES:", src)
         self.assertIn("_blocked_placeholder(s, name, color, fsid, live, now, perm_state", src)

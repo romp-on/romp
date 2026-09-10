@@ -263,6 +263,71 @@ class SendAbortsWhenTmuxAnswersNonzero(unittest.TestCase):
         self.assertEqual(err, "")
 
 
+class PasteVerdictHooks(unittest.TestCase):
+    """_tmux_send's verdict seam. TmuxBackend.send returns truthy the moment the paste thread is
+    started, so a caller whose bookkeeping keys on that return (the user-todo answer stamp) would
+    otherwise never hear that the clear-guard above, or a dead server at a checked step, refused
+    the paste. `on_refused` fires iff the message demonstrably never reached the CLI; `on_delivered`
+    fires once the submitting Enter landed; exactly one of them fires per send, from the paste
+    thread, after the pane lock is released. A hookless send is the call it always was."""
+
+    def setUp(self):
+        self._saved_tmux = km._TMUX
+
+    def tearDown(self):
+        km._TMUX = self._saved_tmux
+
+    def _send(self, pane, **kw):
+        km._TMUX = pane
+        fired = []
+        km._tmux_send(SESSION, "the composer message", _async=False,
+                      on_refused=lambda: fired.append("refused"),
+                      on_delivered=lambda: fired.append("delivered"), **kw)
+        return fired
+
+    def test_a_clear_guard_refusal_fires_on_refused_only(self):
+        pane = SendRefusesToConcatenate._RecordingPane(["a draft typed straight into the terminal"],
+                                                       honors_kill=False)
+        self.assertEqual(self._send(pane), ["refused"])
+        self.assertEqual(pane.pastes, [], "the refusal IS the verdict: nothing was pasted")
+
+    def test_a_clean_paste_fires_on_delivered_only(self):
+        pane = SendRefusesToConcatenate._RecordingPane(["an interrupt-restored prompt"])
+        self.assertEqual(self._send(pane), ["delivered"])
+        self.assertIn(("Enter",), pane.keys_sent)
+
+    def test_every_checked_step_failure_is_a_refusal(self):
+        for step in ("set_buffer", "paste_buffer", "enter"):
+            with self.subTest(step=step):
+                pane = SendRefusesToConcatenate._RecordingPane([""], fail=(step,))
+                self.assertEqual(self._send(pane), ["refused"],
+                                 "a dead server at %s is not a delivery" % step)
+
+    def test_the_hooks_fire_after_the_pane_lock_is_released(self):
+        # the hooks take their own locks (the todo store's, the pending-mark file's); a hook
+        # that ran under the pane lock would serialize those behind every send and interrupt
+        seen = []
+
+        def probe():
+            lock = km._pane_io_lock(SESSION)
+            free = lock.acquire(blocking=False)
+            if free:
+                lock.release()
+            seen.append(free)
+        km._TMUX = SendRefusesToConcatenate._RecordingPane(["an interrupt-restored prompt"])
+        km._tmux_send(SESSION, "the composer message", _async=False, on_delivered=probe)
+        km._TMUX = SendRefusesToConcatenate._RecordingPane(["a draft"], honors_kill=False)
+        km._tmux_send(SESSION, "the composer message", _async=False, on_refused=probe)
+        self.assertEqual(seen, [True, True], "both verdicts fire with the pane lock free")
+
+    def test_a_hookless_send_is_unchanged(self):
+        pane = SendRefusesToConcatenate._RecordingPane(["an interrupt-restored prompt"])
+        km._TMUX = pane
+        km._tmux_send(SESSION, "the composer message", _async=False)
+        self.assertEqual(pane.buffers, ["the composer message"])
+        self.assertIn(("Enter",), pane.keys_sent)
+
+
 class TmuxSettersTypeTheClisOwnCommand(unittest.TestCase):
     """TmuxBackend has no control channel: set_model and set_effort type the CLI's own command into the pane
     (SessionBackend documents the per-backend split). The one asymmetry is pinned here. `/model X` opens a

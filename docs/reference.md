@@ -203,6 +203,8 @@ romp mail remote                 # legacy singleton scheme only (ROMP_POSTAL_PEE
 | `set_working(text)` | Publish what you hold so peers steer clear |
 | `check_sent()` | Whether your sent messages were read yet |
 | `recall_message(to, id?)` | Unsend a message the recipient hasn't read |
+| `add_user_todo(text, detail?)` | Flag something you need from the person you work for and keep working; returns an id. Offered only while the **User todos** switch is on (see [User todos](#user-todos)) |
+| `withdraw_user_todo(id)` | Take that request back once it is met or moot |
 
 Not the same tools: romp peers are discovered only through the postal service's `list_agents`. Claude Code also ships its own `ListAgents` and `SendMessage` tools, which list the account's Anthropic cloud sessions and this session's own subagents: a different system, and a cloud session in that list is easy to mistake for a romp peer (the user 2026-09-08, who found one there that read like a session of theirs). The recommended setting is `"permissions": { "deny": ["ListAgents"] }` in the Claude Code settings, so the only list of agents a session sees is romp's; `SendMessage` must stay allowed, because continuing a subagent uses it.
 
@@ -457,6 +459,35 @@ error, retry-paused, or that you interrupted or ended are left alone. On the
 first run after an upgrade, a session holding a genuinely old queued backlog
 may get one catch-up turn delivering it; that is this feature doing its job
 once.
+
+### User todos
+
+A session can flag a decision or an input it needs from you and keep working
+meanwhile; the guide's [User todos](guide.md#user-todos) section covers what
+you see and what the session sees. A request's line holds up to 500 characters
+and its detail up to 4000; a longer one is refused, never cut short, and the
+session is told to keep the note to one line and put the rest in its reply. If
+the kernel cannot read its request store (`user-todos.json` under
+`~/.local/state/romp/`), the card says so in place of the requests, Reply and
+Dismiss change nothing and say so, a session's withdrawal is told the store
+could not be read, and a request a session tries to file is refused (the
+session is told to say the need in its next reply, not why); the kernel log
+names the file and what it found. A withdrawal that meets a damaged closing
+record is told so too, with the record named, never reported as closed.
+
+The feature is off by default. The gear's **User todos** checkbox (under
+*Sessions*) turns it on for one machine at a time: each kernel keeps its own
+copy, and the choice does not spread to other attached machines. While it is
+off, sessions on that machine are not offered the tools that flag or withdraw a
+request, nothing is listed, nothing is handed back on resume, and the app-icon
+count is the one from before the feature. A session already connected gains or
+loses the two tools within a few seconds of the flip, in either direction; no
+restart or revival is needed. Requests flagged earlier stay stored and reappear
+when you turn it back on; at startup, the kernel's log says how many are
+waiting. The switch is `user-todos-enabled.json` in the same directory, holding
+`{"enabled": true}` or `false`; a file of any other shape reads as off and is
+reported once in the kernel log and the postal bus's log, and an absent file is
+off, silently.
 
 ### Install-time switches
 

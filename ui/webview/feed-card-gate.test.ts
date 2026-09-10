@@ -32,6 +32,7 @@ const env = (over: Partial<GateEnv> = {}): GateEnv => ({
   hostDown: () => false,
   selfHost: "TESTHOST",
   repo: () => null,
+  userTodos: () => 0,
   seq: 1,
   ...over,
 });
@@ -61,6 +62,7 @@ test("each board-level input flips the key on its own", () => {
     "the session's host going down":   { hostDown: (sid) => sid === WEB },
     "this machine's own name":         { selfHost: "OTHERHOST" },
     "the session's GitHub repository": { repo: (sid) => (sid === WEB ? "example/notes-api" : null) },
+    "the session's open user todos":   { userTodos: (sid) => (sid === WEB ? 2 : 0) },
   };
   const seen = new Set<string>([base]);
   for (const [what, over] of Object.entries(flips)) {
@@ -80,6 +82,8 @@ test("inputs that belong to OTHER sessions leave this card's key alone", () => {
   assert.equal(cardInputsKey(it, env({ hostDown: (sid) => sid === API })), base, "another host down");
   assert.equal(cardInputsKey(it, env({ repo: (sid) => (sid === API ? "example/notes-api" : null) })), base,
     "another session's repository");
+  assert.equal(cardInputsKey(it, env({ userTodos: (sid) => (sid === API ? 2 : 0) })), base,
+    "another session's open user todos");
 });
 
 test("the colour echo's in-place write reaches the gate through the key (the object identity cannot carry it)", () => {

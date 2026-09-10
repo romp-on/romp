@@ -79,7 +79,8 @@ fi
 mkdir -p "$HOME/.claude/hooks" "$HOME/.claude/skills"
 
 for h in romp-summarize.sh romp-postal-drain.sh romp-postal-ensure.sh \
-         romp-postal-revive.sh romp-postal-context.sh romp-wake.sh tmux-status.sh; do
+         romp-postal-revive.sh romp-postal-context.sh romp-usertodo-context.sh \
+         romp-wake.sh tmux-status.sh; do
     ln -sf "$ROMP_DIR/hooks/$h" "$HOME/.claude/hooks/$h"
 done
 echo "  Symlinked romp hooks into ~/.claude/hooks/"
@@ -116,7 +117,8 @@ WANT = {  # event -> [(hook script, timeout secs, async)]
     "SessionStart":     [("tmux-status.sh", 5, False),
                          ("romp-postal-ensure.sh", 5, True),
                          ("romp-postal-revive.sh", 8, False),
-                         ("romp-postal-context.sh", 5, False)],  # romp sessions: load the romp-postal skill
+                         ("romp-postal-context.sh", 5, False),   # romp sessions: load the romp-postal skill
+                         ("romp-usertodo-context.sh", 5, False)],  # resume/compact: open user todos as context
     "UserPromptSubmit": [("tmux-status.sh", 5, False),
                          ("romp-summarize.sh", 10, True),
                          ("romp-wake.sh", 5, True)],     # poke the kernel → judges run NOW, not on the 20s tick

@@ -542,6 +542,11 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    opening dots (the loading-state rule; the working dot above stays solid on purpose — that rule is about
    real work, this one is about a load in progress). */
 .tab-dot.opening { background: var(--accent); animation: opening-line-pulse 1.2s ease-in-out infinite; }
+/* USER-TODO glyph (plans/user-todos.md): ⚑ right after the name — the session flagged something it
+   needs from you. Its own element, never a .tab-dot variant (pips encode turn state); quiet and
+   non-numeric. Themed through --dim like .tab-close: classic tabs have no chip fill, so the glyph
+   sits on the page plane and a hardcoded white would vanish under body.theme-light. */
+.tab-usertodo { flex: 0 0 auto; color: var(--dim); font-size: 10px; line-height: 1; }
 /* Vertical context gauge right of the name (the user 2026-08-08): the statusline battery rotated
    upright — fills bottom-up with the context-used %, in the SAME global-colormap colour (fill set
    inline by tabCtxGauge, render.ts), no % text. A faint track so an empty gauge still reads as
@@ -2278,6 +2283,37 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .todo-in_progress .todo-text { color: var(--fg); font-weight: 600; }
 .todo-pending .todo-mark { color: var(--dim); }
 .todo-pending .todo-text { color: var(--dim); }
+/* the split card's second section (plans/user-todos.md): "Waiting on you" — needs the agent
+   flagged for the person it works for, with Reply/Dismiss per row. Reuses the card's own head
+   style; the buttons wear the bg-stop vocabulary (never the accent for a status meaning). */
+/* the "Waiting on you" section heading inside the to-do notice body: the source label's rung (.notice-src),
+   so the two headings the body can carry read alike; a top margin parts it from the checklist above */
+.ut-head { margin-top: 8px; margin-bottom: 6px; font-weight: 700; color: var(--dim); font-size: 0.72em;
+  letter-spacing: 0.06em; text-transform: uppercase; }
+.ut-item { padding: 2px 0; }
+.ut-line { display: flex; gap: 8px; align-items: baseline; line-height: 1.45; }
+.ut-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.ut-has-detail { cursor: pointer; }
+.ut-has-detail:hover { text-decoration: underline dotted; }
+/* the "▸ details" hint trailing a row that HAS detail: the row's chrome rung (.ut-btn / .ut-head)
+   in the dim text color — a disclosure cue, not a status, so never the accent; inline-block keeps
+   the text's dotted hover underline off it. A bare row renders none. */
+.ut-more { display: inline-block; margin-left: 6px; font-size: 0.72em; color: var(--dim); white-space: nowrap; }
+.ut-has-detail:hover .ut-more { color: var(--fg); }
+/* progressive disclosure: the one-line version by default; detail opens on click (keyed fold) */
+.ut-detail { display: none; color: var(--dim); font-size: 0.86em; line-height: 1.4; margin: 2px 0 4px; white-space: pre-wrap; }
+.ut-detail.open { display: block; }
+.ut-btn { flex: 0 0 auto; font-size: 0.72em; padding: 1px 8px; border-radius: 9px; cursor: pointer;
+  background: none; border: 1px solid var(--box-border); color: var(--dim); }
+.ut-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ut-dismiss.armed { border-color: var(--err); color: var(--err); }
+/* the Reply modal: the need being answered, quoted above the box */
+.ut-reply-quote { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ut-reply-input { display: block; width: 100%; box-sizing: border-box; margin: 10px 0 2px; padding: 7px 9px;
+  font: inherit; color: var(--fg); background: var(--code-bg);
+  border: 1px solid var(--box-border); border-radius: 6px; outline: none; resize: vertical; }
+.ut-reply-input:focus { border-color: var(--accent); }
+.ut-reply-input.bad { border-color: var(--err); }   /* the theme's error red, re-inked under body.theme-light */
 
 /* ---------- postal cards (romp peer mail) + teammate messages ---------- */
 /* Both are THE notice since 2026-09-08 (renderPostalService / renderTeammate): a peer's mail wears its

@@ -56,7 +56,7 @@ test("a card repaints only when its object or a board-level input it reads chang
   assert.match(SRC, /function updateAskCard\(card: HTMLElement, it: AskItem\) \{\n\s*const a = card as any;\n\s*a\._it = it;/,
     "updateAskCard stashes the object the gate compares, first thing");
   // the env, built once per render from everything a card's paint reads outside its object
-  assert.match(SRC, /const gate: GateEnv = \{\n\s*dot: dotFor, working: \(n\) => workingSet\.has\(n\),\n\s*focusId: hoverAskId \?\? pinnedAskId, pinnedId: pinnedAskId, notifyOn: cardNotifyOn,\n\s*prefs: \{ grouped: gprefs\.grouped, collapsed: gprefs\.collapsed, colormap: gprefs\.colormap \},\n\s*hostDown: hostIsDown, selfHost: feedSelfHost, repo: prRepoOf, seq: \+\+renderSeq,\n\s*\};/);
+  assert.match(SRC, /const gate: GateEnv = \{\n\s*dot: dotFor, working: \(n\) => workingSet\.has\(n\),\n\s*focusId: hoverAskId \?\? pinnedAskId, pinnedId: pinnedAskId, notifyOn: cardNotifyOn,\n\s*prefs: \{ grouped: gprefs\.grouped, collapsed: gprefs\.collapsed, colormap: gprefs\.colormap \},\n\s*hostDown: hostIsDown, selfHost: feedSelfHost, repo: prRepoOf, seq: \+\+renderSeq,\n\s*userTodos: \(sid\) => userTodosMap\[sid\] \|\| 0,[^\n]*\n\s*\};/);
   assert.match(SRC, /reconcileCol\(cols\.asks, buckets\.asks, desired, gate\);\n\s*reconcileCol\(cols\.needsInput, buckets\.needsInput, desired, gate\);\n\s*reconcileCol\(cols\.completed, buckets\.completed, desired, gate\);/);
   // the latches: the card's Retry is a manual retry, and each latch re-arms on the kernel's reply for ITS request
   // (review find, 2026-09-08): a refused apiRetry names the session, reviveFailed names the revived id

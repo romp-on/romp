@@ -51,6 +51,10 @@ EXPECTED_BARE = {
     # accept — each assembled string IS comment-form (the test asserts POSTAL_RE matches it
     # before neutralizing); only the %s placeholder keeps this source line from reading as one.
     "test_marker_neutralizer.py": 1,
+    # test_user_todos.py keeps its own copy of that variant probe to cover the answer body's two
+    # halves (_user_todo_answer_body, which the standalone neutralizer suite doesn't exercise):
+    # the same assembled comment-form string, one bare hit.
+    "test_user_todos.py": 1,
 }
 
 
