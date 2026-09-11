@@ -5153,6 +5153,8 @@ class SdkSession:
         #   total when the deltas were written (`usage: this.totalUsage`) and is the TURN's own total
         #   on the current CLI — diffing it under-counted every turn but the first (the user
         #   2026-09-06). Which counter is which, and the measurement: _turn_usage.
+        self._spend_unknown_open = False   # True from an attach-unknown seed until the first LIVE result: every replayed
+        #                                    record meanwhile is the lifetime so far and advances the watermarks (T354)
         self._spend_baseline = "fresh"     # what the watermarks stand on: "fresh" (a new CLI process: zero, or the
         #                                    resumed transcript's cost-state record), "attach-pending" (a host attach:
         #                                    the surviving CLI's watermark is read from the registry at the first
@@ -6944,11 +6946,13 @@ class SdkSession:
             toks = cs.get("tokens") if isinstance(cs.get("tokens"), dict) else {}
             self._last_usage_totals = {k: int(v) for k, v in toks.items() if isinstance(v, (int, float))}
             self._spend_baseline = "seeded"
+            self._spend_unknown_open = False
             self.backend._log("spend: %s %s (%s): watermarks seeded at the registry's "
                               "cumulative $%.2f so the first result records only this turn" % (self.name, how, cli, cs["total"]),
                               problem=False)
             return True
         self._spend_baseline = "attach-unknown"
+        self._spend_unknown_open = True
         self.backend._log("spend: %s %s (%s) with no matching watermark on record (%s): its "
                           "first result's total is the process lifetime's, so that result records no spend; the "
                           "watermark is written from it" % (self.name, how.replace("its surviving", "a surviving").replace("its dead", "a dead"), cli or "unnamed",
@@ -7505,7 +7509,6 @@ class SdkSession:
                         # registry's watermark for that process can be read (T354)
                         self._seed_from_reg_cost_state()
                         baseline = self._spend_baseline
-                    unknown = first and baseline == "attach-unknown"
                     # a REDELIVERED result (M2 of 1450's review, reshaped by its round two): hostAck is written at
                     # most once a second while the watermark moves per result, so a kernel death leaves processed
                     # results past the acknowledged offset and the attach's replay hands them over again (the whole
@@ -7518,7 +7521,16 @@ class SdkSession:
                     # it always did; read from the total alone, a reset latched the session at $0 for the process's life
                     tag = getattr(self, "_result_tag", None)          # popped at the top of _on_message for every result
                     duplicate = self._spend_redelivered(tag, total)
-                    if not duplicate:                                  # a replayed record names the replayed epoch: not the watermark's
+                    # the UNKNOWN window (the fix's second round): with no watermark on record, every replayed record is
+                    # the lifetime so far and advances the watermarks to its total (a whole-journal replay, the attach
+                    # whose hostAck names another host, hands over several); the first LIVE result closes the window and
+                    # records its own delta. Keyed on the connect's first result alone, the watermark stayed at the first
+                    # replay's total and the next live result folded the span
+                    unknown = baseline == "attach-unknown" and (first or (duplicate and getattr(self, "_spend_unknown_open", False)))
+                    if not duplicate:
+                        self._spend_unknown_open = False
+                    if not duplicate or unknown:                       # a replayed record names the replayed epoch, not the
+                        #                                                watermark's, unless the replay IS the watermark's source
                         self._spend_session_id = str(getattr(msg, "session_id", "") or "")   # the CLI's session epoch (a /clear moves it)
                     if unknown or duplicate:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
@@ -7542,6 +7554,9 @@ class SdkSession:
                     else:
                         turn_u = self._turn_usage(msg)
                     if unknown:       # the token watermarks moved with the map; the lifetime's counts are not this turn's
+                        #   (a record without the modelUsage map leaves the token watermark empty, and the next live result's
+                        #   map folds whole: the map is the only cumulative count a result carries, so no line here can do
+                        #   better; the dollar watermark is right either way. Noted in the fix's second round)
                         turn_u = {k: 0 for k in (turn_u or {})} if isinstance(turn_u, dict) else turn_u
                     self._turn_cumulative = float(total)          # the turn row carries the CLI's own cumulative (T354)
                     self._turn_baseline = baseline if first else None
@@ -7576,10 +7591,10 @@ class SdkSession:
                                               "transcript than the connect-time seed (last_cost_state)."
                                               % (self.name, delta, SANE_TURN_USD, total), problem=False)
                     elif unknown:
-                        self.backend._log("spend: %s's first result after a host attach carries the surviving CLI's "
+                        self.backend._log("spend: %s's %s after a host attach carries the surviving CLI's "
                                           "cumulative total ($%.2f) with no watermark on record: this turn's own cost is "
                                           "unknowable and nothing was folded; the watermark is set from here"
-                                          % (self.name, total), problem=False)
+                                          % (self.name, "first result" if first else "replayed result", total), problem=False)
             finally:
                 # T304: one durable row per settled turn (turns.jsonl, see the ledger note by
                 # append_turn_row) — the event stamps the restart monitors read. In the finally, ahead of

@@ -37,9 +37,11 @@ class _AssistantMessage:
     pass
 
 
-def _result(total, tokens_in):
+def _result(total, tokens_in, session=""):
     r = _ResultMessage()
     r.total_cost_usd = total
+    if session:
+        r.session_id = session
     r.model_usage = {"claude-x": {"inputTokens": tokens_in, "outputTokens": 0, "cacheReadInputTokens": 0,
                                   "cacheCreationInputTokens": 0, "webSearchRequests": 0, "costUSD": 0.0}}
     r.usage = {"input_tokens": 9999}
@@ -358,9 +360,9 @@ class Rebill(unittest.TestCase):
         self.assertEqual(self._cost_state()["session"], "", "the epoch is stamped from live results (these doubles carry none)")
 
     def test_a_replayed_first_result_under_an_unknown_baseline_sets_the_watermark_so_the_next_live_turn_is_its_own(self):
-        # live on the fix's first boot (2026-09-11 22:37Z): every session's replayed first result was attach-unknown and
-        # folded nothing, right, but the duplicate branch left the watermark at zero, and the next LIVE result folded the
-        # whole cumulative once per session (romp_PR-triage 159.20 = its cumulative, romp_timeline 309.71 = its cumulative)
+        # live on the fix's first boot (2026-09-11 22:37Z): every hosted session's replayed first result was attach-unknown
+        # and folded nothing, right, but the duplicate branch left the watermark at zero, and the next LIVE result folded
+        # the whole cumulative once per session, each by its own lifetime (a synthetic sequence below)
         s = self._session(attach=True, hello_cli=("4242", "s1"), journal_next=10, tags=[{"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
         self.assertEqual(s._spend_baseline, "attach-pending")
         self._run(s, _result(308.15, 90000))                # replayed, no watermark on record: attach-unknown
@@ -384,6 +386,26 @@ class Rebill(unittest.TestCase):
         self._run(s2, _result(520.0, 91000))
         self.assertAlmostEqual(self._day()["usd"], 20.0, msg="the unfolded 12.5 rides the live delta")
         self.assertEqual(self._day()["tokIn"], 1000)
+
+    def test_every_replayed_record_under_an_unknown_baseline_advances_the_watermarks_until_the_first_live_result(self):
+        # the fix's second round: a whole-journal replay (hostAck naming another host) hands over several results; keyed
+        # on the connect's first result alone, the watermark stayed at the first replay's total and the next live result
+        # folded the span (replays 100/200/300 then live 301.50 billed 201.50 and 2100 tokens where 1.50 and 100 were due)
+        s = self._session(attach=True, hello_cli=("4242", "s1"), journal_next=10,
+                          tags=[{"offset": 7, "replay": True}, {"offset": 8, "replay": True}, {"offset": 9, "replay": True},
+                                {"offset": 10, "replay": False}])
+        for total, toks in ((100.0, 1000), (200.0, 2000), (300.0, 3000)):
+            self._run(s, _result(total, toks, session="e1"))
+            self.assertEqual((s._last_cost_total, s._last_usage_totals.get("input_tokens")), (total, toks), "each replay advances the watermarks")
+            self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (total, "e1"),
+                             "and persists them with the replayed epoch (the road 1469's guard compares against)")
+        self.assertEqual(self._day(), {}, "replays fold nothing")
+        self.assertEqual([(r.get("usd"), r.get("redelivered")) for r in self._turns()], [(0.0, True)] * 3)
+        self._run(s, _result(301.5, 3100, session="e1"))     # the first LIVE result closes the window
+        self.assertAlmostEqual(self._day()["usd"], 1.5, msg="its own delta over the LAST replay, not the span")
+        self.assertEqual(self._day()["tokIn"], 100)
+        self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (301.5, "e1"))
+        self.assertFalse(s._spend_unknown_open, "closed by the live result")
 
     def test_the_transport_tags_each_result_record_with_its_offset_as_it_reads_it(self):
         # the transport unit of the rule: the hello's journal.next bounds the replay; records the reader hands over are
