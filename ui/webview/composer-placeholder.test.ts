@@ -74,7 +74,7 @@ test("render.ts: the overlay mirrors the placeholder, wears the identity colour,
   // a recolour of the active session, the ask-mode placeholder swap, the width refit and every keystroke
   assert.match(RENDER, /function growComposer\(ta: HTMLTextAreaElement\) \{[\s\S]*?syncComposerPh\(\);[^\n]*\n\}/);
   assert.match(RENDER, /document\.body\.style\.removeProperty\("--active-accent"\);\n\s*syncComposerPh\(\);/);
-  assert.match(RENDER, /s\.name = m\.name; renderTabs\(\); if \(m\.id === activeId\) \{ syncComposerPh\(\); updateStatusline\(\); \}/, "a rename of the active session renames the box and the badge");
+  assert.match(RENDER, /s\.name = m\.name; renderTabs\(\); syncTabKeysWithStrip\(\); if \(m\.id === activeId\) \{ syncComposerPh\(\); updateStatusline\(\); \}/, "a rename of the active session renames the box and the badge (and re-titles its hot key, 2026-09-10)");
   assert.match(RENDER, /if \(meta\) meta\.color = color;\n\s*renderTabs\(\);\n\s*if \(id === activeId\) \{ syncComposerPh\(\); updateStatusline\(\); \}/, "a recolour of the active session recolours them on the click");
   assert.match(RENDER, /ta\.classList\.remove\("answering"\);\n\s*\}\n\s*syncComposerPh\(\);/);
   assert.match(RENDER, /ta\.placeholder = composerRestingPlaceholder\(\);\n\s*syncComposerPh\(\);\n\s*\}\)\.observe\(ta\);/);

@@ -187,7 +187,7 @@ test("the viewer is READ-ONLY: the message box is hidden, send disabled, one dim
   assert.match(RENDER, /if \(sendBtn\) sendBtn\.disabled = closed \|\| viewer;/);
   assert.match(RENDER, /if \(s\.sub\) \{[\s\S]{0,400}?ro\.textContent = "read-only · a subagent's transcript";[\s\S]{0,100}?return;/);
   // the tab: no drag (a reorder would post the id into the kernel's order), no rename menu, ✕ = Close tab
-  assert.match(RENDER, /tab\.draggable = !s\.sub && !fedMissing;/);   // …nor on a page without its manager (2026-09-10)
+  assert.match(RENDER, /tab\.draggable = !s\.sub && !pinned && !fedMissing;/);   // …nor a pinned tab, nor any tab on a page without its manager (2026-09-10)
   assert.match(RENDER, /if \(!s\.sub\) tab\.addEventListener\("contextmenu"/);
   assert.match(RENDER, /close\.title = dead \|\| s\.sub \? "Close tab" : copies > 1 \? "End session \(it is the one session, shown in every group it is tagged with\)" : "End session";/);
   assert.match(RENDER, /if \(id && isSubId\(id\)\) \{ closeSubagentView\(id\); return; \}/);

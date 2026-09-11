@@ -56,6 +56,34 @@ export function bindable(chord: string): boolean {
   return chord.length > 1;     // bare named keys (F1, Home) are fine; a bare letter would fire while typing
 }
 
+// The chat/pane keys that are BEHAVIOR, not bindable commands — listed so the one dialog answers "what can my
+// keyboard do" completely, clearly marked built-in (Enter-to-send is deliberately not here: a typing key nobody
+// looks up, the user 2026-08-09). Pure data, here rather than in the dialog, because the recorder REFUSES these
+// too (2026-09-10): a hot key recorded as Alt+ArrowLeft would never fire — the shell's pane-focus script takes
+// the key first — so the row says who owns it instead of binding a dead chord.
+export const BUILT_IN: Array<[string, string]> = [
+  ["Shift+Enter", "New line in the composer"],
+  ["Escape", "Leave the composer / close a panel"],
+  ["ArrowLeft / ArrowRight", "Switch session (from the tab bar)"],
+  ["Ctrl+C", "Interrupt the session (composer)"],
+  ["Alt+Arrows", "Move focus between panes"],
+];
+
+// The built-in behaviour a chord already belongs to (its description), or null when it is free to bind.
+// "Alt+Arrows" stands for the four arrows; " / " separates alternatives; Ctrl here is the literal key.
+export function builtInOwner(chord: string, mac: boolean): string | null {
+  const want = resolveChord(chord, mac);
+  for (const [spec, what] of BUILT_IN) {
+    for (const alt of spec.split(" / ")) {
+      const forms = alt.endsWith("+Arrows")
+        ? ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].map((k) => alt.slice(0, -"Arrows".length) + k)
+        : [alt];
+      if (forms.some((f) => resolveChord(f, mac) === want)) return what;
+    }
+  }
+  return null;
+}
+
 // Display: ⌘⇧O on a Mac (symbols, no separators), Ctrl+Shift+O elsewhere.
 export function displayChord(chord: string, mac: boolean): string {
   const c = resolveChord(chord, mac);

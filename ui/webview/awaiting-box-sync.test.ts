@@ -50,7 +50,8 @@ test("a status-only frame re-renders the awaiting box when its fields change —
   assert.match(body, /if \(msg\.id === activeId\) \{\s*\n\s*updateStatusline\(\);/, "the chip repaint stays");
   assert.match(body, /if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/);
   // …and the kernel's delta carries the full status the box reads from
-  assert.match(KERNEL, /tail = \{"type": "chatTail", "id": sid, "from": change_from,\s*\n\s*"events": evs\[change_from:\], "total": total, "status": m\.get\("status"\)\}/);
+  assert.match(KERNEL, /tail = \{"type": "chatTail", "id": sid, "from": change_from,\s*\n\s*"events": evs\[change_from:\], "total": total, "status": m\.get\("status"\),\n(\s*#[^\n]*\n)*\s*"notify": m\.get\("notify"\), "hideFromFeed": m\.get\("hideFromFeed"\), "postalServiceOff": m\.get\("postalServiceOff"\)\}/,
+    "…and the per-session view flags beside it (2026-09-11), so a bell flipped elsewhere reaches a caught-up client on the flip");
 });
 
 test("the await key covers every field the box renders from, and nothing that ticks per second", () => {

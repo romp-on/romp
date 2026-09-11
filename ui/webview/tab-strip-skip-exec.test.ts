@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { planStrip, parseTabGroups, headWords } from "./tab-groups";
 import { tabStateClass, tabDotClass, tabDotTitle, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { newSkeletonState, renderKind } from "./skeleton-tabs";
+import { tabChord, miniChord, chordTitle } from "./tab-keys";
 import type { TagUnion } from "./session-views";
 
 const requireCjs = createRequire(__filename);
@@ -23,7 +24,7 @@ const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview"
 class FakeEl {
   tag: string; className: string; children: FakeEl[] = []; parent: FakeEl | null = null;
   dataset: Record<string, string> = {}; styleProps: Record<string, string> = {}; attrs: Record<string, string> = {};
-  listeners: Record<string, Function[]> = {}; textContent = ""; title = ""; tabIndex = -1; draggable = false;
+  listeners: Record<string, Function[]> = {}; textContent = ""; title = ""; tabIndex = -1; draggable = false; innerHTML = "";   // innerHTML: the pinned tab's pushpin is set as markup (2026-09-11)
   wipes = 0;   // replaceChildren() calls: the strip's rebuild count when this is #tabs
   style: any; classList: any;
   constructor(tag: string, cls = "") {
@@ -61,6 +62,9 @@ type Hooks = {
   notes: Record<string, string>; keyHint: string; lens: unknown; unions: TagUnion[]; tips: unknown[];
   aftermaths: [number, number][]; rowPaints: number; tagSyncs: number; placeholders: number;
   groupsRaw: string | null;   // the stored tab-groups blob the plan reads (localStorage's, in the page)
+  overrides: Record<string, string>;   // the bindings store (romp:keys) the badge reads: command id → chord
+  pins: Map<string, number>;           // the pinned set (romp:tabpins, sid → slot): a pinned tab wears the pushpin and does not drag
+  tabChord: typeof tabChord; miniChord: typeof miniChord; chordTitle: typeof chordTitle;
   phone: boolean;             // the phone layout: the plan is the flat strip there
   heads: HeadCall[];          // every group header the paint minted, in order
   planStrip: typeof planStrip; parseTabGroups: typeof parseTabGroups; headWords: typeof headWords;
@@ -129,6 +133,13 @@ function lift(): (hooks: Hooks) => Api {
     const hostNameNodes = (name) => [document.createTextNode(name)]; const fadedColor = (h) => h;
     const tabCtxGauge = () => el("span", "tab-ctx"); const pickTone = (a, b) => b ?? a;
     const fedMissing = false;   // the page has its federation manager (render.ts fedMissing, 2026-09-10): tabs drag as before
+    // the tab's hot key badge (2026-09-10): the bindings store the strip reads once per render, and the badge's REAL
+    // helpers (tab-keys.ts) — so the node the paint mints is the one the pane paints
+    const loadOverrides = () => H.overrides; const IS_MAC = false;
+    const tabChord = H.tabChord, miniChord = H.miniChord, chordTitle = H.chordTitle;
+    const loadTabPins = () => H.pins;   // the pinned set (2026-09-10), read once per render
+    const pinSvg = (size) => '<svg data-pin="' + size + '"></svg>';   // the pushpin drawing the pinned tab wears (2026-09-11): a stand-in, its size recorded
+    const localStorage = null;          // the store handle the paint passes to loadTabPins; the knob above answers instead
     const showTabTip = (tab, s) => { H.tips.push(s); }; const toggleLedgerCollapsed = () => {}; const showTabMenu = () => {}; const openPicker = () => {};
     const tagMenuButton = () => el("span", "tag-btn"); const openTagMenu = () => {}; const postLens = () => {}; const vscodeApi = null;
     const syncTagFilter = () => { H.tagSyncs++; }; const paintTabRowLines = () => { H.rowPaints++; }; const ensureTabRowObserver = () => {};
@@ -159,9 +170,9 @@ const groups = (patch: Record<string, unknown>) => JSON.stringify({ on: true, co
 function world(): { H: Hooks; api: Api; sessions: Map<string, any>; tabMeta: Map<string, any>; settings: any } {
   const H: Hooks = { FakeEl, bar: new FakeEl("div"), mslot: null, only: "", hidden: new Set(), down: new Set(), notes: {},
                      keyHint: "Open a session (K)", lens: { all: true }, unions: [], tips: [], aftermaths: [], rowPaints: 0, tagSyncs: 0, placeholders: 0,
-                     groupsRaw: null, phone: false, heads: [],
+                     groupsRaw: null, phone: false, heads: [], overrides: {}, pins: new Map(),
                      planStrip, parseTabGroups, headWords, tabStateClass, tabDotClass, tabDotTitle, sectionPip, sectionPipMembers, sectionPipTitle,
-                     newSkeletonState, renderKind, skeletons: 0 };
+                     newSkeletonState, renderKind, skeletons: 0, tabChord, miniChord, chordTitle };
   const api = lift()(H);
   const sessions = new Map<string, any>([["a", session("web", "ready")], ["b", session("api", "working")]]);
   const tabMeta = new Map<string, any>([["p", { name: "tests", color: { bg: "#112233", fg: "#ffffff" } }]]);
@@ -237,8 +248,38 @@ test("every input the strip paints repaints it, once, when it changes", () => {
     ["a placeholder's name", () => { H.hidden.delete("p"); api.renderTabs(); tabMeta.get("p").name = "tests2"; }],
     ["a placeholder's color", () => { tabMeta.get("p").color = { bg: "#445566", fg: "#000000" }; }],
     ["a placeholder's session landing", () => { sessions.set("p", session("tests2", "opening")); }],
+    // the hot key badge (2026-09-10): bound, rebound, and removed (a deliberate "" unbind, which paints no badge)
+    ["a tab's hot key", () => { H.overrides = { "session.hotkey.a": "Ctrl+1" }; }],
+    ["the hot key rebound", () => { H.overrides = { "session.hotkey.a": "Alt+Shift+K" }; }],
+    ["the hot key removed (a deliberate unbind)", () => { H.overrides = { "session.hotkey.a": "" }; }],
+    // a pin (2026-09-10): on, and off again
+    ["a tab pinned", () => { H.pins = new Map([["a", 0]]); }],
+    ["the tab unpinned", () => { H.pins = new Map(); }],
   ];
   for (const [what, change] of changes) repaintsOnce(H, api, what, change);
+});
+
+test("the hot key badge is painted after the gauge and before the close ×, minified, its full spelling as the tooltip and the accessible name", () => {
+  const { H, api, sessions, settings } = world();
+  settings.tabCtx = "always"; sessions.get("a").status.ctx = "40";   // a gauge on tab a, so the badge has something to sit right of
+  const a = () => H.bar.tabs().find((t) => t.dataset.id === "a")!;
+  api.renderTabs();
+  assert.equal(a().children.filter((c) => c.has("tab-key")).length, 0, "no hot key, no badge");
+  H.overrides = { "session.hotkey.a": "Alt+Shift+K" };
+  api.renderTabs();
+  const kids = a().children.map((c) => c.className.split(/\s+/)[0]);
+  const ki = kids.indexOf("tab-key");
+  assert.ok(ki > 0, "a badge: " + kids.join(","));
+  assert.equal(kids[ki - 1], "tab-ctx", "right of the gauge");
+  assert.equal(kids[ki + 1], "tab-close", "left of the close ×");
+  const k = a().children[ki];
+  assert.equal(k.textContent, "⌥⇧K");
+  assert.equal(k.title, "hot key: Alt+Shift+K");
+  assert.equal(k.attrs["aria-label"], "hot key: Alt+Shift+K", "the glyphs read aloud as the full spelling");
+  assert.equal(H.bar.tabs().find((t) => t.dataset.id === "b")!.children.filter((c) => c.has("tab-key")).length, 0, "only the bound tab wears one");
+  H.overrides = { "session.hotkey.a": "" };
+  api.renderTabs();
+  assert.equal(a().children.filter((c) => c.has("tab-key")).length, 0, "an unbind takes the badge away");
 });
 
 test("the sectioned strip: every input a group header paints repaints it, once, when it changes", () => {
@@ -405,4 +446,28 @@ test("the all-hidden blank lands on the skip path when the active view appears b
   api.renderTabs();
   assert.equal(H.bar.wipes, 2);
   assert.equal(av.el.style.display, "", "restored once anything is visible");
+});
+
+test("a pinned tab wears the pushpin after its hot key, the pinned class and no draggable flag; the others drag as before", () => {
+  const { H, api } = world();
+  const tab = (id: string) => H.bar.tabs().find((t) => t.dataset.id === id)!;
+  api.renderTabs();
+  assert.equal(tab("a").draggable, true); assert.equal(tab("a").has("pinned"), false);
+  assert.equal(tab("a").children.filter((c) => c.has("tab-pin")).length, 0, "no pin, no glyph");
+  H.pins = new Map([["a", 0]]);
+  H.overrides = { "session.hotkey.a": "Alt+Shift+K" };   // a hot key too: the pin sits AFTER the badge
+  api.renderTabs();
+  assert.equal(tab("a").has("pinned"), true);
+  assert.equal(tab("a").draggable, false, "a pinned tab starts no drag");
+  const pin = tab("a").children.filter((c) => c.has("tab-pin"));
+  assert.equal(pin.length, 1);
+  assert.equal(pin[0].title, "Pinned — it stays where it is");
+  assert.equal(pin[0].innerHTML, '<svg data-pin="11"></svg>', "the menu's pushpin, at the tab's size");
+  const kids = tab("a").children.map((c) => c.className);
+  assert.ok(kids.findIndex((k) => k.includes("tab-pin")) > kids.findIndex((k) => k.includes("tab-key")), "after the hot key badge: " + kids.join(","));
+  assert.equal(tab("b").draggable, true, "the other tab is untouched"); assert.equal(tab("b").has("pinned"), false);
+  H.pins = new Map(); H.overrides = {};
+  api.renderTabs();
+  assert.equal(tab("a").has("pinned"), false); assert.equal(tab("a").draggable, true);
+  assert.equal(tab("a").children.filter((c) => c.has("tab-pin")).length, 0, "unpinned: the glyph goes");
 });

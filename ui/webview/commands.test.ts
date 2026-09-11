@@ -1,7 +1,7 @@
 // The command registry behind the palette (ui/webview/commands.ts) — real unit tests.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { registerCommand, commandList, runCommand } from "./commands";
+import { registerCommand, unregisterCommand, commandList, runCommand } from "./commands";
 
 test("registers and lists in registration order (the palette's empty-query order)", () => {
   registerCommand({ id: "t.one", title: "First thing", run: () => {} });
@@ -28,4 +28,13 @@ test("runCommand runs the handler and reports unknown ids", () => {
   assert.equal(runCommand("t.run"), true);
   assert.equal(ran, true);
   assert.equal(runCommand("t.nope"), false);
+});
+
+test("unregisterCommand removes a command from the list and the runner, and reports an unknown id", () => {
+  registerCommand({ id: "t.gone", title: "Soon gone", run: () => {} });
+  assert.ok(commandList().some((c) => c.id === "t.gone"));
+  assert.equal(unregisterCommand("t.gone"), true);
+  assert.ok(!commandList().some((c) => c.id === "t.gone"));
+  assert.equal(runCommand("t.gone"), false);
+  assert.equal(unregisterCommand("t.gone"), false, "already gone");
 });

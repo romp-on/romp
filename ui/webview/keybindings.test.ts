@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import {
-  bindable, chordMap, chordOf, conflictOf, dispatchable, displayChord, effectiveChord, resolveChord,
+  bindable, builtInOwner, chordMap, chordOf, conflictOf, dispatchable, displayChord, effectiveChord, resolveChord,
 } from "./keybindings";
 
 const ev = (key: string, m: Partial<{ ctrl: boolean; alt: boolean; shift: boolean; meta: boolean }> = {}) =>
@@ -82,4 +82,22 @@ test("dispatchable: never on repeat; modifier-less chords never fire while typin
   assert.equal(dispatchable({ ctrlKey: false, altKey: false, metaKey: false }, false), true);
   assert.equal(dispatchable({ ctrlKey: false, altKey: false, metaKey: true }, true), true,
     "a real modifier fires regardless of focus");
+});
+
+test("builtInOwner names the behaviour a chord already belongs to — the four Alt+Arrows, both tab-bar arrows, literal Ctrl+C — and frees the rest", () => {
+  for (const k of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]) {
+    assert.equal(builtInOwner("Alt+" + k, false), "Move focus between panes", k);
+    assert.equal(builtInOwner("Alt+" + k, true), "Move focus between panes", k + " on a Mac");
+  }
+  assert.equal(builtInOwner("ArrowLeft", false), "Switch session (from the tab bar)");
+  assert.equal(builtInOwner("ArrowRight", true), "Switch session (from the tab bar)");
+  assert.equal(builtInOwner("Shift+Enter", false), "New line in the composer");
+  assert.equal(builtInOwner("Escape", false), "Leave the composer / close a panel");
+  assert.equal(builtInOwner("Ctrl+C", true), "Interrupt the session (composer)", "literal Ctrl, on a Mac too");
+  assert.equal(builtInOwner("Meta+C", true), null, "⌘C is copy, not ours — and not built in");
+  assert.equal(builtInOwner("Alt+Shift+ArrowLeft", false), null, "another modifier makes it a different chord");
+  assert.equal(builtInOwner("Ctrl+Alt+ArrowLeft", false), null);
+  assert.equal(builtInOwner("Alt+Shift+K", false), null);
+  assert.equal(builtInOwner("Mod+1", true), null);
+  assert.equal(builtInOwner("Shift+Alt+ArrowUp", false), null, "normalised before comparing: Shift is a real difference");
 });

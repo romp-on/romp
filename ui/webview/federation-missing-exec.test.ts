@@ -22,6 +22,7 @@ function lift(fedMissing: boolean): Lifted {
     let order = ["a", "b", "c"]; let tabDragJustCommitted = false; let renders = 0;
     const writes = []; const writeViewOrder = (o) => { writes.push(o.slice()); };
     const renderTabs = () => { renders++; };
+    const holdPinnedSlots = () => false;   // the pinned-tab hold reorderTo runs after its splice (tab-pins.ts): no pins in the lift
     const fedMissing = FED;
   `;
   const epilogue = `return { commitTabOrder, reorderTo, order: () => order.slice(), writes, renders: () => renders };`;

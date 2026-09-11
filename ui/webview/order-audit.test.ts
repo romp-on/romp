@@ -30,7 +30,7 @@ test("the report carries old/new orders, the JS stack, and the drag tag, to the 
 });
 
 test("a user drag tags the very next render as drag-explained, then the tag resets", () => {
-  const reorder = SRC.slice(SRC.indexOf("function reorderTo"), SRC.indexOf("function reorderTo") + 700);
+  const reorder = SRC.slice(SRC.indexOf("function reorderTo"), SRC.indexOf("function reorderTo") + 1100);   // 1100 (was 700): the pinned-slot hold sits ahead of the tag (2026-09-10)
   assert.match(reorder, /tabDragJustCommitted = true;/);
   const audit = SRC.slice(SRC.indexOf("function auditTabOrder"), SRC.indexOf("let draggedId"));
   assert.match(audit, /tabDragJustCommitted = false;/);

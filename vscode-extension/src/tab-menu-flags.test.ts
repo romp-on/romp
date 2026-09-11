@@ -28,7 +28,7 @@ test("the tab menu adds Feed + Mail toggle items with state-dependent labels", (
 });
 
 test("each toggle item carries an icon (slashed when off) and a sub-description", () => {
-  assert.match(SRC, /function ctxIcon\(kind: "feed" \| "mail" \| "bell" \| "bill" \| "folder" \| "tag" \| "pencil" \| "split", off: boolean\)/);   // bill 2026-08-09; folder/tag/pencil 2026-08-24
+  assert.match(SRC, /function ctxIcon\(kind: "feed" \| "mail" \| "bell" \| "bill" \| "folder" \| "tag" \| "pencil" \| "split" \| "key" \| "pin", off: boolean\)/);   // bill 2026-08-09; folder/tag/pencil 2026-08-24; split/key/pin 2026-09-10
   assert.match(SRC, /off \? '<line /);   // slash when the flag is off
   assert.match(SRC, /ctx-item-sub/);
   assert.match(CSS, /\.ctx-item-toggle \{ display: flex;/);

@@ -6,13 +6,14 @@
 // host). Cmd/Ctrl+P toggles the command palette. All three combos are claimable by a page
 // (Google Docs and Figma take Cmd+O/Cmd+P), the override lasts only while this tab has
 // focus, and the window/tab-management set (Cmd+W/T/N/L/Q) stays untouched.
-import { registerCommand, runCommand, commandList } from "./commands";
+import { registerCommand, unregisterCommand, runCommand, commandList } from "./commands";
 import { initPalette, PickItem } from "./palette";
 import { initShortcutsModal } from "./shortcuts-modal";
-import { chordMap, chordOf, dispatchable, displayChord, effectiveChord, keyHint, loadOverrides, titleWithKey, KEYS_EVENT } from "./keybindings";
+import { chordMap, chordOf, dispatchable, displayChord, effectiveChord, keyHint, loadOverrides, saveOverride, titleWithKey, KEYS_EVENT } from "./keybindings";
 import { hostPrefix } from "./host-prefix";   // pure display helper — safe here (never federation.ts, which boots a manager on import)
 import { installMenuEcho } from "./tag-menu";   // model deps only (tag-lens/session-views) — no manager, no DOM cost
 import { loadSettings, OPTIONAL_PANES, type PaneSet } from "./settings";   // the gear's store, read at every palette open (no side effects at import)
+import { hotkeyCommandId, loadTabKeys, rememberTabKey, forgetTabKey, tabChord, unboundTabKeys, TABKEYS_KEY } from "./tab-keys";   // per-tab hot keys (2026-09-10)
 
 type SessionRow = { id: string; name: string; dir: string; bg: string };
 
@@ -29,6 +30,10 @@ installMenuEcho();
   if (window.parent && window.parent !== window) return;
   const w = window as any;
   const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
+  // the dispatcher's chord → command map, rebuilt lazily; declared up here because the per-tab hot-key registrations
+  // below invalidate it at boot, before the dispatcher's own block runs (a `let` further down was a TDZ error that
+  // aborted this whole module — the served split test caught it, 2026-09-10)
+  let byChord: Map<string, string> | null = null;
 
   function pane(id: string): HTMLIFrameElement | null {
     return document.getElementById(id) as HTMLIFrameElement | null;
@@ -123,6 +128,13 @@ installMenuEcho();
     run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "forkSession" }, "*"); } catch (e) { /* chat not loaded */ } },
   });
   registerCommand({
+    id: "session.notify", title: "Toggle notifications for this session",
+    // the per-session bell the tab menu's row flips, from the keyboard (the user 2026-09-11): the chat pane owns the
+    // flag (it knows the active session and the bell's state) and answers with a toast, since the flip itself is
+    // otherwise visible only in that menu. Lands in the column last worked in, like every chat-directed command.
+    run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "notifyToggle" }, "*"); } catch (e) { /* chat not loaded */ } },
+  });
+  registerCommand({
     id: "settings.open", title: "Open settings",
     // the gear lives on its own served page, the shell's hidden #f-settings iframe (the user 2026-09-10;
     // it rode the feed pane before, which made that pane required), loaded on the first open: the shell's one
@@ -171,6 +183,54 @@ installMenuEcho();
   // (_LANDING_SPLIT_JS); the rail's split action runs the same code.
   registerCommand({ id: "chat.split", title: "Split the chat", run: () => { if (w.__rompSplitChat) w.__rompSplitChat(); } });
   registerCommand({ id: "chat.closeSplit", title: "Close this chat split", run: () => { if (w.__rompCloseSplit) w.__rompCloseSplit(); } });
+  // Cycle the focus between chat columns (the user 2026-09-10): unbound by default — the browser owns most
+  // tab-cycling chords — and set in Keyboard shortcuts; with one column there is nothing to cycle.
+  function cycleSplit(dir: 1 | -1): void {
+    const ids: string[] = w.__rompChatFrameIds ? w.__rompChatFrameIds() : ["f-chat"];
+    if (ids.length < 2) return;
+    try { if (w.__rompPaneToggle) w.__rompPaneToggle("chat", true); } catch (e) { /* rail not booted yet */ }   // a hidden chat pane shows itself: the focus has to land somewhere visible
+    const cur = (w.__rompFocusedChatId && w.__rompFocusedChatId()) || "f-chat";
+    const i = Math.max(0, ids.indexOf(cur));
+    const f = pane(ids[(i + dir + ids.length) % ids.length]);
+    try { f!.contentWindow!.focus(); f!.contentWindow!.postMessage({ type: "focusComposer" }, "*"); } catch (e) { /* column not loaded */ }
+  }
+  registerCommand({ id: "chat.nextSplit", title: "Focus the next chat column", run: () => cycleSplit(1) });
+  registerCommand({ id: "chat.prevSplit", title: "Focus the previous chat column", run: () => cycleSplit(-1) });
+  // Per-tab hot keys (the user 2026-09-10): a session with a hot key is a command "Switch to <name>" whose chord
+  // lives in the bindings store like any other, so the dispatcher below, the conflict check and the shortcuts
+  // dialog cover it. The set of such sessions (romp:tabkeys) is read at boot, before any pane has loaded, and
+  // grows when a pane's tab menu asks (hotkeyConfigure), which also opens the dialog on that one row, recording.
+  function jumpToSession(sid: string): void {
+    try { if (w.__rompPaneToggle) w.__rompPaneToggle("chat", true); } catch (e) { /* rail not booted yet */ }
+    const f = (w.__rompChatTarget && w.__rompChatTarget(sid)) || pane("f-chat");   // the column showing it, else the one last worked in
+    // the composer takes the focus too: the switch is for typing there next, and the focus moving INTO that column's
+    // document is what carries the shell's focus ring across (a window focus() alone need not fire it)
+    try { f!.contentWindow!.focus(); f!.contentWindow!.postMessage({ type: "jumpSession", id: sid }, "*"); f!.contentWindow!.postMessage({ type: "focusComposer" }, "*"); } catch (e) { /* chat not loaded */ }
+  }
+  const hotkeySids = new Set<string>();   // the sessions whose command this window has registered
+  function registerTabHotkey(sid: string, name: string): void {
+    registerCommand({ id: hotkeyCommandId(sid), title: "Switch to " + (name || sid.slice(0, 8)), run: () => jumpToSession(sid) });
+    hotkeySids.add(sid);
+    invalidate();
+  }
+  // The set is kept honest (review, 2026-09-10 — it only ever grew, so a cancelled first recording or a menu's
+  // Remove left a dead "Switch to <name>" row in the dialog for good): a session stays in it exactly while it has
+  // a chord bound and its tab exists. THIS window drops the unbound ones — it hears every bindings write, its
+  // own (KEYS_EVENT) and a pane's Remove (a storage event); the chat pane drops the ones whose tab is gone and
+  // re-titles renamed ones (render.ts, it knows the strip) — and every window's registry follows the set.
+  function unregisterTabHotkey(sid: string): void {
+    forgetTabKey(localStorage, sid);
+    unregisterCommand(hotkeyCommandId(sid));
+    hotkeySids.delete(sid);
+    saveOverride(hotkeyCommandId(sid), null);   // the "" unbind (or any chord) leaves the store with the command
+    invalidate();
+  }
+  function syncTabHotkeys(): void {   // the registry = the set: titles refreshed, departed sessions unregistered
+    const set = loadTabKeys(localStorage);
+    for (const [sid, name] of Object.entries(set)) registerTabHotkey(sid, name);
+    for (const sid of Array.from(hotkeySids)) if (!(sid in set)) { unregisterCommand(hotkeyCommandId(sid)); hotkeySids.delete(sid); invalidate(); }
+  }
+  syncTabHotkeys();
 
   // Esc (or running an item) hands focus back to the chat pane, so "palette, Esc, type"
   // never strands the keyboard on the shell document. The palette's hotkey chips show each
@@ -194,6 +254,37 @@ installMenuEcho();
   w.__rompKeysOpen = () => keys.open();
   w.__rompKeysClose = () => keys.close();   // false when not open — the Escape chain moves on
   window.addEventListener("message", (e) => { if (e.data && e.data.romp === "openKeys") keys.open(); });
+  // Sessions in the set with no chord bound leave it — never while the dialog is up (the one being recorded
+  // has none yet), so the solo dialog's own close runs it too.
+  function pruneUnboundHotkeys(): void {
+    if (keys.isOpen()) return;
+    for (const sid of unboundTabKeys(loadTabKeys(localStorage), loadOverrides(), mac)) unregisterTabHotkey(sid);
+  }
+  // A tab's menu asks for a hot key: the session joins the set, its command exists, the dialog opens on it
+  // recording. When the dialog goes — a chord set, or Esc — the focus returns to the pane that asked (its
+  // composer: the shell document is nowhere to type), and a session left with no chord leaves the set.
+  function configureHotkey(sid: string, name: string, from: Window | null): void {
+    rememberTabKey(localStorage, sid, name);
+    registerTabHotkey(sid, name);
+    keys.openFor(hotkeyCommandId(sid), () => {
+      if (tabChord(sid, loadOverrides(), mac)) rememberTabKey(localStorage, sid, name); else unregisterTabHotkey(sid);
+      pruneUnboundHotkeys();
+      const back = from || chatPane()?.contentWindow || null;
+      try { back!.focus(); back!.postMessage({ type: "focusComposer" }, "*"); } catch (e) { /* the asking pane is gone */ }
+    });
+  }
+  window.addEventListener("message", (e) => {
+    const m = e.data;
+    if (!m || m.romp !== "hotkeyConfigure" || typeof m.sid !== "string" || !m.sid) return;
+    configureHotkey(m.sid, typeof m.name === "string" ? m.name : "", (e.source as Window | null) || null);
+  });
+  w.__rompHotkeyConfigure = (sid: string, name: string) => configureHotkey(sid, name, null);   // the pane's menu gates on this being here
+  // another window changed the set (added a session's hot key, or a pane dropped a departed one): follow it here
+  // too, so the chord fires — or stops firing — in this window as well
+  window.addEventListener("storage", (e) => { if (e.key === TABKEYS_KEY) syncTabHotkeys(); });
+  window.addEventListener("storage", (e) => { if (e.key === KEYS_EVENT) pruneUnboundHotkeys(); });   // a pane's Remove is a "" write
+  window.addEventListener(KEYS_EVENT, pruneUnboundHotkeys);
+  pruneUnboundHotkeys();   // a set an earlier build let grow is trimmed at boot
 
   // ── hover discoverability (the user 2026-08-10) ───────────────────────────────────────────────
   // Every shell control that runs a command carries data-keycmd=<command id> (the rail buttons and
@@ -217,8 +308,7 @@ installMenuEcho();
 
   // ONE dispatcher for every bound chord, rebuilt lazily when the store changes (KEYS_EVENT from
   // this document's saves, `storage` from another tab's).
-  let byChord: Map<string, string> | null = null;
-  const invalidate = () => { byChord = null; };
+  function invalidate(): void { byChord = null; }   // a function declaration: the per-tab registrations above call it before this line runs
   window.addEventListener(KEYS_EVENT, invalidate);
   window.addEventListener("storage", invalidate);
   function isTyping(t: EventTarget | null): boolean {
@@ -227,7 +317,7 @@ installMenuEcho();
     return !!el.closest("input, textarea, select, [contenteditable=true]");
   }
   function onKey(e: KeyboardEvent): void {
-    if (keys.isOpen()) return;                    // the dialog is recording/browsing — never dispatch under it
+    if (keys.isOpen()) { keys.feed(e); return; }  // the dialog is recording/browsing — never dispatch under it; a recording takes the key from any pane
     if (!dispatchable(e, isTyping(e.target))) return;
     const ch = chordOf(e);
     if (!ch) return;

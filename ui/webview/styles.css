@@ -560,6 +560,17 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab-ctx { flex: 0 0 auto; position: relative; width: 4px; height: 13px; border-radius: 2px;
   overflow: hidden; background: rgba(255, 255, 255, 0.13); }
 .tab-ctx-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; }
+/* the tab's hot key (the user 2026-09-10): the chord minified, right of the name and the gauge — a small keycap, dim like
+   metadata, its full spelling in the tooltip. Its size is the strip's small text (the group header's 0.82em of the
+   strip), compensated for the tab's own 0.92em so the two render the same — not a new, smaller size (review 2026-09-10:
+   0.7em of the tab compounded to ~8px, the smallest text on the surface) */
+.tab-key { flex: 0 0 auto; font: 600 calc(0.82em / 0.92) ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border: 1px solid var(--box-border);
+  border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; line-height: 1.5; letter-spacing: 0.02em; }
+/* a PINNED tab (the user 2026-09-10; the glyph 2026-09-11, replacing the folded corner): it stays where it is — not
+   draggable, other drags flow around its slot — and says so with the tab menu's own pushpin after the name, the gauge
+   and the hot key, dim like the keycap and brighter with the tab. Visual only: the mechanics are render.ts's */
+.tab-pin { flex: 0 0 auto; display: inline-flex; color: var(--dim); }
+.tab.active .tab-pin, .tab:hover .tab-pin { color: var(--fg); }
 /* compacting → a tiny animated compaction bar before the name (this state gets no tab outline, so the bar
    is the cue). A teal fill whose right edge slides left and loops — the same compression motion as the
    statusline ctx-scan bar, miniaturised — so it reads as a transient process, not a status colour (the user

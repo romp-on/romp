@@ -144,6 +144,14 @@ const rectIn = (fid, sel) => page.evaluate(([fid, sel]) => {
 }, [fid, sel]);
 const clickIn = async (fid, sel) => { const r = await rectIn(fid, sel); await page.mouse.click(r.x + r.w / 2, r.y + Math.min(r.h / 2, 120)); };
 
+// per-tab hot keys (2026-09-10): seed the shared bindings store before the first load — the shell registers
+// "Switch to api" from romp:tabkeys at boot, and the chords ride romp:keys like every other binding
+await page.addInitScript(([sidB]) => {
+  if (!localStorage.getItem("romp:tabkeys")) {
+    localStorage.setItem("romp:tabkeys", JSON.stringify({ [sidB]: "api" }));
+    localStorage.setItem("romp:keys", JSON.stringify({ ["session.hotkey." + sidB]: "Alt+Shift+K", "chat.nextSplit": "Alt+Shift+J", "chat.prevSplit": "Alt+Shift+H" }));
+  }
+}, [cfg.sidB]);
 // ---- load: both sessions are tabs in column 1; column 1 shows A ----
 await page.goto(cfg.url);
 await waitTabs("f-chat", [cfg.sidA, cfg.sidB]);
@@ -179,6 +187,159 @@ await waitFocused("f-chat");
 out.s2.unknownAfterCol1 = await targetOf(cfg.sidX);
 out.s2.col1AfterClicks = await activeIn("f-chat");
 
+// ---- 2c. per-tab hot keys: the badge on B's tab; Alt+Shift+K goes to the column showing B; Alt+Shift+J cycles the
+// columns; the tab menu's Hot key… opens the shell's recorder on that one row, a built-in chord is refused on the row,
+// the pressed chord binds and the focus comes back to the asking pane; Remove prunes the command, Esc keeps it ----
+const badgeOf = (fid, sid) => page.evaluate(([fid, sid]) => {
+  const f = document.getElementById(fid); const d = f && f.contentDocument;
+  const t = d && d.querySelector('#tabs .tab[data-id="' + sid + '"]'); const k = t && t.querySelector(".tab-key");
+  return k ? { text: k.textContent, title: k.title, aria: k.getAttribute("aria-label") } : null;
+}, [fid, sid]);
+// where the keyboard is: the shell's active element (an iframe's id) and, inside that column, the element's id or tag
+const whereFocus = (fid) => page.evaluate((fid) => {
+  const d = document.getElementById(fid).contentDocument; const a = d.activeElement;
+  return { shell: document.activeElement ? document.activeElement.id : null, pane: a ? (a.id || a.tagName) : null };
+}, fid);
+// open a tab's right-click menu in a column and pick the item whose label reads `label`
+const pickTabMenu = async (fid, sid, label) => {
+  const fr = await (await page.$("#" + fid)).contentFrame();
+  await fr.locator('#tabs .tab[data-id="' + sid + '"]').click({ button: "right" });
+  await waitFn((fid) => !!document.getElementById(fid).contentDocument.querySelector(".ctx-menu"), fid, fid + "'s tab menu never opened");
+  const labels = await page.evaluate((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".ctx-menu .ctx-item-label, .ctx-menu .ctx-item")).map((l) => l.textContent), fid);
+  if (!labels.includes(label)) await die(fid + "'s tab menu never offered " + label + " — it offered: " + JSON.stringify(labels));
+  await page.evaluate(([fid, label]) => { const d = document.getElementById(fid).contentDocument;
+    Array.from(d.querySelectorAll(".ctx-menu .ctx-item")).find((i) => { const l = i.querySelector(".ctx-item-label"); return l && l.textContent === label; }).click(); }, [fid, label]);
+  return labels;
+};
+const dialogShown = () => waitFn(() => { const b = document.getElementById("rkeys-back"); return !!b && !b.hidden; }, null, "the recorder never opened");
+const dialogGone = (why) => waitFn(() => { const b = document.getElementById("rkeys-back"); return !!b && b.hidden; }, null, why);
+const hotkeyRows = () => page.evaluate(() => { window.__rompKeysOpen(); const rows = Array.from(document.querySelectorAll("#rkeys-list .rkeys-title")).map((t) => t.textContent).filter((t) => t.startsWith("Switch to ")); window.__rompKeysClose(); return rows; });
+const stores = () => page.evaluate(() => ({ tabkeys: JSON.parse(localStorage.getItem("romp:tabkeys") || "{}"), keys: JSON.parse(localStorage.getItem("romp:keys") || "{}") }));
+out.hk = { mac: await page.evaluate(() => /Mac|iP(hone|ad|od)/.test(navigator.platform || "")) };
+out.hk.badgeB = await badgeOf("f-chat", cfg.sidB);          // column 1 shows A; B's tab there wears the badge
+out.hk.badgeA = await badgeOf("f-chat", cfg.sidA);          // A has no hot key
+await clickIn("f-chat", "#content"); await waitFocused("f-chat");
+out.hk.registered = await page.evaluate(([sidB]) => window.__rompKeyHint("session.hotkey." + sidB), [cfg.sidB]);   // the shell knows the command and its chord
+out.hk.pressedFrom = await whereFocus("f-chat");             // the press lands in column 1's document, outside any text box
+await page.keyboard.press("Alt+Shift+K");                   // from column 1: B is showing in column 2 → the focus goes THERE
+await waitFocused("f-chat-2");
+out.hk.afterKey = { focused: await page.evaluate(() => window.__rompFocusedChatId()), col1: await activeIn("f-chat"), col2: await activeIn("f-chat-2") };
+await page.keyboard.press("Alt+Shift+J");                   // cycle: column 2 → column 1
+await waitFocused("f-chat");
+out.hk.afterCycle1 = await page.evaluate(() => window.__rompFocusedChatId());
+await page.keyboard.press("Alt+Shift+J");                   // and around again
+await waitFocused("f-chat-2");
+out.hk.afterCycle2 = await page.evaluate(() => window.__rompFocusedChatId());
+// the real door: right-click A's tab in column 1, pick Hot key… → the pane asks the shell, whose recorder opens on that one row
+out.hk.menu = await pickTabMenu("f-chat", cfg.sidA, "Hot key…");
+await dialogShown();
+out.hk.recorder = await page.evaluate(() => ({ heading: document.getElementById("rkeys-h").textContent, rows: document.querySelectorAll("#rkeys-list .rkeys-row").length,
+  recording: document.querySelectorAll("#rkeys-list .rkeys-row.recording").length, filterHidden: document.getElementById("rkeys-in").hidden,
+  builtInHidden: document.getElementById("rkeys-fixed").hidden }));
+await page.keyboard.press("Alt+ArrowLeft");                 // a chord the pane-focus script owns: refused, and said
+await waitFn(() => { const h = document.querySelector("#rkeys-list .rkeys-conflict"); return !!h && /built in/.test(h.textContent); }, null, "Alt+ArrowLeft was not refused on the row");
+out.hk.refused = await page.evaluate(() => document.querySelector("#rkeys-list .rkeys-conflict").textContent);
+await page.keyboard.press("Alt+Shift+L");                   // wherever the focus went, the chord records and the dialog closes
+await dialogGone("the recorder never closed on the chord");
+await waitFn(([fid, sid]) => { const f = document.getElementById(fid); const d = f && f.contentDocument;
+  const t = d && d.querySelector('#tabs .tab[data-id="' + sid + '"]'); return !!(t && t.querySelector(".tab-key")); }, ["f-chat-2", cfg.sidA], "A's badge never painted");
+out.hk.badgeAAfter = await badgeOf("f-chat-2", cfg.sidA);
+out.hk.keysStore = (await stores()).keys;
+await waitFn(() => document.activeElement && document.activeElement.id === "f-chat" && document.getElementById("f-chat").contentDocument.activeElement.id === "composer-input", null, "the focus never came back to the asking pane's composer");
+out.hk.afterRecord = await whereFocus("f-chat");
+// Remove (from column 2, where A is not even the active tab): the one "Update hot key…" row opens the recorder, whose
+// Remove button makes the "" write; the shell drops the command, the set entry and the override — and both columns' badges go
+out.hk.updateMenu = await pickTabMenu("f-chat-2", cfg.sidA, "Update hot key…");
+await dialogShown();
+await page.evaluate(() => { const b = Array.from(document.querySelectorAll("#rkeys-list .rkeys-row.recording .rkeys-act")).find((x) => x.textContent === "Remove"); if (!b) throw new Error("no Remove button on the bound row"); b.click(); });
+await dialogGone("the recorder never closed on Remove");
+await waitFn(([sid]) => { const has = (fid) => { const t = document.getElementById(fid).contentDocument.querySelector('#tabs .tab[data-id="' + sid + '"]'); return !!(t && t.querySelector(".tab-key")); };
+  return !has("f-chat") && !has("f-chat-2") && !(sid in JSON.parse(localStorage.getItem("romp:tabkeys") || "{}")); }, [cfg.sidA], "Remove never took A's badge and set entry away");
+out.hk.removed = { badgeCol1: await badgeOf("f-chat", cfg.sidA), badgeCol2: await badgeOf("f-chat-2", cfg.sidA), ...(await stores()), dialogRows: await hotkeyRows() };
+// Esc on a re-recording keeps what was there: B's chord and its command stay, and the focus comes back
+await pickTabMenu("f-chat", cfg.sidB, "Update hot key…");
+await dialogShown();
+await page.keyboard.press("Escape");
+await dialogGone("Esc never closed the solo recorder");
+await waitFn(() => document.activeElement && document.activeElement.id === "f-chat" && document.getElementById("f-chat").contentDocument.activeElement.id === "composer-input", null, "the focus never came back after Esc");
+out.hk.cancelled = { afterCancel: await whereFocus("f-chat"), badgeB: await badgeOf("f-chat", cfg.sidB), ...(await stores()), dialogRows: await hotkeyRows() };   // the focus first: listing the dialog's rows opens (and closes) it
+
+// ---- 2d. pin a tab (the user 2026-09-10): B's tab, pinned from its menu in column 1, wears the pushpin and is not draggable —
+// in every column, since the pinned set is this browser's; Unpin from column 2's menu takes it back ----
+const pinState = (fid, sid) => page.evaluate(([fid, sid]) => { const t = document.getElementById(fid).contentDocument.querySelector('#tabs .tab[data-id="' + sid + '"]');
+  return t ? { pinned: t.classList.contains("pinned"), draggable: t.draggable, pin: !!t.querySelector(".tab-pin svg") } : null; }, [fid, sid]);
+const pinnedIn = (fids, sid, want) => waitFn(([fids, sid, want]) => fids.every((fid) => { const t = document.getElementById(fid).contentDocument.querySelector('#tabs .tab[data-id="' + sid + '"]');
+  return !!t && t.classList.contains("pinned") === want; }), [fids, sid, want], "B's tab never showed pinned=" + want + " in both columns");
+const stripOrder = (fid) => page.evaluate((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id), fid);
+const rewriteArrangement = (ids) => page.evaluate((ids) => document.getElementById("f-chat").contentWindow.__rompWriteOrder(ids), ids);
+const orderBefore = { col1: await stripOrder("f-chat"), col2: await stripOrder("f-chat-2") };   // whatever the kernel's order is: the pin holds THAT slot
+await pickTabMenu("f-chat", cfg.sidB, "Pin tab");
+await pinnedIn(["f-chat", "f-chat-2"], cfg.sidB, true);
+out.pin = { col1: await pinState("f-chat", cfg.sidB), col2: await pinState("f-chat-2", cfg.sidB), a: await pinState("f-chat", cfg.sidA),
+            store: JSON.parse(await page.evaluate(() => localStorage.getItem("romp:tabpins"))), orderBefore };
+// the pinned tab keeps its SLOT whatever rewrites the order: the browser's arrangement is rewritten to the reverse (what a
+// drag elsewhere, a merge or a reload could do) — every column re-derives its order from it and puts B back at its slot
+const reversed = orderBefore.col1.slice().reverse();
+await rewriteArrangement(reversed);
+await waitFn(() => JSON.parse(localStorage.getItem("romp:vieworder") || "[]").length === 2, null, "the arrangement write never landed");
+// give every column a chance to consume the rewrite (a kernel push re-derives the order too), then read the strips
+await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+out.pin.orderHeld = { col1: await stripOrder("f-chat"), col2: await stripOrder("f-chat-2"), arrangement: JSON.parse(await page.evaluate(() => localStorage.getItem("romp:vieworder"))) };
+out.pin.menu = await pickTabMenu("f-chat-2", cfg.sidB, "Unpin tab");
+await pinnedIn(["f-chat", "f-chat-2"], cfg.sidB, false);
+out.pin.after = { col1: await pinState("f-chat", cfg.sidB), col2: await pinState("f-chat-2", cfg.sidB), store: JSON.parse(await page.evaluate(() => localStorage.getItem("romp:tabpins"))) };
+// with the pin gone the same rewrite takes effect in every column (the pin was what held the slot); then it is restored.
+// The arrangement still holds the reverse from above (the hold never writes it back), and a storage value written
+// unchanged raises no event in the sibling column — so restore first, then rewrite: two real changes
+const stripsShow = (want, why) => waitFn((want) => ["f-chat", "f-chat-2"].every((fid) => JSON.stringify(Array.from(document.getElementById(fid).contentDocument.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id)) === JSON.stringify(want)), want, why);
+await rewriteArrangement(orderBefore.col1);
+await waitFn((want) => localStorage.getItem("romp:vieworder") === JSON.stringify(want), orderBefore.col1, "the restore never landed");
+await rewriteArrangement(reversed);
+await stripsShow(reversed, "unpinned, the rewritten arrangement never showed in both columns");
+out.pin.orderReleased = { col1: await stripOrder("f-chat"), col2: await stripOrder("f-chat-2") };
+await rewriteArrangement(orderBefore.col1);
+await stripsShow(orderBefore.col1, "the arrangement never came back to where it started");
+
+// ---- 2e. the session bell from the keyboard (the user 2026-09-11): the palette's "Toggle notifications for this
+// session" flips the ACTIVE session's bell in the focused column — the same override the tab menu's bell row writes —
+// a toast says so, the menu's row reads the other way in EVERY column (the other learns from the kernel's push), and
+// the kernel's flags file carries the override ----
+const peekTabMenu = async (fid, sid) => {   // the tab menu's labels, read and closed without picking anything
+  const fr = await (await page.$("#" + fid)).contentFrame();
+  await fr.locator('#tabs .tab[data-id="' + sid + '"]').click({ button: "right" });
+  await waitFn((fid) => !!document.getElementById(fid).contentDocument.querySelector(".ctx-menu"), fid, fid + "'s tab menu never opened");
+  const labels = await page.evaluate((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".ctx-menu .ctx-item-label")).map((l) => l.textContent), fid);
+  await page.keyboard.press("Escape");
+  await waitFn((fid) => !document.getElementById(fid).contentDocument.querySelector(".ctx-menu"), fid, fid + "'s tab menu never closed on Escape");
+  return labels;
+};
+const bellLabel = async (fid, sid) => (await peekTabMenu(fid, sid)).find((l) => l === "Notify me" || l === "Stop notifying") || null;
+const bellReads = async (fid, sid, want, why) => {   // the menu is a snapshot: re-peek until the kernel's push has landed the flag
+  for (let i = 0; i < 40; i++) { if ((await bellLabel(fid, sid)) === want) return want; await page.waitForTimeout(250); }
+  await die(why);
+};
+const runPalette = async (fid, query) => {   // the chord from inside a column's document; the shell's palette answers
+  await clickIn(fid, "#content"); await waitFocused(fid);
+  await page.keyboard.press("Control+P");
+  await waitFn(() => { const b = document.getElementById("rpal-back"); return !!b && !b.hidden; }, null, "the palette never opened on Ctrl+P");
+  await page.keyboard.type(query);
+  await waitFn(() => { const r = document.querySelector("#rpal-list .rpal-row.active"); return !!r && /Toggle notifications for this session/.test(r.textContent || ""); }, null, "the palette never matched the bell command");
+  await page.keyboard.press("Enter");
+  await waitFn(() => { const b = document.getElementById("rpal-back"); return !!b && b.hidden; }, null, "the palette never closed on Enter");
+};
+const toasts = (fid) => page.evaluate((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".warn-toast-msg")).map((t) => t.textContent), fid);
+out.bell = { before: await bellLabel("f-chat", cfg.sidA), beforeCol2: await bellLabel("f-chat-2", cfg.sidA) };
+await runPalette("f-chat", "toggle notif");
+await waitFn((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".warn-toast-msg")).some((t) => /Notifications enabled for/.test(t.textContent || "")), "f-chat", "no toast said the bell went on");
+out.bell.toastOn = await toasts("f-chat");
+out.bell.afterOn = await bellLabel("f-chat", cfg.sidA);                                       // this column: at once
+out.bell.col2AfterOn = await bellReads("f-chat-2", cfg.sidA, "Stop notifying", "column 2 never learned the bell went on");   // the other: from the kernel
+await runPalette("f-chat", "toggle notif");
+await waitFn((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".warn-toast-msg")).some((t) => /Notifications disabled for/.test(t.textContent || "")), "f-chat", "no toast said the bell went off");
+out.bell.toastOff = await toasts("f-chat");
+out.bell.afterOff = await bellLabel("f-chat", cfg.sidA);
+out.bell.col2AfterOff = await bellReads("f-chat-2", cfg.sidA, "Notify me", "column 2 never learned the bell went off");
+
 // ---- 3. a split ON the session column 1 shows: the third column takes it anyway; close it ----
 out.s3 = await page.evaluate((sidA) => { const f = window.__rompSplitChat(sidA); return { frameId: f && f.id, cols: localStorage.getItem("romp-chat-cols") }; }, cfg.sidA);
 await waitTabs("f-chat-3", [cfg.sidA, cfg.sidB]);
@@ -186,6 +347,12 @@ await waitActive("f-chat-3", cfg.sidA);
 out.s3.col3Active = await activeIn("f-chat-3");
 out.s3.col1Still = await activeIn("f-chat");
 out.s3.targetAWithThree = await targetOf(cfg.sidA);   // column 1 shows A too and comes first in the row
+// three columns: next, next, next wraps to the first; previous wraps back to the last (the two commands are distinct)
+await clickIn("f-chat", "#content"); await waitFocused("f-chat");
+out.s3.cycle = [];
+for (const [key, fid] of [["Alt+Shift+J", "f-chat-2"], ["Alt+Shift+J", "f-chat-3"], ["Alt+Shift+J", "f-chat"], ["Alt+Shift+H", "f-chat-3"]]) {
+  await page.keyboard.press(key); await waitFocused(fid); out.s3.cycle.push(await page.evaluate(() => window.__rompFocusedChatId()));
+}
 await page.evaluate(() => window.__rompCloseSplit(3));
 out.s3.after = await shell();
 out.s3.pane3Gone = await page.evaluate(() => !document.getElementById("chat-pane-3") && !document.getElementById("gv-chat-3") && !document.getElementById("f-chat-3"));
@@ -230,6 +397,12 @@ out.s6.pane1W = await width("chat-pane"); out.s6.pane2W = await width("chat-pane
 await page.evaluate(() => window.__rompCloseSplit(2));
 out.s7 = await shell();
 out.s7.pane2Gone = await page.evaluate(() => !document.getElementById("chat-pane-2") && !document.getElementById("gv-chat-2") && !document.getElementById("f-chat-2"));
+// one column, on A: B's hot key has no column showing B, so it switches the column last worked in TO B
+await clickIn("f-chat", "#content"); await waitFocused("f-chat");
+out.s7.beforeKey = await activeIn("f-chat");
+await page.keyboard.press("Alt+Shift+K");
+await waitActive("f-chat", cfg.sidB);
+out.s7.switched = await activeIn("f-chat");
 out.ms = Date.now() - out.t0;
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
@@ -396,6 +569,7 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(s["col3Active"], SID_A, "the third column shows A even though column 1 does: %r" % s)
         self.assertEqual(s["col1Still"], SID_A)
         self.assertEqual(s["targetAWithThree"], "f-chat", "with two columns on A, the first in row order wins the target")
+        self.assertEqual(s["cycle"], ["f-chat-2", "f-chat-3", "f-chat", "f-chat-3"], "next, next, next wraps; previous wraps back: %r" % s["cycle"])
         self.assertTrue(s["pane3Gone"], "__rompCloseSplit(3) removes the pane, its gutter and its iframe")
         self.assertEqual(s["after"]["cols"], "[2]", "the persisted set is back to column 2 alone: %r" % s["after"])
         self.assertEqual(s["after"]["frameIds"], ["f-chat", "f-chat-2"])
@@ -454,10 +628,80 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(s["frameIds"], ["f-chat"])
         self.assertEqual(s["cols"], "[]")
         self.assertNotIn("chat2", s["grow"] or {}, "the closed column's grow leaves the store: %r" % s["grow"])
+        self.assertEqual(s["beforeKey"], SID_A)
+        self.assertEqual(s["switched"], SID_B, "a hot key for a session no column shows switches the column last worked in to it")
 
     def test_8_the_whole_story_runs_in_well_under_half_a_minute(self):
         r = self._r()
         self.assertLess(r["ms"], 25000, "the driver waits on conditions, never on fixed sleeps: %d ms" % r["ms"])
+
+    def test_per_tab_hot_keys_switch_to_the_column_showing_the_session_and_the_split_cycles(self):
+        # the user 2026-09-10: a hot key per tab (set from its menu, shown minified on the tab) and a hot key that
+        # cycles the focus between the split's columns; both live in the shared bindings store
+        h = self._r()["hk"]
+        full = (lambda k: "\u2325\u21e7" + k) if h["mac"] else (lambda k: "Alt+Shift+" + k)   # the platform's full spelling; the badge glyphs are the same everywhere
+        self.assertEqual(h["badgeB"], {"text": "\u2325\u21e7K", "title": "hot key: " + full("K"), "aria": "hot key: " + full("K")}, "the badge, minified, its full spelling in the tooltip and the accessible name")
+        self.assertEqual(h["registered"], full("K"), "the shell registered the tab's command from the store at boot, with its chord: %r" % h)
+        self.assertIsNone(h["badgeA"], "no hot key, no badge")
+        self.assertEqual(h["pressedFrom"]["shell"], "f-chat", "the chord is pressed with the keyboard inside column 1: the pane document's dispatcher carries it")
+        self.assertNotIn(h["pressedFrom"]["pane"], ("composer-input", "TEXTAREA", "INPUT"), "…outside any text box")
+        self.assertEqual(h["afterKey"]["focused"], "f-chat-2", "the chord goes to the column already showing the session: %r" % h)
+        self.assertEqual(h["afterKey"]["col2"], SID_B); self.assertEqual(h["afterKey"]["col1"], SID_A, "…and column 1 keeps its own tab")
+        self.assertEqual(h["afterCycle1"], "f-chat"); self.assertEqual(h["afterCycle2"], "f-chat-2")
+        self.assertIn("Hot key…", h["menu"], "the tab menu offers it: %r" % h["menu"])
+        r = h["recorder"]
+        self.assertEqual(r["heading"], "Hot key for \u201cweb\u201d", "the pane's ask carries the session's name")
+        self.assertEqual(r["rows"], 1); self.assertEqual(r["recording"], 1); self.assertTrue(r["filterHidden"]); self.assertTrue(r["builtInHidden"], "the built-in section is out of the way too")
+        self.assertRegex(h["refused"], r"is built in \(move focus between panes\)", "a chord the pane-focus script owns is refused on the row: %r" % h["refused"])
+        self.assertEqual(h["badgeAAfter"], {"text": "\u2325\u21e7L", "title": "hot key: " + full("L"), "aria": "hot key: " + full("L")}, "the recorded chord shows on the tab in every column")
+        self.assertEqual(h["keysStore"]["session.hotkey." + SID_A], "Alt+Shift+L")
+        self.assertEqual(h["afterRecord"], {"shell": "f-chat", "pane": "composer-input"}, "the dialog hands the keyboard back to the pane that asked, in its composer")
+        rm = h["removed"]
+        self.assertIsNone(rm["badgeCol1"]); self.assertIsNone(rm["badgeCol2"])
+        self.assertNotIn(SID_A, rm["tabkeys"], "Remove takes the session out of the set: %r" % rm["tabkeys"])
+        self.assertNotIn("session.hotkey." + SID_A, rm["keys"], "…and its override out of the store (no dead \"\" entry): %r" % rm["keys"])
+        self.assertEqual(rm["dialogRows"], ["Switch to api"], "…and its row out of the dialog; B's stays")
+        self.assertIn("Update hot key…", h["updateMenu"], "a bound tab's menu offers one row for both changing and removing: %r" % h["updateMenu"])
+        self.assertNotIn("Remove hot key", h["updateMenu"]); self.assertNotIn("Change hot key…", h["updateMenu"])
+        c = h["cancelled"]
+        self.assertEqual(c["badgeB"]["text"], "\u2325\u21e7K", "Esc on a re-recording keeps the chord")
+        self.assertIn(SID_B, c["tabkeys"]); self.assertEqual(c["keys"]["session.hotkey." + SID_B], "Alt+Shift+K"); self.assertEqual(c["dialogRows"], ["Switch to api"])
+        self.assertEqual(c["afterCancel"], {"shell": "f-chat", "pane": "composer-input"}, "…and hands the keyboard back too")
+
+    def test_the_session_bell_is_a_command_that_flips_the_active_sessions_flag_in_every_column(self):
+        # the user 2026-09-11: notifications for the selected session on a key — the palette's command (bindable like any
+        # other) writes the same per-session override the tab menu's bell row writes, and says what it did
+        b = self._r()["bell"]
+        self.assertEqual((b["before"], b["beforeCol2"]), ("Notify me", "Notify me"), "off to begin with: the lab's master is off and the session has no override")
+        self.assertTrue(any(t == "Notifications enabled for web" for t in b["toastOn"]), "the toast names the session and the new state: %r" % b["toastOn"])
+        self.assertEqual(b["afterOn"], "Stop notifying", "the tab menu reads the other way at once")
+        self.assertEqual(b["col2AfterOn"], "Stop notifying", "…and in the other column, from the kernel's push: the flag reached the kernel")
+        self.assertTrue(any(t == "Notifications disabled for web" for t in b["toastOff"]), b["toastOff"])
+        self.assertEqual((b["afterOff"], b["col2AfterOff"]), ("Notify me", "Notify me"), "a second run turns it off again, everywhere")
+        # the kernel's store, once the story has run: the override is off again — stored as such or dropped as the default
+        p = os.path.join(self.lab, "xdg", "romp", "session-flags.json")
+        flags = json.load(open(p)) if os.path.exists(p) else {}
+        self.assertFalse((flags.get(SID_A) or {}).get("notify", False), "the override is off in the kernel's flags file: %r" % flags)
+
+    def test_a_pinned_tab_wears_the_fold_and_is_not_draggable_in_every_column(self):
+        # the user 2026-09-10: pin a tab so it stays where it is, shown as a folded corner; per browser, so every column agrees
+        p = self._r()["pin"]
+        for c in (p["col1"], p["col2"]):
+            self.assertEqual(c, {"pinned": True, "draggable": False, "pin": True}, "pinned from column 1's menu, shown in both columns: %r" % p)
+        self.assertEqual(p["a"], {"pinned": False, "draggable": True, "pin": False}, "the other tab is untouched")
+        before = p["orderBefore"]["col1"]
+        self.assertEqual(sorted(before), sorted([SID_A, SID_B])); self.assertEqual(p["orderBefore"]["col2"], before, "both columns start on the kernel's order")
+        self.assertEqual(p["store"], {SID_B: before.index(SID_B)}, "pinned AT its slot")
+        rev = list(reversed(before))
+        self.assertEqual(p["orderHeld"]["arrangement"], rev, "the arrangement was rewritten to the reverse…")
+        self.assertEqual(p["orderHeld"]["col1"], before, "…and column 1's strip kept B at its slot")
+        self.assertEqual(p["orderHeld"]["col2"], before, "…and so did column 2's")
+        self.assertIn("Unpin tab", p["menu"]); self.assertNotIn("Pin tab", p["menu"])
+        for c in (p["after"]["col1"], p["after"]["col2"]):
+            self.assertEqual(c, {"pinned": False, "draggable": True, "pin": False}, "unpinned from column 2's menu, gone in both: %r" % p["after"])
+        self.assertEqual(p["after"]["store"], {})
+        self.assertEqual(p["orderReleased"], {"col1": rev, "col2": rev}, "unpinned, the same rewrite moves the tab: the pin was what held it")
+
 
 
 if __name__ == "__main__":

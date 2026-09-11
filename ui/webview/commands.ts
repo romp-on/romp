@@ -40,6 +40,12 @@ export function registerCommand(cmd: PaletteCommand): void {
   commands.set(cmd.id, cmd.chord === undefined ? { ...cmd, chord: DEFAULT_CHORDS[cmd.id] } : cmd);
 }
 
+// A command leaves the registry (the per-tab hot keys, 2026-09-10: a session whose hot key was removed, or whose
+// tab is gone, has no "Switch to" command any more — the dialog and the dispatcher forget it together).
+export function unregisterCommand(id: string): boolean {
+  return commands.delete(id);
+}
+
 export function commandList(): PaletteCommand[] {
   return Array.from(commands.values());   // registration order — the palette's empty-query order
 }
