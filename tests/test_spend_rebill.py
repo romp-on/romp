@@ -357,6 +357,31 @@ class Rebill(unittest.TestCase):
                          "the zero-cost result's own row (no dollars), then the two live ones, none read as a replay")
         self.assertEqual(self._cost_state()["session"], "", "the epoch is stamped from live results (these doubles carry none)")
 
+    def test_a_replayed_first_result_under_an_unknown_baseline_sets_the_watermark_so_the_next_live_turn_is_its_own(self):
+        # live on the fix's first boot (2026-09-11 22:37Z): every session's replayed first result was attach-unknown and
+        # folded nothing, right, but the duplicate branch left the watermark at zero, and the next LIVE result folded the
+        # whole cumulative once per session (romp_PR-triage 159.20 = its cumulative, romp_timeline 309.71 = its cumulative)
+        s = self._session(attach=True, hello_cli=("4242", "s1"), journal_next=10, tags=[{"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
+        self.assertEqual(s._spend_baseline, "attach-pending")
+        self._run(s, _result(308.15, 90000))                # replayed, no watermark on record: attach-unknown
+        self.assertEqual(self._day(), {}, "the lifetime's total is not a turn")
+        rows = self._turns()
+        self.assertEqual((rows[0].get("usd"), rows[0]["spendBaseline"], rows[0].get("redelivered")), (0.0, "attach-unknown", True))
+        self.assertEqual((s._last_cost_total, s._last_usage_totals.get("input_tokens")), (308.15, 90000), "the watermarks start from the replayed lifetime")
+        self._run(s, _result(309.71, 90400))                # the next LIVE result
+        self.assertAlmostEqual(self._day()["usd"], 1.56, msg="its own delta, not the whole cumulative")
+        self.assertEqual(self._day()["tokIn"], 400)
+        self.assertEqual(self._cost_state()["total"], 309.71)
+        # the seeded road is unchanged: a replay below a known watermark moves nothing, and an unfolded replay above it
+        # is absorbed by the next live delta
+        Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
+        self.be._update_reg(SID, costState={"total": 500.0, "tokens": {"input_tokens": 90000}, "cli": "4242:s1", "t": 1})
+        s2 = self._session(attach=True, journal_next=10, tags=[{"offset": 8, "replay": True}, {"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
+        self._run(s2, _result(480.0, 89000)); self._run(s2, _result(512.5, 90400))
+        self.assertEqual(self._day(), {}); self.assertEqual(s2._last_cost_total, 500.0)
+        self._run(s2, _result(520.0, 91000))
+        self.assertAlmostEqual(self._day()["usd"], 20.0, msg="the unfolded 12.5 rides the live delta")
+
     def test_the_transport_tags_each_result_record_with_its_offset_as_it_reads_it(self):
         # the transport unit of the rule: the hello's journal.next bounds the replay; records the reader hands over are
         # tagged in _take before the yield; the last replayed record tagged at next - 1 is a replay even though the

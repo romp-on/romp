@@ -7524,7 +7524,10 @@ class SdkSession:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:
                         delta = total - self._last_cost_total if total >= self._last_cost_total else total
-                    if not duplicate:
+                    if not duplicate or unknown:
+                        # a replayed result under an UNKNOWN baseline still names the lifetime the watermark starts
+                        # from (live 2026-09-11 22:38Z, the fix's first boot: every session's replayed first result
+                        # left the watermark at zero, and its next live result folded the whole cumulative once)
                         self._last_cost_total = float(total)
                     self._spend_first_result = False   # the watermark moved (or a duplicate was seen): the process's first result is in
                     # the tokens: THIS turn's counts, from whichever result counter is a running total —
@@ -7533,7 +7536,9 @@ class SdkSession:
                         keep = dict(self._last_usage_totals)
                         turn_u = self._turn_usage(msg)
                         turn_u = {k: 0 for k in (turn_u or {})} if isinstance(turn_u, dict) else turn_u
-                        self._last_usage_totals = keep       # the token watermarks are not moved down either
+                        if not unknown:
+                            self._last_usage_totals = keep   # the token watermarks are not moved down either (an unknown
+                            #                                  baseline keeps the map's totals: they start the watermark)
                     else:
                         turn_u = self._turn_usage(msg)
                     if unknown:       # the token watermarks moved with the map; the lifetime's counts are not this turn's
