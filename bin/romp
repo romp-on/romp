@@ -677,6 +677,7 @@ EOF
     _romp_cmd "romp perf client [--minutes <n>|--json]" - "Browser-side performance of the open dashboards (client-diag.jsonl, surface perf): handler ms/min by frame type with window p50/p90/p99 and max, main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames — per dashboard and pane over the last <n> minutes (default 10)"
     _romp_cmd "romp api-health"            -            "The API-health signal across your sessions (GET /api-health as JSON: per-key/family retry rates and a thrash state)"
     _romp_cmd "romp fork <parent> <name>"  -            "Branch a session into a new parallel one (parent untouched; --at <uuid> picks the cut)"
+    _romp_cmd "romp billing <session> [login|key]" -    "Which account an SDK session bills (login or API key): bare reads it, a value switches it (mid-turn it waits for the turn to end)"
     _romp_cmd "romp rename <session> <name>" -          "Rename a session (uuid-keyed: mailboxes, goals and history all follow)"
     _romp_cmd "romp move <session> <dir>"   -           "Move an SDK session's working directory (its conversation follows; mid-turn it waits for the turn to end)"
     _romp_cmd "romp color <session> [<#hex|slot>]" -    "Recolor a session's identity swatch (palette hex or slot number; no color arg reads bg/fg)"
@@ -1439,6 +1440,81 @@ if [[ "${1:-}" == "fork" ]]; then
     _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
     echo "romp fork: refused — $_err" >&2
     exit 1
+fi
+
+# Which account an SDK session bills (the user 2026-09-11, who wants the switch reachable from a
+# terminal and a script, not only from the tab menu): the kernel's /auth route, the tab menu's Billing
+# pick as a one-shot route beside /fork. Bare, it READS (GET /auth?id=): one line naming the side the
+# session bills, whether a switch is still applying, the login account, and whether the session was
+# ever picked (an unpicked one bills the machine's default). With `login` or `key` it SWITCHES (POST
+# /auth) and prints the kernel's answer the same way: a quiet session reconnects to apply; a mid-turn
+# one parks the switch and the line says so. The kernel refuses a side this machine cannot bill and
+# names why. No key material is ever printed: the key is the label "API key". A kernel that answers
+# with a refusal is reported AS ITSELF (a refused token, a kernel without the route), never as "not
+# reachable" — the api-health shape.
+if [[ "${1:-}" == "billing" ]]; then
+    shift
+    _bl_usage="usage: romp billing <session> [login|key]"
+    if [[ $# -lt 1 || $# -gt 2 || -z "$1" || "$1" == -* ]]; then echo "$_bl_usage" >&2; exit 2; fi
+    _bl_who="$1"; _bl_val="${2:-}"
+    if [[ -n "$_bl_val" && "$_bl_val" != "login" && "$_bl_val" != "key" ]]; then echo "$_bl_usage" >&2; exit 2; fi
+    _tok="$(_romp_token)"
+    _kport="${ROMP_KERNEL_PORT:-29855}"
+    if [[ -z "$_tok" ]]; then
+        echo "romp billing: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
+        exit 1
+    fi
+    # The HTTP status rides the reply's last line (-w), so a refusal is reported as itself: a refused
+    # token (401/403) and a kernel that predates the route (404) are not "kernel not reachable".
+    if [[ -n "$_bl_val" ]]; then
+        _payload="$(python3 -c 'import json,sys; print(json.dumps({"id": sys.argv[1], "value": sys.argv[2]}))' "$_bl_who" "$_bl_val")"
+        _raw="$(_romp_token_cfg | curl -s -m 30 --config - -w '\n%{http_code}' -X POST "http://127.0.0.1:$_kport/auth" \
+                    -H 'Content-Type: application/json' -d "$_payload")" \
+            || { echo "romp billing: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    else
+        _bl_q="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$_bl_who")"
+        _raw="$(_romp_token_cfg | curl -s -m 10 --config - -w '\n%{http_code}' "http://127.0.0.1:$_kport/auth?id=$_bl_q")" \
+            || { echo "romp billing: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    fi
+    _code="${_raw##*$'\n'}"
+    _body="${_raw%$'\n'*}"; _body="${_body%$'\n'}"
+    case "$_code" in
+        2??|400) ;;
+        401|403) echo "romp billing: the kernel refused the serve token (HTTP $_code): a stale ROMP_SERVE_TOKEN, or a state dir that is not this kernel's" >&2; exit 1 ;;
+        404) echo "romp billing: this kernel has no /auth route (HTTP 404): it predates this command, restart romp" >&2; exit 1 ;;
+        *)   echo "romp billing: the kernel answered HTTP $_code on :$_kport" >&2; exit 1 ;;
+    esac
+    # The kernel's answer as one line. ok:false (a refusal, a 400) prints its reason and exits 1. The
+    # fields are the tab hover's (auth, authLive, authPending, authPicked, acct); nothing here is a key.
+    printf '%s' "$_body" | python3 -c '
+import json, sys
+try:
+    r = json.load(sys.stdin)
+except ValueError:
+    sys.stderr.write("romp billing: the kernel answered something that is not JSON\n"); sys.exit(1)
+if not isinstance(r, dict) or not r.get("ok"):
+    why = (r.get("error") if isinstance(r, dict) else None) or "no reason given"
+    sys.stderr.write("romp billing: refused — %s\n" % why); sys.exit(1)
+word = {"login": "the login", "key": "the API key"}.get(r.get("auth") or "", "")
+name = r.get("name") or r.get("id") or sys.argv[1]
+if r.get("queued"):
+    want = "the login" if sys.argv[2] == "login" else "the API key"
+    line = "%s: queued — the switch to %s applies once the session can take it: it is mid-turn, compacting, being moved, held back by a usage limit, or has changes queued ahead" % (name, want)
+    if word:
+        line += " (bills %s until then)" % word
+elif not word:
+    sys.stderr.write("romp billing: billing unknown for %s — not an SDK session, or the kernel has not reported it yet\n" % name); sys.exit(1)
+elif not r.get("authPicked"):
+    line = "%s: unpicked (bills %s, the default for this machine)" % (name, word)
+else:
+    line = "%s: bills %s" % (name, word)
+    if r.get("authPending"):
+        line += " (applying — not confirmed yet)"
+    if r.get("auth") == "login" and r.get("acct"):
+        line += " · login account %s" % r["acct"]
+print(line)
+' "$_bl_who" "$_bl_val"
+    exit $?
 fi
 
 # Rename a session (the user 2026-08-23, via the SynthProbe fleet restructuring): the kernel's

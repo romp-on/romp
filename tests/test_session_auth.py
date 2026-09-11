@@ -1022,9 +1022,15 @@ class Availability(unittest.TestCase):
     def test_the_refusal_toast_names_the_backend_reason(self):
         # a refused setAuth tells the user WHY (no login signed in / no apiKeyHelper / a managed helper)
         # from the backend's own sentence, and keeps the generic text for the cases without one
+        # one sentence for both doors since POST /auth (2026-09-11): the WS arm and the route read it
+        # from _auth_refusal, which asks the backend first and keeps the generic text for the rest
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        self.assertIn('why = str(getattr(be, "auth_unavailable_why", lambda v: "")(str(msg["value"])) or "")', src)
-        self.assertIn('("Couldn\'t switch the account this session bills: %s." % why) if why', src)
+        self.assertIn('"text": _auth_refusal(be, sid, str(msg["value"])) or _AUTH_REFUSAL_GENERIC}))', src)
+        self.assertIn('fn = getattr(be, "auth_pick_refusal", None)', src)
+        self.assertIn('return ("Couldn\'t switch the account this session bills: %s." % why) if why else ""', src)
+        self.assertIn("or this machine has no Claude login to switch to.", src)
+        # …and it is asked BEFORE the park (review of 178968e6): a busy tmux/Codex pick used to queue for nothing
+        self.assertIn("    if _auth_refusal(be, sid, value):\n        return False", src)
 
 
 class SwitchCycleTruthTable(_Keyed):
@@ -1088,7 +1094,7 @@ class DrivePlumbing(unittest.TestCase):
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('"setAuth", "endSession"', src.replace("\n", " "), "an ID_OPS member")
         self.assertIn('elif t == "setAuth" and msg.get("value") in ("login", "key"):', src)
-        self.assertIn("def _set_auth_or_park(be, sid, value):", src)
+        self.assertIn("def _set_auth_or_park(be, sid, value, state=None):", src)   # state: POST /auth reads the park (2026-09-11)
         self.assertIn('_gate_or_park(sid, ("auth", value))', src)   # parks on the gate, or hands over (2026-09-05)
         self.assertIn('elif op[0] == "auth":', src)
         self.assertIn("be.set_auth(sid, op[1])", src)
@@ -1104,6 +1110,41 @@ class DrivePlumbing(unittest.TestCase):
         sbc = open(os.path.join(os.path.dirname(HERE), "kernel", "session_backend.py")).read()
         self.assertIn("def set_auth(self, sid: str, value: str) -> bool:", sbc)
         self.assertIn("return False", sbc.split("def set_auth", 1)[1][:900])
+
+
+class AuthPicked(_Keyed):
+    """`authPicked` (the user 2026-09-11): whether an EXPLICIT pick stands behind a row's `auth`. An unpicked
+    session's `auth` is the box's fallback (default_auth / effective_auth), and the Billing menu used to
+    check-mark it as though picked; both rows now say which it is, so the menu can say "unpicked"."""
+
+    def test_the_rows_say_whether_a_pick_stands_behind_auth(self):
+        sid = self.be.spawn("n", "/tmp")                      # no pick: the reg carries no auth
+        row = self.be.live_sessions()[sid]
+        self.assertEqual((row["auth"], row["authPicked"]), ("key", False), "the fallback, and said to be one")
+        s = sb.SdkSession(self.be, sb.read_reg(self.be.state_dir, sid))
+        self.assertEqual((s.snapshot()["auth"], s.snapshot()["authPicked"]), ("key", False), "the live twin agrees")
+        picked = self.be.spawn("m", "/tmp", auth="key")       # the SAME side, picked explicitly
+        self.assertEqual((self.be.live_sessions()[picked]["auth"], self.be.live_sessions()[picked]["authPicked"]),
+                         ("key", True))
+        self.assertTrue(sb.SdkSession(self.be, sb.read_reg(self.be.state_dir, picked)).snapshot()["authPicked"])
+
+    def test_an_ended_session_refuses_a_pick_before_any_write_a_dormant_one_takes_it(self):
+        # review of 178968e6: an ended session (kill: alive False, the record kept) was admitted by sid, so the
+        # pick was persisted and sdk-defaults reseeded from a dead session
+        sid = self.be.spawn("n", "/tmp", auth="key")
+        self.assertEqual(self.be.auth_pick_refusal(sid, "login"), "", "dormant: alive, not running — takes the pick")
+        self.be.kill(sid)
+        why = self.be.auth_pick_refusal(sid, "login")
+        self.assertEqual(why, "that session has ended; a dormant one, still alive but not running, can be reached by sid")
+        self.assertEqual(self.be.auth_pick_refusal(sid, ""), why, "a read of an ended session is refused the same way")
+        reg = sb.read_reg(self.be.state_dir, sid)
+        self.assertEqual((reg.get("auth"), reg.get("alive")), ("key", False), "the record is untouched")
+        self.assertFalse((Path(self.d) / "sdk-defaults.json").exists(), "the box's default was not reseeded")
+        self.assertEqual(self.be.auth_pick_refusal("11111111-2222-3333-4444-000000000000", "key"),
+                         "this kernel has no record of that session")
+        # the side this box cannot bill comes first, whatever the record says
+        self.be.login_ok = lambda: False
+        self.assertEqual(self.be.auth_pick_refusal(sid, "login"), sb._cred.WHY_NO_LOGIN)
 
 
 if __name__ == "__main__":

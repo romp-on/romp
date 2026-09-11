@@ -101,7 +101,7 @@ class NonObjectBodies(unittest.TestCase):
     `or`) and raise AttributeError into do_POST's catch-all: a 500 whose body was a Python traceback
     naming absolute paths. Now every one of them answers 400 in the route family's JSON shape, naming
     what arrived, and acts on nothing."""
-    ROUTES = ("/new", "/fork", "/rename", "/move", "/color", "/watch-pr", "/watch", "/tag", "/group",
+    ROUTES = ("/new", "/fork", "/auth", "/rename", "/move", "/color", "/watch-pr", "/watch", "/tag", "/group",
               "/update-dismiss", "/working", "/deliver", "/picker-check", "/walk-root", "/redial")
 
     @classmethod

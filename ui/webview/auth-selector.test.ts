@@ -76,9 +76,10 @@ test("the switching CONTROL is the tab menu's Billing submenu, both sides listed
   // with the session's current choice check-marked
   assert.match(RENDER, /\{ label: st\.authAcct \? `Login \(\$\{st\.authAcct\}\)` : "Login", value: "login", why: avail\.login \? "" : /);   // 2026-09-08: each option carries the reason it is greyed, or ""
   assert.match(RENDER, /\{ label: "API key", value: "key", why: avail\.key \? "" : /);   // 2026-09-08: reason field, see above
-  assert.match(RENDER, /el\("div", "ctx-item" \+ \(st\.auth === c\.value \? " current" : ""\) \+ \(c\.why \? " disabled" : ""\)\)/);   // 2026-09-08: the unavailable side is greyed, never hidden
-  // a pick posts the same setAuth the badge used, and only a CHANGE posts (current = dismiss)
-  assert.match(RENDER, /if \(st\.auth !== c\.value && vscodeApi\) vscodeApi\.postMessage\(\{ type: "setAuth", id, value: c\.value \}\);/);
+  assert.match(RENDER, /el\("div", "ctx-item" \+ \(st\.auth === c\.value && st\.authPicked !== false \? " current" : ""\) \+ \(c\.why \? " disabled" : ""\)\)/);   // 2026-09-08: the unavailable side is greyed, never hidden; 2026-09-11: an unpicked session check-marks nothing
+  // a pick posts the same setAuth the badge used: a CHANGE posts, and so does an unpicked session's own fallback
+  // side (2026-09-11) — a picked session's current option only dismisses
+  assert.match(RENDER, /if \(\(st\.auth !== c\.value \|\| st\.authPicked === false\) && vscodeApi\) vscodeApi\.postMessage\(\{ type: "setAuth", id, value: c\.value \}\);/);
   // the item's sub-line names the current billing, or the applying reconnect
   assert.match(RENDER, /st\.authPending \? "applying…"/);
   assert.match(RENDER, /auth\?: string; authLive\?: string; authPending\?: boolean; authBoth\?: boolean; authAvail\?: AuthAvail; authPickUnavailable\?: string; authPickFell\?: string; authAcct\?: string;/);   // 2026-09-09: the fall the launch took rides beside the unavailable pick
@@ -104,13 +105,13 @@ test("the chat tab hover says Billing whenever the backend reports it, naming th
   // apiKeyHelper on a login launch) LEADS with the warning and names what is actually billed.
   // Anchored at the gate + label: a no-auth session (tmux — the exclusion above) must never grow a
   // fabricated Billing row, so the `if (s.status.auth)` guard is part of the pinned behavior.
-  assert.match(RENDER, /if \(s\.status\.auth\) rows\.push\(\["Billing",\s*\n\s*s\.status\.authPending\s*\n\s*\? \(s\.status\.auth === "key" \? "API key" : "Login"\) \+ " \(applying — not confirmed yet\)"/,
-    "the reconnect window renders as pending intent, never as applied fact");
+  assert.match(RENDER, /if \(s\.status\.auth\) rows\.push\(\["Billing",\s*\n\s*s\.status\.authPicked === false\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? \(s\.status\.authLive && s\.status\.authLive !== s\.status\.auth\s*\n\s*\? `unpicked \(the CLI reports \$\{s\.status\.authLive === "key" \? "the API key" : "the login"\}\) — this session bills that`\s*\n\s*: s\.status\.auth === "key" \? "API key \(unpicked\)"\s*\n\s*: \(s\.status\.authAcct \? `Login \(\$\{s\.status\.authAcct\}, unpicked\)` : "Login \(unpicked\)"\)\)\s*\n\s*: s\.status\.authPending\s*\n\s*\? \(s\.status\.auth === "key" \? "API key" : "Login"\) \+ " \(applying — not confirmed yet\)"/,
+    "unpicked is decided first (2026-09-11), then the reconnect window renders as pending intent, never as applied fact");
   assert.match(RENDER, /⚠ \$\{s\.status\.auth === "key" \? "API key" : "Login"\} picked, but the CLI reports `\s*\n\s*\+ `\$\{s\.status\.authLive === "key" \? "the API key" : "the login"\} — this session bills that`/,
     "a confirmed contradiction leads with the warning");
   // the SWITCH CONTROL (the Billing submenu) carries the same truth where the pick lives
-  assert.match(RENDER, /sb\.textContent = st\.authPending \? "applying…"\s*\n\s*: st\.authPickUnavailable === st\.auth\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? `⚠ \$\{wordOf\(st\.auth\)\} unavailable`[^\n]*\n\s*: st\.authLive && st\.authLive !== st\.auth\s*\n\s*\? `⚠ CLI reports \$\{st\.authLive === "key" \? "API key" : "login"\}`/,
-    "the submenu sub-line shows the contradiction, not the unapplied pick");
+  assert.match(RENDER, /sb\.textContent = st\.authPicked === false\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? `unpicked \(\$\{st\.authLive && st\.authLive !== st\.auth \? `the CLI reports the \$\{wordOf\(st\.authLive\)\}` : `bills the \$\{wordOf\(st\.auth\)\}`\}\)`\s*\n\s*: st\.authPending \? "applying…"\s*\n\s*: st\.authPickUnavailable === st\.auth\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? `⚠ \$\{wordOf\(st\.auth\)\} unavailable`[^\n]*\n\s*: st\.authLive && st\.authLive !== st\.auth\s*\n\s*\? `⚠ CLI reports \$\{st\.authLive === "key" \? "API key" : "login"\}`/,
+    "the submenu sub-line shows the contradiction, not the unapplied pick (after the unpicked case, 2026-09-11)");
 });
 
 test("set_auth refuses a login pick on a box with no login — the same bar the key side always had (T124)", () => {
@@ -126,4 +127,38 @@ test("set_auth refuses a login pick on a box with no login — the same bar the 
 
 test("setAuth is an intent op — held through a kernel-restart window, never dropped", () => {
   assert.match(INTENT, /"setModel", "setEffort", "setMode", "setFast", "setAuth",/);
+});
+
+test("an unpicked session is said to be unpicked: the sub-line names the box's default, the flyout check-marks nothing, the hover appends (unpicked)", () => {
+  // the kernel's authPicked (the user 2026-09-11): true iff the registry carries an explicit pick. Before
+  // it, an unpicked SDK session's `auth` carried the box's fallback (effective_auth / default_auth) and the
+  // Billing menu showed and check-marked that side as though it had been picked. An older kernel sends no
+  // authPicked, and `=== false` reads that as picked — today's rendering, unchanged.
+  assert.match(RENDER, /authPickFell\?: string; authAcct\?: string; authPicked\?: boolean;/);
+  assert.match(RENDER, /sb\.textContent = st\.authPicked === false\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? `unpicked \(\$\{st\.authLive && st\.authLive !== st\.auth \? `the CLI reports the \$\{wordOf\(st\.authLive\)\}` : `bills the \$\{wordOf\(st\.auth\)\}`\}\)`/,
+    "the submenu sub-line says unpicked FIRST, naming the default it bills — or, when the CLI landed elsewhere, what the CLI reports (one line)");
+  assert.match(RENDER, /el\("div", "ctx-item" \+ \(st\.auth === c\.value && st\.authPicked !== false \? " current" : ""\)/,
+    "no check mark on the fallback: nothing was picked");
+  assert.match(RENDER, /s\.status\.authPicked === false\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? \(s\.status\.authLive && s\.status\.authLive !== s\.status\.auth\s*\n\s*\? `unpicked \(the CLI reports /,
+    "the hover row says the same: an unpicked fact, not a pick contradicted");
+  // ordering (review of 178968e6): the unpicked case is decided BEFORE the pick-contradiction branch in both spots
+  assert.ok(RENDER.indexOf("sb.textContent = st.authPicked === false") < RENDER.indexOf("? `⚠ CLI reports ${st.authLive"), "sub-line: unpicked before the contradiction");
+  assert.ok(RENDER.indexOf("s.status.authPicked === false") < RENDER.indexOf("picked, but the CLI reports `"), "hover: unpicked before the contradiction");
+  // the flyout's post rule, DRIVEN from the source expression (review of 60aa0a64): an unpicked session's own
+  // fallback side must become an explicit pick, while a picked session's current option still only dismisses
+  const rule = RENDER.match(/if \(\((st\.auth !== c\.value \|\| st\.authPicked === false)\) && vscodeApi\) vscodeApi\.postMessage\(\{ type: "setAuth", id, value: c\.value \}\);/);
+  assert.ok(rule, "the post rule is the one the pin above names");
+  const posts = new Function("st", "c", "return " + rule![1] + ";") as (st: unknown, c: unknown) => boolean;
+  assert.equal(posts({ auth: "key", authPicked: false }, { value: "key" }), true, "unpicked: clicking the fallback side posts, making it a pick");
+  assert.equal(posts({ auth: "key", authPicked: false }, { value: "login" }), true, "unpicked: the other side posts too");
+  assert.equal(posts({ auth: "key", authPicked: true }, { value: "key" }), false, "picked: the current option only dismisses");
+  assert.equal(posts({ auth: "key", authPicked: true }, { value: "login" }), true, "picked: a change posts");
+  assert.equal(posts({ auth: "key" }, { value: "key" }), false, "an older kernel sends no authPicked: current only dismisses, as before");
+  // the kernel side: the flag rides the running snapshot, the dormant row, the liveness merge and the status push
+  const BACKEND = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk_backend.py"), "utf8");
+  const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
+  assert.ok(BACKEND.includes('"authPicked": self.auth in ("login", "key"),'), "SdkSession.snapshot");
+  assert.ok(BACKEND.includes('"authPicked": reg.get("auth") in ("login", "key"),'), "the dormant registry row");
+  assert.ok(KERNEL.includes('"authPicked": bool(st.get("authPicked")),'), "Sessions.live merge");
+  assert.ok(KERNEL.includes('"authPicked": bool(tm.get("authPicked")),'), "the status push");
 });

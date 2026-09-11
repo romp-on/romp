@@ -8270,6 +8270,10 @@ class SdkSession:
                 # the fall carried explicitly 2026-09-09)
                 "authPickUnavailable": self.backend.pick_unavailable(self.auth),
                 "authPickFell": self.backend.pick_fall(self.auth),
+                # whether an EXPLICIT pick stands behind `auth` (the user 2026-09-11): False means the side
+                # above is the box's default (effective_auth's fallback), which the Billing menu says as
+                # "unpicked" and check-marks nothing, instead of wearing the fallback as a pick
+                "authPicked": self.auth in ("login", "key"),
                 "authLive": self.auth_live,   # what the CLI's init actually reported ("" until one
                 #   lands) — the Billing row says so when it disagrees with the launch intent above
                 #   (a key found via apiKeyHelper bills the key while `auth` still reads login)
@@ -12654,6 +12658,25 @@ class SdkBackend:
             return _cred.WHY_NO_HELPER if self.key_state() == "missing" else ""   # "unknown" is cannot tell
         return ""
 
+    def auth_pick_refusal(self, sid: str, side: str) -> str:
+        """Why a billing pick for `sid` cannot apply, as ONE plain sentence, or "" when it can — asked by the kernel
+        BEFORE it parks or applies the pick (review of the /auth route, 2026-09-11), and by a read (`side` ""),
+        which only the record's own state can refuse. Three reasons: the side this box cannot bill
+        (auth_unavailable_why); a session this backend has no record of; and a session that has ENDED (its
+        record says alive: false, the kill path). A dormant session, alive but not running, takes the pick into
+        its record and applies it on its next resume; an ended one would take a write nobody reads and reseed
+        the box's default from a dead session. Parked instead of refused, the op would wait in the FIFO for a
+        switch that never comes, and nobody would be told."""
+        why = self.auth_unavailable_why(side) if side else ""
+        if why:
+            return why
+        reg = read_reg(self.state_dir, sid)
+        if reg is None:
+            return "this kernel has no record of that session"
+        if not reg.get("alive"):
+            return "that session has ended; a dormant one, still alive but not running, can be reached by sid"
+        return ""
+
     def auth_avail(self) -> dict:
         """The Billing availability the status push carries per session (`authAvail`): {login, key, loginWhy?,
         keyWhy?}. The webview lists BOTH options always and greys the unavailable one with its reason in
@@ -12959,6 +12982,7 @@ class SdkBackend:
                     "auth": self.default_auth(reg),
                     "authPickUnavailable": self.pick_unavailable(reg.get("auth") or ""),   # same as snapshot()
                     "authPickFell": self.pick_fall(reg.get("auth") or ""),
+                    "authPicked": reg.get("auth") in ("login", "key"),   # same as snapshot(): the reg's own pick
                     # the persisted CLI truth (apiKeyAuth, the liveModel pattern) so a dormant
                     # session's Billing row keeps telling it; absent = no init ever landed
                     "authLive": ("key" if reg.get("apiKeyAuth") else "login")

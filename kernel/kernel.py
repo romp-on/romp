@@ -16133,13 +16133,9 @@ def _drive(msg, client):
         if not _set_auth_or_park(be, sid, str(msg["value"])):
             # the backend names the reason it refused (no login signed in / no apiKeyHelper / a managed
             # helper: auth_unavailable_why) when it had one; the generic text covers the rest (a tmux
-            # session, an unknown sid)
-            why = str(getattr(be, "auth_unavailable_why", lambda v: "")(str(msg["value"])) or "")
+            # session, an unknown sid). One sentence with POST /auth (_auth_refusal).
             client["send"](json.dumps({"type": "warn",
-                                       "text": ("Couldn't switch the account this session bills: %s." % why) if why
-                                       else "Couldn't switch the account this session bills — "
-                                            "it isn't an SDK session, no API key is configured, "
-                                            "or this machine has no Claude login to switch to."}))
+                                       "text": _auth_refusal(be, sid, str(msg["value"])) or _AUTH_REFUSAL_GENERIC}))
         _push_soon()
     elif t == "stopTask" and msg.get("taskId"):
         # the SDK's designed stop_task control request, addressed by the id the bg-task box shows.
@@ -17307,6 +17303,8 @@ class Sessions:
                                 # the explicit pick this box cannot bill ("login"|"key"|""): the launch
                                 # fell to the other side, the Billing menu says so (2026-09-08)
                                 "authPickUnavailable": st.get("authPickUnavailable", ""),
+                                # an EXPLICIT pick stands behind `auth` (False: the box's default, said as "unpicked")
+                                "authPicked": bool(st.get("authPicked")),
                                 "authPending": bool(st.get("authPending")),   # an /auth switch reconnecting → badge dots
                                 "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
                                 "subagents": st.get("subagents") or [],   # live Task subagents (SDK only) → lane pill
@@ -30743,15 +30741,121 @@ def _set_env_or_park(be, sid, value):
         be.set_env(sid, value)
 
 
-def _set_auth_or_park(be, sid, value):
+def _set_auth_or_park(be, sid, value, state=None):
     """Apply a billing-account change now — or park it while the session compacts, in the same FIFO as
     /model and /effort (it reconnects the session, which mid-compaction would derail the compaction
-    exactly the way a model switch would). Returns the backend's verdict so the caller can be loud."""
+    exactly the way a model switch would). Returns the backend's verdict so the caller can be loud.
+    `state`, when given, receives {"queued": bool}: whether the change PARKED, from this setter's own
+    decision, so POST /auth answers `queued` truthfully (the _route_meta_command shape, 2026-09-11)."""
     if value not in ("login", "key"):
         return False
+    if _auth_refusal(be, sid, value):
+        return False                  # capability and side BEFORE the park: a parked op nobody can apply is a silent drop
     if _gate_or_park(sid, ("auth", value)):
+        if state is not None:
+            state["queued"] = True
         return True
     return be.set_auth(sid, value)
+
+
+# the residual refusal, when the backend was asked and said no without a reason of its own (a record that
+# vanished between the check and the write): the toast and the route both fall to it
+_AUTH_REFUSAL_GENERIC = ("Couldn't switch the account this session bills — it isn't an SDK session, no API key is "
+                         "configured, or this machine has no Claude login to switch to.")
+
+
+def _auth_refusal(be, sid, value):
+    """Why a billing pick cannot apply, as the one sentence the person reads — or "" when it can. Asked BEFORE
+    the park (review of 178968e6: _ops_gate parks whenever the backend is busy, so a mid-turn tmux or Codex
+    session's pick queued behind its turn and the drain then handed a backend with no switch an op it could
+    not apply — the switch never happened and nobody was told), and shared by both doors, the WS setAuth toast
+    and POST /auth, so they tell one truth (the tab menu hides the pick for tmux, so nothing visible changes
+    there). A backend with no such control (tmux, Codex: SessionBackend.set_auth's default False) is refused
+    outright; the SDK backend names its own reason (auth_pick_refusal: the side this box cannot bill, an ended
+    session, no record); "" hands over."""
+    fn = getattr(be, "auth_pick_refusal", None)
+    if fn is None:
+        return ("Couldn't switch the account this session bills — a terminal (tmux) or Codex session has no such "
+                "control; only a Claude Code (SDK) session's billing is picked here.")
+    why = str(fn(str(sid), str(value)) or "")
+    return ("Couldn't switch the account this session bills: %s." % why) if why else ""
+
+
+def _auth_status(sid):
+    """One session's billing as the tab hover reads it: {id, name, auth, authLive, authPending, authPicked,
+    acct}, off the SAME merged liveness row the status push builds from (Sessions.live: the SDK backend's
+    snapshot for a running session, its registry row for a dormant one; a tmux row carries no auth and
+    reads ""), plus the login's display name. No fragment of a key: the key is the word 'key'."""
+    row = Sessions.live().get(str(sid)) or {}
+    return {"id": str(sid), "name": _name_of(sid) or str(sid)[:8],
+            "auth": str(row.get("auth") or ""), "authLive": str(row.get("authLive") or ""),
+            "authPending": bool(row.get("authPending")), "authPicked": bool(row.get("authPicked")),
+            "acct": _claude_account_label()}
+
+
+def _auth_request(who, value):
+    """POST /auth's brain (`romp billing`): which account a session bills, read or switched, as the route's
+    reply dict (with `_status` when not 200). The tab menu's Billing pick — the setAuth WS op — as a one-shot
+    token-gated route beside /fork, so a terminal, a script or another machine's plugin can set a live
+    session's billing without hand-driving the WS (the user 2026-09-11; the long-running sessions created
+    before the pick existed carry none, and the only door was the tab menu). `who` is a live name or a sid
+    (/fork's resolution: a dormant SDK session by sid); `value` is "login", "key", or "" for a READ that
+    changes nothing. A session on an attached kernel is forwarded over its tunnel the way /send forwards:
+    the body crosses, a far kernel that does not answer is said so by host, and its reply is the reply. The
+    local switch is _set_auth_or_park, so the gear pick's semantics hold exactly: parked while the session
+    cannot take it (mid-turn, compacting, being moved, held back by a usage limit, or with changes queued
+    ahead — _ops_gate's five reasons; `queued`
+    says so, and `auth` is still the old side until it fires), refused BEFORE any park with the sentence the
+    toast carries when the box cannot bill the side (the T124 login gate, the managed-helper gate), the
+    session has no such control (tmux, Codex) or has ended. The reply reads the status fields the tab hover
+    reads (_auth_status)."""
+    who = str(who or "").strip()
+    value = str(value or "").strip()
+    if not who:
+        return {"ok": False, "error": "id or name required", "_status": 400}
+    if value and value not in ("login", "key"):
+        return {"ok": False, "error": 'value must be "login" or "key"'}
+    live = _live_names(_tmux_sessions())
+    sid = live.get(who) or ""
+    if not sid and re.fullmatch(r"[0-9a-fA-F-]{32,36}", who):
+        sid = who                                  # a sid: a dormant SDK session is reached by sid, as /fork's is
+    if not sid:
+        return {"ok": False, "error": 'no live session named "%s" (a dormant one can be reached by sid)' % who}
+    r = _host_for_sid(sid)
+    if r is not None:                              # remote session → its own kernel decides, over the -L tunnel
+        fwd = {"id": sid}
+        if value:
+            fwd["value"] = value
+        res = _remote_forward(r, "/auth", fwd)
+        if res is None:                            # the far kernel didn't answer — say so, never pretend it switched
+            return {"ok": False, "error": "the remote kernel for this session (%s) isn't answering, or has no "
+                    "/auth route yet — billing not %s" % (r.get("host", "?"), "switched" if value else "read")}
+        if not isinstance(res, dict):
+            return {"ok": False, "error": "the remote kernel for this session (%s) answered with something "
+                    "that is not a reply" % r.get("host", "?")}
+        return res                                 # its answer verbatim — a refusal, a read, a queued switch
+    if not _kernel_knows(sid):
+        return {"ok": False, "error": 'no session with id "%s" on this kernel' % sid}
+    be = Sessions.backend_for(sid)
+    out = {"ok": True, "queued": False}
+    if value:
+        why = _auth_refusal(be, sid, value)        # asked ONCE here, before any park or write; the setter's own
+        if why:                                    # guard re-asks only on the way to applying (its door's truth)
+            return {"ok": False, "error": why}
+        meta = {}
+        if not _set_auth_or_park(be, sid, value, state=meta):
+            return {"ok": False, "error": _AUTH_REFUSAL_GENERIC}   # asked and said no without a reason: the residual
+        out["queued"] = bool(meta.get("queued"))
+        _push_soon()                               # the badge dots and the sub-line follow now, not at the backstop
+    else:
+        # a READ: only the record's own state can refuse it — an ENDED session (alive: false) is not "billing
+        # unknown", it is gone, and the reply says so instead of an empty auth (review of 178968e6)
+        fn = getattr(be, "auth_pick_refusal", None)
+        why = str(fn(sid, "") or "") if fn else ""
+        if why:
+            return {"ok": False, "error": why}
+    out.update(_auth_status(sid))
+    return out
 
 
 def _set_fast_or_park(be, sid, value):
@@ -33696,6 +33800,10 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                   # the explicit pick this box cannot bill ("login"|"key"|"") — the launch fell to the
                   # other side (sdk_backend._options) and the menu's sub-line says so under the pick
                   "authPickUnavailable": tm.get("authPickUnavailable", ""),
+                  # whether an explicit pick stands behind `auth` (the user 2026-09-11): an unpicked SDK
+                  # session's `auth` is the box's fallback, and the Billing menu used to check-mark it as
+                  # though picked; False now renders as "unpicked (bills the …)" with no check mark
+                  "authPicked": bool(tm.get("authPicked")),
                   # the login's display name, shown beside 'Login' (the user 2026-08-09); "" when no login
                   "authAcct": _claude_account_label(),
                   "authPending": bool(tm.get("authPending")),   # an /auth reconnect applying → badge dots
@@ -52202,6 +52310,12 @@ class Handler(BaseHTTPRequestHandler):
                 if f is None:
                     return self._send(503, json.dumps({"error": "no API-health frame yet"}), "application/json", cache="no-cache")
                 return self._send(200, json.dumps(f), "application/json", cache="no-cache")
+            if p == "/auth":
+                # `romp billing <session>` bare: which account a session bills, read without acting — POST
+                # /auth's brain with no value (_auth_request); a session on an attached kernel is answered
+                # by that kernel. Token-gated like its POST twin: the reply names a login account.
+                res = _auth_request((q.get("id") or q.get("name") or [""])[0], "")
+                return self._send(res.pop("_status", 200), json.dumps(res), "application/json", cache="no-cache")
             if p == "/api-health":
                 # The API-health signal (docs/reference.md): per-(auth label, model family) attempt /
                 # response / give-up counts over rolling windows and a thrash/degraded/recovering state
@@ -53251,6 +53365,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(409, json.dumps({"ok": False, "error": refusal}), "application/json")
                 return self._send(200, json.dumps({"ok": True, "pending": True, "dir": cwd}),
                                   "application/json")
+            if u.path == "/auth":
+                # Headless billing pick (`romp billing`, the user 2026-09-11): the setAuth WS op as a
+                # one-shot POST beside /fork — see _auth_request. Body: {"id"|"name": <live name or sid>,
+                # "value": "login"|"key"}; without `value` it READS and changes nothing (GET /auth?id= is
+                # the same read). Reply: {ok, queued, id, name, auth, authLive, authPending, authPicked,
+                # acct} — the tab hover's fields, never a fragment of a key. Refusals are 200 ok:false
+                # with the plain reason; a malformed body is a 400.
+                b, berr = _json_object_body(raw_body)
+                if berr:
+                    return self._send(400, json.dumps({"ok": False, "error": berr}), "application/json")
+                res = _auth_request((b or {}).get("id") or (b or {}).get("name"), (b or {}).get("value"))
+                return self._send(res.pop("_status", 200), json.dumps(res), "application/json")
             if u.path == "/fork":
                 # Headless session fork (`romp fork`, the user 2026-08-19 via lab_manager): the WS
                 # forkSession op as a one-shot POST beside /new and /send, so a terminal or another

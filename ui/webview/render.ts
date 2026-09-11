@@ -295,7 +295,7 @@ type PeerIdent = { name: string; host?: string; sid?: string; color?: { bg: stri
 // which billing sides this box can bill, and why not for the other (kernel _auth_avail, 2026-09-08): the
 // Billing submenu lists both and greys the unavailable one with the reason in its hover
 interface AuthAvail { login?: boolean; key?: boolean; loginWhy?: string; keyWhy?: string; acct?: string; default?: string }
-interface Status { state: ChipState; sinceEpoch: number | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; }   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions) — the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "tmux" | "sdk"; apiTooLong = the "blocked" is a "prompt is too long" error (on you → red tab) vs a transient API error (amber/retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried — retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+interface Status { state: ChipState; sinceEpoch: number | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authPicked?: boolean; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; }   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions) — the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "tmux" | "sdk"; apiTooLong = the "blocked" is a "prompt is too long" error (on you → red tab) vs a transient API error (amber/retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried — retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -5294,8 +5294,15 @@ function showTabTip(tab: HTMLElement, s: Session): void {
   // applied fact through the whole reconnect window, and a wrong-side landing read as a quiet
   // parenthetical): a pending pick says so, a confirmed contradiction leads with the warning.
   if (s.status.auth) rows.push(["Billing",
-    s.status.authPending
-      ? (s.status.auth === "key" ? "API key" : "Login") + " (applying — not confirmed yet)"
+    s.status.authPicked === false
+      // never picked: the side is the box's default, said FIRST (a CLI that landed on the other side is an
+      // unpicked fact, not a pick contradicted) rather than worn as a pick
+      ? (s.status.authLive && s.status.authLive !== s.status.auth
+           ? `unpicked (the CLI reports ${s.status.authLive === "key" ? "the API key" : "the login"}) — this session bills that`
+           : s.status.auth === "key" ? "API key (unpicked)"
+             : (s.status.authAcct ? `Login (${s.status.authAcct}, unpicked)` : "Login (unpicked)"))
+      : s.status.authPending
+        ? (s.status.auth === "key" ? "API key" : "Login") + " (applying — not confirmed yet)"
       // the pick names a side this box cannot bill (the kernel's authPickUnavailable, with the reason
       // in authAvail): the launch went to the other side, and the row says so (the user 2026-09-08)
       : s.status.authPickUnavailable === s.status.auth
@@ -6418,7 +6425,12 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     const bodyEl = el("span", "ctx-item-body");
     const l = el("span", "ctx-item-label"); l.textContent = "Billing"; bodyEl.appendChild(l);
     const sb = el("span", "ctx-item-sub");
-    sb.textContent = st.authPending ? "applying…"
+    sb.textContent = st.authPicked === false
+      // never picked (the kernel's authPicked): `auth` is the box's default, said as such and FIRST — a CLI that
+      // landed on the other side is then an unpicked fact, not a pick contradicted — and the flyout check-marks
+      // nothing, since nothing was picked (an older kernel sends no authPicked: read as picked, today's rendering)
+      ? `unpicked (${st.authLive && st.authLive !== st.auth ? `the CLI reports the ${wordOf(st.authLive)}` : `bills the ${wordOf(st.auth)}`})`
+      : st.authPending ? "applying…"
       : st.authPickUnavailable === st.auth
         // the pick names a side this box cannot bill — the launch went to the other one when it exists
         ? `⚠ ${wordOf(st.auth)} unavailable` + (authFellTo(st) ? `, billing ${wordOf(authFellTo(st))}` : "")
@@ -6435,7 +6447,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
       const sub = el("div", "ctx-menu ctx-sub");
       for (const c of [{ label: st.authAcct ? `Login (${st.authAcct})` : "Login", value: "login", why: avail.login ? "" : (avail.loginWhy || "no Claude login signed in on this machine") },
                        { label: "API key", value: "key", why: avail.key ? "" : (avail.keyWhy || "no apiKeyHelper configured") }]) {
-        const opt = el("div", "ctx-item" + (st.auth === c.value ? " current" : "") + (c.why ? " disabled" : ""));
+        const opt = el("div", "ctx-item" + (st.auth === c.value && st.authPicked !== false ? " current" : "") + (c.why ? " disabled" : ""));
         opt.textContent = c.label;
         if (c.why) {   // unavailable here: greyed, the reason on hover, inert (the user 2026-09-08)
           opt.title = c.why;
@@ -6445,7 +6457,10 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           ev2.stopPropagation();
           if (c.why) return;                                       // a disabled option posts nothing, and the menu stays
           dismissTabMenu();
-          if (st.auth !== c.value && vscodeApi) vscodeApi.postMessage({ type: "setAuth", id, value: c.value });
+          // a CHANGE posts — and so does an unpicked session's own fallback side (review of 60aa0a64: `auth` IS
+          // that side, so the natural click posted nothing and the record stayed unpicked); a picked session's
+          // current option only dismisses
+          if ((st.auth !== c.value || st.authPicked === false) && vscodeApi) vscodeApi.postMessage({ type: "setAuth", id, value: c.value });
         });
         sub.appendChild(opt);
       }

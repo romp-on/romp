@@ -387,6 +387,49 @@ the same with the sides swapped. The tab menu's Billing sub-line says the same
 in fewer words: `API key` or `Login (name@example.com)`, `applying…`, `⚠ login
 unavailable, billing API key`, and `⚠ CLI reports API key`.
 
+An unpicked session is one whose record carries no pick: a session from
+before the picker existed, or one created when no remembered default stood
+(the picker seeds a new session from the remembered default when this box can
+bill it). It bills the machine's default, the API key when a helper is
+configured and the login otherwise. The status says so as `authPicked: false`, and the surfaces
+read it as such rather than wearing the default as a pick: the Billing
+sub-line says `unpicked (bills the API key)` and the flyout check-marks
+neither choice, and the hover row reads `API key (unpicked)` or `Login
+(name@example.com, unpicked)`. Picking a side from the flyout makes it an
+explicit pick. An older kernel sends no `authPicked`, and the surfaces read
+that as picked, the rendering they always had.
+
+The pick is reachable without a browser. `POST /auth` is the tab menu's pick
+as a one-shot token-gated route beside `/fork`, so a terminal, a script or
+another machine's plugin can set a live session's billing: body `{"id"` or
+`"name": <live name or sid>, "value": "login"|"key"}`. A body without
+`value` reads without changing anything, and `GET /auth?id=<name or sid>` is
+the same read. The reply is `{ok, queued, id, name, auth, authLive,
+authPending, authPicked, acct}`, the fields the tab hover reads; no fragment of
+a key ever rides it. A quiet session reconnects to apply and answers with
+`authPending: true`; a dormant session takes the pick into its record and
+applies it on its next resume; a session that cannot take the switch now
+(mid-turn, compacting, being moved, held back by a usage limit, or with
+changes queued ahead) parks it, exactly as the menu's pick does, and the reply
+says `queued: true` with `auth` still
+the old side. Refusals come before any park or write, as `ok: false` with the
+reason the toast carries: a side this machine cannot bill; a terminal (tmux)
+or Codex session, which has no such control; a session that has ended (a read
+of one is refused the same way, never answered with an empty side); an
+unknown name or a value other than the two sides, naming it. A malformed body
+is a 400. A
+session that lives on an attached kernel is forwarded over its tunnel with
+the body, and that kernel's reply is the answer; when it does not answer, the
+reply says so by host. `romp billing <session>` prints the read as one line,
+`web: bills the API key`, `web: bills the login · login account
+name@example.com`, or `web: unpicked (bills the API key, the default for this
+machine)`, with `(applying — not confirmed yet)` while a switch reconnects;
+`romp billing <session> login|key` posts the switch and prints the same line,
+or that it is queued until the session can take it. A reply with no side (a
+terminal session, or a kernel that has not reported one) is an error on
+stderr and exit 1, never a quiet success. A kernel that predates the route
+answers 404, and the command says to restart romp.
+
 Failures are loud rather than silent: a session that lands on the other auth
 than it was launched for is flagged in the Log panel, and a dead credential
 ("Not logged in", an invalid or expired key) blocks the session's card with the
