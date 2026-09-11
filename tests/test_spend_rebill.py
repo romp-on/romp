@@ -372,15 +372,18 @@ class Rebill(unittest.TestCase):
         self.assertAlmostEqual(self._day()["usd"], 1.56, msg="its own delta, not the whole cumulative")
         self.assertEqual(self._day()["tokIn"], 400)
         self.assertEqual(self._cost_state()["total"], 309.71)
-        # the seeded road is unchanged: a replay below a known watermark moves nothing, and an unfolded replay above it
-        # is absorbed by the next live delta
-        Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
+
+    def test_the_seeded_road_is_unchanged_by_the_unknown_baseline_rule(self):
+        # a replay below a KNOWN watermark moves nothing, and an unfolded replay above it is absorbed by the next live
+        # delta (the round-five behaviour the verifier read as right); only the unknown baseline seeds from a replay
         self.be._update_reg(SID, costState={"total": 500.0, "tokens": {"input_tokens": 90000}, "cli": "4242:s1", "t": 1})
         s2 = self._session(attach=True, journal_next=10, tags=[{"offset": 8, "replay": True}, {"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
         self._run(s2, _result(480.0, 89000)); self._run(s2, _result(512.5, 90400))
-        self.assertEqual(self._day(), {}); self.assertEqual(s2._last_cost_total, 500.0)
+        self.assertEqual(self._day(), {}, "replays fold nothing")
+        self.assertEqual((s2._last_cost_total, s2._last_usage_totals["input_tokens"]), (500.0, 90000), "the seeded watermarks stand")
         self._run(s2, _result(520.0, 91000))
         self.assertAlmostEqual(self._day()["usd"], 20.0, msg="the unfolded 12.5 rides the live delta")
+        self.assertEqual(self._day()["tokIn"], 1000)
 
     def test_the_transport_tags_each_result_record_with_its_offset_as_it_reads_it(self):
         # the transport unit of the rule: the hello's journal.next bounds the replay; records the reader hands over are
