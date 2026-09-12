@@ -50,6 +50,10 @@ test("the Billing flyout's placement (T380 review): prefer right, fall left with
   assert.match(BILL, /else top = Math\.max\(0, Math\.min\(ir\.top, window\.innerHeight - sr\.height - 4\)\);/, "only when neither fits, clamped");
   assert.doesNotMatch(BILL, /Math\.max\(0, Math\.min\(ir\.right \+ 2, window\.innerWidth - sr\.width - 4\)\)/, "the old slide-over-the-row rule is gone");
   assert.match(BILL, /const olderKernel = avail\.defaultExplicit === undefined;/);
+  // the Default group offers the machine's own login and the key only (T346 beside T380): the kernel takes no stored login
+  // as the machine default yet, and its scoped arm refuses that value by name
+  assert.match(BILL, /const machineChoices = choices\.filter\(\(c\) => c\.value === "login" \|\| c\.value === "key"\);/, "a stored login is not a machine-default radio yet");
+  assert.match(BILL, /const radios = \[\.\.\.machineChoices\.map\(/, "the radios come from the filtered list");
   assert.match(BILL, /\.\.\.\(olderKernel \? \[\] : \[\{ label: `Automatic \(\$\{autoWord\}\)`, value: "auto", why: "", cur: !explicit \}\]\)/, "an older kernel that takes no auto gets no Automatic radio");
   const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
   assert.match(CSS, /\.ctx-sub-billing \{ max-width: 22em; \}/, "a menu's width: the note wraps");

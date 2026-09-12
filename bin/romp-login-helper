@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# romp-login-helper <login-id> [<state dir>]: Claude Code's apiKeyHelper for a romp session billed to a STORED
+# Claude login (T346; docs/reference.md "Several Claude logins"). The kernel writes
+# `apiKeyHelper: "<this script> <id> <state dir>"` into that session's per-session settings layer; the CLI runs
+# it per request (refreshing on its own TTL), and it runs the login's own TOKEN COMMAND, recorded in the login's
+# record (STATE/logins/<id>.json, field tokenCmd; 1Password's `op read op://vault/item/field` is the documented
+# example, and romp assumes nothing about it), whose output is the login's setup-token, to stdout only.
+#
+# The command runs the way Claude Code runs an apiKeyHelper and the kernel runs the box's own
+# (kernel/credentials.py run_helper): under a WHITELISTED environment (PATH, HOME, USER, LOGNAME, TMPDIR, LANG,
+# LC_ALL, TERM, CLAUDE_CONFIG_DIR and the LC_*/XDG_* names), never the kernel's whole environment, whose serve
+# token is full control of every session and which no third-party tool may see; stdin closed (a prompt would
+# hang until the CLI's timeout); its STDERR DISCARDED (a secret manager's diagnostics can quote the value it
+# read, and the CLI's stderr is buffered into the session's registry row and the kernel log). Anything the tool
+# needs beyond that environment, the command provides itself (a service-account token sourced from a private
+# file, for example). The token never touches a romp file, a romp environment or a log line: this script's one
+# output is the CLI's pipe. Its own failures are one stderr line naming the login id and the step, never a
+# value, and a non-zero exit; the command's failure is its exit code (the CLI then fails the request loudly:
+# an auth error the session's card names by the login's label).
+set -euo pipefail
+id="${1:-}"
+if [[ -z "$id" || ! "$id" =~ ^[0-9a-f]{12}$ ]]; then
+    echo "romp-login-helper: a stored login's 12-hex id is the first argument" >&2
+    exit 2
+fi
+state="${2:-${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}}"
+rec="$state/logins/$id.json"
+cmd="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as e:
+    sys.stderr.write("romp-login-helper: the record for login %s does not read (%s)\n" % (sys.argv[2], type(e).__name__))
+    sys.exit(1)
+c = d.get("tokenCmd") if isinstance(d, dict) else None
+if not isinstance(c, str) or not c.strip() or any(ord(ch) < 32 for ch in c):
+    sys.stderr.write("romp-login-helper: the record for login %s names no token command\n" % sys.argv[2])
+    sys.exit(1)
+print(c)' "$rec" "$id")"
+keep=()
+for k in PATH HOME USER LOGNAME TMPDIR LANG LC_ALL TERM CLAUDE_CONFIG_DIR; do
+    if [[ -n "${!k+x}" ]]; then keep+=("$k=${!k}"); fi
+done
+while IFS= read -r k; do
+    case "$k" in LC_*|XDG_*) keep+=("$k=${!k}") ;; esac
+done < <(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p')
+# a bound on the command, like the kernel's own helper run (credentials.HELPER_TIMEOUT_S): the CLI's own budget is
+# not pinned, and a hung secret manager must fail the request rather than hold it; a machine without coreutils'
+# timeout runs unbounded (the CLI's budget then decides). ROMP_LOGIN_HELPER_TIMEOUT_S overrides the 15 s.
+lim="${ROMP_LOGIN_HELPER_TIMEOUT_S:-15}"
+if command -v timeout >/dev/null 2>&1; then set -- timeout "$lim" /bin/sh -c "$cmd"; else set -- /bin/sh -c "$cmd"; fi
+exec env -i "${keep[@]}" "$@" </dev/null 2>/dev/null

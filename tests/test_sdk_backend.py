@@ -2973,7 +2973,7 @@ class SpendRecord(unittest.TestCase):
                       "tokens come from _turn_usage — the flat usage dict is per-turn and is never diffed")
         self.assertIn('mu = getattr(msg, "model_usage", None)', src,
                       "the cumulative modelUsage map is the counter the token watermarks diff")
-        self.assertIn("sid=self.thread_of or self.sid)   # the rail's spend", src,
+        self.assertIn("sid=self.thread_of or self.sid,", src,
                       "a comment THREAD bills its OWNING session (T144); a plain session bills itself "
                       "(T100's per-session attribution, completed)")
         self.assertIn("self._seed_spend_watermarks()   # a fresh CLI process starts its cumulative counters at", src,

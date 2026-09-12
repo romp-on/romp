@@ -14,6 +14,7 @@ CLI:
   romp-judge --test <transcript>  # caption one transcript's recent units, print them (no write)
 """
 import collections
+import shlex
 import contextlib, copy, hashlib, json, os, re, secrets, shutil, signal, stat, sys, time, subprocess, threading, traceback, importlib.util
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -70,6 +71,9 @@ em = load_source("romp_event_model", HERE / "event_model.py")
 em.set_checkpoint_dir(lambda: STATE / "checkpoints")   # T323 stage 3: the fold checkpoints live under the state root, read at
 #                                                        call time so _rebind_state moves them with everything else
 _cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", HERE / "credentials.py")
+# the stored Claude logins' registry (T346): a judge call for a session billed to one names that login's helper,
+# and never runs as a login the registry holds refused
+_logins = sys.modules.get("romp_logins") or load_source("romp_logins", HERE / "logins.py")
 
 HOME     = Path.home()
 STATE    = Path(os.environ.get("ROMP_STATE_DIR")   # per-kernel state root override (plans/multi-kernel.md)
@@ -916,6 +920,11 @@ def _judge_cmd(model, sys_prompt, effort=None, auth=None, tier="triage"):
         # the CLI takes as unset (null falls through to the settings files; verified on 2.1.257), the same
         # lever a login-picked session's launch uses (sdk_backend.flag_settings_path).
         overlay["apiKeyHelper"] = ""
+    elif str(auth or "").startswith("login:"):
+        # a call for a session billed to a STORED login (T346) carries that login's own helper instead: the
+        # judges bill the same account as the session they judge, and the machine's tokens stay out of the
+        # child (_judge_env restores them for the machine's login only)
+        overlay["apiKeyHelper"] = _login_helper_cmd(str(auth)[6:])
     if overlay:
         cmd += ["--settings", json.dumps(overlay)]
     return cmd
@@ -1524,7 +1533,7 @@ def _prune_usage_log():
         pass
 
 
-def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None, err=False):
+def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None, err=False, auth=None):
     """Append ONE per-call usage line to USAGE for the kernel/UI cost rollup (judge_ui 2026-06-17).
     `wrap` is the claude -p JSON envelope. `sent`/`recv` are the LITERAL wall-clock floats bracketing the
     actual API call — when the judge's prompt went out and when its response came back (the user
@@ -1547,6 +1556,10 @@ def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None, err=F
                                 "fastReason": wrap.get("fast_mode_disabled_reason"),   # why not, when the CLI says
                                 **({"err": True} if err else {}),   # an error envelope's row: kept for its readback,
                                 #   zero cost, skipped by the cost rollup's call and cost counts
+                                # which account the call billed (T346): 'key', 'login' (the machine's own) or
+                                # 'login:<id>' (a stored login), so the cost rollups split by login; absent on rows
+                                # written before the stamp existed
+                                **({"auth": auth} if auth else {}),
                                 "cost": wrap.get("total_cost_usd")}) + "\n")
     except Exception:
         pass
@@ -1688,7 +1701,8 @@ def _judge_auth(fsid):
     box can bill it (T380; auth_unavailable_why: a logged-out login, a managed helper, an expired account
     file all move the launch, the status and the flyout to the other side, and the judges with them — the
     round-3 review found a seed re-read here that kept billing the login alone), else the helper rule. A
-    call with no session (rows with no session) takes the same default a fresh session would. Standalone
+    call with no session (rows with no session) takes the same default a fresh session would. A session billed to a STORED login (T346) is decided here first, from the reg's
+    own pick: the resolver names sides, and a stored login is a pick, never a default. Standalone
     (tests, no kernel wiring) the registry file and the helper rule stand in: an explicit 'login' or 'key'
     pick → that side; else the key when Claude Code's settings carry an apiKeyHelper, else login."""
     reg = {}
@@ -1698,6 +1712,23 @@ def _judge_auth(fsid):
             reg = reg if isinstance(reg, dict) else {}
         except Exception:
             reg = {}
+    a = reg.get("auth") or ""
+    lid = reg.get("authLogin") if isinstance(reg.get("authLogin"), str) else ""
+    if a == "login" and lid and re.fullmatch(r"[0-9a-f]{12}", lid):
+        # a session billed to a STORED login (T346): its judges bill that same login, carried as the pick value
+        # 'login:<id>' so _judge_cmd names the login's helper and every latch and row says WHICH login. A stored
+        # login the registry holds REFUSED (or expired, or gone) is never run as: the call takes the session's own
+        # fallback (the key when a helper is configured, else the machine's login), said once per session, and a
+        # judge call never clears a refusal (its envelope carries no evidence of which login answered).
+        why = _logins.why_unavailable(_logins.record_state(STATE, lid))
+        if not why:
+            return "login:" + lid
+        fall = "key" if _key_available() else "login"
+        if (fsid, lid) not in _LOGIN_FALL_SAID:
+            _LOGIN_FALL_SAID.add((fsid, lid))
+            sys.stderr.write("romp-judge: session %s bills a stored login that is unavailable (%s); its judge calls bill "
+                             "the %s instead\n" % (str(fsid or "")[:8], why, "API key" if fall == "key" else "machine's login"))
+        return fall
     if _DEFAULT_AUTH_FN is not None:
         try:
             side = str(_DEFAULT_AUTH_FN(reg) or "")
@@ -1705,10 +1736,41 @@ def _judge_auth(fsid):
                 return side
         except Exception:
             pass   # the resolver failed: the standalone rule below decides, never a raise inside a judge call
-    a = reg.get("auth") or ""
     if a in ("login", "key"):
         return a
     return "key" if _key_available() else "login"
+
+
+def _is_login_auth(auth) -> bool:
+    """A login-side pick, the machine's own ('login') or a stored one ('login:<id>')."""
+    return auth == "login" or str(auth or "").startswith("login:")
+
+
+def _login_helper_cmd(login_id):
+    """The apiKeyHelper for a judge call billed to a STORED login (T346): bin/romp-login-helper with the record
+    id and this state directory, the same command the session's own launch carries (sdk_backend
+    flag_settings_path's helper_cmd), so the judge runs the login's own token command per request (1Password's
+    `op read` is the documented example) and nothing rides this process's files or environment."""
+    return "%s %s %s" % (shlex.quote(str(HERE.parent / "bin" / "romp-login-helper")), login_id, shlex.quote(str(STATE)))
+
+
+_LOGIN_FALL_SAID = set()       # (fsid, login id) pairs whose judge fall off a refused stored login was said (once each)
+_API_HEALTH_NOTE_FN = None     # the kernel wires the API-health ring's judge source (T346, the user 2026-09-11: one
+                               # accounting per login, the judges included): fn(kind, auth, model, msg, fsid) with kind
+                               # 'ok' | 'gaveup'; standalone judges note nothing
+
+
+def _note_api_health(kind, auth, model, msg, fsid):
+    """File ONE judge call's outcome into the API-health ring through the kernel's hook: an 'ok' for a served
+    reply, a 'gaveup' with the envelope's message for an error envelope. Never for a codex call (another
+    vendor), never raising into the call."""
+    fn = _API_HEALTH_NOTE_FN
+    if fn is None or auth == "codex":
+        return
+    try:
+        fn(kind, auth, model, msg, fsid)
+    except Exception:
+        pass
 
 
 def _is_auth_error(text):
@@ -1766,12 +1828,16 @@ def _auth_down_mark(fsid, mode, note):
     if not fsid:
         return
     note = str(note or "")[:300]
+    mode = str(mode or "")
+    login = mode[6:] if mode.startswith("login:") else ""    # a stored login's id (T346); the mode stays the side word
+    if login:
+        mode = "login"
     with _auth_lock:
         d = dict(_auth_down_map())
         row = d.get(fsid) or {}
-        if row.get("mode") == mode and row.get("note") == note:
+        if row.get("mode") == mode and row.get("note") == note and (row.get("login") or "") == login:
             return
-        d[fsid] = {"t": int(row.get("t") or time.time()), "mode": mode, "note": note}
+        d[fsid] = {"t": int(row.get("t") or time.time()), "mode": mode, "note": note, **({"login": login} if login else {})}
         _auth_write_locked(d)
 
 
@@ -1932,6 +1998,8 @@ def _judge_env(tier, auth="login", model=None):
     unconditionally, and a KEY-billed call injects nothing back (2026-09-08: romp holds no key; the child
     resolves Claude Code's apiKeyHelper itself, and the first pass after boot runs exactly like every later
     one). A LOGIN-billed call gets the claimed login tokens back and, in _judge_cmd, the helper suppression.
+    A call billed to a STORED login ('login:<id>', T346) gets NEITHER: its credential is that login's own
+    helper in _judge_cmd's overlay, and a machine token beside it would outrank the helper.
     Removal, not blanking: the CLI treats even an empty var as key-mode-without-a-key and refuses with
     "Not logged in"."""
     env = dict(os.environ)
@@ -2229,7 +2297,7 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
             return ""
         try:
             fast_asked = _tier_fast(tier, model)
-            if fast_asked and auth != "login":
+            if fast_asked and not _is_login_auth(auth):
                 env = dict(env, **_fast_org_env())    # permission follows billing (the sessions' rule, T300)
             p = subprocess.run(_judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier), input=user,
                                capture_output=True, text=True, cwd=JUDGE_SCRATCH, env=env,
@@ -2269,7 +2337,7 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
                 if fast_asked and "fast_mode_state" in wrap:
                     # the call asked for fast and the CLI's refusal envelope still says whether fast engaged: keep
                     # that readback (a zero-cost row marked err, which the cost rollup skips) and judge it below
-                    _log_judge_usage(judge or tier, tier, model, fsid, dict(wrap, total_cost_usd=0), sent, recv, err=True)
+                    _log_judge_usage(judge or tier, tier, model, fsid, dict(wrap, total_cost_usd=0), sent, recv, err=True, auth=auth)
                     _note_fast_readback(tier, model, wrap, judge or tier, fsid)
                 if _LIMIT_ENVELOPE_RE.search(msg):
                     # a limit-shaped envelope is the EVENT that says usage.json is stale (get_usage
@@ -2291,10 +2359,12 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
                     # credential-class: only the user can fix it — latch, so build_feed floors this
                     # session's focus card instead of leaving the board silently frozen (2026-08-12)
                     _auth_down_mark(fsid, auth, msg[:160])
+                _note_api_health("gaveup", auth, model, msg, fsid)   # the judges' half of the login's bucket (T346)
                 return ""
             if isinstance(wrap, dict) and isinstance(wrap.get("result"), str):
                 _judge_ctx.last["reply"] = _mid_elide(wrap["result"])
-                _log_judge_usage(judge or tier, tier, model, fsid, wrap, sent, recv)
+                _log_judge_usage(judge or tier, tier, model, fsid, wrap, sent, recv, auth=auth)
+                _note_api_health("ok", auth, model, "", fsid)          # the judges' half of the login's bucket (T346)
                 if fast_asked and "fast_mode_state" in wrap:   # no answer is no information (never a fabricated refusal)
                     _note_fast_readback(tier, model, wrap, judge or tier, fsid)
                 _note_served_model(model, wrap)       # the envelope names the model a bare alias resolved to;

@@ -808,6 +808,25 @@ class SetAuth(_Keyed):
             km._drive({"type": "setAuth", "id": "11111111-2222-3333-4444-555555555555", "value": "auto"}, client)
             self.assertEqual(sent[-1]["type"], "warn")
             self.assertIn("not for one session", sent[-1]["text"])
+            # a scoped STORED login (T346 beside T380): the kernel takes no stored login as the machine default yet, so the
+            # value is refused by name from an arm before the per-session one, and neither writer sees it: never the
+            # machine default, and never read as this session's own pick either
+            calls = []
+            class Recorder:
+                def set_auth_default(self, v): calls.append(("default", v)); return True
+                def set_auth(self, sid, v): calls.append(("session", v)); return True
+            km.Sessions.backend_for = staticmethod(lambda sid: Recorder())
+            parked = []
+            saved_park = km._set_auth_or_park
+            km._set_auth_or_park = lambda be, sid, v: (parked.append(v), True)[1]
+            try:
+                km._drive({"type": "setAuth", "id": "11111111-2222-3333-4444-555555555555", "value": "login:0123456789ab", "scope": "machine"}, client)
+            finally:
+                km._set_auth_or_park = saved_park
+            self.assertEqual(sent[-1]["type"], "warn")
+            self.assertIn("a stored login can't be the machine's default yet", sent[-1]["text"])
+            self.assertEqual(calls, [], "no writer is called for a scoped value the arm does not take")
+            self.assertEqual(parked, [], "and the value never reaches the per-session pick path")
         finally:
             km.Sessions.backend_for, km._kernel_knows, km._push_soon = saved
 
@@ -1085,17 +1104,22 @@ class Availability(unittest.TestCase):
         a = km._auth_avail()
         self.assertNotIn("loginWhy", a)
         self.assertNotIn("keyWhy", a)
-        self.assertEqual(km._auth_avail_status(), {"login": True, "key": True, "default": "key", "defaultExplicit": False},
+        st = km._auth_avail_status()
+        self.assertEqual({k: st[k] for k in ("login", "key", "default", "defaultExplicit")},
+                         {"login": True, "key": True, "default": "key", "defaultExplicit": False},
                          "the status half carries the machine default since T380 (the Billing flyout's Default group marks it), and whether it is explicit")
+        self.assertEqual(st["logins"][0]["machine"], True, "the login list rides beside (T346), the machine's own first")
         self._world(FAKE_KEY, "")
         a = km._auth_avail()
         self.assertEqual(a["loginWhy"], km.jd._cred.WHY_NO_LOGIN)
-        self.assertEqual(km._auth_avail_status(), {"login": False, "key": True, "loginWhy": km.jd._cred.WHY_NO_LOGIN, "default": "key", "defaultExplicit": False})
+        self.assertEqual({k: v for k, v in km._auth_avail_status().items() if k != "logins"},
+                         {"login": False, "key": True, "loginWhy": km.jd._cred.WHY_NO_LOGIN, "default": "key", "defaultExplicit": False})
         self._world("", "aaaaaaaaaaaa")
         self.assertEqual(km._auth_avail()["keyWhy"], km.jd._cred.WHY_NO_HELPER)
         self._world(FAKE_KEY, "aaaaaaaaaaaa", managed=True)
         self.assertEqual(km._auth_avail()["loginWhy"], km.jd._cred.WHY_MANAGED_HELPER)
-        self.assertEqual(km._auth_avail_status(), {"login": False, "key": True, "loginWhy": km.jd._cred.WHY_MANAGED_HELPER, "default": "key", "defaultExplicit": False})
+        self.assertEqual({k: v for k, v in km._auth_avail_status().items() if k != "logins"},
+                         {"login": False, "key": True, "loginWhy": km.jd._cred.WHY_MANAGED_HELPER, "default": "key", "defaultExplicit": False})
         self.assertNotIn(FAKE_KEY, json.dumps(km._auth_avail()), "the reasons carry no key material either")
 
     def test_the_default_falls_to_the_side_that_exists_both_ways(self):
@@ -1219,7 +1243,7 @@ class DrivePlumbing(unittest.TestCase):
     def test_the_op_is_routed_parked_and_replayed(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('"setAuth", "endSession"', src.replace("\n", " "), "an ID_OPS member")
-        self.assertIn('elif t == "setAuth" and msg.get("value") in ("login", "key"):', src)
+        self.assertIn('elif t == "setAuth" and lg.parse_pick(msg.get("value"))[0]:', src)   # T346: 'login' | 'key' | 'login:<id>'
         self.assertIn("def _set_auth_or_park(be, sid, value):", src)
         # the machine's default (T380): the same op with scope "machine" writes the seed on THIS kernel and touches no session
         self.assertIn('elif t == "setAuth" and msg.get("scope") == "machine" and msg.get("value") in ("login", "key", "auto"):', src)
@@ -1228,8 +1252,14 @@ class DrivePlumbing(unittest.TestCase):
         ksrc = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
         self.assertIn('jd._DEFAULT_AUTH_FN = getattr(_sdk_backend, "default_auth", None)', ksrc, "the one billing resolver, wired into the judges")
         self.assertIn("keeps no machine billing default", src, "a backend without the writer (Codex) is refused by name, never a raise inside the drive")
-        self.assertLess(src.index('msg.get("scope") == "machine"'), src.index('elif t == "setAuth" and msg.get("value") in ("login", "key"):'),
+        plain = src.index('elif t == "setAuth" and lg.parse_pick(msg.get("value"))[0]:')
+        self.assertLess(src.index('msg.get("scope") == "machine"'), plain,
                         "the scoped arm is tried first: the plain arm would otherwise swallow it as a per-session pick")
+        # a scoped value the kernel does not take yet (a STORED login as the machine's default, T346 beside T380) is refused
+        # by name from an arm BEFORE the plain one, so it is never read as a session's own pick either
+        refuse = src.index('elif t == "setAuth" and msg.get("scope") == "machine":')
+        self.assertLess(refuse, plain, "the scoped refusal sits before the per-session arm")
+        self.assertIn("a stored login can't be the machine's default yet", src)
         self.assertIn('_gate_or_park(sid, ("auth", value))', src)   # parks on the gate, or hands over (2026-09-05)
         self.assertIn('elif op[0] == "auth":', src)
         self.assertIn("be.set_auth(sid, op[1])", src)
@@ -1238,7 +1268,7 @@ class DrivePlumbing(unittest.TestCase):
         src = open(os.path.join(BIN, "romp-kernel")).read()
         # (parent + tags joined the signature with tab groups, 2026-09-04 — auth's slot is unchanged)
         self.assertIn("def _create_sdk_session(nm, cwd, auth=\"\", prefs=None, client=None, env=None, parent=\"\", tags=()):", src)
-        self.assertEqual(src.count('auth=(a if a in ("login", "key") else "")'), 2,
+        self.assertEqual(src.count('auth=(a if lg.parse_pick(a)[0] else "")'), 2,
                          "the WS op and POST /new both pass it")
 
     def test_the_abc_names_the_control_and_the_default_refuses(self):

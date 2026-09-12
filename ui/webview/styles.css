@@ -3019,6 +3019,15 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 /* the Billing row's single-choice text: written out where the buttons would sit (the user 2026-08-09) —
    the buttons' 0.82em, plain, no button chrome (it is a fact, not a control) */
 .picker-auth-fixed { flex: 0 0 auto; color: var(--fg); font-size: 0.82em; padding: 4px 0; }
+/* several logins (T346): the Billing row's options shrink with an ellipsis so three long labels share the row (the
+   whole label is the hover); an unavailable one is greyed and inert; past three choices the row is one dropdown in
+   the menu vocabulary (the theme's menu tokens, the dark literals only as var() fallbacks) */
+.picker-auth .picker-be-opt { flex: 0 1 auto; min-width: 0; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-auth .picker-be-opt[disabled] { opacity: 0.45; cursor: default; }
+.picker-auth .picker-be-opt[disabled]:hover { background: transparent; color: var(--dim); }
+.picker-auth-select { flex: 0 1 auto; min-width: 0; max-width: 70%; font: inherit; font-size: 0.82em; padding: 3px 6px;
+  background: var(--menu-bg, #252526); color: var(--menu-fg, #cccccc); border: 1px solid var(--menu-border, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-menu, 6px); }
 /* the picker's Tags row (tab groups, the user 2026-09-04): one option per tag; several may be selected, a session
    can hold several tags. Each option IS the tag chip every surface draws (T321, the user 2026-09-10): the thin
    border in the tag's colour, so the button around it carries no chrome: no border, no padding, the page's typeface

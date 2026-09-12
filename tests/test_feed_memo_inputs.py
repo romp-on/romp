@@ -150,6 +150,8 @@ HELPERS = {
     "_cap_switch_offer": ("sig", ("row", "usage", "offer", "auth")),   # authLive, usage.json (recorded), its cap window's crossing, the key on hand
     # pure over classified inputs
     "_awaiting_peer_items": ("pure", "over the peer identities _session_awaiting resolved (peers), nothing else"),
+    "_login_refusal_label": ("pure", "over the live row's authLogin, authLoginLive and authLabel (row) and the api error (transcript): a stored login the session's API error refused, by label (T346)"),
+    "lg.mark_refused": ("pure", "a WRITE, not a read: the login registry's refused mark for the login the api error named (idempotent); its return enters nothing, and the label the card shows is the row's (T346)"),
 }
 
 # ── the module-scope names the body reads without calling, name -> (kind, labels or note) ─────────────────
@@ -157,6 +159,7 @@ MODULE_READS = {
     "_NEEDS_INPUT_STATES": ("const", "the live-prompt perm states (permission, picker), a tuple of strings bound once"),
     "jd.CITE_MIN_CHARS": ("const", "the judge module's citation floor, an int bound once"),
     "jd.WHY_IN_FLIGHT": ("const", "the in-flight-class stall reasons, a tuple of the judge module's constant strings"),
+    "jd.STATE": ("const", "the state root, a Path bound once at import (handed to the registry write above; the tests rebind it whole)"),
 }
 
 # ── the context fields the body reads, field -> (kind, labels or note) ────────────────────────────────────

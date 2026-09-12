@@ -71,7 +71,11 @@ var GEAR_HTML =
   // description — as an rs-sub it floated a SECOND hover popover under the Account row, stacked on
   // rs-login-acct's (the user 2026-09-02, who saw two tooltips stacked; even empty it painted a box)
   "<span id=rs-login-state class=rs-note style='margin-left:8px'></span>" +
-  '</div></span></div>' +
+  '</div>' +
+  // the STORED logins (T346): the other Claude logins a session can be billed to, one row each with a
+  // Remove; filled from the kernel's authed /logins (labels and dates, never a token)
+  "<div id=rs-logins class=rs-logins style='margin-top:8px'></div>" +
+  '</span></div>' +
   '<div class=rs-sec>Sessions</div>' +
   "<div class='rs-row' style='cursor:default'><span style='flex:1 1 auto'><b>Default directory</b>" +
   '<span class=rs-sub>The default directory for NEW sessions (still editable per session). Persisted kernel-side — also settable with <code>romp default-dir</code>. Falls back to the romp install dir until you set one; blank reverts to it. ~ and $VARs expand.</span>' +
@@ -575,6 +579,60 @@ function initGear(post, opts) {
       lgI = document.getElementById('rs-login-input'), lgSend = document.getElementById('rs-login-send'),
       lgX = document.getElementById('rs-login-cancel'), lgA = document.getElementById('rs-login-acct');
   var lgTimer = null, lgLive = '';   // lgLive = the flow state lgRender last saw (drives the button's two jobs)
+  // ── the stored logins (T346): every other Claude login a session on this machine can be billed to, listed
+  // under the machine's own with a Remove each. Read from the kernel's authed /logins on every settings fill
+  // and after a Remove: labels, organisations, dates and states, never a token. A Remove acknowledges at once
+  // (the row goes, the button disables) and the re-read confirms.
+  var lgL = document.getElementById('rs-logins');
+  function lgDate(t) { try { return new Date(t * 1000).toLocaleDateString(); } catch (e) { return ''; } }
+  function lgWhen(t) {
+    if (typeof t !== 'number') return 'soon';
+    var d = Math.round((t * 1000 - Date.now()) / 86400000);
+    return d <= 0 ? 'now (the token is a year old)' : 'in ' + d + ' day' + (d === 1 ? '' : 's');
+  }
+  function lgLogins(d) {
+    if (!lgL) return;
+    var rows = (d && d.logins) || [];
+    lgL.textContent = '';
+    var head = document.createElement('div');
+    head.className = 'rs-sub';
+    head.textContent = rows.length ? 'Other logins a session can bill (the token stays where you keep it; romp keeps the label and the command that reads it):'
+                                   : 'No other Claude logins stored on this machine. Add one with romp login add <label>.';
+    lgL.appendChild(head);
+    rows.forEach(function (r) {
+      var row = document.createElement('div');
+      row.className = 'rs-login-row';
+      var name = document.createElement('span');
+      name.className = 'rs-login-name';
+      name.textContent = r.display || r.label || r.id;
+      name.title = name.textContent;
+      row.appendChild(name);
+      var note = r.why ? r.why
+        : r.expiresSoon ? 'token expires ' + lgWhen(r.expiresAt)
+        : (typeof r.addedAt === 'number' ? 'added ' + lgDate(r.addedAt) : '');
+      var st = document.createElement('span');
+      st.className = 'rs-note' + (r.why ? ' rs-login-bad' : (r.expiresSoon ? ' rs-login-warn' : ''));
+      st.textContent = note;
+      row.appendChild(st);
+      var rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'rs-login-rm';
+      rm.textContent = 'Remove';
+      rm.title = 'Forget this login here: its record leaves this machine (the token stays where you keep it); a session billed to it falls back at its next launch.';
+      rm.addEventListener('click', function () {
+        rm.disabled = true; rm.textContent = 'Removing…';
+        post({ type: 'loginRemove', id: r.id });
+        row.remove();
+        lgFetchLogins();
+      });
+      row.appendChild(rm);
+      lgL.appendChild(row);
+    });
+  }
+  function lgFetchLogins() {
+    if (!lgL) return;
+    fetch(ku('/logins'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(lgLogins).catch(function () {});
+  }
   // The paste-code UI lives in a MODAL (the user 2026-08-30: "it would just be a login button…
   // then it would pop up another modal that says paste the code so it doesn't always sit there
   // taking up space") — centered card over a translucent backdrop, the panel rule's treatment.
@@ -1246,6 +1304,7 @@ function initGear(post, opts) {
     if (cvm) cvm.checked = !!v.conserveMemory;   // T148: the kernel's persisted conserve flag is authoritative
     if (csg) csg.checked = !!v.compactSuggest;   // T208+: the kernel's persisted opt-in is authoritative
     lgRender(v);   // the Billing login block (T157) rides the same /version read
+    lgFetchLogins();   // …and the stored logins beside it (T346), from the authed /logins
     if ((v.login || {}).state && !lgTimer) lgTimer = setTimeout(lgPoll, 1500);   // a flow mid-run resumes polling
     if (typeof v.updateMode === 'string') setShow(upm, v.updateMode);   // the kernel's persisted mode is authoritative
     if (typeof v.judgeModel === 'string') setShow(jm, v.judgeModel);   // the judge's ACTUAL current model/effort per tier is authoritative

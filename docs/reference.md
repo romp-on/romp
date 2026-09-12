@@ -48,6 +48,7 @@ These are for scripting and for agents rather than daily use:
 | `romp move <session> <dir>` | Move a session's working directory to `<dir>` (the folder must already exist); the conversation, name, mail and history stay with the session. Quiet session → moves now; open turn → queued, fires when the turn ends. See [Moving a session to another folder](#moving-a-session-to-another-folder) |
 | `romp checkin <host>` / `romp checkout <host>` | Publish this machine to an attached hub, or withdraw it. The hub files this machine under the name it declares only when that name is a machine name (letters, digits, dots, hyphens or underscores, starting with a letter or digit, at most 128 characters). Any other declared name is refused with a 400 that states the rule and echoes nothing, is recorded nowhere, and is said once on both machines: on the hub, one stderr line and one Log entry under the `refused` kind, naming the value as a clipped repr; on this machine, one stderr line, one dial-log record and one Log entry carrying the hub's reason, after which the same name is not re-sent until it, or the hub's kernel, changes. A hub's `POST /tunnels/trust` for a host it has never seen (the remembered-hosts entry that tiers relayed mail by origin) holds the wider rule that registry's writers share, a machine name or an ssh alias (letters, digits, dots, hyphens, underscores, at-signs, colons or square brackets, not starting with a hyphen, at most 255 characters), because a hub keys an attached peer by its ssh alias and carries that alias when you set trust between two of your machines; anything else is refused the same way, on the hub, with nothing recorded. `ROMP_HOST_NAME` (the kernel) and `ROMP_POSTAL_HOST` (the postal bus) override the declared name only when they clear the same rule; an unusable value (a space, an at-sign, a trailing newline) is set aside once, on stderr or in the bus log, and the derived name (the short hostname, else the platform's machine name, else a minted id) is used |
 | `romp default-dir [PATH]` | The default working directory for new sessions; no argument prints it, `""` clears it |
+| `romp login add <label> (--cmd '<shell line>' \| --op <reference>)`, `romp login list`, `romp login remove <label>` | The stored Claude logins a session can be billed to beside the machine's own (see [Several Claude logins](#several-claude-logins)): `add` records the command that prints the login's setup-token on demand (`--op` is the 1Password shorthand for `op read`); `list` and `remove` print labels only, never a token |
 | `romp debug [on\|off\|status]` | Judge debug mode, where rejection rows carry the full input and reply |
 | `romp refresh --quiet` | Refresh at the next quiet window instead — waits for sessions to finish their turns (15-min backstop). The ONLY door to the quiet window: a deploy (a peer's `romp update`, a release self-update, an automatic converge) restarts immediately, by the user's 2026-09-08 decision |
 | `romp down --wait <s>`, `romp down --now` | How long `romp down` waits for turns in flight to finish (0 to 600 seconds; default 5), or no wait at all |
@@ -446,6 +447,155 @@ the size of the number carries its explanation. A result that carries no
 per-model usage map is counted from the main loop alone, and the error center
 says so once: once per session when the CLI left the map out, once per kernel
 run when the Agent SDK the kernel imported has no field for it.
+
+### Several Claude logins
+
+A machine holds one Claude login at a time: Claude Code keeps the signed-in
+account in its own configuration directory, and `/login` replaces it. The
+user (2026-09-11) has a personal and an enterprise account under one email and
+wants a session billed to either, the way the Billing row offers Login vs API
+key. Romp therefore keeps a registry of STORED logins beside the machine's
+own: one record per login under `STATE/logins/<id>.json`, holding the label
+the user gave it, the email, organisation and kind word (`personal` for a Pro
+or Max subscription, `enterprise` for a Team or Enterprise one, read from
+Claude Code's own record when the add flow could, never guessed from an
+organisation's presence), and the COMMAND that prints the credential. The
+credential itself is a `claude setup-token` bearer (a one-year token) and
+lives wherever the user keeps it, nowhere in romp: no file under romp's state
+directory holds it, and it never rides romp's environment or a log line. Romp
+assumes nothing about where it is kept; it only runs the recorded command.
+1Password's `op read op://vault/item/field` is the documented example, and
+`romp login add --op <reference>` writes exactly that command.
+
+A session billed to a stored login reaches the token the way a key-billed
+session reaches the key today, through Claude Code's `apiKeyHelper` contract:
+its per-session settings layer (the file the SDK hands the CLI as
+`--settings`, the same layer a login pick uses to write `"apiKeyHelper": ""`)
+names `bin/romp-login-helper <id> <state dir>` as the helper, and that script
+runs the record's token command and passes its output into the CLI's pipe, per
+request, refreshed on the CLI's own helper interval. The machine's own login
+tokens are stripped from such a launch, since a bearer in the environment
+outranks the helper. This helper road rests on one fact the user verifies on a
+machine with a login (the devbox has none): a request the CLI authenticates
+with a setup-token through the helper is accepted and billed to the
+subscription, not refused as a bad API key and not billed as API dollars. That
+check runs in a plain terminal outside any recorded session or agent
+transcript: minting a setup-token prints it, and a token in a transcript is a
+compromised token (the gear flow of the second change removes the handling).
+Should the check fail, the fallback is the environment road: the launch runs
+the token command itself and puts the token in that one session's process
+environment as `CLAUDE_CODE_OAUTH_TOKEN`, exactly where the machine's own
+login tokens ride today, readable by processes of the same user as those are.
+
+The command runs the way the kernel runs the box's own key helper: under a
+whitelisted environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `LANG`,
+`LC_ALL`, `TERM`, `CLAUDE_CONFIG_DIR` and the `LC_*` and `XDG_*` names), never
+the kernel's whole environment, whose serve token is full control of every
+session; with its standard input closed; and with its standard error
+discarded, since a secret manager's diagnostics can quote the value it read
+and the CLI's standard error is kept in the session's registry row and the
+kernel log. Anything the tool needs beyond that, the command provides itself:
+on a headless machine `op read` needs a 1Password service-account token or a
+signin session, so the command is `. ~/.config/op/env && op read --no-newline
+'<reference>'` with that private file (mode 0600) holding it, while a desktop's
+1Password app session serves as is. The login records themselves are written
+at mode 0600 in a 0700 directory.
+
+A failing command is loud, never a quiet fall onto another account. The
+session's first request fails with an auth error the card names by the login's
+label. When the CLI never used the helper and signed in with something else
+(the machine's own login from its credentials file, a managed key, a key found
+in a settings file), the init's own report is the evidence: its source word is
+anything but the helper's. The problem ring names what the CLI used, the tab
+hover reads `picked, but the CLI signed in with another credential`, the
+submenu's sub-line `CLI used another credential`, the record is marked refused
+so every menu greys it with that reason, and the session is reconnected so its
+next launch takes the same fall a dead machine login takes (the API key when a
+helper is configured, else the machine's own login, said in the Billing row as
+a fall). The session is not ended, since that would drop the conversation: it
+keeps running on the fallback side, flagged, and the Billing menu switches it
+elsewhere on a click. The reconnect is asked once per session, and only when
+the machine has a side to fall to (a helper, or a signed-in machine login);
+with neither, a relaunch would carry the same failing helper and land wrong
+again, so the session stays where it landed, flagged. The API-health bucket and
+the spend rows follow the credential that actually answered, never the pick,
+and an API auth error marks a stored login refused only on a session whose
+launch carried that login's helper and whose CLI used it. That evidence is
+per process: a relaunch that no longer carries the helper (the login went
+unavailable, then a model or effort change) starts with none, and it is kept
+on the session's registry row so a session re-attached to its running CLI
+after a kernel restart keeps it through the turn: an attach launches nothing
+and resets nothing. A served reply on
+a session whose helper did answer is the deciding event the other way and
+clears the refusal; a judge call never clears one (its envelope does not say
+which login answered), and the judges of a session on a refused login take the
+same fallback, said once in the kernel log. The helper bounds the command at fifteen seconds (the kernel's own helper
+bound; `ROMP_LOGIN_HELPER_TIMEOUT_S` overrides it). A command whose text
+carries a credential-shaped run (a setup-token's prefix, forty or more token
+characters outside a path, or a JWT-shaped bearer of three dot-joined
+segments) is refused at add time: it would ride the shell's argument list on
+every refresh, readable to every process of the same user, and the refusal
+says a value typed there is already exposed through the shell's history and
+should be rotated. Dotted names pass (a secret manager's key path, a host, a
+file), a forty-digit hex run inside a `gpg` command or right after
+`--recipient` is a key fingerprint and passes, and the rule is applied at add
+time only: a stored record is never re-read against it.
+
+A machine or session with no stored login works exactly as today: the ordinary
+Claude Code login and the API key path are untouched, and the stored logins
+are an addition beside them. The user's own shape is the case the tests pin:
+the personal account on the ordinary login as now, and the enterprise account
+as a stored login whose command reads a setup-token from 1Password.
+
+Three things to know plainly. The judges bill the SAME account as the session
+they judge: a session billed to a stored login has its planner, closer and
+distiller calls carry that login's helper too, so its analysis is subscription
+usage on that login; a session on the machine default is unchanged. A pasted
+token's label is the user's word: romp cannot read an account or an
+organisation out of a token it never sees, so a login added from the command
+line carries only the label typed for it. And the tool the command calls must
+work non-interactively for the user who runs romp (a signed-in `op`, for the
+example), as the machine's key helper already must.
+
+Two doors add a login. `romp login add <label> --cmd '<shell line>'` records
+the command that prints the token; `romp login add <label> --op
+op://vault/item/field` records `op read` of that reference. Neither reads,
+prints or stores the token. The gear's Account section will run `claude
+setup-token` under a scratch configuration directory and hand the printed token
+to a store the user names, so the user never handles it. `romp login list`
+prints the labels, `romp login remove <label>` forgets a record (a label two
+records share is refused; name the id instead); the token stays wherever it
+was kept.
+
+Every surface that offers a billing pick lists every login the machine knows
+plus the API key: the new-session picker's Billing row (segmented buttons up
+to three choices, one dropdown beyond; an unavailable choice greyed with its
+reason), the tab menu's Billing submenu (the session's current login
+check-marked, an unavailable one greyed with the reason in its hover), the tab
+hover's Billing row and the submenu's sub-line (`Login (name@example.com ·
+Org · enterprise)` for the machine's own login, `Login (<label> · Org ·
+kind)` for a stored one, each piece only when known), and the gear's Account
+section, which lists the stored logins with a Remove each. The pick reaches
+the kernel as `login` (the machine's own), `key` or `login:<id>`; the
+registry's `auth` stays `login` | `key`, and a new `authLogin` field names the
+stored login, so every older reader keeps its meaning. A fork bills the same
+login as its parent. The API-health signal gives a stored login its own
+bucket, labelled `login:<salted digest of the record id>`, and the card names
+such a bucket by the login's label when several share a model family.
+
+Failures are loud. An API refusal of a stored login's credential names the
+login by label on the session's card (`the <label> login was refused`) and
+marks the record refused: every menu greys it with that reason until it is
+removed or added again, and `setAuth` refuses it with the same sentence. A
+stored login's one-year life is warned from eleven months in the gear and the
+menus, and an expired one reads as unavailable. The machine's own login
+signing out leaves a session billed to a stored login untouched (its helper
+is its own; only the machine-login option greys). A single-login machine with
+no stored logins behaves exactly as before.
+
+The Billing surfaces that list the logins, name the enterprise one and switch a
+session's pick ship with the registry and the credential road; the gear's
+guided add flow is the second change.
 
 ### Self-scheduled work wakes an idle session
 
@@ -2211,7 +2361,12 @@ bucket. A login is labelled by a salted digest of the account digest the usage
 bars stamp, so the same login gives the same label within one install, and
 nothing about the credential itself is in any label. The salt lives at
 `STATE/api-health-salt`, minted once at 0600; an empty file makes a login's
-label the account digest itself, so a bucket can be matched to the log.
+label the account digest itself, so a bucket can be matched to the log. A
+session billed to a stored login (see [Several Claude
+logins](#several-claude-logins)) hands its record id as the material instead,
+so that login is its own bucket, `login:<salted digest of the id>`, and the
+bucket carries the login's display label in `label` (empty for every other
+bucket), which the dashboard's card uses to name it.
 
 ### Top-level fields
 
@@ -2375,6 +2530,9 @@ own model and are exact.
   (connection-level failures) and `other`. Additive: the field arrived after
   the document's other fields and `schema` stayed `1`; a reader that ignores it
   sees the document it always saw.
+- `label`: the display label of the stored login this bucket's auth label
+  names (see [Several Claude logins](#several-claude-logins)), `""` for every
+  other bucket. Additive like `series`.
 
 ### On the dashboard
 

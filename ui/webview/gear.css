@@ -216,3 +216,14 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 /* the Open log button's unread count (T290): the red the bar's triangle wore when something was unread —
    a STATUS colour (the accent/status split), so it is the same literal on every surface */
 .rs-log-n { color: #ff6b6b; font-weight: 600; }
+
+/* the stored logins under the Account row (T346): one line per login (its label, its state, a Remove), the
+   sub-line's size; a refused or expired one wears the blocked red, an expiring one the working amber */
+.rs-logins .rs-login-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 0.82em; }
+.rs-logins .rs-login-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rs-logins .rs-note { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 0; }
+.rs-logins .rs-login-bad { color: var(--err, #F85B5A); }   /* the blocked red, through the token */
+.rs-logins .rs-login-warn { color: var(--st-working-bg, #e5c07b); }
+.rs-logins .rs-login-rm { flex: 0 0 auto; cursor: pointer; font: inherit; background: var(--btn-bg, #2a2a2a); color: var(--fg, #ccc);
+  border: 1px solid var(--hairline, #3a3a3a); border-radius: 5px; padding: 2px 8px; }
+.rs-logins .rs-login-rm[disabled] { opacity: 0.5; cursor: default; }

@@ -113,7 +113,7 @@ interface AskItem {
               spendLimit?: boolean;   // apiError: a monthly spend cap (on you → raise it, never auto-retried; the user 2026-07-14)
               modelLimit?: boolean;   // apiError: this session's MODEL is out of allowance (on you → switch model or add credits; the user 2026-08-01)
               refusal?: boolean;   // apiError: the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — deterministic on the same input, the user 2026-08-15)
-              mode?: string; since?: number;   // judgeAuth adds these: which billing its judges ride ('key'|'login') + the first refusal time — romp can't analyze the session until the credential is fixed (the user 2026-08-12)
+              mode?: string; login?: string; since?: number;   // judgeAuth adds these: which billing its judges ride ('key'|'login') + the first refusal time — romp can't analyze the session until the credential is fixed (the user 2026-08-12)
               capOffer?: { resetsAt: number; window?: string };   // apiError: login-billed session dead on the account's cap + a key on hand → the explicit switch OFFER; the pick is yours alone, both directions (2026-08-30)
               toName?: string; toSid?: string;    // parkedHandoff adds to*
               mid?: string; frm?: string; to?: string; origin?: string; body?: string; gist?: string };   // quarantine (held peer mail) adds these; gist = the bus's 90-char collapse for the compact card line
@@ -2466,7 +2466,9 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   // to resume — the latch clears itself on the judges' next successful call once the credential works).
   (a._jauthBadge as HTMLElement).style.display = isJudgeAuth ? "" : "none";
   if (isJudgeAuth && it.blocked) {
-    a._jauthBadge.textContent = it.blocked.mode === "key" ? "⚠ Can't analyze · API key" : "⚠ Can't analyze · login";
+    // a STORED login's refusal names the login (T346); the machine's own and the key keep their plain words
+    a._jauthBadge.textContent = it.blocked.login ? `⚠ Can't analyze · ${it.blocked.login}`
+      : it.blocked.mode === "key" ? "⚠ Can't analyze · API key" : "⚠ Can't analyze · login";
     setTip(a._jauthBadge as HTMLElement, (it.blocked.what || "")
       + (it.blocked.text ? ` — the CLI said: ${it.blocked.text}` : ""));
   }

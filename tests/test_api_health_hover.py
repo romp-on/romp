@@ -797,7 +797,7 @@ class Script(unittest.TestCase):
         self.assertEqual(HIST.count("shown++"), 1, "shown counts transition rows only: the divider takes no slot")
         self.assertIn("var word=(multi?bname(d,r.bucket)+' ':'')+(STATE_WORD[r.to]||r.to)", HIST, "a bucket is named only when there are several; the state in plain words")
         self.assertIn("var STATE_WORD={thrashing:'rate-limit storm',degraded:'API failing',recovering:'recovering',healthy:'fine',unknown:'quiet'};", JS)
-        self.assertIn("return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}", HIST, "two of one family are told apart by auth")
+        self.assertIn("return dup?fam+' · '+(b.label||b.auth||key.split('|')[0]):fam;}", HIST, "two of one family are told apart by the login's label, else the auth label")
 
     def test_the_roles_follow_the_mode_and_the_cell_is_described_by_the_short_summary(self):
         self.assertIn("el.addEventListener('focus',function(){if(moving||skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});", JS)

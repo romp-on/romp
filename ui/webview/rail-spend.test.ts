@@ -54,7 +54,7 @@ test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside
   assert.ok(BACKEND.includes('mu = getattr(msg, "model_usage", None)'));
   assert.ok(BACKEND.includes("out[k] = v - last if v >= last else v"), "a shrunken running total is a reset we missed → fold whole");
   assert.ok(KERNEL.includes('KINDS = ("tokIn", "tokOut", "tokCacheR", "tokCacheW")'));
-  assert.ok(BACKEND.includes("sid=self.thread_of or self.sid)   # the rail's spend"),
+  assert.ok(BACKEND.includes("sid=self.thread_of or self.sid,"),   // T346: the stored login the launch carried rides beside it
     "the settle threads the OWNING sid — a comment thread bills its owner (T144), a plain session itself (T100)");
   assert.ok(BACKEND.includes("if keyed or ke:   # carry an existing key split forward even on a login turn"));
   assert.ok(BACKEND.includes("_fold(days, day, 90)"));

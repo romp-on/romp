@@ -1049,7 +1049,7 @@ class SaltedLabels(unittest.TestCase):
         # not a re-derivation: the same init word _note_auth_source already judges, and the usage bars'
         # account digest; no key material and no helper run
         src = inspect.getsource(sb.SdkBackend._note_auth_source)
-        self.assertIn("self.api_health.auth_label(source)", src)
+        self.assertIn("self.api_health.auth_label(source, login_id=_lid,", src)   # T346: a stored login's id rides beside the source word
         self.assertNotIn("helper_key(", src, "never a credential resolution at init time")
         self.assertNotIn("_launched_key_fp", src, "romp records no key identity")
         self.assertIn("acct_digest()", inspect.getsource(sb.ApiHealth.auth_label))

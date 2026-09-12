@@ -311,8 +311,12 @@ interface TodoTask { id: string; subject: string; activeForm?: string; status: s
 type PeerIdent = { name: string; host?: string; sid?: string; color?: { bg: string; fg: string } | null };   // a named peer behind a peer-kind wait (kernel _peer_identity, 2026-08-26)
 // which billing sides this box can bill, and why not for the other (kernel _auth_avail, 2026-09-08): the
 // Billing submenu lists both and greys the unavailable one with the reason in its hover
-interface AuthAvail { login?: boolean; key?: boolean; loginWhy?: string; keyWhy?: string; acct?: string; default?: string; defaultExplicit?: boolean }   // defaultExplicit: set in the Billing flyout's Default group, else the helper rule (T380)
-interface Status { state: ChipState; sinceEpoch: number | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; }   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions) — the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you → red tab) vs a transient API error (amber/retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried — retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+// one login a host offers a session (T346): the machine's own (machine: true, value "login") or a stored one (value
+// "login:<id>"); `label` is its display (email · organisation · kind for the machine's, the user's label plus what
+// the add flow could read for a stored one), `why` the reason it is greyed when `available` is false
+interface AuthLogin { id?: string; value?: string; label?: string; machine?: boolean; available?: boolean; why?: string; expiresSoon?: boolean }
+interface AuthAvail { login?: boolean; key?: boolean; loginWhy?: string; keyWhy?: string; acct?: string; default?: string; defaultExplicit?: boolean; logins?: AuthLogin[] }   // defaultExplicit: set in the Billing flyout's Default group, else the helper rule (T380)
+interface Status { state: ChipState; sinceEpoch: number | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; }   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions) — the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you → red tab) vs a transient API error (amber/retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried — retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -323,6 +327,26 @@ function authFellTo(st: Status): string {
   const other = st.auth === "key" ? "login" : "key";
   const avail: AuthAvail = st.authAvail || { login: true, key: true };
   return avail[other] ? other : "";
+}
+// The name beside 'Login' for a session billing a login (T346): the kernel's authLabel (a stored login's display,
+// else the machine's own as email · organisation · kind), falling back to the account name an older kernel sends.
+function loginName(st: Status): string { return st.authLabel || st.authAcct || ""; }
+// The Billing choices a kernel offers (T346): every login it knows (the machine's own first, then the stored ones)
+// plus the API key, each with the reason it is greyed or "". Called only when the kernel sent `logins`; an older
+// kernel's caller keeps its two-entry list.
+function authLoginChoices(avail: AuthAvail): { label: string; value: string; why: string }[] {
+  const out = (avail.logins || []).map((l) => ({
+    label: l.label ? `Login (${l.label})` : "Login",
+    value: l.value || (l.id ? `login:${l.id}` : "login"),
+    why: l.available === false ? (l.why || (l.machine ? (avail.loginWhy || "no Claude login signed in on this machine") : "this login is unavailable")) : "" }));
+  out.push({ label: "API key", value: "key", why: avail.key ? "" : (avail.keyWhy || "no apiKeyHelper configured") });
+  return out;
+}
+// Whether a Billing choice IS the session's current pick: the key, or a login by WHICH login (st.authLogin names a
+// stored one, "" the machine's own).
+function authChoiceCurrent(st: Status, value: string): boolean {
+  if (value === "key") return st.auth === "key";
+  return st.auth === "login" && ("login" + (st.authLogin ? `:${st.authLogin}` : "")) === value;
 }
 interface Color { bg: string; fg: string; }
 // A run_in_background task surfaced in the #bg-tasks box (the kernel's _bg_tasks): a one-line summary +
@@ -5863,6 +5887,10 @@ function showTabTip(tab: HTMLElement, s: Session): void {
   if (s.status.auth) rows.push(["Billing",
     s.status.authPending
       ? (s.status.auth === "key" ? "API key" : "Login") + " (applying — not confirmed yet)"
+      // a STORED login picked, but the init's evidence says the CLI never used its helper and signed in with the
+      // machine's own login (T346): the wrong account, said as such, never shown as the pick applied
+      : (s.status.auth === "login" && s.status.authLogin && s.status.authLoginLive === "")
+        ? `⚠ Login (${loginName(s.status)}) picked, but the CLI signed in with another credential: this session bills that`
       // the pick names a side this box cannot bill (the kernel's authPickUnavailable, with the reason
       // in authAvail): the launch went to the other side, and the row says so (the user 2026-09-08)
       : s.status.authPickUnavailable === s.status.auth
@@ -5875,7 +5903,7 @@ function showTabTip(tab: HTMLElement, s: Session): void {
         ? `⚠ ${s.status.auth === "key" ? "API key" : "Login"} picked, but the CLI reports `
           + `${s.status.authLive === "key" ? "the API key" : "the login"} — this session bills that`
         : s.status.auth === "key" ? "API key"
-          : (s.status.authAcct ? `Login (${s.status.authAcct})` : "Login")]);
+          : (loginName(s.status) ? `Login (${loginName(s.status)})` : "Login")]);
   for (const [k, v, color] of rows) {
     const r = el("div", "tab-tip-row");
     const ke = el("span", "tab-tip-k"); ke.textContent = k;
@@ -7350,12 +7378,14 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     const l = el("span", "ctx-item-label"); l.textContent = "Billing"; bodyEl.appendChild(l);
     const sb = el("span", "ctx-item-sub");
     sb.textContent = st.authPending ? "applying…"
+      : (st.auth === "login" && st.authLogin && st.authLoginLive === "")
+        ? "⚠ CLI used another credential"   // the stored login's helper was not used (T346): the init's evidence
       : st.authPickUnavailable === st.auth
         // the pick names a side this box cannot bill — the launch went to the other one when it exists
         ? `⚠ ${wordOf(st.auth)} unavailable` + (authFellTo(st) ? `, billing ${wordOf(authFellTo(st))}` : "")
       : st.authLive && st.authLive !== st.auth
         ? `⚠ CLI reports ${st.authLive === "key" ? "API key" : "login"}`   // the pick did not take — say so where the switch lives (T124)
-        : (st.auth === "key" ? "API key" : (st.authAcct ? `Login (${st.authAcct})` : "Login"));
+        : (st.auth === "key" ? "API key" : (loginName(st) ? `Login (${loginName(st)})` : "Login"));
     bodyEl.appendChild(sb);
     item.appendChild(bodyEl);
     const caret = el("span", "ctx-caret"); caret.textContent = "▸"; item.appendChild(caret);
@@ -7364,10 +7394,14 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
       if (already) return already as HTMLElement;
       menu.querySelector(".ctx-sub")?.remove();                    // one flyout at a time
       const sub = el("div", "ctx-menu ctx-sub ctx-sub-billing");
-      const choices = [{ label: st.authAcct ? `Login (${st.authAcct})` : "Login", value: "login", why: avail.login ? "" : (avail.loginWhy || "no Claude login signed in on this machine") },
-                       { label: "API key", value: "key", why: avail.key ? "" : (avail.keyWhy || "no apiKeyHelper configured") }];
+      // every login this host knows plus the key (T346, authLoginChoices); an older kernel sends no `logins` and
+      // keeps the two-entry list, the machine's login named by its account
+      const choices = avail.logins && avail.logins.length ? authLoginChoices(avail)
+        : [{ label: st.authAcct ? `Login (${st.authAcct})` : "Login", value: "login", why: avail.login ? "" : (avail.loginWhy || "no Claude login signed in on this machine") },
+           { label: "API key", value: "key", why: avail.key ? "" : (avail.keyWhy || "no apiKeyHelper configured") }];
       for (const c of choices) {
-        const opt = el("div", "ctx-item" + (st.auth === c.value ? " current" : "") + (c.why ? " disabled" : ""));
+        const cur = authChoiceCurrent(st, c.value);   // the key, or a login by WHICH login (st.authLogin)
+        const opt = el("div", "ctx-item" + (cur ? " current" : "") + (c.why ? " disabled" : ""));
         opt.textContent = c.label;
         if (c.why) {   // unavailable here: greyed, the reason on hover, inert (the user 2026-09-08)
           opt.title = c.why;
@@ -7377,7 +7411,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           ev2.stopPropagation();
           if (c.why) return;                                       // a disabled option posts nothing, and the menu stays
           dismissTabMenu();
-          if (st.auth !== c.value && vscodeApi) vscodeApi.postMessage({ type: "setAuth", id, value: c.value });
+          if (!cur && vscodeApi) vscodeApi.postMessage({ type: "setAuth", id, value: c.value });
         });
         sub.appendChild(opt);
       }
@@ -7404,7 +7438,10 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         // an older kernel sends no defaultExplicit and takes no "auto": its flyout marks the side it computed and offers no
         // Automatic radio (review: the click would be swallowed there)
         const olderKernel = avail.defaultExplicit === undefined;
-        const radios = [...choices.map((c) => ({ ...c, cur: olderKernel ? avail.default === c.value : (explicit && avail.default === c.value) })),
+        // the machine's own login and the key only (T346 beside T380): a stored login as the machine's default is not
+        // taken by the kernel yet (its scoped arm refuses the value by name), so the group does not offer it
+        const machineChoices = choices.filter((c) => c.value === "login" || c.value === "key");
+        const radios = [...machineChoices.map((c) => ({ ...c, cur: olderKernel ? avail.default === c.value : (explicit && avail.default === c.value) })),
                         ...(olderKernel ? [] : [{ label: `Automatic (${autoWord})`, value: "auto", why: "", cur: !explicit }])];
         for (const c of radios) {
           const opt = el("div", "ctx-item ctx-radio" + (c.cur ? " current" : "") + (c.why ? " disabled" : ""));
@@ -8318,8 +8355,15 @@ function syncPickerAuth(): void {
   if (!wrap) return;
   const a = pickerAuthAvail;
   const show = !pickMode && !!(a && (a.login || a.key)) && pickerBackendChoice() === "sdk";
-  wrap.style.display = show ? "" : "none";
-  if (!show) return;
+  // …or a STORED login this host can bill (T346), when its own login and key are both away
+  const stored = (a && a.logins ? a.logins : []).filter((l) => !l.machine);
+  const showStored = !pickMode && stored.some((l) => l.available !== false) && pickerBackendChoice() === "sdk";
+  wrap.style.display = show || showStored ? "" : "none";
+  if (!show && !showStored) return;
+  if (stored.length) { syncPickerAuthMany(wrap, a!); return; }
+  // back to the two-option row: a many-login host's rebuilt options and dropdown go, the two buttons return
+  wrap.querySelectorAll(".picker-be-opt[data-many]").forEach((x) => x.remove());
+  pickerAuthDropSelect(wrap);
   const both = !!(a!.login && a!.key);
   wrap.querySelectorAll(".picker-be-opt").forEach((x) => ((x as HTMLElement).style.display = both ? "" : "none"));
   const fixed = wrap.querySelector(".picker-auth-fixed") as HTMLElement | null;
@@ -8342,12 +8386,73 @@ function syncPickerAuth(): void {
   }
 }
 
+// The Billing row with SEVERAL logins (T346): one option per login the host knows (the machine's own first, then
+// the stored ones) plus API key, rebuilt from each reply. Up to three choices wear the segmented buttons (shrinking
+// with an ellipsis, the whole label in the hover; an unavailable one greyed and inert with its reason); beyond three
+// the row is one dropdown in the menu vocabulary, rebuilt only when the choice set changes so an open list survives
+// a re-sync. The pick is kept by VALUE across rebuilds; the host's default seeds it, else the first usable choice.
+// One usable choice is written out, as the two-option row does.
+function syncPickerAuthMany(wrap: HTMLElement, a: AuthAvail): void {
+  const choices = authLoginChoices(a);
+  const usable = choices.filter((c) => !c.why);
+  const fixed = wrap.querySelector(".picker-auth-fixed") as HTMLElement | null;
+  wrap.querySelectorAll<HTMLElement>(".picker-be-opt:not([data-many])").forEach((x) => (x.style.display = "none"));
+  const held = pickerAuthChoice();
+  const prev = (held && choices.some((c) => c.value === held && !c.why)) ? held
+    : (a.default && choices.some((c) => c.value === a.default && !c.why)) ? a.default
+    : (usable[0] ? usable[0].value : "");
+  wrap.querySelectorAll(".picker-be-opt[data-many]").forEach((x) => x.remove());
+  if (usable.length <= 1) {
+    pickerAuthDropSelect(wrap);
+    if (fixed) {
+      fixed.style.display = "";
+      fixed.textContent = usable[0] ? usable[0].label : "Login";
+      fixed.title = choices.filter((c) => c.why).map((c) => `${c.label} unavailable: ${c.why}`).join("\n");
+    }
+    return;
+  }
+  if (fixed) { fixed.style.display = "none"; fixed.textContent = ""; fixed.title = ""; }
+  if (choices.length <= 3) {
+    pickerAuthDropSelect(wrap);
+    for (const c of choices) {
+      const b = el("button", "picker-be-opt" + (c.value === prev ? " sel" : "")) as HTMLButtonElement;
+      b.type = "button"; b.textContent = c.label; b.dataset.auth = c.value; b.dataset.many = "1";
+      b.title = c.why ? `${c.label} unavailable: ${c.why}` : `Bill this session to ${c.label}.`;
+      if (c.why) b.disabled = true;
+      b.addEventListener("click", () => wrap.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", x === b)));
+      wrap.insertBefore(b, fixed);
+    }
+    return;
+  }
+  const sig = choices.map((c) => c.value + "|" + c.label + "|" + c.why).join("\n");
+  let dd = wrap.querySelector("select.picker-auth-select") as HTMLSelectElement | null;
+  if (!dd || dd.dataset.sig !== sig) {
+    if (dd) dd.remove();
+    dd = el("select", "picker-auth-select") as HTMLSelectElement;
+    dd.dataset.sig = sig;
+    dd.title = "Which account this session bills";
+    for (const c of choices) {
+      const o = document.createElement("option");
+      o.value = c.value; o.textContent = c.label + (c.why ? ` (unavailable: ${c.why})` : ""); o.disabled = !!c.why;
+      dd.appendChild(o);
+    }
+    dd.value = prev;
+    wrap.insertBefore(dd, fixed);
+  }
+}
+// the two-option row has no dropdown: drop one a many-login host left behind
+function pickerAuthDropSelect(wrap: HTMLElement): void {
+  wrap.querySelectorAll("select.picker-auth-select").forEach((x) => x.remove());
+}
+
 // the picked billing for the create payload — "" when the row is hidden or written-out (one real
 // choice: the kernel default IS that choice, and a stale .sel from a previously-selected both-offering
 // host must not ride along)
 function pickerAuthChoice(): string {
   const wrap = document.querySelector("#picker .picker-auth") as HTMLElement | null;
   if (!wrap || wrap.style.display === "none") return "";
+  const dd = wrap.querySelector("select.picker-auth-select") as HTMLSelectElement | null;   // several logins (T346)
+  if (dd) return dd.value || "";
   const sel = wrap.querySelector(".picker-be-opt.sel") as HTMLElement | null;
   if (!sel || sel.style.display === "none") return "";
   return sel.dataset.auth || "";

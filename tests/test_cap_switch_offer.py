@@ -78,8 +78,8 @@ class CapSwitchOffer(unittest.TestCase):
         self.assertEqual(len(sites), 2, "exactly the helper + the parked replay: %r" % sites)
         self.assertTrue(any("return be.set_auth(sid, value)" in l for l in sites))
         self.assertTrue(any("be.set_auth(sid, op[1])" in l for l in sites))
-        self.assertIn('elif t == "setAuth" and msg.get("value") in ("login", "key"):', src,
-                      "the route is a user gesture, and the ONLY door")
+        self.assertIn('elif t == "setAuth" and lg.parse_pick(msg.get("value"))[0]:', src,
+                      "the route is a user gesture, and the ONLY door (T346: 'login' | 'key' | 'login:<id>')")
         self.assertNotIn("set_auth", src[src.index("def _cap_switch_offer"):
                                          src.index("def _judge_limit_view")],
                          "the offer itself never switches anything")

@@ -102,7 +102,7 @@ class NonObjectBodies(unittest.TestCase):
     naming absolute paths. Now every one of them answers 400 in the route family's JSON shape, naming
     what arrived, and acts on nothing."""
     ROUTES = ("/new", "/fork", "/rename", "/move", "/color", "/watch-pr", "/watch", "/tag", "/group",
-              "/update-dismiss", "/working", "/deliver", "/walk-root", "/redial")
+              "/update-dismiss", "/working", "/deliver", "/walk-root", "/redial", "/logins")
 
     @classmethod
     def setUpClass(cls):

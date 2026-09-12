@@ -48,6 +48,7 @@ jd = load_source("romp_judge", HERE / "judge.py")
 cm = load_source("romp_colormap", HERE / "colormap.py")  # age → recency tint
 pal = load_source("romp_palette", HERE / "palette.py")  # session-identity palettes (selectable)
 sb = load_source("romp_session_backend", HERE / "session_backend.py")  # the SessionBackend ABC
+lg = load_source("romp_logins", HERE / "logins.py")  # stored Claude logins (T346): the registry beside the machine's own login
 CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in this worktree via `git merge main`
 # ROMP_DIST_DIR: test seam (romp-lab serves a COPY of the built bundles, so its rebuild simulations —
 # mtime bumps that must raise the reload banner — never touch the dist the LIVE kernel serves).
@@ -16196,6 +16197,9 @@ def _sdk_locked():
             # store names no signed-in account — the same authority the usage bars trust, so the
             # pick can never sit in the UI as applied fact on a box that demonstrably cannot apply it
             _sdk_backend.login_ok = lambda: (None if _claude_account_state() == "unreadable" else bool(_claude_account()))
+            # the judges' half of the API-health ring (T346, the user 2026-09-11: one accounting per login, the
+            # judges included): judge.py files each claude -p call's outcome through this hook
+            jd._API_HEALTH_NOTE_FN = _judge_api_health_note
             #   None = cannot tell (the account file is mid-rewrite or unreadable): no launch falls on it (2026-09-09)
             # a postal banner the backend fed and a connection rebuild stranded goes BACK to the bus by message id
             # (SdkSession._return_stranded_mail → the bus's POST /restore), never dropped (2026-09-12)
@@ -16403,13 +16407,21 @@ def _auth_avail():
     # a signed-in account, or an account file that cannot be read just now (cannot tell is never "no login",
     # review 2026-09-09: a remembered login pick must not fall to the key on a read failure)
     login_ok = (bool(_claude_account()) or _claude_account_state() == "unreadable") and not managed
+    logins = _login_choices(login_ok, managed)
     default = d.get("auth") if d.get("auth") in ("login", "key") else ("key" if key else "login")
+    # a remembered pick of a STORED login (T346) stands as "login:<id>" while that login is usable; otherwise
+    # it falls through the machine-login rules below like any remembered login pick
+    dlid = _reg_login(d) if (default == "login" and d.get("auth") == "login") else ""
+    if dlid:
+        stored = next((row for row in logins if row.get("id") == dlid), None)
+        if stored and stored.get("available"):
+            default = "login:" + dlid
     if default == "key" and not key:
         default = "login"
     elif default == "login" and not login_ok and key:
         default = "key"
     out = {"login": login_ok, "key": key,
-           "acct": _claude_account_label(), "default": default,
+           "acct": _claude_account_label(), "default": default, "logins": logins,
            # T380: the default is EXPLICIT (set in the Billing flyout's Default group) or the helper rule; the
            # group marks Automatic otherwise and its sub-line says which
            "defaultExplicit": bool(d.get("authExplicit")) and d.get("auth") in ("login", "key")}
@@ -16432,7 +16444,7 @@ def _auth_avail_status():
     if memo is not None and "avail_status" in memo:
         return dict(memo["avail_status"])
     a = _auth_avail()
-    out = {k: a[k] for k in ("login", "key", "loginWhy", "keyWhy", "default", "defaultExplicit") if k in a}
+    out = {k: a[k] for k in ("login", "key", "loginWhy", "keyWhy", "logins", "default", "defaultExplicit") if k in a}
     if memo is not None:
         memo["avail_status"] = dict(out)
     return out
@@ -17385,7 +17397,13 @@ def _drive(msg, client):
         # host cannot take; said, never swallowed.
         client["send"](json.dumps({"type": "warn",
                                    "text": "Automatic is a choice for the machine's default billing, not for one session: pick Login or API key here."}))
-    elif t == "setAuth" and msg.get("value") in ("login", "key"):
+    elif t == "setAuth" and msg.get("scope") == "machine":
+        # a STORED login as the machine's default (T346 beside T380): not taken yet, said. This arm sits before the
+        # per-session arm so a scoped value is never read as a session's own pick; the flyout's Default group lists
+        # the machine's own login and the key only until set_auth_default takes a stored one (the T346 follow-up).
+        client["send"](json.dumps({"type": "warn",
+                                   "text": "Couldn't set this machine's default billing: a stored login can't be the machine's default yet; pick it for a session instead."}))
+    elif t == "setAuth" and lg.parse_pick(msg.get("value"))[0]:   # "login" | "key" | "login:<id>" (T346)
         # per-session billing (login vs the manager env's API key) — SDK-only, applied via reconnect
         # like /effort; mid-compaction → parked in the same FIFO. LOUD on refusal (fail loudly): Codex
         # sessions and a keyless manager can't apply it, and a silent swallow leaves a dead control.
@@ -18158,6 +18176,11 @@ class Sessions:
                                 # Billing row's live truth. Merged since 2026-09-08 — the status push read
                                 # it off this map from the start, and nothing had ever put it here
                                 "authLive": st.get("authLive", ""),
+                                # WHICH login a login pick bills (T346): the stored login's record id and its
+                                # display label, "" for the machine's own
+                                "authLogin": st.get("authLogin", ""),
+                                "authLabel": st.get("authLabel", ""),
+                                "authLoginLive": st.get("authLoginLive"),   # the init's evidence of which login answered
                                 # the explicit pick this box cannot bill ("login"|"key"|""): the launch
                                 # fell to the other side, the Billing menu says so (2026-09-08)
                                 "authPickUnavailable": st.get("authPickUnavailable", ""),
@@ -28978,7 +29001,11 @@ def _chat_sig_shared():
     return {"flags": _chat_ident(jd.STATE / "session-flags.json"),
             "ncards": _chat_ident(jd.STATE / "notify-cards.json"),
             "colormap": _colormap(),
-            "acct": (_claude_account_label(), _auth_both(), tuple(sorted(_auth_avail_status().items()))),
+            # …plus the login's display (T346: the organisation and kind word beside the name, and every stored
+            # login's label and availability ride _auth_avail_status), so a credentials-file or registry change
+            # re-renders the Billing rows
+            "acct": (_claude_account_label(), _claude_login_display(), _auth_both(),
+                     json.dumps(_auth_avail_status(), sort_keys=True)),
             "cleared": _chat_ident(jd.STATE / "cleared.jsonl"),
             "host": _self_host(),
             "names": _names_digest(getattr(_live_scope, "names", None) or _names_snapshot()),
@@ -31397,7 +31424,7 @@ def _set_auth_or_park(be, sid, value):
     """Apply a billing-account change now — or park it while the session compacts, in the same FIFO as
     /model and /effort (it reconnects the session, which mid-compaction would derail the compaction
     exactly the way a model switch would). Returns the backend's verdict so the caller can be loud."""
-    if value not in ("login", "key"):
+    if not lg.parse_pick(value)[0]:          # "login" | "key" | "login:<id>" (a stored login, T346)
         return False
     if _gate_or_park(sid, ("auth", value)):
         return True
@@ -34463,6 +34490,13 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   "authPickUnavailable": tm.get("authPickUnavailable", ""),
                   # the login's display name, shown beside 'Login' (the user 2026-08-09); "" when no login
                   "authAcct": _claude_account_label(),
+                  # WHICH login this session bills when it bills a login (T346): a stored login's record id and
+                  # its display label, else "" and the machine's own login as email · organisation · kind
+                  "authLogin": tm.get("authLogin", ""),
+                  "authLabel": tm.get("authLabel", "") or _claude_login_display(),
+                  # the init's EVIDENCE of which login answered a stored-login launch (T346): the record id when its
+                  # helper did, "" when the CLI signed in with the machine's own login instead, absent before an init
+                  "authLoginLive": tm.get("authLoginLive"),
                   "authPending": bool(tm.get("authPending")),   # an /auth reconnect applying → badge dots
                   "modelPending": _model_pending_now(sid, tm),   # switching-dots on the model badge until the pick lands, from EITHER surface (the user 2026-07-03)
                   "effortPending": bool(tm.get("effortPending")),   # switching-dots on the effort badge while the /effort reconnect applies (SDK-only; the user 2026-07-06)
@@ -36850,6 +36884,21 @@ def _feed_session_entry(s, ctx):
     #                                              the build's clock, the one the key's `offer` component reads the cap window against
     if aerr:
         reads["usage"] = True                    # the offer reads usage.json: the key's `usage` component rides this record
+    # a session billed to a STORED login (T346) whose credential the API refused: the card names the login
+    # by its label, and the registry marks the record refused so every menu greys it with the reason until
+    # it is removed or added again (logins.mark_refused is idempotent: an unchanged reason writes nothing).
+    # Gated on the launch having CARRIED that login's helper and the CLI having used it (authLoginLive, the
+    # init's evidence), never on the pick: a session that fell to the key never tried the stored credential.
+    # Read from the live row (the key's `row` component) and the api error (`transcript`): nothing unkeyed.
+    _auth_login_lbl = _login_refusal_label(tm or {}, aerr)
+    if _auth_login_lbl:
+        # Inside the memo body this mark runs once per KEY change, not per build (the feed team's read of the merge,
+        # 2026-09-12): enough, because the refusal is a fact of the api error record, whose identity is in the key
+        # (the transcript component), and the write is idempotent. The one divergence from the inline body it
+        # replaced: a login removed and added again while the SAME api error record still stands is not re-marked
+        # until this session's inputs move (a retry writes a new record), where the inline body re-marked it from the
+        # stale error on every build. Read as better, not as a gap.
+        lg.mark_refused(jd.STATE, str((tm or {})["authLogin"]), aerr.get("text") or "the API refused this login")
     api_top = None
     if aerr:
         f = store.get("lastNode")
@@ -36866,6 +36915,9 @@ def _feed_session_entry(s, ctx):
     # LIVE floors (a permission prompt, the session's own API error): one interrupt at a time, the
     # present event first — and the api floor's authErr copy already names the same credential fix.
     jerr = _jauth_map.get(fsid)
+    # the judges' credential refused is a STORED login's (T346): the card names it by label, carried on the map
+    # entry by build_feed (a keyed input; the registry itself is never read here)
+    _jauth_login = str(jerr.get("loginLabel") or "") if jerr else ""
     jauth_top = None
     if jerr and api_top is None and perm_top is None:
         f = store.get("lastNode")
@@ -37399,6 +37451,7 @@ def _feed_session_entry(s, ctx):
                                   else "this session's model is out of allowance — switch its model or add credits to continue" if aerr.get("modelLimit")
                                   # a dead credential: retrying re-presents it forever — name the fix
                                   # (per-session auth, the user 2026-08-08)
+                                  else ("the %s login was refused: remove it or add it again in the gear's Billing block, or switch which login this session bills" % _auth_login_lbl) if aerr.get("authErr") and _auth_login_lbl
                                   else "this session's sign-in or API key isn't working — fix the login (claude /login) or the key, or switch which one it bills" if aerr.get("authErr")
                                   # a refusal is deterministic: retrying re-sends the same prompt and
                                   # collects the same refusal — name the real fix (the user 2026-08-15)
@@ -37406,10 +37459,12 @@ def _feed_session_entry(s, ctx):
                                   else "this session stopped on an API error — Retry to resume")} if nid == api_top
                         # the session itself is fine — it's romp's ANALYSIS of it whose credential is
                         # refused, so the copy blames the judges, not the session (the user 2026-08-12)
-                        else {"state": "judgeAuth", "mode": jerr.get("mode"),
+                        else {"state": "judgeAuth", "mode": jerr.get("mode"), "login": _jauth_login,
                               "since": jerr.get("t"), "text": jerr.get("note") or "",
                               "what": ("romp can't analyze this session — the API key its judges bill is being refused. Fix the key behind Claude Code's apiKeyHelper (rotate the vault item) or switch which account this session bills"
                                        if jerr.get("mode") == "key" else
+                                       ("romp can't analyze this session: the %s login its judges bill is being refused. Remove it or add it again in the gear's Billing block, or switch which login this session bills" % _jauth_login)
+                                       if _jauth_login else
                                        "romp can't analyze this session — the login its judges bill is being refused. Sign in again (claude /login) or switch which account this session bills")} if nid == jauth_top
                         else {"state": perm_state,
                               "what": ("this session is stopped awaiting your input" if perm_state == "picker"
@@ -37568,6 +37623,11 @@ def build_feed(now, live_map=None):
     wmap = _wait_for_graph(now, {s["sid"] for s in alive})   # per-session 'waiting on a live peer' (the user 2026-06-22)
     _stalls = _stalled_goals()                       # goals romp's nudge gate is holding → the card's Stalled section
     _jauth_map = jd._auth_down_map()                 # judge-auth-down latch → the per-session card floor below
+    # a judges' refusal of a STORED login (T346) names the login by its label: resolved HERE, once per build, onto a copy
+    # of the entry, so the memoized derivation reads the label from the keyed jauth component (a relabel moves the
+    # component and re-derives the card) and never the registry (an input the key does not fold)
+    _jauth_map = {f: (dict(e, loginLabel=(_sdk().login_display(str(e["login"])) if _sdk() else ""))
+                     if isinstance(e, dict) and e.get("login") else e) for f, e in _jauth_map.items()}
     _jactive = {r.get("fsid") for r in jd.active_runs()}   # judge calls in flight NOW → the Analyzing… prong
     cold_parse = False                               # any living session not yet parsed → warm it in the background
     cmap = _colormap()                               # the age tint's colormap, once per build: the FOLD's input (never the memo's)
@@ -37771,7 +37831,13 @@ def _state_ev_step(ev, o):
     return ev
 
 
-_ACCT_CACHE = {"mtime": -1.0, "val": "", "label": "", "state": "none"}   # state: "ok" | "none" | "unreadable"
+_ACCT_CACHE = {"mtime": -1.0, "val": "", "label": "", "state": "none",   # state: "ok" | "none" | "unreadable"
+               "org": "", "orgDigest": ""}   # organizationName + a digest of organizationUuid (T346), "" when none
+# The kind word of the machine's login (T346): from Claude Code's own credentials file, subscriptionType folded
+# by logins.kind_word ("team"/"enterprise" read enterprise, "pro"/"max" read personal; anything else is no word,
+# never guessed from an organisation's presence). mtime-cached like _ACCT_CACHE; the file's other values, the
+# tokens, never leave _kind_read.
+_KIND_CACHE = {"mtime": -1.0, "kind": ""}
 
 
 # ── in-dashboard LOGIN (T157, the user 2026-08-28: today an expired login means dropping to a
@@ -38062,9 +38128,11 @@ def _acct_read():
         m = os.stat(p).st_mtime
     except FileNotFoundError:
         _ACCT_CACHE["mtime"], _ACCT_CACHE["val"], _ACCT_CACHE["label"], _ACCT_CACHE["state"] = -1.0, "", "", "none"
+        _ACCT_CACHE["org"] = _ACCT_CACHE["orgDigest"] = ""
         return
     except OSError:
         _ACCT_CACHE["mtime"], _ACCT_CACHE["val"], _ACCT_CACHE["label"], _ACCT_CACHE["state"] = -1.0, "", "", "unreadable"
+        _ACCT_CACHE["org"] = _ACCT_CACHE["orgDigest"] = ""
         return
     if _ACCT_CACHE["mtime"] == m:
         return
@@ -38073,13 +38141,22 @@ def _acct_read():
         d = json.loads(open(p, encoding="utf-8").read())
     except Exception:
         _ACCT_CACHE["mtime"], _ACCT_CACHE["val"], _ACCT_CACHE["label"], _ACCT_CACHE["state"] = -1.0, "", "", "unreadable"
+        _ACCT_CACHE["org"] = _ACCT_CACHE["orgDigest"] = ""
         return                                                     # uncached: retried on the next read
     oa = ((d if isinstance(d, dict) else {}).get("oauthAccount")) or {}
     uuid = oa.get("accountUuid") if isinstance(oa, dict) else None
     if uuid:
         val = hashlib.sha256(str(uuid).encode("utf-8")).hexdigest()[:12]
+    org = org_dig = ""
     if isinstance(oa, dict):
         label = str(oa.get("emailAddress") or oa.get("displayName") or "")
+        # the organisation (T346): its name for display beside the login, its uuid as a digest for equality
+        # only (the same rule as the account: an identifier never travels, a digest answers same-or-not)
+        org = str(oa.get("organizationName") or "")
+        ouid = oa.get("organizationUuid")
+        if ouid:
+            org_dig = hashlib.sha256(str(ouid).encode("utf-8")).hexdigest()[:12]
+    _ACCT_CACHE["org"], _ACCT_CACHE["orgDigest"] = org, org_dig
     _ACCT_CACHE["mtime"], _ACCT_CACHE["val"], _ACCT_CACHE["label"], _ACCT_CACHE["state"] = m, val, label, ("ok" if val else "none")
 
 
@@ -38089,6 +38166,157 @@ def _claude_account_state():
     alone; "unreadable" is cannot-tell and never moves a launch."""
     _acct_read()
     return _ACCT_CACHE["state"]
+
+
+def _kind_read():
+    """The machine login's kind word ("personal" | "enterprise" | ""), from `<CLAUDE_CONFIG_DIR|~/.claude>/.credentials.json`
+    claudeAiOauth.subscriptionType, mtime-cached (one stat per read). The file holds the login's tokens: nothing
+    but the folded enum word leaves this function, a failed read is "" and never cached against the mtime, and
+    a box that keeps its credential in a keychain (no file) simply has no kind word."""
+    p = os.path.join(jd._cred.claude_config_dir(), ".credentials.json")
+    try:
+        m = os.stat(p).st_mtime
+    except OSError:
+        _KIND_CACHE["mtime"], _KIND_CACHE["kind"] = -1.0, ""
+        return ""
+    if _KIND_CACHE["mtime"] == m:
+        return _KIND_CACHE["kind"]
+    try:
+        d = json.loads(open(p, encoding="utf-8").read())
+        sub = ((d if isinstance(d, dict) else {}).get("claudeAiOauth") or {}).get("subscriptionType")
+    except Exception:
+        _KIND_CACHE["mtime"], _KIND_CACHE["kind"] = -1.0, ""
+        return ""
+    _KIND_CACHE["mtime"], _KIND_CACHE["kind"] = m, lg.kind_word(sub)
+    return _KIND_CACHE["kind"]
+
+
+def _claude_login_display():
+    """The machine's own login as the Billing surfaces name it (T346): `email · Organisation · kind`, each piece
+    only when known ("" when no login is signed in). Display only, like _claude_account_label; the digest paths
+    stay the equality oracles."""
+    _acct_read()
+    return " · ".join(x for x in (_ACCT_CACHE["label"], _ACCT_CACHE["org"], _kind_read()) if x)
+
+
+def _reg_login(d):
+    """The stored login a reg or the remembered defaults name under `authLogin`, "" when none or junk."""
+    v = (d or {}).get("authLogin") if isinstance(d, dict) else None
+    return v if isinstance(v, str) and lg.ID_RE.match(v) else ""
+
+
+def _login_choices(login_ok, managed, now=None):
+    """Every login a session on this machine can be billed to (T346), the machine's own first: [{id, value, label,
+    machine, available, why?, expiresSoon?}]. The picker's Billing row and the tab menu's Billing submenu render
+    their login options from this list (plus API key), so the two agree. `value` is the pick word set_auth takes
+    ("login" for the machine's own, "login:<id>" for a stored one), `label` the display: the machine's reads
+    email · organisation · kind when each is known (_claude_login_display), a stored one the user's label with
+    the email, organisation and kind the add flow could read (logins.display). A refused, expired or command-less
+    stored login stays listed, unavailable, with the reason. Labels only, never a token."""
+    now = time.time() if now is None else now
+    me = {"id": "", "value": "login", "label": _claude_login_display(), "machine": True, "available": bool(login_ok)}
+    if not login_ok:
+        me["why"] = jd._cred.WHY_MANAGED_HELPER if managed else jd._cred.WHY_NO_LOGIN
+    out = [me]
+    for rec in lg.records(jd.STATE, now):
+        why = jd._cred.WHY_MANAGED_HELPER if managed else lg.why_unavailable(rec, now)
+        row = {"id": rec["id"], "value": "login:" + rec["id"], "label": lg.display(rec), "machine": False,
+               "available": not why}
+        if why:
+            row["why"] = why
+        if rec.get("expiresSoon") and not rec.get("expired"):
+            row["expiresSoon"] = True                 # the docs' one-year life: warned from eleven months
+        out.append(row)
+    return out
+
+
+def _login_rows():
+    """The stored logins for the gear's Billing block and `romp login list` (GET /logins): labels, organisations,
+    dates and states. Never a token, never the token command itself: hasCmd says one is recorded."""
+    rows = []
+    for rec in lg.records(jd.STATE):
+        kind = str(rec.get("kind") or "")
+        rows.append({"id": rec["id"], "label": str(rec.get("label") or ""), "display": lg.display(rec),
+                     "email": str(rec.get("email") or ""), "org": str(rec.get("org") or ""),
+                     "kind": kind if kind in lg.KINDS.values() else lg.kind_word(kind),
+                     "addedAt": rec.get("addedAt"), "expiresAt": rec.get("expiresAt"),
+                     "expiresSoon": bool(rec.get("expiresSoon")), "expired": bool(rec.get("expired")),
+                     "hasCmd": bool(rec.get("hasCmd")), "refused": str(rec.get("refused") or ""),
+                     "why": lg.why_unavailable(rec)})
+    return rows
+
+
+def _judge_err_status(msg):
+    """The HTTP status a judge error envelope names (the CLI's text carries it: 'API Error: 429 …'), else None."""
+    m = re.search(r"\b([45][0-9][0-9])\b", str(msg or ""))
+    return int(m.group(1)) if m else None
+
+
+def _judge_api_health_note(kind, auth, model, msg, fsid):
+    """The API-health ring's JUDGE source (T346, the user 2026-09-11: one accounting per login, the judges
+    included). judge.py calls this through jd._API_HEALTH_NOTE_FN once per claude -p call: kind 'ok' for a
+    served reply, 'gaveup' with the error envelope's message. The bucket is the account the call billed, in
+    the sessions' own labels: a key call the helper's (key:helper), the machine's login its account digest,
+    a stored login its record id (login:<salted digest>, named by label in the card), and the family the
+    call's model. Judge calls emit no retry frames, so this source adds responses and give-ups only; the
+    sid is the judged session's (the ring's sessionsRetrying counts retries alone, so it is unaffected)."""
+    be = _sdk()
+    ah = getattr(be, "api_health", None) if be else None
+    sbm = sys.modules.get(type(be).__module__) if be else None   # the backend's own module, whatever name loaded it
+    if ah is None or sbm is None:
+        return
+    side, lid = lg.parse_pick(auth)
+    if side == "key":
+        label = ah.auth_label("apiKeyHelper")
+    elif side == "login":
+        label = ah.auth_label("none", login_id=lid, display=(be.login_display(lid) if lid else ""))
+    else:
+        return
+    fam = sbm.model_family(model or "")
+    now = time.time()
+    sid = str(fsid or "judges")
+    if kind == "ok":
+        # never a clearer of a refusal: the judge's envelope carries no evidence of WHICH login answered (a
+        # session's init word does; _note_auth_source and _ah_note_assistant own the clear)
+        ah.note_ok(now, auth=label, family=fam, sid=sid, message_id=None)
+        return
+    st = _judge_err_status(msg)
+    low = str(msg or "").lower()
+    cat = ("rate_limit" if st == 429 or "rate limit" in low or "usage limit" in low
+           else "overloaded" if st == 529 or "overloaded" in low
+           else "authentication_failed" if _is_auth_error(msg)
+           else "server_error" if st is not None and st >= 500
+           else "unknown")
+    ah.note_gaveup(now, auth=label, family=fam, status=st, category=cat, sid=sid, turn=0)
+
+
+def _login_refusal_label(row, aerr):
+    """The stored login an API auth error refused, as its display label, or "". Only when the session's launch
+    carried that login's helper AND the CLI used it (authLoginLive names the login: the init's evidence) does the
+    error speak about the login; a session that fell to the key or the machine's own login (a managed helper, a
+    refused record, a wrong landing) never tried the stored credential, so its auth error marks nothing (review
+    2026-09-11: a revoked key marked an untried login refused)."""
+    if not (aerr and aerr.get("authErr")):
+        return ""
+    row = row or {}
+    lid = str(row.get("authLogin") or "")
+    if not lid or str(row.get("authLoginLive") or "") != lid:
+        return ""
+    return str(row.get("authLabel") or "login")
+
+
+def _auth_pick_label(value):
+    """A judge usage row's `auth` stamp in words: 'API key', the machine's login display, a stored login's
+    display (T346), or the stamp itself for a value this build does not know."""
+    side, lid = lg.parse_pick(value)
+    if side == "key":
+        return "API key"
+    if side == "login" and not lid:
+        return _claude_login_display() or "login"
+    if side == "login":
+        be = _sdk()
+        return (be.login_display(lid) if be else "") or ("login %s" % lid)
+    return str(value or "before the stamp")
 
 
 def _usage():
@@ -38892,11 +39120,31 @@ def _spend_detail_local(now=None):
         live = set(_live_names(_live_map()).values())
     except Exception:
         live = set()
+    # by LOGIN (T346): the ledger's byLogin sub-maps over the same day keys, each stored login a row named by
+    # its display label; the machine's own login and the key are the remainder, never rows here
+    be = _sdk()
+    sbm = sys.modules.get(type(be).__module__) if be else None   # the backend's own module, whatever name loaded it
+    by_login = {}
+    for k, e in days.items():
+        if k not in day_set or not isinstance(e, dict):
+            continue
+        bl = e.get("byLogin") if isinstance(e.get("byLogin"), dict) else {}
+        for lid, v in bl.items():
+            if not isinstance(v, dict):
+                continue
+            r = by_login.setdefault(str(lid), [0.0, 0, 0])
+            r[0] += float(v.get("usd") or 0); r[1] += int(v.get("tok") or 0); r[2] += int(v.get("turns") or 0)
+    by_login_rows = sorted(({"id": lid, "label": ((be.login_display(lid) if be else "") or ("login %s" % lid)),
+                             "usd": round(u, 4), "tok": t, "turns": n} for lid, (u, t, n) in by_login.items()),
+                           key=lambda r: (-r["usd"], -r["tok"]))
     sessions = []
     for sid, (u, t, n) in totals.items():
         bg, fg = _identity_of(sid)
         row = {"sid": sid, "name": _name_of(sid) or "", "bg": bg, "fg": fg, "live": sid in live,
                "usd": round(u, 4), "tok": t, "turns": n}
+        _lid = sbm.SdkBackend.reg_login(sbm.read_reg(jd.STATE, sid)) if sbm else ""
+        if _lid and be:
+            row["login"] = be.login_display(_lid)     # the stored login this session bills now (T346)
         if sid in keyt:
             k = keyt[sid]
             row["key"] = {"usd": round(k[0], 4), "tok": k[1], "turns": k[2]}
@@ -39006,6 +39254,7 @@ def _spend_detail_local(now=None):
             # client-side, the way the strip and the lanes apply it (view-order.ts).
             "order": [s for s in _session_order() if s in live or s in set(_kept_open)],
             "unattributed": {"usd": round(un[0], 4), "tok": un[1], "turns": un[2]},
+            "byLogin": by_login_rows,
             "hours": hrs, "days": _series(days, day_keys)}
 
 
@@ -39320,6 +39569,18 @@ def _merge_spend_details(payloads, hosts, local):
         for sid in (p.get("order") or []):
             if isinstance(sid, str):
                 order.append([host, sid])
+    def _merge_by_login():
+        acc = {}
+        for host, p in payloads:
+            for r in p.get("byLogin") or []:
+                if not isinstance(r, dict):
+                    continue
+                k = str(r.get("label") or r.get("id") or "")
+                a = acc.setdefault(k, {"label": k, "usd": 0.0, "tok": 0, "turns": 0, "hosts": []})
+                a["usd"] = round(a["usd"] + float(r.get("usd") or 0), 4)
+                a["tok"] += int(r.get("tok") or 0); a["turns"] += int(r.get("turns") or 0); a["hosts"].append(host)
+        return sorted(acc.values(), key=lambda r: (-r["usd"], -r["tok"]))
+
     no_turns = set()   # hosts whose stacks carry no turns or key dollars per bucket (an older build), for the modal's note
     hrs, dys = _merge_range("hours"), _merge_range("days")
     for h in hosts:
@@ -39327,6 +39588,7 @@ def _merge_spend_details(payloads, hosts, local):
             h["noTurns"] = True         # the modal: a dash in those columns for this host's rows, and a note naming it
     out = dict(local)
     out.update({"hosts": hosts, "sessions": sessions, "unattributed": un, "order": order, "tags": _spend_tags(),
+                "byLogin": _merge_by_login(),
                 "hours": hrs, "days": dys})
     return out
 
@@ -40962,18 +41224,22 @@ def _judge_usage(t0):
     incremental row cache — never the file. Empty/zeros until the log exists."""
     def blank():
         return {"calls": 0, "in": 0, "out": 0, "cost": 0.0, "ms": 0}
-    total, by_judge, by_tier = blank(), {}, {}
+    total, by_judge, by_tier, by_auth = blank(), {}, {}, {}
     for o in _judge_usage_rows():
         if (o.get("t") or 0) < t0 or o.get("err"):     # err: an error envelope's row, kept for its fast readback
             continue                                    # only (zero cost, no model call to count)
         for b in (total, by_judge.setdefault(o.get("judge") or "?", blank()),
-                  by_tier.setdefault(o.get("tier") or "?", blank())):
+                  by_tier.setdefault(o.get("tier") or "?", blank()),
+                  # which account the call billed (T346): the row's stamp, 'unstamped' for rows before it
+                  by_auth.setdefault(o.get("auth") or "unstamped", blank())):
             b["calls"] += 1
             b["in"] += int(o.get("in") or 0)
             b["out"] += int(o.get("out") or 0)
             b["cost"] += float(o.get("cost") or 0.0)
             b["ms"] += int(o.get("ms") or 0)
-    return {"total": total, "byJudge": by_judge, "byTier": by_tier}
+    for k, b in by_auth.items():
+        b["label"] = _auth_pick_label(k) if k != "unstamped" else "before the stamp"
+    return {"total": total, "byJudge": by_judge, "byTier": by_tier, "byAuth": by_auth}
 
 
 # (_token_windows, the footer's old fixed 5h/7d token split, was removed 2026-08-13 — it had no callers
@@ -51505,7 +51771,7 @@ var h='<table class=rsp-tbl><thead><tr><th>session</th><th class=n>dollars</th>'
 var many=spMany(d);
 var model=spRows(d);
 model.rows.forEach(function(s){h+='<tr data-sid="'+esc(s.sid||'')+'"'+(s.live?' class=rsp-live':' class=rsp-dead')+(s.kind==='tag'?' data-tag="'+esc(s.name)+'"':'')+'>'
-+'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
++'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many)+(s.s&&s.s.login?'<span class=ru-tip-reset> \u00b7 bills '+esc(s.s.login)+'</span>':''))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
 +'<td class=n>'+fmtUsd(s.usd)+'</td>'+(keyCol?'<td class=n>'+(s.key?fmtUsd(s.key.usd):'\u2014')+'</td>':'')
 +'<td class=n>'+(s.turns==null?'\u2014':(s.turns||0))+'</td><td class=n>'+fmtTok(s.tok||0)+'</td></tr>';});   // a dash: the turns are unknown (an older peer)
 // spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no
@@ -51522,6 +51788,10 @@ h+='</tbody></table>';
 // dollars only when the key column is drawn; it lives in the table's node so a range switch re-decides it
 var dh=spDashedHosts(d);
 if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\u2019 turns'+(keyCol?' and key-billed dollars':'')+' in this range are unknown (a dash)</div>';
+// by LOGIN (T346): a session billed to a stored login has its dollars filed under that login too (the ledger's
+// byLogin, the judges' calls included); one line when any stored login has spend in the range. The machine's
+// own login and the API key are the remainder, said as such rather than rowed
+if(d.byLogin&&d.byLogin.length)h+='<div class=rsp-note>By login: '+d.byLogin.map(function(r){return esc(r.label||r.id||'?')+' '+fmtUsd(r.usd)+' \u00b7 '+(r.turns||0)+' turn'+(r.turns===1?'':'s');}).join('; ')+'. The rest is the machine\u2019s own login and the API key.</div>';
 if(model.multi)h+='<div class=rsp-note>'+model.multi+(model.multi===1?' session carries':' sessions carry')+' several tags and count'+(model.multi===1?'s':'')+' under each of them, so the rows add up past the totals.</div>';
 return h;}
 // 1. the SAME window numbers the hover shows — the sums across every machine, rows only (one renderer).
@@ -51877,7 +52147,7 @@ var lab='API health: '+DOTWORD[mg.dot]+(mg.n>1?' across '+mg.n+' machines':'');i
 // a bucket's name for the card: its model family, plus its auth label when another bucket shares the family
 function bname(d,key){var b=(d.buckets||{})[key]||{},fam=b.family||key.split('|')[1]||key,dup=false;
 Object.keys(d.buckets||{}).forEach(function(k){if(k!==key&&((d.buckets[k]||{}).family||'')===fam)dup=true;});
-return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
+return dup?fam+' · '+(b.label||b.auth||key.split('|')[0]):fam;}
 // one window row in the spend hover's grammar: the label (with its caveat when the window outreaches the kernel's
 // uptime, the way the rolling month says 'complete since'), then the figures. The figures are the window's totals,
 // said in the window's tense ('retried', never 'retrying': the live set is the Sessions waiting list above).
@@ -56287,6 +56557,16 @@ class Handler(BaseHTTPRequestHandler):
                 if f is None:
                     return self._send(503, json.dumps({"error": "no API-health frame yet"}), "application/json", cache="no-cache")
                 return self._send(200, json.dumps(f), "application/json", cache="no-cache")
+            if p == "/logins":
+                # The stored Claude logins (T346): labels, organisations, dates and states for the gear's
+                # Billing block and `romp login list`, plus the machine's own login as the surfaces name it.
+                # AUTHED like /api-health (the plain _authorize): the rows name accounts. No token ever rides
+                # here (a row's hasCmd says a token command is recorded; the command itself never rides either).
+                return self._send(200, json.dumps({"ok": True, "logins": _login_rows(),
+                                                   "machine": {"label": _claude_login_display(),
+                                                               "acct": _claude_account_label(),
+                                                               "state": _claude_account_state()}}),
+                                  "application/json", cache="no-cache")
             if p == "/api-health":
                 # The API-health signal (docs/reference.md): per-(auth label, model family) attempt /
                 # response / give-up counts over rolling windows and a thrash/degraded/recovering state
@@ -57323,7 +57603,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(200, json.dumps({"ok": False, "error": _sdk_setup_hint()}),
                                           "application/json")
                     a = (b or {}).get("auth")
-                    sid, extra = _create_sdk_session(nm, cwd, auth=(a if a in ("login", "key") else ""),
+                    sid, extra = _create_sdk_session(nm, cwd, auth=(a if lg.parse_pick(a)[0] else ""),
                                                      prefs=b,   # pins ride the FIRST connect — see the def
                                                      env=env_req,   # env is born into the spawn's reg
                                                      parent=psid, tags=tags_req)   # tags before the first push
@@ -57500,6 +57780,62 @@ class Handler(BaseHTTPRequestHandler):
                 _mark_views_dirty()
                 return self._send(200, json.dumps({"ok": True, "id": tsid, "bg": bg,
                                                    "fg": pal.fg_for(bg)}), "application/json")
+            if u.path == "/logins":
+                # The stored logins' two writes (T346). {"add": {label, tokenCmd | opRef, email?, org?, kind?}}
+                # records a login: the label is the user's word, tokenCmd the shell line that prints its
+                # setup-token on demand (opRef, a 1Password secret reference, is the documented shorthand and
+                # becomes `op read` of it), and no token ever rides this body. {"remove": <id or label>} forgets
+                # one (logins.remove: the record goes, the token stays wherever the user keeps it); a label two
+                # records share is refused naming the count, never picked from.
+                b, berr = _json_object_body(raw_body)
+                if berr:
+                    return self._send(400, json.dumps({"ok": False, "error": berr}), "application/json")
+                add = b.get("add")
+                if add is not None:
+                    if not isinstance(add, dict):
+                        return self._send(400, json.dumps({"ok": False, "error": "add must be an object"}), "application/json")
+                    label = " ".join(str(add.get("label") or "").split())
+                    token_cmd = str(add.get("tokenCmd") or "").strip() or lg.op_read_command(add.get("opRef"))
+                    if not label or len(label) > 80:
+                        return self._send(400, json.dumps({"ok": False, "error":
+                            "add.label (1 to 80 characters, the login's name in every menu) required"}), "application/json")
+                    cerr = lg.token_cmd_error(token_cmd)
+                    if cerr:
+                        return self._send(400, json.dumps({"ok": False, "error":
+                            "add.tokenCmd: %s (or add.opRef, a 1Password secret reference op://vault/item/field)" % cerr}),
+                            "application/json")
+                    if any(str(r.get("label") or "") == label for r in lg.records(jd.STATE)):
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "a stored login named %r exists; remove it first or pick another label" % label}), "application/json")
+                    rec = {"id": lg.mint_id(), "label": label, "tokenCmd": token_cmd, "addedAt": int(time.time())}
+                    for k in ("email", "org"):
+                        v = " ".join(str(add.get(k) or "").split())[:120]
+                        if v:
+                            rec[k] = v
+                    kind = lg.kind_word(add.get("kind")) or (str(add.get("kind")) if add.get("kind") in lg.KINDS.values() else "")
+                    if kind:
+                        rec["kind"] = kind
+                    try:
+                        lg.write_record(jd.STATE, rec)
+                    except OSError as e:
+                        return self._send(200, json.dumps({"ok": False, "retryable": True, "error":
+                            "the login record could not be saved (%s); retry once romp's state directory takes writes again" % e}),
+                            "application/json")
+                    _push_soon()
+                    return self._send(200, json.dumps({"ok": True, "id": rec["id"], "label": label,
+                                                       "display": lg.display(rec)}), "application/json")
+                ref = str(b.get("remove") or "").strip()
+                if not ref:
+                    return self._send(400, json.dumps({"ok": False, "error":
+                        "add {label, tokenCmd or opRef} or remove (a stored login's id or label) required"}), "application/json")
+                lid, err = lg.resolve(jd.STATE, ref)
+                if err:
+                    return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
+                rec = lg.read_record(jd.STATE, lid) or {}
+                lg.remove(jd.STATE, lid)
+                _push_soon()
+                return self._send(200, json.dumps({"ok": True, "removed": lid, "label": str(rec.get("label") or "")}),
+                                  "application/json")
             if u.path == "/watch-pr":
                 # Register a PR-landing watch (the user 2026-08-24, both teams' surveys): one [romp]
                 # mail to the registering session when the PR reaches a terminal state — MERGED,
@@ -58446,6 +58782,11 @@ class Handler(BaseHTTPRequestHandler):
                 client["send"](json.dumps({"type": "warn", "text": err}))
         elif msg and msg.get("type") == "loginCancel":
             _login_cancel()
+        elif msg and msg.get("type") == "loginRemove" and msg.get("id"):
+            # the gear's Billing block forgets a stored login (T346): the record goes; the token stays wherever the user keeps it
+            if not lg.remove(jd.STATE, str(msg["id"])):
+                client["send"](json.dumps({"type": "warn", "text": "No stored login with that id; it may already be gone."}))
+            _push_soon()
         elif msg and msg.get("type") == "setConserve" and msg.get("enabled") is not None:
             # the gear's conserve-memory toggle (T148) — kernel-side like autoNudge; the sweep
             # reads the flag fresh each pass, so flipping it needs no restart
@@ -58767,7 +59108,7 @@ class Handler(BaseHTTPRequestHandler):
                         # the picker's Tags row (prefilled from the active tab, editable) rides `tags`;
                         # `parent` is accepted for API symmetry with /new — applied before the first
                         # push, so the new tab lands sectioned under its group (see _create_sdk_session)
-                        _sid, extra = _create_sdk_session(nm, cwd, auth=(a if a in ("login", "key") else ""),
+                        _sid, extra = _create_sdk_session(nm, cwd, auth=(a if lg.parse_pick(a)[0] else ""),
                                                           client=client, parent=psid or "", tags=ctags)
                         if not _sid:
                             # a name taken or being registered since the live check above (the claim
