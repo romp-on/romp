@@ -1569,9 +1569,28 @@ w=sys.argv[2] if len(sys.argv)>2 else ""
 if w: d["when"]=w
 print(json.dumps(d))' "$_who" "$_when")"
     fi
-    _resp="$(_romp_token_cfg | curl -sf -m 10 --config - -X POST "http://127.0.0.1:$_kport/$_verb" \
-                  -H 'Content-Type: application/json' -d "$_payload")" \
-        || { echo "romp $_verb: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    # The exit code says what HAPPENED, not what curl felt (2026-09-12). Until this change every curl failure
+    # wore one message, "kernel not reachable", and exit 1 — including a TIMEOUT (curl 28) on a kernel that
+    # had already taken the request and delivered it but answered late (a boot storm: the minutes after a
+    # restart, the box under load). A caller that retries on a non-zero exit then re-sends a delivered message
+    # every time — one wake service sent nine copies of each wake twenty seconds apart after a restart. So:
+    # a connection the kernel never took (curl 7, 6, 52) is "not reachable", exit 1, nothing sent; a timeout
+    # AFTER the request went out is exit 3 with the truth — the message may have been delivered, do not retry
+    # blindly; a refusal the kernel wrote is its own words, exit 1 (below). The cap is ROMP_KERNEL_HTTP_TIMEOUT_S
+    # (default 10 s), so a slow box can widen it and a test can shrink it.
+    _cap="${ROMP_KERNEL_HTTP_TIMEOUT_S:-10}"
+    _crc=0
+    _resp="$(_romp_token_cfg | curl -sf -m "$_cap" --config - -X POST "http://127.0.0.1:$_kport/$_verb" \
+                  -H 'Content-Type: application/json' -d "$_payload")" || _crc=$?   # `|| ...`: survives set -e
+    if [[ $_crc -ne 0 ]]; then
+        case $_crc in
+            28) echo "romp $_verb: the kernel on :$_kport took the request but did not answer within ${_cap}s" \
+                     "(mid-restart or under load) — it may already have $([[ "$_verb" == send ]] && echo 'delivered the message' || echo 'acted on it');" \
+                     "do not retry blindly (ROMP_KERNEL_HTTP_TIMEOUT_S widens the wait)" >&2; exit 3 ;;
+            22) echo "romp $_verb: the kernel refused the request (HTTP error) — not delivered" >&2; exit 1 ;;
+            *)  echo "romp $_verb: kernel not reachable on :$_kport (is romp running?) [curl exit $_crc]" >&2; exit 1 ;;
+        esac
+    fi
     if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
         if [[ "$_verb" == "send" && ( "$_resp" == *'"queued": true'* || "$_resp" == *'"queued":true'* ) ]]; then
             # the kernel PARKED it (a turn is open / compacting / the account is limit-held) and delivers it

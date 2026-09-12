@@ -439,7 +439,8 @@ class RedeliveryFeedsTheAuthoritativeQueue(unittest.TestCase):
         self.be.sessions[SID] = s          # register WITHOUT starting the thread (no loop)
         return s
 
-    def _stash_echo(self, text, t=100):
+    def _stash_echo(self, text, t=None):
+        t = int(time.time()) - 100 if t is None else t   # a RECENT stamp: re-delivery has an age line (2026-09-12)
         e = {"type": "user", "uuid": "echo:" + text[:10], "session_id": SID, "t": t,
              "parentUuid": None, "author": "human", "_echo_text": text,
              "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
@@ -452,7 +453,7 @@ class RedeliveryFeedsTheAuthoritativeQueue(unittest.TestCase):
     def test_live_session_redelivery_reaches_pending_and_survives_the_next_persist(self):
         reg = self._reg(queue=[])
         s = self._sess(reg)
-        e = self._stash_echo("typed while the old client was dying", t=300)
+        e = self._stash_echo("typed while the old client was dying", t=int(time.time()) - 60)
         self.be._mark_dropped_echoes(SID, s.pending())     # the fresh-spawn (_run) call shape
         self.assertEqual(s.pending(), ["typed while the old client was dying"],
                          "a live session's recovered send must enter _pending — a reg-only write "
@@ -507,7 +508,8 @@ class ReconnectStrandIsFlagOnly(unittest.TestCase):
         self.be.sessions[SID] = s          # register WITHOUT starting the thread (no loop)
         return s
 
-    def _stash_echo(self, text, t=100):
+    def _stash_echo(self, text, t=None):
+        t = int(time.time()) - 100 if t is None else t   # a RECENT stamp: re-delivery has an age line (2026-09-12)
         e = {"type": "user", "uuid": "echo:" + text[:10], "session_id": SID, "t": t,
              "parentUuid": None, "author": "human", "_echo_text": text,
              "message": {"role": "user", "content": [{"type": "text", "text": text}]}}

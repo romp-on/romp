@@ -16,6 +16,7 @@ import json
 import os
 import tempfile
 import types
+import time
 import unittest
 from romp_load import load_source
 
@@ -173,7 +174,7 @@ class SdkLiveTailRevision(unittest.TestCase):
         self.assertEqual(self.rev(), r0 + 1, "the `dropped` verdict is a change")
         self.be._mark_dropped_echoes(SID, queued_texts=(), refeed=False)
         self.assertEqual(self.rev(), r0 + 1, "already flagged: nothing newly dropped, no bump")
-        self.be._stash_live(SID, "e2", _echo("e2", "landed, un-pruned", 7))
+        self.be._stash_live(SID, "e2", _echo("e2", "landed, un-pruned", int(time.time()) - 5))   # recent: inside the re-delivery age line
         self.be._text_landed = lambda sid, text, t=None, off=None, fsid=None: True
         r1 = self.rev()
         self.be._mark_dropped_echoes(SID, queued_texts=())                  # the scan finds the record
