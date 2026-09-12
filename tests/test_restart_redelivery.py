@@ -27,6 +27,9 @@ sb = load_source("romp_sdk_backend_redeliver", os.path.join(BIN, "romp-event-mod
 sb = load_source("romp_sdk_backend_redeliver2", os.path.join(HERE, "..", "kernel", "sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-555555555555"
+# Send stamps are RECENT epoch seconds (2026-09-12): re-delivery has an age line (REDELIVER_MAX_AGE_S), so a
+# stamp of 100 (1970) would read as a stale send and take the flag path instead of the re-feed under test.
+T0 = int(__import__("time").time()) - 600
 
 
 class Redelivery(unittest.TestCase):
@@ -70,7 +73,7 @@ class Redelivery(unittest.TestCase):
         sb.write_reg(self.be.state_dir, SID, {"sid": SID, "alive": True, "cwd": self.cwd,
                                               "lastSid": SID, "queue": []})
 
-    def _echo(self, text, author="human", t=100):
+    def _echo(self, text, author="human", t=T0):
         self.be._live.setdefault(SID, {})["echo:" + text[:8]] = {
             "_echo_text": text, "author": author, "t": t}
 
@@ -82,8 +85,8 @@ class Redelivery(unittest.TestCase):
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
 
     def test_lost_human_send_re_enters_the_queue_in_send_order(self):
-        self._echo("first typed message", t=100)
-        self._echo("second typed message", t=200)
+        self._echo("first typed message", t=T0)
+        self._echo("second typed message", t=T0 + 100)
         self.be._mark_dropped_echoes(SID, [])
         self.assertEqual(self._reg_queue(), ["first typed message", "second typed message"])
         for a in self.be._live[SID].values():
@@ -108,7 +111,7 @@ class Redelivery(unittest.TestCase):
 
     def test_surviving_queue_texts_stay_ahead_and_undropped(self):
         self._echo("still queued text")
-        self._echo("lost text", t=300)
+        self._echo("lost text", t=T0 + 200)
         sb.write_reg(self.be.state_dir, SID, {"sid": SID, "alive": True, "cwd": self.cwd,
                                               "lastSid": SID, "queue": ["still queued text"]})
         self.be._mark_dropped_echoes(SID, ["still queued text"])
@@ -166,7 +169,7 @@ class BootDeliversARefedSend(unittest.TestCase):
         return (sb.read_reg(self.state, SID) or {}).get("queue") or []
 
     def test_a_re_queued_send_earns_the_resume_the_same_boot(self):
-        ensured = self._boot([{"t": 100, "text": "typed just before the restart", "author": "human"}])
+        ensured = self._boot([{"t": T0, "text": "typed just before the restart", "author": "human"}])
         self.assertEqual(self._reg_queue(), ["typed just before the restart"],
                          "the reseed re-queued the lost send (the half that already worked)")
         self.assertEqual(ensured, [SID], "…and the same boot's sweep resumes the session to deliver it")
@@ -174,7 +177,7 @@ class BootDeliversARefedSend(unittest.TestCase):
     def test_a_dormant_threads_re_queued_reply_earns_the_resume_too(self):
         # a comment thread is never auto-resumed at boot EXCEPT for a queued reply of the user's own
         # — and a re-queued reply is exactly that
-        ensured = self._boot([{"t": 100, "text": "a reply the thread never started", "author": "human"}],
+        ensured = self._boot([{"t": T0, "text": "a reply the thread never started", "author": "human"}],
                              threadOf="11111111-2222-3333-4444-000000000000")
         self.assertEqual(self._reg_queue(), ["a reply the thread never started"])
         self.assertEqual(ensured, [SID])
