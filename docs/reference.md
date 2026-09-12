@@ -447,6 +447,38 @@ per-model usage map is counted from the main loop alone, and the error center
 says so once: once per session when the CLI left the map out, once per kernel
 run when the Agent SDK the kernel imported has no field for it.
 
+### Several Claude logins
+
+A machine holds one Claude login at a time, and Claude Code's `/login` replaces
+it. A SECOND login (an enterprise account beside a personal one, or a
+colleague's) is set up in one command:
+
+    romp-login-setup <1password-vault> <label>
+
+It needs the stored-logins change deployed (`romp login add`); on a romp
+without it the command stops before any sign-in and says so. The label names
+the 1Password item and romp's reference to it, so it may use letters, digits,
+spaces, dashes and underscores only; anything else is refused before the
+sign-in. Sign in when the browser opens, choosing the account and organisation
+the token should bill. The command signs in under a scratch configuration (the
+machine's own login is untouched), mints a `claude setup-token` (a one-year
+credential), stores it in 1Password as an API Credential item titled with the
+label (field `credential`, written through a template file rather than a
+command argument), and registers the login with the running romp as
+`romp login add <label> --op op://<vault>/<label>/credential`. On screen the
+CLI's one line that carries the token reads `<token captured>`; the token
+itself goes to one private directory under a temporary directory (the CLI's
+captured output, the token file and the 1Password template, all removed when
+the command ends, on every exit path) and to the 1Password item. Each step
+fails loudly and stops the ones after it. The script is about twenty lines and
+meant to be read before it is run. `--check`, accepted anywhere on the line
+and off by default, then proves the stored token is what Claude Code accepts:
+one request through an `apiKeyHelper` that reads the item, with the
+environment's credential variables removed (the machine's own settings files
+and keychain still apply), must be accepted, and the same request through a
+helper that returns junk must be refused, which shows the helper, and nothing
+else on the machine, is what authenticated.
+
 ### Self-scheduled work wakes an idle session
 
 A session's own scheduled work (a recurring Monitor, a cron firing, a
