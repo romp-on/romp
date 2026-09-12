@@ -25,13 +25,23 @@ sb = load_source("romp_sdk_backend_stale0", os.path.join(BIN, "romp-event-model"
 sb = load_source("romp_sdk_backend_stale", os.path.join(HERE, "..", "kernel", "sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-666666666666"
-NOW = int(time.time())
-FRESH_T = NOW - 60                       # a minute before the restart: inside any sane line
-STALE_T = NOW - 3 * 86400                # three days before it: the pile the field measured
+NOW = FRESH_T = STALE_T = 0              # set per test by Fixture.setUp (_reset_clock), never at import
+
+
+def _reset_clock():
+    """Every stamp is relative to the clock the TEST runs on, read in setUp — never at import. pytest imports
+    each module at collection and runs this one minutes later under the full suite, while the code under test
+    reads time.time() at the call: an import-time NOW put the send planted 120 s INSIDE the line past it by the
+    time the arm ran (CI 2026-09-12: both sends dropped, the standalone run green at every timezone)."""
+    global NOW, FRESH_T, STALE_T
+    NOW = int(time.time())
+    FRESH_T = NOW - 60                       # a minute before the restart: inside any sane line
+    STALE_T = NOW - 3 * 86400                # three days before it: the pile the field measured
 
 
 class Fixture(unittest.TestCase):
     def setUp(self):
+        _reset_clock()
         self.td = tempfile.mkdtemp()
         os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(self.td, "claude")
         self.cwd = os.path.join(self.td, "proj")
