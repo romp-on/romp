@@ -53,8 +53,9 @@ class KernelSamples(unittest.TestCase):
 
     def test_the_tick_rides_the_pusher(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        self.assertIn("        _kernel_sample_tick(now)\n", src)
-        self.assertLess(src.index("_boot_row_backstop(now)\n"), src.index("        _kernel_sample_tick(now)\n"), "beside the boot row's backstop in the tick jobs")
+        self.assertIn("        _job_stage('kernelSample', lambda: _kernel_sample_tick(now))\n", src)   # a tick job, its own stage (T398)
+        self.assertLess(src.index("_job_stage('bootRowBackstop', lambda: _boot_row_backstop(now))\n"),
+                        src.index("        _job_stage('kernelSample', lambda: _kernel_sample_tick(now))\n"), "beside the boot row's backstop in the tick jobs")
 
 
 class RestartPhasesScript(unittest.TestCase):

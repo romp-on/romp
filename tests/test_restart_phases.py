@@ -70,7 +70,7 @@ class BootMarks(unittest.TestCase):
 
     def test_the_backstop_rides_the_pusher_tick_not_a_thread(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        self.assertIn("        _boot_row_backstop(now)\n", src, "the pusher's tick jobs call it")
+        self.assertIn("        _job_stage('bootRowBackstop', lambda: _boot_row_backstop(now))\n", src, "the pusher's tick jobs call it (as its own stage, T398)")
         self.assertNotIn("threading.Timer(BOOT_ROW_BACKSTOP_S", src, "no timer thread: nothing outlives a boot (T282)")
         self.assertEqual(len(threading.enumerate()), len([t for t in threading.enumerate() if not t.name.startswith("boot-row")]))
 

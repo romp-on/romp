@@ -194,7 +194,7 @@ class HardRuleAndRoutingPins(unittest.TestCase):
 
     def test_the_sweep_runs_every_tick_independent_of_the_toggle(self):
         src = inspect.getsource(km._pusher_cycle_jobs)
-        self.assertIn("_deferral_sweep_tick(now)", src)
+        self.assertIn("_job_stage('deferralSweep', lambda: _deferral_sweep_tick(now))", src)   # a tick job, its own stage (T398)
         sweep_pos = src.index("_deferral_sweep_tick")
         nudge_pos = src.index("_auto_nudge_tick")
         self.assertLess(sweep_pos, nudge_pos, "retirement runs before the walk that would re-fire")

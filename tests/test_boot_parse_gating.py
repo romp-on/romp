@@ -274,7 +274,8 @@ class TickJobsKeyOnAChange(unittest.TestCase):
         self.assertNotIn("_tick_job_check", inspect.getsource(km._auto_nudge_session),
                          "the nudge has wall-clock timers, so it keeps its per-cycle evaluation (documented in _tick_job_check)")
         cyc = inspect.getsource(km._pusher_cycle_jobs)
-        self.assertLess(cyc.index("_interrupt_block_tick(now, live_map)"), cyc.index("_persist_tick_seen()"), "the memo is written after the tick jobs")
+        self.assertLess(cyc.index("_job_stage('interruptBlock', lambda: _interrupt_block_tick(now, live_map))"),
+                        cyc.index("_job_stage('persistTickSeen', lambda: _persist_tick_seen())"), "the memo is written after the tick jobs")
         self.assertIn("_persist_tick_seen(force=True)", inspect.getsource(km._drain_and_exit), "and at exit")
 
 

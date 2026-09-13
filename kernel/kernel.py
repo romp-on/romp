@@ -209,13 +209,14 @@ _STAGE_RING_LEN = [None]          # resolved once (the first cycle), like the ot
 
 
 def _stage_ring_len(mem_total=None):
-    """How many cycles' stage splits the pusher keeps (T397): ROMP_PERF_STAGE_RING when it names a positive integer, else one
-    per 64 MiB of the machine's memory floored at 16 (a 64 GB box keeps 1024 cycles, a 4 GB one 64; an entry is about
-    2.5 KB, so the largest ring is a few MB), never a literal count (the user's caches direction 2026-09-11). Resolved ONCE
+    """How many cycles' stage splits the pusher keeps (T397): ROMP_PERF_STAGE_RING when it names a positive integer (clamped to
+    the fraction), else one per 256 MiB of the machine's memory floored at 16 (a 64 GB box keeps 256 cycles, a 4 GB one 16; an
+    entry carries about thirty stages at about 10 KB, so the largest ring is a few MB), never a literal count (the user's
+    caches direction 2026-09-11). Resolved ONCE
     into a module slot at first use (the memory reader is defined below this class and read again at every snapshot
     otherwise; round one, low 5). `mem_total` computes the fraction for a given reading (tests) and resolves nothing."""
     if mem_total is not None:
-        return max(16, int(mem_total) // (64 * 1024 * 1024))
+        return max(16, int(mem_total) // (256 * 1024 * 1024))
     if _STAGE_RING_LEN[0] is None:
         raw = os.environ.get("ROMP_PERF_STAGE_RING", "")
         n = 0
@@ -223,8 +224,9 @@ def _stage_ring_len(mem_total=None):
             n = int(raw) if raw else 0
         except ValueError:
             n = 0
-        _STAGE_RING_LEN[0] = n if n > 0 else max(16, _mem_total_bytes() // (64 * 1024 * 1024))
-    return _STAGE_RING_LEN[0]
+        frac = max(16, _mem_total_bytes() // (256 * 1024 * 1024))
+        _STAGE_RING_LEN[0] = min(n, frac) if n > 0 else frac   # the override never exceeds the fraction: a huge value made
+    return _STAGE_RING_LEN[0]                                    #  deque(maxlen=) raise inside cycle() (round two, low 2)
 
 
 class _PerfStats:
@@ -326,7 +328,12 @@ class _PerfStats:
     # below the table itself). test_perf_stats pins it at 1.5x the literal count.
     HTTP_PATHS = 256
     SLOTS = 32
-    STAGES = ("jobs", "push", "push.chat", "push.feed", "push.timeline", "push.send")
+    JOBS = ("beginCheckpointCycle", "applyPendingOps", "turnNotify", "liftSpentAwaiting", "deathSweep", "endOnIdle", "deferralSweep",
+            "autoNudge", "interruptBlock", "persistTickSeen", "persistCheckpoints", "convergeCheckpoints", "bootRowBackstop",
+            "kernelSample", "autoPauseOnLimit", "usagePoll", "autoPauseOnSpend", "spendGuard", "autoResumeRetry", "apiHealth",
+            "autoResumeSession", "autoRetry", "idleQueueDrive", "clearDoneNotes")   # the tick jobs, each a `jobs.<job>` stage (T398)
+    STAGES = ("prelude", "jobs", "push", "push.chat", "push.feed", "push.timeline", "push.send", "push.warm", "push.feedFirst") \
+        + tuple("jobs." + j for j in JOBS)   # every stage a fresh snapshot lists at zero: the cycle's prelude, the containers, the sub-stages
     BUILDS = ("chat", "feed", "timeline", "feedJson", "thread")
     # builds.chat's bg_miss labels: _chat_build_sig's components, a tab with no cached build, and a tab whose
     # signature could not be taken
@@ -343,7 +350,7 @@ class _PerfStats:
             self.pusher = {"cycles": 0, "wakes": 0, "wakes_event": 0, "wakes_backstop": 0,
                            "cycle_ms_sum": 0.0, "cycle_ms_max": 0.0, "cycle_ms_last": 0.0,
                            "cycle_cpu_ms_sum": 0.0, "sends": 0,
-                           "idle_cycles": 0, "idle_ms_sum": 0.0, "idle_cpu_ms_sum": 0.0}
+                           "idle_cycles": 0, "idle_ms_sum": 0.0, "idle_cpu_ms_sum": 0.0, "splitFailed": 0}
             self.ring = collections.deque(maxlen=self.RING)
             self.stages = {k: 0.0 for k in self.STAGES}
             # T397: the stage split PER CYCLE. `cycle_stages` fills as the cycle's stages close (wall ms, the reader's bytes
@@ -434,14 +441,17 @@ class _PerfStats:
             if ms > p["cycle_ms_max"]:
                 p["cycle_ms_max"] = ms
             self.ring.append(ms)
-            split = {"s": round(dt, 3), "t": time.time(),
-                     "stages": {k: {"ms": round(v["ms"], 1), "bytes": v["bytes"], "hydrated": v["hydrated"]}
-                                for k, v in self.cycle_stages.items()}}
-            if self.first_cycle is None:
-                self.first_cycle = split
-            if self.stage_ring is None:
-                self.stage_ring = collections.deque(maxlen=_stage_ring_len())
-            self.stage_ring.append(split)
+            try:                                          # the split's bookkeeping never ends the pusher thread (it runs in
+                split = {"s": round(dt, 3), "t": time.time(),   #  the cycle's finally, caught nowhere): a failure is counted
+                         "stages": {k: {"ms": round(v["ms"], 1), "bytes": v["bytes"], "hydrated": v["hydrated"]}
+                                    for k, v in self.cycle_stages.items()}}
+                if self.first_cycle is None:
+                    self.first_cycle = split
+                if self.stage_ring is None:
+                    self.stage_ring = collections.deque(maxlen=_stage_ring_len())
+                self.stage_ring.append(split)
+            except Exception:
+                p["splitFailed"] = p.get("splitFailed", 0) + 1
             self.cycle_stages = {}
             self._stage_mark = None
 
@@ -471,8 +481,8 @@ class _PerfStats:
                 return
             prev = self._stage_mark
             self._stage_mark = marks
-            if prev is not None:                            # the jobs before the push: to the cycle's `jobs` bucket
-                cs = self.cycle_stages.setdefault("jobs", {"ms": 0.0, "bytes": 0, "hydrated": 0})
+            if prev is not None:                            # bytes between the jobs' own stages: the glue, a sub-stage of jobs
+                cs = self.cycle_stages.setdefault("jobs.other", {"ms": 0.0, "bytes": 0, "hydrated": 0})
                 cs["bytes"] += max(0, marks[0] - prev[0]); cs["hydrated"] += max(0, marks[1] - prev[1])
 
     def stage(self, name, dt):
@@ -483,9 +493,14 @@ class _PerfStats:
                 return                                      # another thread's push: the totals alone
             cs = self.cycle_stages.setdefault(name, {"ms": 0.0, "bytes": 0, "hydrated": 0})
             cs["ms"] += dt * 1000.0
-            if name == "push":                              # the container: its bytes are its sub-stages' (already attributed)
-                cs["bytes"] = sum(v["bytes"] for k, v in self.cycle_stages.items() if k.startswith("push."))
-                cs["hydrated"] = sum(v["hydrated"] for k, v in self.cycle_stages.items() if k.startswith("push."))
+            if name in ("push", "jobs"):                    # a container: its bytes are its sub-stages' (already attributed),
+                prev = self._stage_mark                     #  the glue since the last sub-stage closed going to `<name>.other`
+                if prev is not None and (marks[0] > prev[0] or marks[1] > prev[1]):
+                    g = self.cycle_stages.setdefault(name + ".other", {"ms": 0.0, "bytes": 0, "hydrated": 0})
+                    g["bytes"] += max(0, marks[0] - prev[0]); g["hydrated"] += max(0, marks[1] - prev[1])
+                self._stage_mark = marks
+                cs["bytes"] = sum(v["bytes"] for k, v in self.cycle_stages.items() if k.startswith(name + "."))
+                cs["hydrated"] = sum(v["hydrated"] for k, v in self.cycle_stages.items() if k.startswith(name + "."))
             else:
                 prev = self._stage_mark
                 if prev is not None:
@@ -23358,6 +23373,10 @@ def _boot_health_first_cycle(dt):
     split = _PERF_STATS.first_cycle_split()                # T397: the cycle's stage split rides the row (the ledger reader
     if split is not None:                                  #  sees which stage a slow boot spent its time in without the kernel)
         row["stages"] = split.get("stages")
+    try:
+        row["parse"] = em.asm_checkpoint_stats().get("parse")   # T398: the parse's roads at the first cycle's end (serve, fold,
+    except Exception:                                           #  restore, full with its reason, bypass, the g:<reason> demotions)
+        pass
     if row["slow"]:
         try:
             sys.stderr.write("boot health: the first pusher cycle took %.1f s (bound %.0f s): sessions and cards waited behind it; "
@@ -49651,6 +49670,8 @@ def _pusher_cycle():
     few-hundred-ms staleness by construction — they always saw a snapshot aged by however many jobs
     ran before them."""
     _t_cycle = time.monotonic()
+    _PERF_STATS.cycle_begin()               # T397 round two, low 3: the split opens with the cycle, so the prelude below (the
+    #                                         liveness snapshot, the names) is a stage of its own and the stages sum to the wall
     _c_cycle = time.thread_time()           # this thread's CPU: the wall above includes lock waits and any forked child
     _m_cycle = (_PERF_STATS.marks(), jd._GOAL_IO["saves"], jd._GOAL_IO["writes"])   # idle-cycle marks: see cycle()
     with _clients_lock:
@@ -49674,6 +49695,7 @@ def _pusher_cycle():
         #                                       token and per postal card (~38% of pusher wall, py-spy
         #                                       2026-08-31). INSIDE the try: a raise here must still hit
         #                                       the finally, or the liveness scope above leaks set
+        _PERF_STATS.stage("prelude", time.monotonic() - _t_cycle)   # the cycle's opening: liveness, names, scopes (T397)
         _pusher_cycle_jobs(now, live_map, any_client)
     finally:
         _chat_push_scopes_close()
@@ -49688,16 +49710,28 @@ def _pusher_cycle():
         _boot_health_first_cycle(time.monotonic() - _t_cycle)   # the boot's first cycle, on the record (a no-op after)
 
 
+def _job_stage(name, thunk):
+    """One tick job as a sub-stage of `jobs` in the cycle's split (T398): the boot's first split said jobs 25 s with 224 MB read
+    and nothing finer, so each job here closes its own `jobs.<name>` stage and the row names the job that read. The job is a
+    thunk (`lambda: _x_tick(now, live_map)`), so the call reads as before on its line and the tests that pin those lines hold."""
+    _t = time.monotonic()
+    try:
+        return thunk()
+    finally:
+        _PERF_STATS.stage("jobs." + name, time.monotonic() - _t)
+
+
 def _pusher_cycle_jobs(now, live_map, any_client):
     _t_jobs = time.monotonic()            # /perf: this function minus the _push_all below is the `jobs` stage
-    _PERF_STATS.cycle_begin()             # T397: the cycle's first byte mark, so the split's bytes start here
+    if not _PERF_STATS._mine():
+        _PERF_STATS.cycle_begin()         # a caller that did not open the cycle (a test driving the jobs alone) opens it here
     try:                                  # the cycle's checkpoint byte budget, whole again, and the drops owed from the last one
-        _begin_checkpoint_cycle()         # (T362): before the builds below, whose quiescence drops write against it
+        _job_stage('beginCheckpointCycle', lambda: _begin_checkpoint_cycle())         # (T362): before the builds below, whose quiescence drops write against it
     except Exception:
         sys.stderr.write("checkpoint-cycle: %s\n" % traceback.format_exc())
     _t_push = 0.0
     try:                                  # parked ops deliver on the settle EVENT this cycle was woken for
-        _apply_pending_ops()              # (_wake_kernel, /tick, a park/cancel/move, the 0.5 s backstop) —
+        _job_stage('applyPendingOps', lambda: _apply_pending_ops())              # (_wake_kernel, /tick, a park/cancel/move, the 0.5 s backstop) —
         #                                   the parked-parse refresh runs inside, per sid, after the
         #                                   holds (2026-09-05)
     except Exception:                     # FIRST, so a delivered op's echo / retired chip rides this push;
@@ -49714,91 +49748,91 @@ def _pusher_cycle_jobs(now, live_map, any_client):
             _t_push = time.monotonic() - _t_push
             _PERF_STATS.stage("push", _t_push)
     try:                                  # the turn-finished push (bell popover): AFTER the feed build above,
-        _turn_notify_tick(now, live_map)      # so a bell event the same settle produced files its buzz first
+        _job_stage('turnNotify', lambda: _turn_notify_tick(now, live_map))      # so a bell event the same settle produced files its buzz first
     except Exception:
         sys.stderr.write("turn-notify: %s\n" % traceback.format_exc())
     # (the WS keepalive lives on its own _heartbeat thread — NOT here — so a slow push can't starve it)
     try:                                  # EXACT retraction first: dispatches returned → the stamp is spent,
-        _lift_spent_awaiting(now, live_map)   # so the nudge tick below never wakes a wait that already ended
+        _job_stage('liftSpentAwaiting', lambda: _lift_spent_awaiting(now, live_map))   # so the nudge tick below never wakes a wait that already ended
     except Exception:
         sys.stderr.write("awaiting-lift: %s\n" % traceback.format_exc())
     try:                                  # death is a recorded EVENT: a sid that left the live map is
-        _death_sweep_tick(now, live_map)      # corroborated with the liveness owner, then stamped (2026-08-13)
+        _job_stage('deathSweep', lambda: _death_sweep_tick(now, live_map))      # corroborated with the liveness owner, then stamped (2026-08-13)
     except Exception:
         sys.stderr.write("death-sweep: %s\n" % traceback.format_exc())
     try:                                  # a session that asked to close itself dies at its turn's settle
-        _end_on_idle_sweep(now, live_map)     # (the clean × path — the user 2026-08-15's "close yourself")
+        _job_stage('endOnIdle', lambda: _end_on_idle_sweep(now, live_map))     # (the clean × path — the user 2026-08-15's "close yourself")
     except Exception:
         sys.stderr.write("end-on-idle: %s\n" % traceback.format_exc())
     try:                                  # deferral records retire on their reasons' own events — BEFORE
-        _deferral_sweep_tick(now)         # the walk, independent of the nudge toggle (the stall/swirl
+        _job_stage('deferralSweep', lambda: _deferral_sweep_tick(now))         # the walk, independent of the nudge toggle (the stall/swirl
     except Exception:                     # surfaces read these records regardless)
         sys.stderr.write("deferral-sweep: %s\n" % traceback.format_exc())
     try:                                  # Auto Nudge runs server-side even with no browser open; the awaiting
-        _auto_nudge_tick(now, live_map)       # WAKE rides its goal walk (see _wake_goal) and runs even when the
+        _job_stage('autoNudge', lambda: _auto_nudge_tick(now, live_map))       # WAKE rides its goal walk (see _wake_goal) and runs even when the
     #                                       nudge is OFF — the toggle scopes the nudge legs, not the dead-man
     except Exception:
         sys.stderr.write("auto-nudge: %s\n" % traceback.format_exc())
     try:                                  # Interrupt → Blocked runs EVERY push, independent of the nudge toggle
-        _interrupt_block_tick(now, live_map)
+        _job_stage('interruptBlock', lambda: _interrupt_block_tick(now, live_map))
     except Exception:
         sys.stderr.write("interrupt-block: %s\n" % traceback.format_exc())
     try:                                  # the tick jobs' evaluation memo, persisted when a completed evaluation
-        _persist_tick_seen()              # moved it (T323 stage 1): the next kernel's first look starts from here
+        _job_stage('persistTickSeen', lambda: _persist_tick_seen())              # moved it (T323 stage 1): the next kernel's first look starts from here
     except Exception:
         sys.stderr.write("tick-seen: %s\n" % traceback.format_exc())
     try:                                  # the folds' checkpoints, written for a session at its settle or a states-log
-        _persist_checkpoints(now)         # move (T323 stage 3): the next kernel folds the tails, not the files
-        _converge_checkpoints(now)        # ...and the documents a boot's whole reads left dirty, bounded per cycle (T360)
+        _job_stage('persistCheckpoints', lambda: _persist_checkpoints(now))         # move (T323 stage 3): the next kernel folds the tails, not the files
+        _job_stage('convergeCheckpoints', lambda: _converge_checkpoints(now))        # ...and the documents a boot's whole reads left dirty, bounded per cycle (T360)
     except Exception:
         sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
     try:                                  # the boot row's backstop: written without attachDone once the bound has passed
-        _boot_row_backstop(now)
+        _job_stage('bootRowBackstop', lambda: _boot_row_backstop(now))
     except Exception:
         pass
     try:                                  # the kernel's own size at 5, 30 and 60 minutes and every hour (kernel-samples.jsonl)
-        _kernel_sample_tick(now)
+        _job_stage('kernelSample', lambda: _kernel_sample_tick(now))
     except Exception:
         pass
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
-        _auto_pause_on_limit()
+        _job_stage('autoPauseOnLimit', lambda: _auto_pause_on_limit())
     except Exception:
         sys.stderr.write("auto-pause-on-limit: %s\n" % traceback.format_exc())
     try:                                  # the login account's rate-limit meters, polled on a standing
-        _usage_poll_tick(now)             # interval (the user 2026-08-23): all-key traffic ends no login
+        _job_stage('usagePoll', lambda: _usage_poll_tick(now))             # interval (the user 2026-08-23): all-key traffic ends no login
     except Exception:                     # turns, so the turn-end refresh never fired and usage-history
         sys.stderr.write("usage-poll: %s\n" % traceback.format_exc())   # sat stale — blinding the judge
     #                                       quota gate and the headroom line
     try:                                  # a monthly spend cap (no readable reset) also engages it — else it storms forever
-        _auto_pause_on_spend_limit(now, live_map)
+        _job_stage('autoPauseOnSpend', lambda: _auto_pause_on_spend_limit(now, live_map))
     except Exception:
         sys.stderr.write("auto-pause-on-spend-limit: %s\n" % traceback.format_exc())
     try:                                  # the spend guard (T350): a session over the hourly ceiling is stopped and told,
-        _spend_guard_tick(now, live_map)      # every dashboard warned, a session-events row filed, once per crossing
+        _job_stage('spendGuard', lambda: _spend_guard_tick(now, live_map))      # every dashboard warned, a session-events row filed, once per crossing
     except Exception:
         sys.stderr.write("spend-guard: %s\n" % traceback.format_exc())
     try:                                  # a paused retry auto-clears once any session serves a request again
-        _auto_resume_retry(now, live_map)
+        _job_stage('autoResumeRetry', lambda: _auto_resume_retry(now, live_map))
     except Exception:
         sys.stderr.write("auto-resume-retry: %s\n" % traceback.format_exc())
     try:                                  # the bottom bar's API health cell: built AFTER this cycle's pause
-        _api_health_push(_api_health_frame(now, live_map))   # decisions, every cycle (a connecting shell gets a
+        _job_stage('apiHealth', lambda: _api_health_push(_api_health_frame(now, live_map)))   # decisions, every cycle (a connecting shell gets a
     except Exception:                     # current frame), sent only when it changed
         sys.stderr.write("api-health-frame: %s\n" % traceback.format_exc())
     try:                                  # a per-session interrupt-suppressed retry re-arms once that thread lands a clean turn
-        _auto_resume_session_retry(now, live_map)
+        _job_stage('autoResumeSession', lambda: _auto_resume_session_retry(now, live_map))
     except Exception:
         sys.stderr.write("auto-resume-session-retry: %s\n" % traceback.format_exc())
     try:                                  # the kernel drives the transient-api-error retry itself (unattended;
-        _auto_retry_tick(now, live_map)       # the dashboard tick is just the countdown + a redundant asker)
+        _job_stage('autoRetry', lambda: _auto_retry_tick(now, live_map))       # the dashboard tick is just the countdown + a redundant asker)
     except Exception:
         sys.stderr.write("auto-retry-tick: %s\n" % traceback.format_exc())
     try:                                  # self-scheduled wake signals queued in an idle SDK CLI get their
-        _idle_queue_drive_tick(now, live_map)  # turn driven (crons/monitors/task notices — see the tick)
+        _job_stage('idleQueueDrive', lambda: _idle_queue_drive_tick(now, live_map))  # turn driven (crons/monitors/task notices — see the tick)
     except Exception:
         sys.stderr.write("idle-queue-drive: %s\n" % traceback.format_exc())
     try:                                  # expire stale set_working notes once a session goes idle + done (cheap when no notes)
-        _clear_done_working_notes(now, live_map)
+        _job_stage('clearDoneNotes', lambda: _clear_done_working_notes(now, live_map))
     except Exception:
         sys.stderr.write("clear-working-notes: %s\n" % traceback.format_exc())
     _PERF_STATS.stage("jobs", (time.monotonic() - _t_jobs) - _t_push)

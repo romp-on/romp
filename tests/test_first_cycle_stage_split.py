@@ -21,9 +21,9 @@ class StageSplitUnit(unittest.TestCase):
 
     def test_the_ring_is_a_fraction_of_memory_never_a_literal(self):
         km = self.km
-        self.assertEqual(km._stage_ring_len(64 * 1024 ** 3), 1024, "one cycle per 64 MiB: a 64 GB box keeps 1024")
-        self.assertEqual(km._stage_ring_len(4 * 1024 ** 3), 64)
-        self.assertEqual(km._stage_ring_len(512 * 1024 ** 2), 16, "the floor")
+        self.assertEqual(km._stage_ring_len(64 * 1024 ** 3), 256, "one cycle per 256 MiB: a 64 GB box keeps 256 (about 10 KB an entry)")
+        self.assertEqual(km._stage_ring_len(8 * 1024 ** 3), 32)
+        self.assertEqual(km._stage_ring_len(4 * 1024 ** 3), 16, "the floor")
         self.assertEqual(km._stage_ring_len(0), 16)
         self.assertGreaterEqual(km._stage_ring_len(), 16, "the machine's reading")
         # round one, low 5: resolved ONCE into a module slot, with an override
@@ -57,7 +57,12 @@ class StageSplitUnit(unittest.TestCase):
         self.assertEqual(snap["stageRing"][1]["stages"], {"jobs": {"ms": 1.0, "bytes": 0, "hydrated": 0}})
         self.assertEqual(snap["stageRingMax"], km._stage_ring_len())
         self.assertEqual(snap["stageRingLen"], 2)
-        self.assertIsNone(km._PerfStats().snapshot()["pusher"]["firstCycle"], "no cycle yet: no split")
+        fresh = km._PerfStats().snapshot()
+        self.assertIsNone(fresh["pusher"]["firstCycle"], "no cycle yet: no split")
+        self.assertEqual(fresh["pusher"]["splitFailed"], 0, "seeded at zero: a row without it means zero, not an older kernel")
+        self.assertEqual(fresh["stages_ms"]["prelude"], 0.0, "every stage listed at zero: %r" % sorted(fresh["stages_ms"])[:6])
+        self.assertIn("jobs.interruptBlock", fresh["stages_ms"])
+        self.assertEqual(len(km._PerfStats.JOBS), 24, "the 24 tick jobs by name")
 
     def test_a_stages_bytes_are_the_readers_bytes_since_the_previous_boundary(self):
         km = self.km
@@ -74,7 +79,8 @@ class StageSplitUnit(unittest.TestCase):
         st = ps.snapshot()["pusher"]["firstCycle"]["stages"]
         self.assertEqual(st["push.chat"]["bytes"], 250)
         self.assertEqual(st["push"]["bytes"], 250, "the container carries its sub-stages' bytes")
-        self.assertEqual(st["jobs"]["bytes"], 1050, "the jobs before and after the push")
+        self.assertEqual(st["jobs.other"]["bytes"], 1050, "the jobs' glue before and after the push, a sub-stage of jobs")
+        self.assertEqual(st["jobs"]["bytes"], 1050, "the container carries its sub-stages' bytes")
 
     def test_the_split_is_the_pusher_threads_alone(self):
         """Round one, medium: a dashboard's connect push runs _push on the HTTP handler thread through the same stage calls; its
@@ -139,6 +145,43 @@ class StageSplitUnit(unittest.TestCase):
         src = inspect.getsource(km)
         self.assertIn('_PERF_STATS.snapshot(ring_all=(q.get("ring") or [""])[0] == "all")', src, "GET /perf?ring=all serves the ring")
 
+    def test_the_override_is_clamped_and_the_split_never_ends_the_pusher(self):
+        """Round two, low 2: an override above the fraction passed the positive check and deque(maxlen=) raised inside cycle(),
+        which runs in the pusher's finally and is caught nowhere, so a diagnostic knob ended the pusher thread for the
+        process's life. The override is clamped to the fraction, and the split's bookkeeping never raises (counted)."""
+        km = self.km
+        saved = km._STAGE_RING_LEN[0]
+        self.addCleanup(lambda: km._STAGE_RING_LEN.__setitem__(0, saved))
+        km._STAGE_RING_LEN[0] = None
+        with mock.patch.dict(os.environ, {"ROMP_PERF_STAGE_RING": str(2 ** 63 - 1)}):
+            self.assertEqual(km._stage_ring_len(), km._stage_ring_len(km._mem_total_bytes()), "clamped to the fraction")
+        ps = km._PerfStats()
+        real = km._stage_ring_len
+        km._stage_ring_len = lambda mem_total=None: 2 ** 70                 # a length the deque refuses
+        self.addCleanup(setattr, km, "_stage_ring_len", real)
+        ps.cycle_begin(); ps.stage("jobs", 0.001)
+        ps.cycle(0.002)                                                    # no raise
+        self.assertEqual(ps.snapshot()["pusher"].get("splitFailed"), 1)
+
+    def test_every_tick_job_is_a_sub_stage_and_the_report_total_is_the_counter(self):
+        """T398: the first live split said jobs 25 s with 224 MB read and nothing finer; every tick job closes its own
+        `jobs.<job>` stage, the container carries their sum. Round two, low 1: the report's total is the running counter."""
+        km = self.km
+        ps = km._PerfStats()
+        ps.cycle_begin()
+        em._count_read("/lab/tick.jsonl", 300)
+        ps.stage("jobs.interruptBlock", 0.004)
+        ps.stage("jobs.autoNudge", 0.001)
+        ps.stage("jobs", 0.006)
+        ps.cycle(0.007)
+        st = ps.snapshot()["pusher"]["firstCycle"]["stages"]
+        self.assertEqual(st["jobs.interruptBlock"]["bytes"], 300)
+        self.assertEqual(st["jobs"]["bytes"], 300, "the container carries its sub-stages' bytes")
+        self.assertIn("_job_stage('interruptBlock', lambda: _interrupt_block_tick(now, live_map))", inspect.getsource(km._pusher_cycle_jobs))
+        rep = em.read_bytes_report()
+        self.assertEqual(rep["total"], em.read_bytes_total())
+        self.assertGreaterEqual(rep["total"], sum(v for k, v in rep.items() if k != "total"))
+
 
 class LabBootFirstCycle(unittest.TestCase):
     """A lab boot whose first cycle runs at least two stages: the real pusher cycle with every tick job a no-op and the push a
@@ -172,12 +215,33 @@ class LabBootFirstCycle(unittest.TestCase):
         first = snap["firstCycle"]
         self.assertIsNotNone(first, "the first cycle's split is kept")
         self.assertTrue({"jobs", "push"} <= set(first["stages"]), "both stages named: %r" % sorted(first["stages"]))
+        self.assertTrue(any(k.startswith("jobs.") for k in first["stages"]), "the tick jobs as sub-stages: %r" % sorted(first["stages"]))
         self.assertGreaterEqual(first["stages"]["push"]["ms"], 5.0)
         self.assertLessEqual(sum(v["ms"] for k, v in first["stages"].items() if k in ("jobs", "push")), first["s"] * 1000.0 + 5.0,
                              "the stages fit the cycle's wall")
         self.assertEqual(len(self.rows), 1, "one boot-health row")
         self.assertEqual(sorted(self.rows[0]["stages"]), sorted(first["stages"]), "the row carries the split")
         self.assertEqual(self.rows[0]["firstCycleS"], round(dt, 2))
+
+
+    def test_a_whole_pusher_cycle_names_its_prelude_and_the_stages_sum_to_the_wall(self):
+        """Round two, low 3: cycle_begin was the jobs' first statement, so the liveness snapshot and the names before it had
+        no bucket and the stages under-summed the cycle. The cycle opens at the top of _pusher_cycle and the prelude is a
+        stage, so prelude + jobs + push fit the wall."""
+        km = self.km
+        km._push_all = lambda live_map=None: time.sleep(0.003)
+        with km._clients_lock:                                             # a client, so the cycle pushes (any_client)
+            km._clients.append({"app": "feed", "wid": "lab", "send": lambda *a, **k: None, "alive": True})
+        self.addCleanup(lambda: [km._clients.remove(c) for c in list(km._clients) if c.get("wid") == "lab"])
+        km._pusher_cycle()
+        first = km._PERF_STATS.snapshot()["pusher"]["firstCycle"]
+        self.assertIsNotNone(first)
+        st = first["stages"]
+        self.assertIn("prelude", st, "%r" % sorted(st))
+        self.assertGreaterEqual(st["push"]["ms"], 3.0, "the push ran (a client was connected): %r" % sorted(st))
+        top = sum(v["ms"] for k, v in st.items() if k in ("prelude", "jobs", "push"))
+        self.assertLessEqual(top, first["s"] * 1000.0 + 2.0, "the top stages fit the wall: %r vs %r" % (top, first["s"]))
+        self.assertGreaterEqual(top, first["s"] * 1000.0 * 0.8, "and account for most of it: %r vs %r" % (top, first["s"]))
 
 
 if __name__ == "__main__":

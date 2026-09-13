@@ -165,18 +165,22 @@ class LazyUnitText(Harness):
                 break
         self.assertGreaterEqual(len(human), 2, "a golden scenario with two human segments")
         phantom, prompt = human[0], human[1]
-        real_plan, real_text = saved[0], saved[1]
+        real_text = saved[1]
         def stub_units(session, store=None, floor=jd._UNSET_FLOOR, lazy_text=False):
-            return [(phantom["id"], "work", phantom["t"], None, True, None, jd._seg_anchor(phantom), None),
+            # the phantom is a LIVE unit: its key carries the phase suffix (a work unit's key is the bare seg id, which a
+            # bare-seg-id write would also produce), so the assertion below tells the unit's own key from any other write
+            return [(phantom["id"], "live", phantom["t"], None, True, None, jd._seg_anchor(phantom), None),
                     (prompt["id"], "prompt", prompt["t"], jd._prompt_text(prompt["atoms"]), True, None, jd._seg_anchor(prompt), None)]
         jd.plan_units = stub_units
-        jd.unit_text_for = lambda seg, phase: "" if (seg["id"] == phantom["id"] and phase == "work") else real_text(seg, phase)
+        jd.unit_text_for = lambda seg, phase: "" if (seg["id"] == phantom["id"] and phase == "live") else real_text(seg, phase)
         calls = []
         jd.opener_llm = lambda text, menu_text, sibling_num=None: (calls.append(text), "")[1]   # a blank plan: the coerced place
         jd._plan_session(fsid, str(path), NOW)
         store = jd.load_goals(fsid)
-        pk, uk = jd._unit_key(phantom["id"], "work"), jd._unit_key(prompt["id"], "prompt")
+        pk, uk = jd._unit_key(phantom["id"], "live"), jd._unit_key(prompt["id"], "prompt")
+        self.assertNotEqual(pk, phantom["id"], "a suffixed key: distinguishable from a bare seg-id write")
         self.assertIn(pk, store["placements"]); self.assertIsNone(store["placements"][pk], "the phantom's OWN key retired")
+        self.assertNotIn(phantom["id"], store["placements"], "no bare seg-id write beside it")
         self.assertEqual(len(calls), 1, "the prompt unit reached the opener once: %r" % calls)
         self.assertIsNotNone(store["placements"].get(uk), "the prompt planned and placed: %r" % {k: v for k, v in store["placements"].items()})
 
