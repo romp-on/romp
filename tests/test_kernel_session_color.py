@@ -155,7 +155,7 @@ class SessionColor(unittest.TestCase):
         self.assertIn("id=rs-pal-btn", html)
         self.assertIn("id=rs-pal-list", html)
         self.assertIn("{ type: 'setPalette', name: name }", _gear_src())
-        self.assertIn("plFill(); fill(); showSection(section); }", _gear_src(),   # the opener ends on the section scroll since T379
+        self.assertIn("plFill(); fill(); if (section) showSection(section); else clearSectionScroll(); }", _gear_src(),   # the opener ends on the section scroll since T379
                       "gear open re-reads the server-authoritative choice from /palette")
 
 

@@ -576,8 +576,8 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab-widgets-gear:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
 /* Vertical context gauge right of the name (the user 2026-08-08): the statusline battery rotated
    upright — fills bottom-up with the context-used %, in the SAME global-colormap colour (fill set
-   inline by tabCtxGauge, render.ts), no % text. A faint track so an empty gauge still reads as
-   "gauge", not dirt. Toggled in gear → Chat ("Context gauge in tabs"), default on. */
+   inline by the context bar widget, tab-widgets.ts tabCtxGauge), no % text. A faint track so an empty gauge still reads as
+   "gauge", not dirt. The gear's Tab widgets section (the Context bar row) switches it and picks when it shows; on by default. */
 .tab-ctx { flex: 0 0 auto; position: relative; width: 4px; height: 13px; border-radius: 2px;
   overflow: hidden; background: rgba(255, 255, 255, 0.13); }
 .tab-ctx-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; }

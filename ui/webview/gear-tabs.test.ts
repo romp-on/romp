@@ -77,22 +77,40 @@ test("selectTab shows one pane, marks its pill, remembers it per browser; openSe
   assert.match(GEAR, /b\.classList\.toggle\('on', on\); b\.setAttribute\('aria-selected', on \? 'true' : 'false'\);/);
   assert.match(GEAR, /pn\.hidden = pn\.getAttribute\('data-pane'\) !== t;/);
   assert.match(GEAR, /try \{ localStorage\.setItem\(TAB_KEY, t\); \} catch \(e\) \{\}/);
-  assert.match(GEAR, /function openSettings\(tab, section\) \{\s*\n\s*if \(!p\.hidden\) \{ if \(knownTab\(tab\)\) \{ selectTab\(tab\); showSection\(section\); return; \} closeSettings\(\); return; \}/,
+  assert.match(GEAR, /function openSettings\(tab, section\) \{\s*\n\s*if \(!p\.hidden\) \{ if \(knownTab\(tab\)\) \{ selectTab\(tab\); if \(section\) showSection\(section\); else clearSectionScroll\(\); return; \} closeSettings\(\); return; \}/,
     "a named tab on an open panel switches to it and scrolls to its section; a bare ask still toggles");
   assert.match(GEAR, /if \(e\.data && e\.data\.romp === 'openSettings'\) openSettings\(typeof e\.data\.tab === 'string' \? e\.data\.tab : undefined, typeof e\.data\.section === 'string' \? e\.data\.section : undefined\);/, "the tab and the section ride the message");
   // the SECTION anchor (the user's amendment 2026-09-12): looked up in the shown pane only; the card, the modal's one scroll box, scrolls so the head
   // sits under its padding (never scrollIntoView, which would scroll the host document too); after the panel is shown, since rects exist only then
-  assert.match(GEAR, /function showSection\(section\) \{\s*\n\s*if \(typeof section !== 'string' \|\| !section\) return;\s*\n\s*var sec = document\.querySelector\('#rsettings \.rs-pane:not\(\[hidden\]\) \.rs-sec\[data-section="' \+ section \+ '"\]'\);/);
-  assert.match(GEAR, /card\.scrollTop = card\.scrollTop \+ sec\.getBoundingClientRect\(\)\.top - card\.getBoundingClientRect\(\)\.top - \(parseFloat\(getComputedStyle\(card\)\.paddingTop\) \|\| 0\);/);
+  assert.match(GEAR, /function showSection\(section\) \{\s*\n\s*if \(sectionRO\) \{ sectionRO\.disconnect\(\); sectionRO = null; \}\s*\n\s*sectionAsk = null;\s*\n\s*if \(typeof section !== 'string' \|\| !section\) return;\s*\n\s*var sec = document\.querySelector\('#rsettings \.rs-pane:not\(\[hidden\]\) \.rs-sec\[data-section="' \+ section \+ '"\]'\);/);
+  assert.match(GEAR, /card\.scrollTop = card\.scrollTop \+ sec\.getBoundingClientRect\(\)\.top - card\.getBoundingClientRect\(\)\.top - padT;/);
+  // round two, LOW 1: room at the pane's end so the head reaches the top even for the last section; LOW 2 and 7: one pending ask,
+  // disconnected on close and before a new ask, and a plain open resets the card and the room
+  assert.match(GEAR, /var go = function \(\) \{\s*\n\s*pane\.style\.paddingBottom = '';/, "the room is cleared before the measurement (a re-ask must not read its own earlier room)");
+  // the follow-up's round one, MEDIUM: the room is sized to the card's CAP (max-height, a content box), since below the cap the card
+  // grows under the room and the head stops short on tall windows; a second measurement after the write takes up rounding
+  assert.match(GEAR, /var capH = parseFloat\(cs\.maxHeight\);\s*\n\s*var content = isFinite\(capH\) && capH > 0 \? capH : \(card\.clientHeight - padT - padB\);\s*\n\s*var missing = content - below\(\);\s*\n\s*pane\.style\.paddingBottom = missing > 0 \? Math\.ceil\(missing\) \+ 'px' : '';\s*\n\s*var short = \(card\.clientHeight - padT - padB\) - below\(\);\s*\n\s*if \(short > 0\) pane\.style\.paddingBottom = Math\.ceil\(Math\.max\(missing, 0\) \+ short\) \+ 'px';/);
+  assert.match(GEAR_CSS, /\n\.rs-card \{ width: min\(560px, 94%\); max-height: 88vh; overflow: auto;/, "the cap the room is sized to");
+  assert.doesNotMatch(GEAR_CSS.match(/\n\.rs-card \{[^}]*\}/)![0], /box-sizing/, "a content box: max-height caps the content, which is what the room fills");
+  assert.match(GEAR, /selectTab\(b\.getAttribute\('data-tab'\)\); clearSectionScroll\(\); \}\); \}\);/, "a pill change clears the room and starts at the top (LOW 1)");
+  assert.match(GEAR, /function clearSectionScroll\(\) \{\s*\n\s*if \(sectionRO\) \{ sectionRO\.disconnect\(\); sectionRO = null; \}\s*\n\s*sectionAsk = null;\s*\n\s*var card = document\.querySelector\('#rsettings \.rs-card'\);\s*\n\s*if \(card\) \{ card\.scrollTop = 0; card\.removeAttribute\('data-section-landed'\); \}/);
+  assert.match(GEAR, /function showSection\(section\) \{\s*\n\s*if \(sectionRO\) \{ sectionRO\.disconnect\(\); sectionRO = null; \}/, "a new ask retires the pending one");
+  assert.match(GEAR, /function closeSettings\(\) \{ clearSectionScroll\(\); p\.hidden = true; setModalCls\(false\); feedFull\(false\); \}/, "the reset before the hide: a hidden card ignores a scroll write");
+  // the ask STANDS: the head re-lands on every size change of the card or the pane (a font arriving, a list filling), until the
+  // user's own scroll, a pill change or the close ends it (CI 2026-09-13: the head landed neither at the top nor at the end)
+  assert.match(GEAR, /sectionRO = new ResizeObserver\(function \(\) \{ if \(sectionAsk === ask && card\.clientHeight > 0\) go\(\); \}\);\s*\n\s*sectionRO\.observe\(card\);\s*\n\s*sectionRO\.observe\(pane\);/);
+  assert.match(GEAR, /ask\.top = card\.scrollTop;/, "the ask remembers what it set, so its own scroll event is not the user's");
+  assert.match(GEAR, /card\.setAttribute\('data-section-landed', section\);/, "a landing is marked on the card, so a lab waits for the event, never a delay");
+  assert.match(GEAR, /if \(card\) \{ card\.scrollTop = 0; card\.removeAttribute\('data-section-landed'\); \}/, "…and the mark goes with the ask");
+  assert.match(GEAR, /card\.addEventListener\('scroll', function \(\) \{ if \(sectionAsk && Math\.abs\(card\.scrollTop - sectionAsk\.top\) > 1\) \{ if \(sectionRO\) \{ sectionRO\.disconnect\(\); sectionRO = null; \} sectionAsk = null; \} \}\);/, "the user's scroll ends the ask");
   // the first open in the shell: this document has no layout until the shell lifts its iframe on the settings-open message, so a
   // scroll set then clamps to zero (measured); the card gaining a size is the event, observed once, never a timer
-  assert.match(GEAR, /if \(card\.clientHeight > 0\) \{ go\(\); return; \}/);
-  assert.match(GEAR, /var ro = new ResizeObserver\(function \(\) \{ if \(card\.clientHeight > 0\) \{ ro\.disconnect\(\); go\(\); \} \}\);\s*\n\s*ro\.observe\(card\);/);
+  assert.match(GEAR, /if \(card\.clientHeight > 0\) go\(\);   \/\/ laid out already/, "the first landing when the panel already has a layout; the ask then stands (no return: the observer still watches)");
   const showAt = GEAR.indexOf("function showSection(section) {");
   const showSec = GEAR.slice(showAt, GEAR.indexOf("\n  }\n", showAt) + 4);   // the function body alone
   assert.doesNotMatch(showSec, /setTimeout|requestAnimationFrame/, "no time-based guess at the shell's round trip");
   assert.doesNotMatch(showSec, /scrollIntoView/, "the section scroll is set on the card, never scrollIntoView (which scrolls the host document too)");
-  assert.match(GEAR, /plFill\(\); fill\(\); showSection\(section\); \}/, "the scroll is the opener's last act, after the panel is displayed");
+  assert.match(GEAR, /plFill\(\); fill\(\); if \(section\) showSection\(section\); else clearSectionScroll\(\); \}/, "the scroll (or the reset) is the opener's last act, after the panel is displayed");
   assert.match(GEAR_CSS, /#rsettings \.rs-pane\[hidden\] \{ display: none; \}/, "a hidden pane is out of the flow (the [hidden] rule the author display would beat)");
   assert.match(GEAR_CSS, /#rsettings \.rs-tab\.on \{ color: var\(--accent, #9cd2ff\); border-color: var\(--accent, #9cd2ff\); background: var\(--accent-wash, rgba\(156, 210, 255, 0\.12\)\); font-weight: 600; \}/);
 });
@@ -120,6 +138,12 @@ test("the Tab widgets section's rows come from the strip's own module: built onc
   assert.match(GEAR_CSS, /#rsettings \.rs-widgets \{ display: grid; grid-template-columns: 96px 1fr auto auto; column-gap: 10px; \}\s*\n#rsettings \.rs-widget \{ display: grid; grid-template-columns: subgrid; grid-column: 1 \/ -1;/, "one grid across the rows, each row a subgrid of it (round one, LOW 2)");
   assert.match(GEAR_CSS, /#rsettings \.rs-row:hover \.rs-sub, #rsettings \.rs-widget:hover \.rs-sub \{ display: block; position: absolute;/, "the widget rows share the panel's hover popover rule");
   assert.doesNotMatch(GEAR_CSS, /#rsettings \.rs-widget-name span \{/, "no always-painted description rule");
+  // round two, LOW 3: grid-template-columns: subgrid needs Chromium 117 and the stylesheet's oklch(from) 119; the extension's declared
+  // VS Code floor is 1.88 (Electron 28, Chromium 120), the first release that ships both
+  const pkg = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "..", "vscode-extension", "package.json"), "utf8"));
+  assert.equal(pkg.engines.vscode, "^1.88.0", "the declared floor carries subgrid (117) and oklch(from) (119)");
+  const lock = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "..", "vscode-extension", "package-lock.json"), "utf8"));
+  assert.equal(lock.packages[""].engines.vscode, "^1.88.0", "the lockfile's root agrees, so the first install after the merge rewrites nothing (LOW 2)");
   assert.match(GEAR_CSS, /#rsettings \.rs-widget-demo \.tab-dot \{ flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var\(--st-working-bg, #e0b020\); \}/, "the demo wears the strip's vocabulary in this sheet's fallbacks");
 });
 

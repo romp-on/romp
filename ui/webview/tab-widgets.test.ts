@@ -6,6 +6,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+const STRIP_CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 import type { WidgetStatus, TabWidgetPrefs } from "./tab-widgets";
 
 type El = { tag: string; className: string; textContent: string; title: string; attrs: Record<string, string>; children: El[]; style: Record<string, string>;
@@ -164,4 +165,9 @@ test("source: the strip and the gear draw from this ONE module; the dot rule has
   assert.equal((RENDER.match(/const dotCls = tabDotClass\(st\);/g) || []).length, 0, "render.ts no longer appends the dot itself");
   const GEAR = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "gear.js"), "utf8");
   assert.match(GEAR, /var TW = require\('\.\/tab-widgets\.ts'\);/, "the gear renders the rows' live demos from the same module");
+});
+
+test("ONE .tab-key rule in the strip's sheet: this side owns it, so a merge with the tab hot keys pull request's copy cannot leave two identical blocks silently", () => {
+  assert.equal((STRIP_CSS.match(/^\.tab-key \{/gm) || []).length, 1);
+  assert.match(STRIP_CSS, /^\.tab-key \{ flex: 0 0 auto; font: 600 calc\(0\.82em \/ 0\.92\) ui-monospace, SFMono-Regular, Menlo, monospace; color: var\(--dim\); border: 1px solid var\(--box-border\);/m, "the agreed rule text");
 });
