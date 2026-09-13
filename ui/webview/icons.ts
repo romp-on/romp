@@ -23,3 +23,16 @@ export const ICON_FORK = svg('<polyline points="2 12 9 12 15 7 22 7"/><polyline 
 /** the acknowledgements a glyph button swaps to: done, and failed */
 export const ICON_CHECK = svg('<polyline points="20 6 9 17 4 12"/>');
 export const ICON_CROSS = svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>');
+
+/** THE PADLOCK (T395, the user 2026-09-12): the same drawing the Sessions pane's lock-to-now toggle draws at its bottom
+ *  (ui/romp-timeline-view.js _drawLockToggle: a 15-unit box, the body a rounded rect, the shackle seated when locked and
+ *  swung out when not), so a lock reads the same on the timeline and in the chat strip. That file is served raw and
+ *  cannot import this module, so the numbers are stated there and here, pinned equal by tab-lock.test.ts. */
+const LOCK_BODY = '<rect x="3" y="6.2" width="8" height="5.6" rx="1.2"/>';
+export const LOCK_SHACKLE_SEATED = 'M4.8 6.2 V4.4 a2.2 2.2 0 0 1 4.4 0 V6.2';
+export const LOCK_SHACKLE_OPEN = 'M9.4 6.2 V5.3 A2.4 2.4 0 0 1 13.6 3.7';
+const lockSvg = (shackle: string): string =>
+  '<svg viewBox="0 0 15 15" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"'   // drawn at the tag glyph's 14px, so the two boxes beside each other measure the same (T395 round two)
+  + ' stroke-linecap="round" aria-hidden="true">' + LOCK_BODY + '<path d="' + shackle + '"/></svg>';
+export const ICON_LOCK = lockSvg(LOCK_SHACKLE_SEATED);
+export const ICON_LOCK_OPEN = lockSvg(LOCK_SHACKLE_OPEN);

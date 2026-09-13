@@ -281,7 +281,7 @@ test("membership rows drag-reorder into the SHARED session order (the user 2026-
   assert.deepEqual(p.data.sessions.map((s: any) => s.id), ["d", "b", "a", "c"], "optimistic — no snap-back before the next poll");
   // the wiring: grab a NAME cell; the insertion cue moves WITHOUT rebuilding mid-drag (the
   // redraw-eats-pointer rule) — the rebuild and the persist happen on the drop
-  assert.match(SRC, /nameCell\.setAttribute\('style', 'white-space:nowrap;cursor:grab;'\);/);
+  assert.match(SRC, /nameCell\.setAttribute\('style', 'white-space:nowrap;cursor:' \+ \(this\._tabsLocked\(\) \? 'default' : 'grab'\) \+ ';'\);/);   // the tab lock (T395) takes the grab away
   assert.match(SRC, /nameCell\._sid = s\.id;/);
   assert.match(SRC, /cells\[toIdx\]\.style\[toIdx > fromIdx \? 'borderBottom' : 'borderTop'\] = '2px solid #9cd2ff';/,
     "the accent insertion cue rides the target cell's border — no mid-drag rebuild");

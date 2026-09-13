@@ -164,9 +164,9 @@ test("the shell hears the drag: tabDrag on at dragstart after the geometry snaps
 test("a create in flight is not draggable, and the page answers the shell's two questions before a move or a close (the chat split, review finds 2026-09-11)", () => {
   // a provisional tab has no session to move: draggable, the shell's zones would have opened a column on an id the kernel
   // does not know (it flashed open and shut); a sub-agent viewer was already not draggable
-  assert.match(RENDER, /tab\.draggable = !s\.sub && !fedMissing && !isProvisionalId\(id\);/);
+  assert.match(RENDER, /tab\.draggable = !s\.sub && !fedMissing && !isProvisionalId\(id\) && !settings\.tabsLocked;/);   // …nor while the tabs are locked (T395)
   // the palette's DOM read can still name either: the shell asks the page at its one mutation (tests/test_chat_split.py
   // runs the refusals), and whether this column has a create in flight before it closes it under one
-  assert.match(RENDER, /\(window as any\)\.__rompMovableSession = \(sid: unknown\): boolean => typeof sid === "string" && !!sid && !isProvisionalId\(sid\) && !isSubId\(sid\);/);
+  assert.match(RENDER, /\(window as any\)\.__rompMovableSession = \(sid: unknown\): boolean => typeof sid === "string" && !!sid && !isProvisionalId\(sid\) && !isSubId\(sid\) && !settings\.tabsLocked;/);   // the shell's move question answers no while the tabs are locked (T395)
   assert.match(RENDER, /\(window as any\)\.__rompColumnBusy = \(\): boolean => !!provisionalId \|\| failedProvisionals\.size > 0;/);
 });

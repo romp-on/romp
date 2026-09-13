@@ -193,7 +193,7 @@ test("every dense rule is scoped to the body class, and the sheet's defaults are
   assert.match(defaultRule(".bg-since"), /font-size: 0\.82em;/);
   // the defaults come first, so the tests that read a selector's first rule keep reading the default
   // (tag-mounts.test.ts: .tab-add, .tab-tagbox; bg-tasks-layout.test.ts: #bg-tasks, .bg-fold-head, .bg-sum, .bg-head)
-  for (const sel of [".tab", ".tab-add", ".tab-tagbox", ".tab-group-head", ".tab-group-sep:not(.tab-group-break)", "#bg-tasks", ".bg-fold-head", ".bg-list", ".bg-group-head", ".bg-head", ".bg-sum", ".bg-since"]) {
+  for (const sel of [".tab", ".tab-add", ".tab-tagbox", ".tab-lockbox", ".tab-group-head", ".tab-group-sep:not(.tab-group-break)", "#bg-tasks", ".bg-fold-head", ".bg-list", ".bg-group-head", ".bg-head", ".bg-sum", ".bg-since"]) {
     assert.ok(CSS.indexOf("\n" + sel + " {") < CSS.indexOf("\nbody." + DENSE_CHROME_CLASS + " " + sel + " {"), sel + ": default before dense");
   }
   assert.ok(CSS.indexOf("\n.host-prefix {") < CSS.indexOf("\nbody." + DENSE_CHROME_CLASS + " .tab .host-prefix {"), ".host-prefix: default before dense");

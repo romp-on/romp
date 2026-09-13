@@ -89,7 +89,7 @@ test("one-click MOVE between groups (tab groups, 2026-09-04): 'Move to <name>' a
     "the group THIS COPY sits in (T264b: a session under several tags has a copy per group, and the menu speaks for the right-clicked copy's group), else the first holder; only while the strip is sectioned, and never a tag whose create is still in flight");
   assert.match(fly, /lb\.append\("Move to ", named\(\)\); bodyE\.appendChild\(lb\);/, "the tag inside the sentence is the chip (T321)");
   assert.match(fly, /moveUnion\(home, g\); build\(\); sb\.textContent = subText\(\);/, "the row IS the move");
-  assert.match(fly, /plus\.title = "add this tag too — the session keeps its other tags";/, "…and multi-tag stays one click away");
+  assert.match(fly, /plus\.title = "add this tag too \(the session keeps its other tags\)" \+ \(settings\.tabsLocked \? ": adding is not a move, so the lock does not hold it" : ""\);/, "…and multi-tag stays one click away (the tab lock, T395, adds its clause)");
   assert.match(fly, /lb\.append\("\+ ", named\(\)\); bodyE\.appendChild\(lb\);/, "with no home tag, + <name> is the move");
   const mv = RENDER.slice(RENDER.indexOf("const moveUnion = (from: TagUnion, to: TagUnion)"), RENDER.indexOf("// HOVER-INTENT open"));
   assert.match(mv, /const a = applyUnionEdit\(nv, to, \{ add: \[id\] \}\);\s*\n\s*const r = applyUnionEdit\(nv, from, \{ remove: \[id\] \}\);/,

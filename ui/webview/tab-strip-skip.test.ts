@@ -70,7 +70,7 @@ test("a tab drag resets the signature (its live reorder changes the strip's DOM 
   // the listeners live in wireTabDrag, shared with the skeleton tab (2026-09-07); renderTabs wires every loaded tab through it
   assert.match(fn, /wireTabDrag\(tab, id\);/);
   const wire = RENDER.slice(RENDER.indexOf("function wireTabDrag("), RENDER.indexOf("function makeSkeletonTab("));
-  assert.match(wire, /tab\.addEventListener\("dragstart", \(e\) => \{\s*\n(?:\s*if \(fedMissing\) \{ e\.preventDefault\(\); return; \}[^\n]*\n)?\s*draggedId = id; draggedEl = tab; tabDragCommitted = false;\s*\n\s*tabStripSig = "";/);   // the manager-missing refusal may lead (2026-09-10)
+  assert.match(wire, /tab\.addEventListener\("dragstart", \(e\) => \{\s*\n(?:\s*if \(fedMissing \|\| settings\.tabsLocked\) \{ e\.preventDefault\(\); return; \}[^\n]*\n)?\s*draggedId = id; draggedEl = tab; tabDragCommitted = false;\s*\n\s*tabStripSig = "";/);   // the manager-missing refusal may lead (2026-09-10)
   assert.match(fn, /showTabTip\(tab, sessions\.get\(id\) \?\? s\)/, "a tab node now outlives a frame that replaced the session object");
   assert.match(RENDER, /^let tabStripSig = "";/m);
   // a GROUP drag needs no reset: its dragover only marks the drop target (no live reorder of headers — the

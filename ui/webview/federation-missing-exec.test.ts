@@ -13,7 +13,7 @@ const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview"
 
 type Lifted = { commitTabOrder: () => void; reorderTo: (a: string, b: string, after: boolean) => boolean; order: () => string[]; writes: string[][]; renders: () => number };
 
-function lift(fedMissing: boolean): Lifted {
+function lift(fedMissing: boolean, locked = false): Lifted {
   const a = RENDER.indexOf("function commitTabOrder() {"), b = RENDER.indexOf("\n}\n", a) + 3;
   const c = RENDER.indexOf("function reorderTo(dragId: string, targetId: string, after: boolean): boolean {"), d = RENDER.indexOf("\n}\n", c) + 3;
   assert.ok(a > 0 && b > a && c > b && d > c, "anchors not found — commitTabOrder / reorderTo moved; re-anchor");
@@ -23,9 +23,10 @@ function lift(fedMissing: boolean): Lifted {
     const writes = []; const writeViewOrder = (o) => { writes.push(o.slice()); };
     const renderTabs = () => { renders++; };
     const fedMissing = FED;
+    const settings = { tabsLocked: LOCKED };   // the tab lock (T395): a drop after another window locked mid-drag commits nothing
   `;
   const epilogue = `return { commitTabOrder, reorderTo, order: () => order.slice(), writes, renders: () => renders };`;
-  return new Function("FED", prelude + js + epilogue)(fedMissing) as Lifted;
+  return new Function("FED", "LOCKED", prelude + js + epilogue)(fedMissing, locked) as Lifted;
 }
 
 test("with the manager present a drop reorders, writes the arrangement once and says it reordered (the lift is live)", () => {
@@ -45,4 +46,12 @@ test("with the manager MISSING a drop moves nothing, writes nothing and says so 
   assert.equal(p.renders(), 0);
   p.commitTabOrder();
   assert.deepEqual(p.writes, [], "commitTabOrder stood down on its own: no arrangement written from a page without its manager");
+});
+
+test("with the tabs LOCKED (another window's press landed mid-drag) a drop moves nothing and writes nothing (T395 round one, LOW 3)", () => {
+  const p = lift(false, true);
+  assert.equal(p.reorderTo("a", "b", true), false, "not a committed drag");
+  assert.deepEqual(p.order(), ["a", "b", "c"]);
+  assert.deepEqual(p.writes, []);
+  assert.equal(p.renders(), 0);
 });

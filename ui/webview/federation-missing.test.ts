@@ -60,13 +60,13 @@ test("render.ts: the boot check fails loudly — one reload, then one diag row p
 
 test("render.ts: for as long as the page is in this state every drag starter and the arrangement writer stand down, and a refused drop is a cancelled drag", () => {
   assert.match(RENDER, /function commitTabOrder\(\) \{\n\s*if \(fedMissing\) return;/, "one-writer principle: an order that never passed through the arrangement is not one");
-  assert.match(RENDER, /function reorderTo\(dragId: string, targetId: string, after: boolean\): boolean \{[^\n]*\n\s*if \(fedMissing\) return false;/, "a drop is refused, and says so");
+  assert.match(RENDER, /function reorderTo\(dragId: string, targetId: string, after: boolean\): boolean \{[^\n]*\n\s*if \(fedMissing \|\| settings\.tabsLocked\) return false;/, "a drop is refused, and says so");
   assert.match(RENDER, /if \(prev\?\.dataset\?\.id\) tabDragCommitted = reorderTo\(draggedId, prev\.dataset\.id, true\);\n\s*else if \(next\?\.dataset\?\.id\) tabDragCommitted = reorderTo\(draggedId, next\.dataset\.id, false\);/,
     "the drop is committed only when the reorder happened: a refused one FLIPs the strip home on dragend");
-  assert.match(RENDER, /tab\.addEventListener\("dragstart", \(e\) => \{\n\s*if \(fedMissing\) \{ e\.preventDefault\(\); return; \}/, "the one drag starter refuses first (skeleton tabs and rename-restored tabs included)");
+  assert.match(RENDER, /tab\.addEventListener\("dragstart", \(e\) => \{\n\s*if \(fedMissing \|\| settings\.tabsLocked\) \{ e\.preventDefault\(\); return; \}/, "the one drag starter refuses first (skeleton tabs and rename-restored tabs included)");
   // every draggable flag agrees (the pinned-tabs peer branch adds its own clause to the strip's, hence the optional group)
-  assert.match(RENDER, /tab\.draggable = !s\.sub && (?:!pinned && )?!fedMissing && !isProvisionalId\(id\);/, "the strip's tabs (a create in flight has no session to move either: the chat split, 2026-09-11)");
-  assert.equal((RENDER.match(/tab\.draggable = !fedMissing;/g) || []).length, 2, "the skeleton tab and the rename's restore");
+  assert.match(RENDER, /tab\.draggable = !s\.sub && (?:!pinned && )?!fedMissing && !isProvisionalId\(id\) && !settings\.tabsLocked;/, "the strip's tabs (a create in flight has no session to move either: the chat split, 2026-09-11)");
+  assert.equal((RENDER.match(/tab\.draggable = !fedMissing && !settings\.tabsLocked;/g) || []).length, 2, "the skeleton tab and the rename's restore (and never while the tabs are locked, T395)");
   assert.doesNotMatch(RENDER, /tab\.draggable = true;/, "no starter is unconditionally draggable any more");
 });
 

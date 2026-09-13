@@ -1,5 +1,5 @@
 import { marked } from "marked";
-import { ICON_FORK } from "./icons";   // the fork control's glyph (T381), the stroke family the bars share
+import { ICON_FORK, ICON_LOCK, ICON_LOCK_OPEN } from "./icons";   // the fork control's glyph (T381), the stroke family the bars share
 import { sanitizeMd, userContentTarget } from "./md-sanitize";   // the one sanitizer every markdown surface shares, and the lookup for a message's own `#` links
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
@@ -27,13 +27,13 @@ import { SUBAGENT_OPEN_WAIT_MS, subagentStallText, subagentStalled } from "./sub
 import { placeholderKind, placeholderStands, fillPlaceholder } from "./pane-placeholder";   // the empty pane's placeholder, by kind (T355)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
-import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
+import { openTagMenu, tagMenuButton, syncTagFilter, tagChip, TAG_BTN_BORDER } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
 import { markerLabel, dayContext, DayWalk } from "./time-marker";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
 import { compactDisplay, isFoldableNoticeShape, toolCounts, itemAnchor, type DisplayItem } from "./compact";
 import { senderKind, SenderKind } from "./sender-identity";
-import { loadSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
+import { loadSettings, saveSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
 import { backendLabel, effectiveDefaultBackend } from "./backend-names";
 import { delegate } from "./actions";
 import { flash } from "./actions";   // its own line: the import above is pinned verbatim by click-safe.test.ts (the file-view precedent)
@@ -5816,7 +5816,7 @@ function flipTabs(mutate: () => void): void {
   });
 }
 function reorderTo(dragId: string, targetId: string, after: boolean): boolean {   // whether it reordered: a drop that it refused is not a committed drag
-  if (fedMissing) return false;   // no manager: the strip shows the kernel's seed, not an arrangement — a reorder here would be a lie to keep
+  if (fedMissing || settings.tabsLocked) return false;   // no manager: the strip shows the kernel's seed, not an arrangement — a reorder here would be a lie to keep; or the tabs were locked mid-drag by another window (T395 round one)
   const di = order.indexOf(dragId);
   if (di < 0) return false;
   order.splice(di, 1);
@@ -5978,6 +5978,15 @@ let renderPendingWhilePressed = false;
 // before the rebuild. Reset ("") wherever the strip's DOM is changed outside renderTabs — a tab drag's live
 // reorder — so the next render rebuilds whatever the inputs say.
 let tabStripSig = "";
+// THE TAB LOCK (T395, the user 2026-09-12): one press freezes every way a tab moves (the drag reorder, a drag into another
+// column or the split's edge, the tab menu's Move to rows) until the next press. A per-browser setting like the gear's,
+// written through the same store and fanned out the same way: the same-document signal every consumer listens to (the
+// strip repaints through its signature), and the host relay VS Code's separate panes need.
+function setTabsLocked(on: boolean): void {
+  settings = saveSettings({ tabsLocked: on });
+  try { window.dispatchEvent(new Event("romp:settings")); } catch { /* no window event: nothing listens */ }
+  vscodeApi?.postMessage({ type: "settingsSync", settings });
+}
 // Release the press-hold and flush any deferred rebuild. Hoisted so the DRAG handlers can call it
 // too: a native drag swallows the pointerup, so without this a finished drag would leave the strip
 // frozen against pushes until the next unrelated press (see the dragend handler).
@@ -6106,8 +6115,9 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
     }
   }
   head.setAttribute("aria-label", spoken);
-  head.draggable = true;
+  head.draggable = !settings.tabsLocked;   // the tab lock (T395) holds the groups too
   head.addEventListener("dragstart", (e) => {
+    if (settings.tabsLocked) { e.preventDefault(); return; }
     draggedGroup = name;
     if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setDragImage(dragImageBlank(), 0, 0); }
     head.classList.add("dragging");
@@ -6234,7 +6244,7 @@ function wireTabDrag(tab: HTMLElement, id: string): void {
   // visual, browser-style. dragImageBlank must be a rendered DOM node at dragstart (Chromium
   // snapshots it), hence the fixed off-viewport 1px div installed once below.
   tab.addEventListener("dragstart", (e) => {
-    if (fedMissing) { e.preventDefault(); return; }   // no manager: the strip is the kernel's seed, not an arrangement — nothing to reorder (see fedMissing)
+    if (fedMissing || settings.tabsLocked) { e.preventDefault(); return; }   // the tab lock (T395) holds it; no manager: the strip is the kernel's seed, not an arrangement — nothing to reorder (see fedMissing)
     draggedId = id; draggedEl = tab; tabDragCommitted = false;
     tabStripSig = "";   // the drag live-reorders the strip's DOM: whatever the order ends up, the next render rebuilds
     if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setDragImage(dragImageBlank(), 0, 0); }
@@ -6282,7 +6292,7 @@ function makeSkeletonTab(id: string): HTMLElement {
   tab.dataset.id = id;
   tab.dataset.act = "select";   // click → setActive via the stable #tabs delegate (./actions), click-safe as every tab
   tab.addEventListener("keydown", onTabKey);
-  tab.draggable = !fedMissing;
+  tab.draggable = !fedMissing && !settings.tabsLocked;
   wireTabDrag(tab, id);
   if (color) {
     tab.style.setProperty("--chip-bg", color.bg);
@@ -6552,7 +6562,7 @@ function renderTabs() {
   // input missing here is a repaint that never happens.
   const stripSig = JSON.stringify([
     activeId, peekId, ids, visibleIds, activeId ? tabInView(activeId) : null, plan.items,
-    settings.tabCtx, settings.stripGroupRows, settings.theme, settings.colormap, settings.tabWidgets, titleWithKey("Open a session", "session.new"),   // tabWidgets: which widgets a tab carries, their order and options (T379)
+    settings.tabCtx, settings.stripGroupRows, settings.tabsLocked, settings.theme, settings.colormap, settings.tabWidgets, titleWithKey("Open a session", "session.new"),   // tabWidgets: which widgets a tab carries, their order and options (T379); tabsLocked: the tab lock (T395)
     surfaceLens(effViews(), "chat"), unions,
     snapView,   // the section whose view the pane shows (makeGroupHead: the header's mark and its way-back act)
     visibleIds.map((id) => {
@@ -6591,6 +6601,7 @@ function renderTabs() {
   // the active tab. Captured before the tab rule below, which keeps its pinned two-line shape.
   const focusedEl = document.activeElement as HTMLElement | null;
   const focusedGroup = (focusedEl?.closest(".tab-group-head") as HTMLElement | null)?.dataset.group;
+  const focusedLock = !!focusedEl?.closest(".tab-lock");   // a keyboard press on the lock rebuilt the strip: the lock keeps the focus (T395 round one)
   const refocusTab = bar.contains(document.activeElement);
   bar.replaceChildren();
   // A session under several tags has a COPY in each group (T264b, the user 2026-09-08: tags are
@@ -6633,7 +6644,7 @@ function renderTabs() {
     tab.addEventListener("keydown", onTabKey);
     // drag-to-reorder (synced with the timeline via the shared session-order file). A subagent viewer
     // stays put: it is client-only, and a reorder would post its id into the kernel's order.
-    tab.draggable = !s.sub && !fedMissing && !isProvisionalId(id);   // …and a page without its manager offers no drag at all (fedMissing); a create in flight has no session to move yet (the chat split: a zone's drop would open a column on an id the kernel does not know)
+    tab.draggable = !s.sub && !fedMissing && !isProvisionalId(id) && !settings.tabsLocked;   // the tab lock (T395) holds every tab; …and a page without its manager offers no drag at all (fedMissing); a create in flight has no session to move yet (the chat split: a zone's drop would open a column on an id the kernel does not know)
     wireTabDrag(tab, id);   // the dragstart/dragend pair, shared with the skeleton tab (2026-09-07)
     if (s.color) {
       tab.style.setProperty("--chip-bg", s.color.bg);
@@ -6699,6 +6710,23 @@ function renderTabs() {
   add.title = titleWithKey("Open a session", "session.new");
   add.addEventListener("click", () => openPicker());
   bar.appendChild(add);
+  // THE TAB LOCK (T395, the user 2026-09-12): right after the + tab and before the tags box, in a little rounded box like
+  // the tags box (the user says the position may move later): the padlock the Sessions pane shows at its bottom (icons.ts,
+  // one drawing). A press freezes every tab move until the next press (setTabsLocked); locked, the box wears the menu
+  // vocabulary's current dress, the accent on the glyph and its outline, never a fill. The state is in the strip's
+  // signature, so the toggle repaints through it; the click is the node's own, click-safe because the strip is rebuilt
+  // only when its signature changes.
+  const lockBox = el("span", "tab-lockbox");
+  const lock = el("button", "tab-lock" + (settings.tabsLocked ? " on" : "")) as HTMLButtonElement;
+  lock.type = "button";
+  lock.innerHTML = settings.tabsLocked ? ICON_LOCK : ICON_LOCK_OPEN;
+  lock.title = settings.tabsLocked ? "Tabs are locked in place: click to allow moving them again" : "Lock the tabs in place: no drag or move until clicked again";
+  lock.setAttribute("aria-label", "Lock tabs");
+  lock.style.setProperty("--tab-lock-border", TAG_BTN_BORDER);   // the tag button's border, from its one source (tag-menu.ts), so the two boxes match by value (T395 round two)
+  lock.setAttribute("aria-pressed", settings.tabsLocked ? "true" : "false");
+  lock.addEventListener("click", (e) => { e.stopPropagation(); setTabsLocked(!settings.tabsLocked); });
+  lockBox.appendChild(lock);
+  bar.appendChild(lockBox);
   // the shared TAG-ICON filter (the user 2026-08-25): identical across surfaces, opening the one
   // multi-select lens menu — this instance governs the TAB STRIP (actives.chat)
   const tagBtn = tagMenuButton("filter these tabs by tag", (btn) => {
@@ -6789,7 +6817,8 @@ function renderTabs() {
     const h = Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((x) => x.dataset.group === focusedGroup);
     // the group gone, or now holding the active tab (no stop): the old rule
     if (h && h.tabIndex >= 0) h.focus(); else focusActiveTab();
-  } else if (refocusTab) focusActiveTab();
+  } else if (focusedLock) (bar.querySelector(".tab-lock") as HTMLElement | null)?.focus();   // not the active tab: Enter again would drop the caret into the composer
+  else if (refocusTab) focusActiveTab();
   stripAftermath(visibleIds, ids);
   // (The Fleet toggle that briefly lived here as a tab-bar pill was removed 2026-06-24: Fleet/Chat are now
   // the rotated toggles in the chat pane's vertical strip — see _LANDING_FLEET_JS — so the pill was redundant.)
@@ -7209,11 +7238,15 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           if (home) {
             lb.append("Move to ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
+            // the tab lock (T395): a move row is a tab move, so it reads held (the label dims, the row answers nothing); the + beside
+            // it still tags (adding is not a move), so it keeps its strength and says so itself (round one, LOW 1)
+            if (settings.tabsLocked) { row.classList.add("ctx-item-locked"); row.setAttribute("aria-disabled", "true"); bodyE.title = "Tabs are locked: the lock in the tab strip"; }
             const plus = el("button", "ctx-tag-x ctx-tag-plus") as HTMLButtonElement;
-            plus.type = "button"; plus.textContent = "+"; plus.title = "add this tag too — the session keeps its other tags";
+            plus.type = "button"; plus.textContent = "+";
+            plus.title = "add this tag too (the session keeps its other tags)" + (settings.tabsLocked ? ": adding is not a move, so the lock does not hold it" : "");
             plus.addEventListener("click", (e2) => { e2.stopPropagation(); editUnion(g, { add: [id] }); build(); sb.textContent = subText(); });
             row.appendChild(plus);
-            row.addEventListener("click", (e2) => { e2.stopPropagation(); moveUnion(home, g); build(); sb.textContent = subText(); });
+            row.addEventListener("click", (e2) => { e2.stopPropagation(); if (settings.tabsLocked) return; moveUnion(home, g); build(); sb.textContent = subText(); });
           } else {
             lb.append("+ ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
@@ -7581,7 +7614,7 @@ function startTabRename(id: string, copy?: string) {   // `copy`: which copy of 
     input.remove();
     fixed?.remove();
     label.style.display = "";
-    tab.draggable = !fedMissing;
+    tab.draggable = !fedMissing && !settings.tabsLocked;
     renameActive = false;
     if (renderPendingAfterRename) { renderPendingAfterRename = false; renderTabs(); }
     // The bare name, never the display string: the host prefix is this viewer's, and the kernel that
@@ -7904,7 +7937,10 @@ const PROVISIONAL_WAIT_MS = 90_000;
 // viewer are this page's own, never the store's, though both carry data-id on the strip), and whether this column has
 // a create in flight, or a failed one still holding its text, that would die with the document. Shape checks and a flag
 // read: any column's page answers for any id.
-(window as any).__rompMovableSession = (sid: unknown): boolean => typeof sid === "string" && !!sid && !isProvisionalId(sid) && !isSubId(sid);
+(window as any).__rompMovableSession = (sid: unknown): boolean => typeof sid === "string" && !!sid && !isProvisionalId(sid) && !isSubId(sid) && !settings.tabsLocked;   // …and nothing moves while the tabs are locked (T395)
+// the REASON behind the answer above (T395 round one): the shell's refusal toast names the padlock for a lock, and says
+// "only an open session" for the rest, instead of one line for both
+(window as any).__rompMoveRefusal = (sid: unknown): string => typeof sid !== "string" || !sid || isProvisionalId(sid) || isSubId(sid) ? "not-open" : settings.tabsLocked ? "locked" : "";
 (window as any).__rompColumnBusy = (): boolean => !!provisionalId || failedProvisionals.size > 0;
 
 function openProvisional(req: CreateReq): void {

@@ -83,7 +83,7 @@ test("a pick of a session another column holds is shown where it lives: the setA
   assert.match(RENDER, /import \{ localStrip, readCloseAckMs \} from "\.\/tab-order";/);
   // the shell's two questions before it moves a tab or closes a column (kernel.py moveTab / close; tests/test_chat_split.py
   // runs the refusals): an id a column can hold, and a create in flight here
-  assert.match(RENDER, /\(window as any\)\.__rompMovableSession = \(sid: unknown\): boolean => typeof sid === "string" && !!sid && !isProvisionalId\(sid\) && !isSubId\(sid\);/);
+  assert.match(RENDER, /\(window as any\)\.__rompMovableSession = \(sid: unknown\): boolean => typeof sid === "string" && !!sid && !isProvisionalId\(sid\) && !isSubId\(sid\) && !settings\.tabsLocked;/);   // …and no while the tabs are locked (T395)
   assert.match(RENDER, /\(window as any\)\.__rompColumnBusy = \(\): boolean => !!provisionalId \|\| failedProvisionals\.size > 0;/);
   assert.match(KERNEL, /function movable\(f,sid\)\{[^\n]*__rompMovableSession/);
   assert.match(KERNEL, /function busy\(f\)\{[^\n]*__rompColumnBusy/);

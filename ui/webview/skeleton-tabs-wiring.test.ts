@@ -85,7 +85,7 @@ test("makeSkeletonTab: the loaded-tab chrome minus what it does not know — no 
   assert.match(sk, /tab\.dataset\.id = id;/);
   assert.match(sk, /tab\.dataset\.act = "select";/, "the stable #tabs delegate — click-safe like every tab");
   assert.match(sk, /tab\.addEventListener\("keydown", onTabKey\);/);
-  assert.match(sk, /tab\.draggable = !fedMissing;\s*\n\s*wireTabDrag\(tab, id\);/, "a real live session: reordering is legitimate — unless the page has no manager to arrange it (2026-09-10)");
+  assert.match(sk, /tab\.draggable = !fedMissing && !settings\.tabsLocked;\s*\n\s*wireTabDrag\(tab, id\);/, "a real live session: reordering is legitimate — unless the page has no manager to arrange it (2026-09-10), or the tabs are locked (T395)");
   assert.match(sk, /tab\.classList\.add\("colored"\)/);
   assert.match(sk, /const status = skeletonTabs\.status\.get\(id\) as Status \| undefined;\s*\n\s*applyTabStatus\(tab, \{ id, status: status \?\? \{\} \}\);/,
     "the chip reads ONLY the kernel's status frames; none yet → an empty status → the unknown ring");

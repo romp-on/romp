@@ -137,3 +137,69 @@ test("executed: the ordering rule, both mirrors — tagOrder governs, unlisted n
   assert.deepEqual(viewTagUnion(proto).map((u: any) => u.name), ["zed", "constructor"],
     "a prototype-key name sorts as UNLISTED (after the ordered), never as index-of-Function");
 });
+
+// THE TAB LOCK (T395 round two, LOW 2): the pane reads the strip's store key at each gesture; locked, a pill drag never starts
+// (no listeners are armed, nothing posts), a drag whose store flipped to locked mid-gesture posts nothing at its drop, and the
+// dialog's row drag is held the same way. Executed here, over the same shim the pill drag above runs on.
+function withStore(value: any, fn: () => void) {
+  const real = g.localStorage.getItem;
+  g.localStorage.getItem = (k: string) => (k === "romp:settings" ? JSON.stringify(value) : null);
+  try { fn(); } finally { g.localStorage.getItem = real; }
+}
+function cellsOf(dlg: any, key: string): any[] {
+  const out: any[] = [];
+  (function walk(x: any) { for (const c of x.children || []) { if (c[key]) out.push(c); walk(c); } })(dlg);
+  return out;
+}
+
+test("executed: with the tabs locked a pill drag never starts and posts nothing; the pill says why", () => {
+  const posted: any[] = [];
+  g.__rompTimelineSetViews = (v: any) => posted.push(v);
+  g.__rompTimelineEditTag = () => {};
+  withStore({ tabsLocked: true }, () => {
+    const panel = drawnPanel();
+    panel._openViewsDialog(null);
+    const cells = cellsOf(panel._viewsDialog, "_tname");
+    assert.equal(cells.length, 4);
+    assert.equal(cells[3].style.cursor, "default", "no grab cursor while locked");
+    assert.match(String(cells[3].title), /the tabs are locked/, "the pill says why");
+    cells[3]._listeners.pointerdown({ preventDefault() {}, pointerId: 7 });
+    assert.equal(cells[3]._listeners.pointermove, undefined, "no drag listeners armed: the gesture never began");
+    assert.deepEqual(posted, [], "nothing posted");
+  });
+  delete g.__rompTimelineSetViews; delete g.__rompTimelineEditTag;
+});
+
+test("executed: a pill drag whose store flipped to locked mid-gesture posts nothing at its drop", () => {
+  const posted: any[] = [];
+  g.__rompTimelineSetViews = (v: any) => posted.push(v);
+  g.__rompTimelineEditTag = () => {};
+  const panel = drawnPanel();
+  panel._openViewsDialog(null);
+  const cells = cellsOf(panel._viewsDialog, "_tname");
+  cells.forEach((c, i) => { c._rect = { top: i * 30, bottom: i * 30 + 28, left: 0, right: 200, width: 200, height: 28 }; });
+  cells[0].parentNode._rect = { top: 0, bottom: 200, left: 0, right: 800, width: 800, height: 200 };
+  const grab = cells[3];
+  grab._listeners.pointerdown({ preventDefault() {}, pointerId: 7 });   // unlocked: the drag begins
+  grab._listeners.pointermove({ clientY: 31 });
+  withStore({ tabsLocked: true }, () => { grab._listeners.pointerup({}); });   // another window locked before the drop
+  assert.deepEqual(posted, [], "the drop writes nothing");
+  delete g.__rompTimelineSetViews; delete g.__rompTimelineEditTag;
+});
+
+test("executed: with the tabs locked the dialog's row drag never starts, and the row says why", () => {
+  const orders: any[] = [];
+  g.__rompTimelineWriteOrder = (o: any) => orders.push(o);
+  withStore({ tabsLocked: true }, () => {
+    const panel = drawnPanel();
+    panel._openViewsDialog(null);
+    const rows = cellsOf(panel._viewsDialog, "_sid");
+    assert.ok(rows.length >= 2, "the membership rows: " + rows.length);
+    assert.match(String(rows[0].getAttribute ? rows[0].getAttribute("style") : rows[0].style.cssText || ""), /cursor:default/, "no grab cursor while locked");
+    assert.match(String(rows[0].title), /the tabs are locked/, "the row says why");
+    rows[1]._listeners.pointerdown({ preventDefault() {}, pointerId: 9 });
+    assert.equal(rows[1]._listeners.pointermove, undefined, "no drag listeners armed");
+    assert.deepEqual(orders, [], "no order written");
+  });
+  delete g.__rompTimelineWriteOrder;
+});

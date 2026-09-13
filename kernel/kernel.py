@@ -54200,9 +54200,12 @@ function adopt(f,sid,state){if(!f||!state)return;try{f.contentWindow.postMessage
 // would die with the document if its last listed member left and the column closed under it. Shape checks and a flag
 // on the page, so any column's page answers for any id; an older page without them answers movable, not busy.
 function movable(f,sid){try{var m=f&&f.contentWindow&&f.contentWindow.__rompMovableSession;return typeof m==='function'?!!m(sid):true;}catch(e){return true;}}
+// the page's REASON behind movable (T395 round one): 'locked' means the tab lock, and the toast names the padlock; '' is movable
+function refusal(f,sid){try{var w=f&&f.contentWindow&&f.contentWindow.__rompMoveRefusal;return typeof w==='function'?String(w(sid)||''):'';}catch(e){return '';}}
 function busy(f){try{var b=f&&f.contentWindow&&f.contentWindow.__rompColumnBusy;return typeof b==='function'&&!!b();}catch(e){return false;}}
 function loaded(f){try{return !!(f&&f.contentWindow&&typeof f.contentWindow.__rompTakeSessionState==='function');}catch(e){return false;}}   // the page's bundle has evaluated, so a posted message is heard
 var BUSY='A session is still being created in this column.';
+var LOCKED='The tabs are locked: unlock them with the padlock in the tab strip to move this session.';
 function make(n,sid,state){var have=document.getElementById(frameId(n));if(have)return have;
 var g=document.createElement('div');g.className='gv gv-chat';g.id='gv-chat-'+n;
 var p=document.createElement('div');p.className='pane chat-col';p.id=paneId(n);p.setAttribute('data-col',String(n));
@@ -54233,7 +54236,7 @@ function unlist(sid){for(var i=0;i<cols.length;i++){var c=cols[i],j=c.ids.indexO
 // of the origin and the origin would close, so that is refused with a line rather than done for nothing.
 function moveTab(sid,to){if(typeof sid!=='string'||!sid)return null;
 var from=ownerOf(sid),src=frameOfCol(from);
-if(!movable(src,sid))return notify('Only an open session can be moved between columns.');
+var why=refusal(src,sid);if(why==='locked')return notify(LOCKED);if(why||!movable(src,sid))return notify('Only an open session can be moved between columns.');
 if(to==='new'){var se=entry(from);if(se&&se.ids.length===1)return notify('This session is already alone in its column.');
 if(!canSplit())return refuse();
 try{if(!document.body.classList.contains('po-chat')&&window.__rompPaneToggle)window.__rompPaneToggle('chat',true);}catch(e){}   // a hidden chat group comes forward first

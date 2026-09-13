@@ -149,6 +149,8 @@ function lift(): (hooks: Hooks) => Api {
     const fedMissing = false;   // the page has its federation manager (render.ts fedMissing, 2026-09-10): tabs drag as before
     const showTabTip = (tab, s) => { H.tips.push(s); }; const toggleLedgerCollapsed = () => {}; const showTabMenu = () => {}; const openPicker = () => {};
     const tagMenuButton = () => el("span", "tag-btn"); const openTagMenu = () => {}; const postLens = () => {}; const vscodeApi = null;
+    const ICON_LOCK = "<svg data-lock=seated></svg>"; const ICON_LOCK_OPEN = "<svg data-lock=open></svg>"; const setTabsLocked = () => {};   // the tab lock (T395): the strip builds the button; its press is outside this slice
+    const TAG_BTN_BORDER = "rgba(255,255,255,0.10)";   // the tag button's border the lock borrows (T395 round two)
     const syncTagFilter = () => { H.tagSyncs++; }; const paintTabRowLines = () => { H.rowPaints++; }; const ensureTabRowObserver = () => {};
     const focusActiveTab = () => {}; const syncNoSessionsPlaceholder = (v, t) => { H.aftermaths.push([v, t]); };
   `;

@@ -764,6 +764,11 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
    feed view menu's .forced items wear */
 .ctx-sub .ctx-item.disabled { opacity: 0.45; cursor: default; }
 .ctx-sub .ctx-item.disabled:hover { background: transparent; color: inherit; }   /* .ctx-item:hover also recolours */
+/* a Move to row held by the tab lock (T395): the label dims and the row stops answering, but the + beside it still tags
+   (adding is not a move), so it keeps full strength and its own title; hence the dim on the body, not the row */
+.ctx-sub .ctx-item.ctx-item-locked { cursor: default; }
+.ctx-sub .ctx-item.ctx-item-locked > .ctx-item-body { opacity: 0.45; }
+.ctx-sub .ctx-item.ctx-item-locked:hover { background: transparent; color: inherit; }
 .ctx-sub .ctx-item.current::after {
   content: "✓"; position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
   background: var(--check-bg); color: #fff; border-radius: 50%;
@@ -824,6 +829,15 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
    pill and landed nearly flush under the tab row above, while a line the + shared had air (the
    user 2026-08-25). Inner centering keeps the pill and chips at their own sizes. */
 .tab-tagbox { display: inline-flex; align-items: center; flex-wrap: wrap; min-height: 31px; }
+/* THE TAB LOCK (T395, the user 2026-09-12): a little rounded box like the tags box, right after the + tab (the user says
+   the position may move later), with the same floor so a controls-only line stays as tall as one the + is on; the
+   padlock gray at rest, and locked it wears the menu vocabulary's current dress, the accent on the glyph and the
+   outline, never a colour fill. */
+.tab-lockbox { display: inline-flex; align-items: center; min-height: 31px; margin-left: 4px; }
+.tab-lock { display: inline-flex; align-items: center; background: transparent; border: 1px solid var(--tab-lock-border, var(--box-border)); border-radius: 6px; padding: 4px 6px; cursor: pointer; color: var(--dim); }   /* the border is the tag button's own value, set by the strip from tag-menu.ts (one source); the glyph is 14px like the tag's, so both boxes measure 28 by 24 */
+.tab-lock:hover { color: var(--fg); }
+.tab-lock.on { color: var(--accent); border-color: var(--accent); }
+.tab-lock svg { display: block; }
 .tab-add:hover { color: var(--fg); background: rgba(255, 255, 255, 0.04); }
 /* (The .tab-fleet pill was removed 2026-06-24 — Fleet/Chat are now the rotated toggles in the chat pane's
    vertical strip, so the tab-bar pill was redundant.) */
@@ -4392,6 +4406,7 @@ body.dense-chrome .tab-add { padding: 3px 8px; font-size: 1.1em; }              
    the 18px line + 2 x 3px dense padding + the 1px border; #tabs stretches every item on a row to the tallest, so
    without this the row holding the + and the tag control would stay 31px beside 25px rows */
 body.dense-chrome .tab-tagbox { min-height: 25px; }                                     /* 31px */
+body.dense-chrome .tab-lockbox { min-height: 25px; }                                    /* 31px; the lock box follows the tags box (T395) */
 body.dense-chrome .tab-group-head { gap: 4px; padding: 3px 5px; }                       /* 5px; 6px 7px — the dense tab's own padding, so the row keeps a tab's box here too (T322) */
 /* the untagged trail's divider (the inline layout, stripGroupRows off): its 1px line is the content area under fixed
    gutters, so the 8px gutters sized for the 32px row would leave a 9px line in the 25px row; 6px keeps the default's

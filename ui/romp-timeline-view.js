@@ -11,6 +11,7 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 const MIN_W = 60, MAX_W = 172800;                  // 1 min … 48 h window (NICE has 60 → 1-min ticks render)
 const MAX_OFFSET = 72 * 3600;                      // pan slider: right edge from now (0) back to −72 h (linear)
 // Compact metrics: rows collapse to the minimum height a bar+dots+label need.
+const LOCKED_TEXT = 'the tabs are locked: unlock them with the padlock in the tab strip to move sessions';   // the tab lock (T395)
 const LANE_GAP = 26, BAR_H = 8, CORNER = 6, MSG_DROP = 10, DOT_R = 6, CLEAR = DOT_R + 4, COINCIDE = 45;
 // Demo/recording VIEW filter (the user 2026-07-14): the dashboard loaded at `#only=<tag>` scopes every
 // pane to sessions whose name starts with <tag>. The timeline reads the SHELL's URL (window.top) so one
@@ -2416,7 +2417,16 @@ class TimelinePanel {
   }
   // One mousedown on a lane; the first real movement decides via dragAxis: horizontal → PAN the plot,
   // vertical → REORDER the lane. A plain click (no movement) falls through to the row's select handler.
+  // THE TAB LOCK (T395 round one): the chat strip's padlock holds this pane's drags too, since the lanes and the tabs share
+  // one order (and the pills one tagOrder). The setting is the strip's own store key, read at each gesture (this file is
+  // served raw, so no import: the storage key, and the storage event above for the repaint, are its road); a drag never
+  // starts while locked, a persist refuses one that began before another window locked, and the lanes say why on hover.
+  _tabsLocked() {
+    try { const s = JSON.parse(localStorage.getItem('romp:settings') || '{}'); return !!(s && s.tabsLocked === true); }
+    catch (e) { return false; }
+  }
   _beginDrag(sid, e) {
+    if (this._tabsLocked()) return;                            // the tab lock holds the lanes (a plain click still selects)
     if (e.button !== 0 || !this._geom) return;                 // left button, need geometry
     const order = (this._vis || []).map((s) => s.id);
     const fromIdx = order.indexOf(sid);
@@ -2531,6 +2541,11 @@ class TimelinePanel {
   // reordering themselves" bug the order-audit log finally pinned (the user 2026-07-02). _kernelHost's
   // Electron-or-nothing guard is that rule.
   _persistOrder(order, prev, sid, from) {
+    if (this._tabsLocked()) {                                  // locked since the drag began (another window's press): nothing is written, the lanes go back
+      if (Array.isArray(prev)) this._applyOrderToData(prev);
+      this.settingRefused({ gesture: 'order', sid: sid || '', from: from || '', text: LOCKED_TEXT });
+      return;
+    }
     try {
       if (typeof window !== 'undefined' && typeof window.__rompTimelineWriteOrder === 'function') {
         window.__rompTimelineWriteOrder(order); return;
@@ -4560,8 +4575,10 @@ class TimelinePanel {
           const pillCell = tgrid.createDiv();
           pillCell._tname = tg.name;
           if (!tg.pending && (this._tagEditorFor !== unionKey(tg) || !editable)) {
-            pillCell.style.cursor = 'grab';
+            pillCell.style.cursor = this._tabsLocked() ? 'default' : 'grab';
+            if (this._tabsLocked()) pillCell.title = LOCKED_TEXT;
             pillCell.addEventListener('pointerdown', (e) => {
+              if (this._tabsLocked()) return;   // the tab lock (T395) holds the pill order too
               e.preventDefault();
               const cells = Array.from(tgrid.children).filter((c) => c._tname);
               const fromIdx = cells.indexOf(pillCell);
@@ -4625,7 +4642,7 @@ class TimelinePanel {
                 // the union display order, remote-homed names included; the kernel orders the
                 // stored tags array by it (lensBlob's own re-sort matters on the Electron path,
                 // where the posted blob is the file)
-                this._setLens({ tagOrder: names }, { tagOrder: true });
+                if (!this._tabsLocked()) this._setLens({ tagOrder: names }, { tagOrder: true });   // locked mid-drag: no write
                 build();
               };
               pillCell.addEventListener('pointermove', onMove);
@@ -4997,10 +5014,12 @@ class TimelinePanel {
           // cue moves WITHOUT rebuilding mid-drag (the redraw-eats-pointer rule); the rebuild —
           // and the persist — happen on the drop.
           const nameCell = grid.createDiv();
-          nameCell.setAttribute('style', 'white-space:nowrap;cursor:grab;');
+          nameCell.setAttribute('style', 'white-space:nowrap;cursor:' + (this._tabsLocked() ? 'default' : 'grab') + ';');
+          if (this._tabsLocked()) nameCell.title = LOCKED_TEXT;   // the tab lock (T395)
           nameCell._sid = s.id;
           nameCell.addEventListener('pointerdown', (e) => {
             e.preventDefault();
+            if (this._tabsLocked()) return;   // the tab lock (T395) holds the dialog's rows too
             const cells = Array.from(grid.children).filter((c) => c._sid);
             const fromIdx = cells.indexOf(nameCell);
             if (fromIdx < 0) return;
@@ -5812,7 +5831,8 @@ class TimelinePanel {
       // it at the bottom (latest) — same as a bar, just no anchor. Non-interactive lane elements below
       // are pointer-events:none so their area falls through here; bars/dots keep their handlers on top.
       const rowHit = el('rect', { x: 0, y: y - LANE_GAP / 2, width: W, height: LANE_GAP, fill: 'transparent' });
-      rowHit.style.cursor = 'grab';   // grab = drag to PAN (horizontal) or REORDER (vertical); a plain click still selects/opens
+      rowHit.style.cursor = this._tabsLocked() ? 'default' : 'grab';   // grab = drag to PAN (horizontal) or REORDER (vertical); a plain click still selects/opens; the tab lock (T395) takes the grab away
+      if (this._tabsLocked()) { const lt = el('title', {}); lt.textContent = LOCKED_TEXT; rowHit.appendChild(lt); }
       rowHit.addEventListener('mousedown', (e) => this._beginDrag(s.id, e));   // drag starts on EMPTY row space only (bars/dots keep their click → jump-to-chat)
       rowHit.addEventListener('click', () => {
         if (this._suppressClick) { this._suppressClick = false; return; }   // just finished a drag → not a select
@@ -5874,7 +5894,7 @@ class TimelinePanel {
             .map((d) => '<div class="b" style="opacity:.85">' + esc(d) + '</div>').join('');
           const tip = '<div class="r"><span class="chip" style="background:' + s.color + '"></span><span class="who" style="color:' + s.color + '">' + esc(s.name)
             + '</span><span class="t">' + clock(anchor) + '– awaiting…</span></div>' + rows;
-          const wh = el('rect', { x: lx1, y: y - 7, width: lx2 - lx1, height: 14, fill: 'transparent' }); wh.style.cursor = 'grab';
+          const wh = el('rect', { x: lx1, y: y - 7, width: lx2 - lx1, height: 14, fill: 'transparent' }); wh.style.cursor = this._tabsLocked() ? 'default' : 'grab';
           wh.addEventListener('mouseenter', (e) => { ln.setAttribute('stroke-width', String(BAR_H + 2)); ln.setAttribute('opacity', '0.6'); this.showTip(tip, e); });
           wh.addEventListener('mousemove', (e) => this.moveTip(e));
           wh.addEventListener('mouseleave', () => { ln.setAttribute('stroke-width', String(BAR_H)); ln.setAttribute('opacity', '0.4'); this.hideTip(); });
@@ -6735,6 +6755,7 @@ class TimelinePanel {
     const hit = el('rect', { x: -2, y: -1, width: 19, height: 15, fill: 'transparent' });   // hit pad (whole glyph clickable)
     g.appendChild(hit);
     const st = { fill: 'none', stroke: color, 'stroke-width': 1.4, 'stroke-linecap': 'round', 'pointer-events': 'none' };
+    // the same numbers as ui/webview/icons.ts ICON_LOCK / ICON_LOCK_OPEN (the chat strip's tab lock, T395): one drawing, change both
     g.appendChild(el('rect', Object.assign({ x: 3, y: 6.2, width: 8, height: 5.6, rx: 1.2 }, st)));
     g.appendChild(el('path', Object.assign({ d: on ? 'M4.8 6.2 V4.4 a2.2 2.2 0 0 1 4.4 0 V6.2'           // seated shackle (locked)
                                                   : 'M9.4 6.2 V5.3 A2.4 2.4 0 0 1 13.6 3.7' }, st)));   // swung-out shackle (unlocked)

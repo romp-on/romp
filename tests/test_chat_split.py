@@ -277,13 +277,13 @@ class SplitSourcePins(unittest.TestCase):
         # the one refusal line each; the movable check at the top of the one mutation, the busy check where a column's
         # last listed member would leave and where a column is closed by hand (a reconcile of another tab's write is not)
         for needle in ["function movable(f,sid){", "function busy(f){", "function loaded(f){",
-                       "if(!movable(src,sid))return notify('Only an open session can be moved between columns.');",
+                       "var why=refusal(src,sid);if(why==='locked')return notify(LOCKED);if(why||!movable(src,sid))return notify('Only an open session can be moved between columns.');",
                        "var BUSY='A session is still being created in this column.';",
                        "var se2=entry(from);if(se2&&se2.ids.length===1&&busy(src))return notify(BUSY);",
                        "if(!keep&&busy(f)){notify(BUSY);return;}"]:
             self.assertIn(needle, split, needle)
         mt = split[split.index("function moveTab(sid,to){"):split.index("function close(n,keep){")]
-        self.assertLess(mt.index("if(!movable(src,sid))"), mt.index("if(to==='new'){"), "refused before anything is taken or grown")
+        self.assertLess(mt.index("var why=refusal(src,sid);"), mt.index("if(to==='new'){"), "refused before anything is taken or grown (the reason read first, T395)")
         self.assertLess(mt.index("busy(src)"), mt.index("var st=take(src,sid)"), "refused before the hand-off")
         # a column closed for emptiness tells the first column which of its gone ids the page's own cross removed, ahead of
         # the store write; nothing else is held (the vanishing tab, 2026-09-12)
@@ -322,6 +322,7 @@ let STORE = {};
 const CALLS = { register: [], unregister: [], growFair: [], splitGrow: [], splitShrink: [], gutter: [], wireFocus: [], wireEsc: [], colGone: [], events: [], posted: [], focus: [], notify: [], toggle: [], taken: [], sets: [] };
 let SEQ = [];             // the order of the shell's side effects across stubs (a store write, a post, a grow, a key drop)
 let UNMOVABLE = new Set(); // ids the pages answer "not a session a column can hold" for (a create in flight, a viewer)
+let LOCKED_SIDS = new Set(); // ids whose page answers 'locked' (the tab lock, T395): the toast names the padlock
 let BUSY = {};            // frame id → whether that page reports a create in flight
 global.localStorage = { getItem: (k) => (k in STORE ? STORE[k] : null), setItem: (k, v) => { STORE[k] = String(v); CALLS.sets.push(k); SEQ.push('set:' + k); }, removeItem: (k) => { delete STORE[k]; } };
 let BODY_CLASSES = new Set(['po-chat', 'po-feed', 'po-timeline']);
@@ -358,7 +359,8 @@ function mkEl(tag) {
     el.contentWindow = {
       postMessage(m) { CALLS.posted.push({ id: el.id, m }); SEQ.push('post:' + el.id + ':' + (m.romp || m.type)); }, focus() { CALLS.focus.push(el.id); },
       __rompTakeSessionState(sid) { const held = TAKE[el.id] && TAKE[el.id][sid]; CALLS.taken.push([el.id, sid, !!held]); if (!held) return null; delete TAKE[el.id][sid]; return held; },
-      __rompMovableSession(sid) { return !UNMOVABLE.has(sid); },
+      __rompMovableSession(sid) { return !UNMOVABLE.has(sid) && !LOCKED_SIDS.has(sid); },
+      __rompMoveRefusal(sid) { return LOCKED_SIDS.has(sid) ? 'locked' : UNMOVABLE.has(sid) ? 'not-open' : ''; },
       __rompColumnBusy() { return !!BUSY[el.id]; },
     };
     el.contentDocument = { querySelector(sel) { return (sel === '#tabs .tab.active[data-id]' && el._active) ? { getAttribute: () => el._active } : null; } };
@@ -392,7 +394,7 @@ global.__rompColGone = (c) => CALLS.colGone.push(c);
 global.__rompFocusedChatId = () => FOCUSED;
 function boot(store, mobile) {
   STORE = Object.assign({}, store || {}); MOBILE = !!mobile; BYID = {}; WL = {}; TAKE = {}; FOCUSED = 'f-chat'; BODY_CLASSES = new Set(['po-chat', 'po-feed', 'po-timeline']);
-  SEQ = []; UNMOVABLE = new Set(); BUSY = {};
+  SEQ = []; UNMOVABLE = new Set(); LOCKED_SIDS = new Set(); BUSY = {};
   for (const k in CALLS) CALLS[k] = [];
   ROW = mkEl('div'); ROW.className = 'row';
   const cp = mkEl('div'); cp.id = 'chat-pane'; const fc = mkEl('iframe'); fc.id = 'f-chat'; cp.appendChild(fc); ROW.appendChild(cp);
@@ -554,6 +556,15 @@ out.unmovable = { prov: window.__rompMoveTab(PROV, 'new'), provInto2: window.__r
 BYID['f-chat']._active = PROV; CALLS.notify = [];
 out.unmovable.palette = { r: window.__rompSplitChat(), notify: CALLS.notify.slice(), stored: cols(), ids: ids() };
 BYID['f-chat']._active = '';
+// the tab lock (T395 round one): the page answers 'locked', and the toast names the padlock, not "an open session"
+LOCKED_SIDS.add(API); CALLS.notify = [];
+out.locked = { r: window.__rompMoveTab(API, 2), notify: CALLS.notify.slice(), stored: cols(), ids: ids() };
+LOCKED_SIDS = new Set();
+// an OLDER chat bundle (no __rompMoveRefusal on its frame): the shell falls to the movable question and its one line (round two, LOW 3)
+const olderWin = BYID['f-chat'].contentWindow, refusalFn = olderWin.__rompMoveRefusal;
+delete olderWin.__rompMoveRefusal; UNMOVABLE.add(PROV); CALLS.notify = [];
+out.older = { r: window.__rompMoveTab(PROV, 'new'), notify: CALLS.notify.slice(), hasField: typeof olderWin.__rompMoveRefusal };
+olderWin.__rompMoveRefusal = refusalFn; UNMOVABLE = new Set();
 BUSY['f-chat-2'] = true; CALLS.notify = []; CALLS.sets = []; CALLS.taken = []; CALLS.unregister = [];
 out.busy = { home: window.__rompMoveTab(API, 1), ids: ids(), stored: cols(), notify: CALLS.notify.slice(), saves: saves(), taken: CALLS.taken.slice() };
 crossOf('f-chat-2').fire('click', { stopPropagation() {} });
@@ -852,6 +863,22 @@ class SplitExecutes(unittest.TestCase):
         self.assertIsNone(p["r"], "the palette's move of a create in flight (the active tab) is the same refusal")
         self.assertEqual(p["notify"], [["warn", "Only an open session can be moved between columns."]])
         self.assertEqual(p["stored"], u["stored"]); self.assertEqual(p["ids"], ["f-chat", "f-chat-2"])
+
+    def test_a_locked_page_refuses_the_move_with_a_toast_that_names_the_padlock(self):
+        # T395 round one (MEDIUM 2): the page's answer carries its reason; a lock is not "not an open session", and the toast
+        # says the way back
+        l = self.out["locked"]
+        self.assertIsNone(l["r"])
+        self.assertEqual(l["notify"], [["warn", "The tabs are locked: unlock them with the padlock in the tab strip to move this session."]])
+        self.assertEqual(l["stored"], self.out["unmovable"]["stored"], "the store is untouched")
+        self.assertEqual(l["ids"], self.out["unmovable"]["ids"], "no column opened")
+
+    def test_an_older_bundle_without_the_refusal_field_falls_to_the_movable_question(self):
+        # round two, LOW 3: a chat page from before the refusal field answers only the movable question, and the shell's one line stands
+        o = self.out["older"]
+        self.assertEqual(o["hasField"], "undefined", "the frame was minted without the field")
+        self.assertIsNone(o["r"])
+        self.assertEqual(o["notify"], [["warn", "Only an open session can be moved between columns."]])
 
     def test_a_column_with_a_create_in_flight_keeps_its_last_member_and_stays_open(self):
         # its queued text and draft would die with the document (review find 2026-09-11): the move that would empty it,

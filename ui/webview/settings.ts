@@ -29,6 +29,7 @@ export interface RompSettings {
   panes: PaneSet;   // which OPTIONAL dashboard panes this browser shows at all (the user 2026-09-10): Sessions (key timeline), Outline (key fleet) and Feed. Per browser, like the rail's romp-panes toggle, but a different thing: the rail hides a loaded pane; a pane off HERE is not in the dashboard at all (no rail button, no phone tab, no palette command, its iframe never given a src, so no socket and nothing built for it). The chat is required and not listed; the Files pane keeps its rail toggle. The shell (_LANDING_COLLAPSE_JS) reads it at boot and on the storage event; the kernel keeps judging and tracking regardless, this is a view setting.
   denseChrome: boolean;   // chat page: COMPACT TABS AND AGENTS (the user 2026-09-08: on a phone, the tab strip and the background-work panel left about three lines of transcript in view). Density only, as a body class (dense-chrome.ts applyDenseChrome, run with the scheme and theme appliers): smaller tabs and group headers in the strip, tighter rows in the #bg-tasks panel with its list capped at about four rows. OFF by default: the strip and the panel are unchanged until the gear opts in. Distinct from `compact`, the transcript's own tidy-up (tool runs collapsed, thinking hidden).
   tabWidgets: TabWidgetPrefs;   // the tab-title WIDGETS (T379, the user 2026-09-12): which of the registered marks a tab carries (the status dot, the context bar, the hot-key keycap), their order and their options, set from the gear's Tab widgets section on the Chat tab. `tabCtx` above stays the context bar's MIRROR: a store with no tabWidgets derives them from it, and every save writes it back from them (tab-widgets.ts).
+  tabsLocked: boolean;   // chat tab strip: THE LOCK (T395, the user 2026-09-12): on, no tab moves (the drag reorder, a drag into another column or the split's edge, the tab menu's Move to rows) until the lock is clicked again. Per browser like every gear setting and fanned out the same way (settingsSync). OFF by default; only the literal true locks.
 }
 // Solarized LIGHT is deliberately absent (the user allowed skipping it): its text tiers are designed
 // for a paper-light ground and invert into mud on romp's dark canvas — an unreadable preset is worse
@@ -75,7 +76,7 @@ export function tabCtxMode(v: unknown): TabCtxMode {
 // hand-written "why" as their line; they show the distiller's summary instead (the why demotes to a hover).
 // compact defaults ON (the user 2026-07-14): a fresh install reads the tidy transcript
 // (thinking hidden, tool runs folded); the gear opts back into the full stream.
-export const DEFAULT_SETTINGS: RompSettings = { compact: true, colormap: "aurora", subgoals: true, showIndexJudges: false, showTriageJudges: false, backend: "sdk", defaultDir: "", showBranch: false, showSessionBadge: false, tabCtx: "over50", fileLinkPane: "chat", stripGroupRows: true, showFilesControl: false, chatScheme: "default", chatTabTheme: "classic", theme: "classic", denseChrome: false, panes: { timeline: true, fleet: true, feed: true }, tabWidgets: { on: {}, order: [], opts: {} } };
+export const DEFAULT_SETTINGS: RompSettings = { tabsLocked: false, compact: true, colormap: "aurora", subgoals: true, showIndexJudges: false, showTriageJudges: false, backend: "sdk", defaultDir: "", showBranch: false, showSessionBadge: false, tabCtx: "over50", fileLinkPane: "chat", stripGroupRows: true, showFilesControl: false, chatScheme: "default", chatTabTheme: "classic", theme: "classic", denseChrome: false, panes: { timeline: true, fleet: true, feed: true }, tabWidgets: { on: {}, order: [], opts: {} } };
 const KEY = "romp:settings";
 
 export function loadSettings(): RompSettings {
@@ -86,6 +87,7 @@ export function loadSettings(): RompSettings {
       const s = { ...DEFAULT_SETTINGS, ...parsed };
       s.tabCtx = tabCtxMode(s.tabCtx);   // a store written by the boolean-era gear holds true/false
       s.fileLinkPane = fileLinkPane(s.fileLinkPane);   // only "pane" opts in; anything else reads as the default
+      s.tabsLocked = s.tabsLocked === true;   // the tab lock (T395): only the literal true locks; a store from before the key reads unlocked
       s.showFilesControl = s.showFilesControl === true;   // only the literal true shows the control; anything else hides it (the default since T317b)
       delete (s as Record<string, unknown>).filesControl;   // the T317-era key (merged in by that gear's whole-object save): never read, gone on the next save
       s.chatScheme = chatScheme(s.chatScheme);   // unknown/legacy values normalize to "default"
