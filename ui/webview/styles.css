@@ -1926,7 +1926,7 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   from { background: rgba(224, 176, 32, 0.30); }
   to   { background: transparent; }
 }
-.turn.anchor-flash { animation: anchor-flash 1.6s ease-out; border-radius: 6px; }
+.anchor-flash { animation: anchor-flash 1.6s ease-out; border-radius: 6px; }   /* the turn, or the aligned element inside it when the landing aligns on quoted words or a text atom (T386) */
 
 /* ---------- user turn — a Signal-style OUTGOING bubble (the user's own messages) ----
    solid saturated blue + white text, right-aligned, so "your voice" is unmistakable.

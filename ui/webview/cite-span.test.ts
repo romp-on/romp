@@ -33,14 +33,15 @@ test("the span rides the payload only while it was located IN the landing atom",
 
 test("the landing highlights with zero DOM surgery, and falls back honestly", () => {
   assert.match(RENDER, /pendingAnchorQuote = typeof \(m as \{ anchorQuote\?: string \}\)\.anchorQuote === "string"/);
-  assert.match(RENDER, /if \(pendingAnchorQuote\) \{ highlightCiteSpan\(target, pendingAnchorQuote\); pendingAnchorQuote = null; \}/,
-    "consumed exactly at the successful landing — an honest-fail never strands a stale span");
-  const fn = RENDER.slice(RENDER.indexOf("function highlightCiteSpan"), RENDER.indexOf("function landOn"));
+  assert.match(RENDER, /const quote = pendingAnchorQuote; pendingAnchorQuote = null;\s*\n\s*const quoteEl = quote \? highlightCiteSpan\(target, quote\) : null;/,
+    "consumed exactly at the successful landing — an honest-fail never strands a stale span; the element the sentence starts in is what the landing aligns on (T386)");
+  const fn = RENDER.slice(RENDER.indexOf("function highlightCiteSpan"), RENDER.indexOf("// ── a landing SETTLES"));
   assert.match(fn, /CSS as unknown as \{ highlights\?: Map<string, unknown> \}/,
     "the CSS Custom Highlight API — the ever-re-rendering turn list is never mutated");
-  assert.match(fn, /if \(!H \|\| typeof Highlight === "undefined"\) return;/, "no API → today's whole-message landing");
-  assert.match(fn, /if \(!m\) return;\s*\/\/ unfindable in the rendered text → no highlight, no guess/);
-  assert.match(fn, /scrollElInto\(content0, el0, "center", "land-on"\)/, "land ON the sentence, not the message top — through the write helper, attributed (T262j)");
+  assert.match(fn, /if \(!H \|\| typeof Highlight === "undefined"\) return null;/, "no API → the whole-message landing");
+  assert.match(fn, /if \(!m\) return null;\s*\/\/ unfindable in the rendered text → no highlight, no guess/);
+  assert.match(fn, /return range\.startContainer\.parentElement;/, "the sentence's element goes back to the landing, which aligns on it in its one settled write (T386); no second write from here");
+  assert.doesNotMatch(fn, /scrollElInto\(/, "the highlight moves nothing itself");
   assert.match(CSS, /::highlight\(cite-span\) \{ background-color: color-mix\(in srgb, var\(--accent\) 30%, transparent\);/,
     "accent-tinted, never a status colour (via the token, so the light theme re-inks it)");
 });

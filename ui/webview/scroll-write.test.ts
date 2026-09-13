@@ -32,7 +32,7 @@ test("a scroll event within a pixel of the last programmatic write is its echo; 
   // the marker is one-shot (verifier low, T366 round two): set only by a write that MOVED the view, consumed by the first
   // event after it whatever that event was, so a gesture that lands within a pixel of an old write's target is a gesture
   assert.match(RENDER, /const after = content\.scrollTop;\s*\n\s*if \(after !== before\) lastScrollWriteAfter = after;/, "a write that did not move owes no echo");
-  assert.match(RENDER, /const cls = classifyScroll\(c\.scrollTop, lastScrollWriteAfter\);[\s\S]{0,400}?\n\s*lastScrollWriteAfter = null;/, "the first event after the write consumes the marker, echo or not");
+  assert.match(RENDER, /const cls = classifyScroll\(c\.scrollTop, lastScrollWriteAfter\);[\s\S]{0,900}?\n\s*lastScrollWriteAfter = null;/, "the first event after the write consumes the marker, echo or not");
 });
 
 test("the row names the writer and carries before/after/delta/stick, gesture:false", () => {
@@ -59,5 +59,5 @@ test("render.ts: one helper writes #content.scrollTop, files the row only when t
   const raw = RENDER.split("\n").filter((l) => /\b(content|c)\.scrollTop (=|\+=|-=) /.test(l) && !/writeScroll|const |let /.test(l));
   assert.deepEqual(raw.map((l) => l.trim()), ["content.scrollTop = top;"], "the only assignment is the helper's own");
   // the gesture marker: a write's echo is consumed, anything else files a gesture row
-  assert.match(RENDER, /const cls = classifyScroll\(c\.scrollTop, lastScrollWriteAfter\);\s*\n\s*const gv = activeId \? views\.get\(activeId\) : null;\s*\n\s*if \(gv\) gv\.gestureScroll = cls === "gesture";[^\n]*\n\s*lastScrollWriteAfter = null;[^\n]*\n\s*if \(cls !== "write-echo"\) scrollDiagRow\("scrollgesture", \{ sid: activeId \|\| "", top: c\.scrollTop, gesture: true, sh: c\.scrollHeight, ch: c\.clientHeight \}\);/, "the scroll nobody's code asked for is the user's; a write's echo is consumed, never filed (the classification is read once and marks the view for the edge check, T366)");
+  assert.match(RENDER, /const cls = classifyScroll\(c\.scrollTop, lastScrollWriteAfter\);\s*\n\s*const gv = activeId \? views\.get\(activeId\) : null;\s*\n\s*if \(gv\) gv\.gestureScroll = cls === "gesture";[^\n]*\n\s*if \(cls === "gesture"\) \{ if \(gestureEvidence\(settleLastInput, Date\.now\(\), settleScrollerHeld\)\) settleGesture\(\); else settleSample\(\); \}[^\n]*\n(?:\s*\/\/[^\n]*\n){3}\s*lastScrollWriteAfter = null;[^\n]*\n\s*if \(cls !== "write-echo"\) scrollDiagRow\("scrollgesture", \{ sid: activeId \|\| "", top: c\.scrollTop, gesture: true, sh: c\.scrollHeight, ch: c\.clientHeight \}\);/, "the scroll nobody's code asked for is the user's; a write's echo is consumed, never filed (the classification is read once and marks the view for the edge check, T366)");
 });

@@ -50,6 +50,9 @@ import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (th
 
 SID = "aaaaaaaa-1111-2222-3333-444444444444"
 TURNS = 320   # 640 events: past the wire tail, so older history stays on the server and the page's run is a tail
+TOOL_TURN = 40   # the turn whose reply opens with four tool calls and ends with the words (T386's card-anchor road)
+TOOL_TURN_TEXT = ("The four checks passed. Two questions for you: which bound do we keep for the retry curve, "
+                  "and do we drop the second plot?")
 
 
 def _free_port():
@@ -67,7 +70,7 @@ const require = createRequire(process.env.EXT_PKG);
 const { chromium } = require("playwright");
 const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 let browser;
-try { browser = await chromium.launch(); }
+try { browser = await chromium.launch(cfg.launch || {}); }   // a lab may ask for classic scrollbars (the settle lab's drag road): Playwright hides them headless by default
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: { width: 1000, height: 600 } });
 // every frame the page sends its kernel, by type: the window asks, the older asks and the re-attach ask are the evidence
@@ -162,7 +165,10 @@ process.exit(0);
 """
 
 
-class ServedWindowLanding(unittest.TestCase):
+class WindowLab(unittest.TestCase):
+    """The boot: a hermetic kernel over a synthetic transcript longer than the wire tail, the real /chat page served
+    from a copy of the built bundle. Subclassed by this module's tests and by the landing lab (T386,
+    tests/test_landing_settles_browser.py); carries no tests of its own."""
     maxDiff = None
 
     @classmethod
@@ -199,13 +205,34 @@ class ServedWindowLanding(unittest.TestCase):
             ta = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(base + 2 * k + 1))
             recs.append({"type": "user", "uuid": u, "parentUuid": prev, "timestamp": tu, "sessionId": SID,
                          "message": {"role": "user", "content": "question number %d about the notes api" % k}})
-            recs.append({"type": "assistant", "uuid": a, "parentUuid": u, "timestamp": ta, "sessionId": SID,
+            text = "Answer %d: the handler reads the note by id and returns it." % k
+            pa = u
+            if k == TOOL_TURN:
+                # one turn whose FIRST atoms are tool calls (four, like a card's anchor on a Bash) and whose words come last
+                # (T386): a card anchored on the first atom must land the reader on the words, not on the tool group
+                for i in range(4):
+                    tu_id = "toolu_%03d_%d" % (k, i)
+                    tuu = "44444444-5555-6666-7777-%012d" % (10 * k + i)
+                    tru = "55555555-6666-7777-8888-%012d" % (10 * k + i)
+                    recs.append({"type": "assistant", "uuid": tuu, "parentUuid": pa, "timestamp": ta, "sessionId": SID,
+                                 "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "tool_use",
+                                             "content": [{"type": "tool_use", "id": tu_id, "name": "Bash", "input": {"command": "true # check %d" % i}}]}})
+                    recs.append({"type": "user", "uuid": tru, "parentUuid": tuu, "timestamp": ta, "sessionId": SID,
+                                 "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tu_id, "content": "ok"}]},
+                                 "toolUseResult": {"stdout": "ok", "stderr": "", "interrupted": False, "isImage": False}})
+                    pa = tru
+                text = TOOL_TURN_TEXT
+            recs.append({"type": "assistant", "uuid": a, "parentUuid": pa, "timestamp": ta, "sessionId": SID,
                          "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "end_turn",
-                                     "content": [{"type": "text", "text": "Answer %d: the handler reads the note by id and returns it." % k}]}})
+                                     "content": [{"type": "text", "text": text}]}})
             prev = a
         Path(proj, SID + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+        cls.transcript = os.path.join(proj, SID + ".jsonl")      # a lab that appends a live turn writes here (T386)
         cls.deep_uuid = "11111111-2222-3333-4444-%012d" % 20   # the eleventh question: far above the tail the page holds
         cls.deep_t = base + 20                                     # …and its time, as a card's focus frame carries it
+        cls.tool_uuid = "44444444-5555-6666-7777-%012d" % (10 * TOOL_TURN)   # the tool turn's FIRST atom: a card's anchor (T386)
+        cls.tool_t = base + 2 * TOOL_TURN + 1
+        cls.tool_quote = "which bound do we keep for the retry curve"
         cls.base = base
         cls.port = _free_port()
         cls.token = "testtok-livepaused"
@@ -231,12 +258,13 @@ class ServedWindowLanding(unittest.TestCase):
             cls.kernel.wait()
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
-    def _drive(self, script, name):
+    def _drive(self, script, name, extra=None):
         cfg = os.path.join(self.lab, name + ".json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sid": SID,
-                       "deepUuid": self.deep_uuid, "deepT": self.deep_t, "base": self.base,
-                       "shots": os.environ.get("LIVE_PAUSED_SHOTS", "")}, f)
+                       "deepUuid": self.deep_uuid, "deepT": self.deep_t, "base": self.base, "transcript": self.transcript,
+                       "toolUuid": self.tool_uuid, "toolT": self.tool_t, "toolQuote": self.tool_quote,
+                       "shots": os.environ.get("LIVE_PAUSED_SHOTS", ""), **(extra or {})}, f)
         driver = os.path.join(self.lab, name + ".mjs")
         with open(driver, "w") as f:
             f.write(script)
@@ -249,6 +277,8 @@ class ServedWindowLanding(unittest.TestCase):
         self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
         return json.loads(line[len("RESULT:"):])
 
+
+class ServedWindowLanding(WindowLab):
     def test_a_window_nobody_asked_for_never_detaches_an_attached_reader_and_a_deep_link_still_lands(self):
         r = self._drive(DRIVER_LANDING, "landing")
         print("RESULT:" + json.dumps(r), file=sys.stderr)   # the whole measurement rides a failure's captured stderr

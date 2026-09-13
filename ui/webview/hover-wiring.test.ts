@@ -44,7 +44,7 @@ test("the feed modal title hover lights the originating chat message", () => {
 test("landOn top-aligns the target (block:'start'), never centers", () => {
   const landOn = RENDER.slice(RENDER.indexOf("function landOn("));
   const body = landOn.slice(0, landOn.indexOf("\n}\n"));
-  assert.match(body, /scrollElInto\(c, target, "start", writer\)/, "lands at the top — through the write helper, attributed (T262j)");
+  assert.match(body, /scrollElInto\(c, at, "start", writer\)/, "lands at the top — through the write helper, attributed (T262j); `at` is the aligned element, the turn or the words in it (T386)");
   assert.doesNotMatch(body, /block: "center"/, "must not center the landing");
 });
 

@@ -382,7 +382,7 @@ test("the create dialog names the thread right there: prefilled <session>-commen
 test("the landing pulse fires once per navigation, not once per history-fetch round", () => {
   assert.match(UI, /let flashedAnchor: string \| null = null;/);
   assert.match(UI, /if \(flashKey == null \|\| flashKey !== flashedAnchor\)/);
-  assert.match(UI, /landOn\(target, uuid\);/);
+  assert.match(UI, /landOn\(target, uuid, quoteEl \?\? firstTextAtomBelow\(target\), quote\);/);   // the one landing write, aligned on the words when the frame quotes them (T386)
   assert.match(UI, /if \(anchor\) flashedAnchor = null;/);
 });
 
