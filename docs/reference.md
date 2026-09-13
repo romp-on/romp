@@ -1573,10 +1573,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   resident instead, since the chain walk reads them at every pass; a leaf
   with no assembly document, one with no compaction boundary, takes the memo
   road too, since the leaf road's seeded walk had nothing to seed and read it
-  whole at every boot). The
+  whole at every boot, and so does every cleared or resume-forked session's
+  leaf, whose document is written over its lineage and cannot seed the
+  one-file walk). The
   counters: the memo's answers (`served`), the walks it took (`walked`), the
   walks over a memo the file's growth or rewrite retired (`stale`; a file
-  whose entry merely left memory and came back is walked, not stale) and the
+  whose entry merely left memory and came back is walked, not stale; a growing
+  file on the memo road, a live leaf without a seeding document or a growing
+  anchor named in a scan, ticks it once per judge pass, the routine retirement
+  by growth, so a rising count beside a growing file is expected and only a
+  rise with no growth is a surprise) and the
   walks whose memo could not be read or stored (`fallback`: a document state
   of the wrong shape, or no reader entry after the walk).
 - `stacks`: every thread's last six frames, keyed by the thread's ident and

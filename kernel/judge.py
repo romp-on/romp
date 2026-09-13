@@ -6134,7 +6134,12 @@ def _per_file_rewound(fsid, files):
             # pre-cut verdicts and the tail read now instead of the whole file (T323 stage 4a). A non-empty
             # transcript that yields ZERO records raises OSError there (the incremental reader swallows a
             # permissions break into an empty list): a failed read, not an empty file, and it must count like one.
-            if fp == leaf and em.asm_document_stands(fp):   # the leaf road: the document's pre-cut verdicts and the tail read now
+            if fp == leaf and len(files) == 1 and em.asm_document_seeds(fp):   # the leaf road: the document's pre-cut verdicts
+                em.rewound_memo_forget(fp)                #  and the tail read now; a document written over a two-file lineage (a
+                #                                           /clear anchor beside, or a resume fork's from-file among its inputs)
+                #                                           cannot seed the one-file walk, and the leaf takes the memo road (round
+                #                                           one, low 1); the memo's cursor from the leaf's documentless days is
+                #                                           dropped at the flip so the checkpoint's cut follows the live folds (low 2)
                 out |= em.file_rewound(fp, rompuuid=fsid, sdk_human=_sdk_owned(fsid))
             else:                                         # a dead episode's frozen file, or a leaf with no assembly document (no
                 #                                           compaction boundary yet, or ever: its seeded walk had nothing to seed

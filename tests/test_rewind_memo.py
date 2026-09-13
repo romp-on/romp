@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
-from test_asm_checkpoint import em, G, SID, NOW, Harness, kernel_module   # noqa: E402  the harness and the golden builders
+from test_asm_checkpoint import em, G, SID, NOW, Harness, kernel_module, compacting_variant   # noqa: E402  the harness and the golden builders
 
 
 class RewoundMemo(Harness):
@@ -99,7 +99,7 @@ class RewoundMemo(Harness):
         src = inspect.getsource(jd._per_file_rewound)
         self.assertIn("em.file_rewound(fp, rompuuid=fsid", src, "the leaf: the document's pre-cut verdicts and the tail")
         self.assertIn("em.rewound_uuids(fp, drop=fp not in lineage and not _sdk_owned(fp.stem))", src, "a dead file: the memo, its entry dropped; a lineage file or a registered session's own file resident")
-        self.assertLess(src.index("if fp == leaf and em.asm_document_stands(fp):"), src.index("em.rewound_uuids(fp, drop="),
+        self.assertLess(src.index("if fp == leaf and len(files) == 1 and em.asm_document_seeds(fp):"), src.index("em.rewound_uuids(fp, drop="),
                         "the leaf road decided first, and only for a leaf with an assembly document")
 
     def test_an_over_cap_set_is_recorded_as_such_and_walked_again(self):
@@ -350,6 +350,151 @@ class RewoundMemo(Harness):
         self.assertEqual(fails, 0)
         self.assertEqual(calls, [fsid], "the leaf road, with the rompuuid: %r" % calls)
         self.assertEqual(em.rewound_memo_stats()["walked"], 0, "the memo not consulted for a documented leaf")
+
+    def test_a_documented_leaf_of_a_two_file_lineage_takes_the_memo_road(self):
+        """Round one, low 1: a cleared or resume-forked session's document is written over the leaf plus its anchor, so the leaf
+        road's load refused it on the inputs comparison and the leaf was read whole at every process, at the head and the base
+        alike. A two-file lineage takes the memo road: read whole once, served at the next process."""
+        jd = kernel_module().jd
+        fsid = "7a391000-2222-4333-8444-000000000399"
+        td = Path(tempfile.mkdtemp()); (td / "state").mkdir()
+        saved = jd.STATE; jd._rebind_state(td / "state")
+        saved_owner = jd._SDK_OWNER_FN; jd._SDK_OWNER_FN = None
+        def restore():
+            jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._rebind_state(saved); shutil.rmtree(td, ignore_errors=True)
+            jd._SDK_OWNER_FN = saved_owner
+        self.addCleanup(restore)
+        anchor = td / (fsid + ".jsonl")                                  # the session's anchor: _judge_candidates adds it beside the leaf
+        anchor.write_text("".join(json.dumps(r) + "\n" for r in G.scenario_resume_lineage_fileA()))
+        leaf = td / (G.FSID_B + ".jsonl")                                # the leaf compacts: it has a document, written over both files
+        leaf.write_text("".join(json.dumps(r) + "\n" for r in compacting_variant(G.scenario_resume_lineage_fileB(), "lin")))
+        for f in (anchor, leaf):
+            old = time.time() - 600; os.utime(f, (old, old))
+        cands = [str(anchor), str(leaf)]
+        self.fresh_process()
+        tree = em.parse_session(str(leaf), rompuuid=fsid, name="impl", dir="/TESTDIR", candidate_files=cands, postal_log=[], now=NOW)
+        self.assertTrue(em.asm_checkpoint_write(str(leaf), fsid, tree=tree), em.asm_checkpoint_stats())
+        self.assertTrue(em.asm_document_stands(str(leaf)))
+        files = jd._judge_candidates(fsid, [str(leaf)]); self.assertEqual(len(files), 2)
+        self.fresh_process()
+        out, fails = jd._per_file_rewound(fsid, files)
+        self.assertEqual(fails, 0)
+        em.checkpoint_write(str(leaf)); em.checkpoint_write(str(anchor))   # the settle's and the dirty writer's fold documents
+        self.fresh_process()
+        with em._JSONL_CACHE_LOCK:
+            em._RECORD_CACHE_STATS["wholeReads"] = {}
+        out2, fails2 = jd._per_file_rewound(fsid, files)
+        self.assertEqual((fails2, out2), (0, out))
+        rows = {k: v["bytes"] for k, v in em.record_cache_stats()["wholeReads"].items() if k.endswith("<-_per_file_rewound")}
+        self.assertEqual(rows, {}, "no whole read of the leaf at the next process: %s" % em.record_cache_stats()["wholeReads"])
+        self.assertFalse(em.asm_document_seeds(str(leaf)), "a document over two files cannot seed the one-file walk")
+
+    def test_the_sidecar_names_the_documents_inputs_and_a_one_file_document_seeds(self):
+        jd, fsid, path = self._own_leaf("seeds", scenario="compaction_atom")
+        self.fresh_process()
+        tree = em.parse_session(path, rompuuid=fsid, name="impl", dir="/TESTDIR", candidate_files=[path], postal_log=[], now=NOW)
+        self.assertTrue(em.asm_checkpoint_write(path, fsid, tree=tree))
+        meta = json.loads(em._asm_ckpt_file(path).with_name(em._asm_ckpt_file(path).name + ".meta").read_text())
+        self.assertEqual(meta.get("files"), [fsid], "the sidecar carries the inputs' fsids: %r" % meta)
+        self.assertTrue(em.asm_document_seeds(path))
+
+    def test_the_flip_to_the_leaf_road_forgets_the_memo_so_the_cut_follows_the_live_folds(self):
+        """Round one, low 2: a documentless leaf carries a rewoundUuids cursor in its fold document; when its first compaction lands
+        the scan flips to the leaf road for good, the cursor never steps again, and the checkpoint's cut (the minimum over the
+        folds) drags behind it until growth passes it. The flip drops the memo's cursor and the next write's cut follows."""
+        jd, fsid, path = self._own_leaf("flip", scenario="rewind_off_path")
+        self.fresh_process()
+        jd._per_file_rewound(fsid, [path])                                # the memo road: a cursor at the file's record count
+        self.assertIn(path, em._REWOUND_CACHE)
+        n0 = em._REWOUND_CACHE[path][0]
+        em.fold_records({}, path, list, lambda st, r: st, ckpt="flipFold")   # a live fold beside it, as the settle's folds are
+        self.assertTrue(em.checkpoint_write(path), "the settle's write while the leaf is documentless: the memo reaches the disk")
+        self.assertIn("rewoundUuids", json.loads(em._ckpt_file(path).read_text())["folds"])
+        recs = G.SINGLE_FILE["rewind_off_path"][0]()
+        more = compacting_variant(recs, "flip")[len(recs):]                # the first compaction lands, with turns after it
+        with open(path, "a") as fh:
+            for r in more:
+                fh.write(json.dumps(r) + "\n")
+        old = time.time() - 600; os.utime(path, (old, old))
+        tree = em.parse_session(path, rompuuid=fsid, name="impl", dir="/TESTDIR", candidate_files=[path], postal_log=[], now=NOW)
+        self.assertTrue(em.asm_checkpoint_write(path, fsid, tree=tree), em.asm_checkpoint_stats())
+        jd._per_file_rewound(fsid, [path])                                # the leaf road now
+        self.assertNotIn(path, em._REWOUND_CACHE, "the memo's cursor dropped at the flip")
+        em.fold_records({}, path, list, lambda st, r: st, ckpt="flipFold")   # the live fold steps to the file's record count
+        self.assertTrue(em.checkpoint_write(path), "the next write")
+        d = json.loads(em._ckpt_file(path).read_text())
+        self.assertNotIn("rewoundUuids", d["folds"], "the next write omits the fold, though the document carried it: %r" % sorted(d["folds"]))
+        self.assertEqual(d["count"], d["folds"]["flipFold"]["count"], "the cut equals the live fold's count: %r" % d)
+        self.assertGreater(d["count"], n0, "past the old cursor: %d vs %d" % (d["count"], n0))
+        self.assertNotIn(path, em._RETIRED_FOLDS, "the retirement honoured is done")
+
+    def test_the_sidecar_says_whether_resume_links_joined_the_inputs_and_an_older_sidecar_is_refreshed(self):
+        """Round one, lows 1 and 2: the load refuses a document on its links too, so a one-file lineage whose document was written
+        with resume links among the inputs cannot seed either (`linked`); and a session that already carried a document kept
+        the old sidecar shape indefinitely, since the write skips a restored entry: the restore rewrites the sidecar alone."""
+        jd, fsid, path = self._own_leaf("linked", scenario="compaction_atom")
+        self.fresh_process()
+        tree = em.parse_session(path, rompuuid=fsid, name="impl", dir="/TESTDIR", candidate_files=[path], postal_log=[], now=NOW)
+        self.assertTrue(em.asm_checkpoint_write(path, fsid, tree=tree))
+        cp = em._asm_ckpt_file(path); meta = cp.with_name(cp.name + ".meta")
+        d = json.loads(meta.read_text()); self.assertEqual((d["files"], d["linked"]), ([fsid], False), "%r" % d)
+        self.assertTrue(em.asm_document_seeds(path))
+        d["linked"] = True; meta.write_text(json.dumps(d))
+        self.assertFalse(em.asm_document_seeds(path), "links among the inputs: the one-file walk cannot be seeded")
+        meta.write_text(json.dumps({"av": d["av"], "path": d["path"]}))          # an older sidecar, without the list
+        self.assertTrue(em.asm_document_seeds(path), "an older sidecar answers as the stat did")
+        before = em.checkpoint_stats()["documentBytes"]
+        self.fresh_process(); modes = []
+        em.parse_session(path, rompuuid=fsid, name="impl", dir="/TESTDIR", candidate_files=[path], postal_log=[], now=NOW, asm_mode_out=modes)
+        self.assertEqual(modes, ["restore"])
+        d2 = json.loads(meta.read_text())
+        self.assertEqual((d2.get("files"), d2.get("linked")), ([fsid], False), "the restore refreshed the older sidecar: %r" % d2)
+        em.asm_document_seeds(path)
+        self.assertGreater(em.checkpoint_stats()["documentBytes"], before, "the sidecar read is counted under documentBytes")
+
+    def test_a_leaf_road_pass_over_a_clean_path_retires_nothing_and_leaves_no_work(self):
+        """Round two: the forget fired at EVERY leaf-road pass, so every leaf on the leaf road sat permanently dirty (the converge
+        pass's zero-cost gate never quiet) and a memo stored later in the process was popped out of the next document. A pass
+        over a path with no cursor and no rewoundUuids on disk retires nothing and dirties nothing."""
+        jd, fsid, path = self._own_leaf("clean", scenario="compaction_atom")
+        self.fresh_process()
+        tree = em.parse_session(path, rompuuid=fsid, name="impl", dir="/TESTDIR", candidate_files=[path], postal_log=[], now=NOW)
+        self.assertTrue(em.asm_checkpoint_write(path, fsid, tree=tree))
+        em.fold_records({}, path, list, lambda st, r: st, ckpt="cleanFold")
+        self.assertTrue(em.checkpoint_write(path)); self.assertFalse(em.checkpoint_has_work(), "clean after the write")
+        jd._per_file_rewound(fsid, [path])                                # the leaf road, twice, over an unchanged clean path
+        jd._per_file_rewound(fsid, [path])
+        self.assertFalse(em.checkpoint_has_work(), "no retirement pending, nothing dirty: %r" % sorted(em.checkpoint_dirty()))
+        self.assertNotIn(path, em._RETIRED_FOLDS)
+
+    def test_a_memo_stored_after_a_leaf_road_pass_survives_the_next_write(self):
+        """Round two, the verifier's probe D: after a leaf-road pass the path took the memo road (its lineage grew an anchor), the
+        memo was stored, and the still-pending retirement popped it out of the next document and discarded the dirty mark: the
+        next process read the file whole again. With the retirement fired only at a real flip, the memo reaches the disk."""
+        jd, fsid, path = self._own_leaf("survive", scenario="compaction_atom")
+        self.fresh_process()
+        tree = em.parse_session(path, rompuuid=fsid, name="impl", dir="/TESTDIR", candidate_files=[path], postal_log=[], now=NOW)
+        self.assertTrue(em.asm_checkpoint_write(path, fsid, tree=tree))
+        jd._per_file_rewound(fsid, [path])                                # the leaf road (no memo anywhere: nothing to retire)
+        anchor = Path(path).with_name(fsid + ".jsonl")                    # the session clears: the leaf's file becomes an anchor
+        self.assertEqual(str(anchor), path, "the leaf IS <fsid>.jsonl here; a second file makes the lineage two files")
+        leaf2 = Path(path).with_name("7a391000-2222-4333-8444-000000000388.jsonl")   # outside _own_leaf's sid range
+        leaf2.write_text(json.dumps(G.uline(NOW + 5, "after the clear", "u_after", None)) + "\n")
+        files = jd._judge_candidates(fsid, [str(leaf2)]); self.assertEqual(len(files), 2)
+        jd._per_file_rewound(fsid, files)                                 # the memo road for the anchor: the memo stored
+        self.assertIn(path, em._REWOUND_CACHE)
+        em.fold_records({}, path, list, lambda st, r: st, ckpt="surviveFold")
+        self.assertTrue(em.checkpoint_write(path))
+        em.checkpoint_write(str(leaf2))                                  # the new leaf's own fold document (its memo too)
+        d = json.loads(em._ckpt_file(path).read_text())
+        self.assertIn("rewoundUuids", d["folds"], "the memo reached the disk: %r" % sorted(d["folds"]))
+        self.fresh_process()
+        with em._JSONL_CACHE_LOCK:
+            em._RECORD_CACHE_STATS["wholeReads"] = {}
+        jd._per_file_rewound(fsid, files)
+        rows = {k: v["bytes"] for k, v in em.record_cache_stats()["wholeReads"].items() if k.endswith("<-_per_file_rewound")}
+        self.assertEqual(rows, {}, "the next process reads no whole file: %s" % em.record_cache_stats()["wholeReads"])
+        self.assertEqual(em.rewound_memo_stats()["served"], 2, "both files served: %s" % em.rewound_memo_stats())
 
 
 if __name__ == "__main__":
