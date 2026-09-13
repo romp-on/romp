@@ -23,7 +23,7 @@ test("the header is ONE line worded from the rows — 'Awaiting …' idle, 'In t
   // presentations at each turn boundary; one renderer now words the header from the same rows in both states
   assert.doesNotMatch(SRC, /count \+ " background tasks"/);
   assert.doesNotMatch(SRC, /"Background task · "/);
-  assert.match(SRC, /lab\.textContent = "In the background · " \+ listBreakdown\(counted, keptN\);/);   // every row the list shows, the kept rows counted apart (T394)
+  assert.match(SRC, /lab\.textContent = "In the background · " \+ listBreakdown\(counted, keptN\);/);   // every row the list shows by kind, then how many wear the verdict (T394)
   assert.match(SRC, /lab\.textContent = "Awaiting " \+ word \+ " · " \+ listBreakdown\(counted, keptN\);/);
   // collapsed by default: when the fold isn't open, only the header renders
   assert.match(SRC, /const open = openFolds\.has\("bgfold:" \+ sid\);/);   // the ONE fold store since 2026-09-08 (was bgFoldOpen)

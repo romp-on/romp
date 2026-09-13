@@ -375,7 +375,7 @@ test("the box draws an agent's waits as indented sub-rows in the SAME row vocabu
 });
 
 test("the header and the chip count the top level only: the breakdown reads `items`, and nested ids still keep their tracked task from listing twice as a leftover of its kind", () => {
-  assert.match(RENDER, /lab\.textContent = "Awaiting " \+ word \+ " · " \+ listBreakdown\(counted, keptN\);/, "the mixed header's breakdown is every listed row, the kept rows counted apart (T394)");
+  assert.match(RENDER, /lab\.textContent = "Awaiting " \+ word \+ " · " \+ listBreakdown\(counted, keptN\);/, "the mixed header's breakdown is every listed row by kind, then how many wear the verdict (T394)");
   assert.match(RENDER, /const word = awaitWord\(s\.status\.awaitingKind, s\.status\.awaitingCount, items\);/, "the header word: top-level rows + the kernel's top-level count");
   assert.match(RENDER, /const itemIds = rowIds\(items\);/, "a task an agent's wait names is named, not a leftover");
 });

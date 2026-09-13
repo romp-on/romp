@@ -13684,7 +13684,7 @@ const BG_RANK: Record<string, number> = { failed: 3, running: 2, completed: 1 };
 // T394 (the user 2026-09-12, from a screenshot of the fold with a section for tasks merely also running): a tracked task the kernel's rows do
 // not name is still a command or an agent, and what set it apart was a JUDGE'S VERDICT (the closer audited its launch without a
 // wait), not a kind. So it lists in its kind's section, dimmed, with the verdict as a muted suffix on the row (kept running, not
-// waited on), and the header counts it apart from the awaited breakdown; the section of its own, whose title said nothing of
+// waited on), and the header counts it with every listed row by kind, naming how many wear the verdict; the section of its own, whose title said nothing of
 // that, is gone. One hue per kind for the dot and the caption word (the sheet: bg-kind-*), status overriding for failed and
 // completed rows.
 const BG_KEPT_WORD = "· kept running, not waited on";
@@ -13945,7 +13945,7 @@ function renderBgTasks() {
   } else {
     // WORKING (or idle with nothing awaited — a service the session keeps around): the same rows, worded
     // as what they are, no idle note. The header counts every row the list shows (T394): the in-flight rows by
-    // kind, then the tracked tasks the kernel names no row for, apart, as the kept-running rows they are.
+    // kind, then the tracked tasks the kernel names no row for, counted with them by kind, the rows wearing the verdict named after.
     lab.textContent = "In the background · " + listBreakdown(counted, keptN);
   }
   head.appendChild(lab);

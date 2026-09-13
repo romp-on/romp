@@ -244,7 +244,7 @@ class ServedBgKinds(unittest.TestCase):
         # every listed row counted by kind (round two): the awaited command, the kept service, the placed command and the finished
         # service are four commands; only the running service wears the verdict (round one, medium 1 and low 1)
         self.assertEqual(d["header"], "In the background · 1 agent · 4 commands · 1 watch · 1 kept running",
-                         "the header counts every row it lists, the kept one apart: %r" % d["header"])
+                         "the header counts every row it lists, then how many wear the verdict: %r" % d["header"])
         for x, kind in ((agent, "agents"), (cmd, "commands"), (svc, "commands"), (placed, "commands"), (done, "commands"), (watch, "watches")):
             self.assertIn("bg-kind-" + kind, x["cls"].split(), "%s wears its kind: %r" % (x["label"], x["cls"]))
         self.assertIn("bg-kept", svc["cls"].split(), "the running service is the kept row: %r" % svc["cls"])
@@ -326,8 +326,9 @@ class ServedBgKinds(unittest.TestCase):
         pi = r["peerIdle"]
         # the sections in the rows' display order (agents, commands, watches, peers, timers): the kept service, then the peer
         self.assertEqual([(x["section"], x["label"], x["kept"]) for x in pi["rows"]], [("Commands", "Serve the docs preview", KEPT_WORD), ("Peers", "api", None)], "the kept service and the peer row: %r" % pi["rows"])
-        self.assertTrue(pi["header"].startswith("Awaiting api"), "the wait names the peer: %r" % pi["header"])
-        self.assertTrue(pi["header"].endswith(" · 1 command · 1 peer · 1 kept running"), "…then every listed row by kind, the peer as a peer, and the kept subset: %r" % pi["header"])
+        # the whole header once: the wait names the peer, the why with its delegated-to prefix stripped (a reply), then every listed row by
+        # kind (peers last, as the sections), then the kept subset
+        self.assertEqual(pi["header"], "Awaiting api · a reply · 1 command · 1 peer · 1 kept running", "the peer-named header, whole: %r" % pi["header"])
         ne = r["nested"]
         self.assertEqual([(x["label"], "bg-sub" in x["cls"].split()) for x in ne["rows"]], [("Map the notes-api parser", False), ("Run the parser test chunk", True)], "the agent, then its own wait as a sub-row: %r" % ne["rows"])
         self.assertEqual(ne["header"], "In the background · 1 agent", "the header counts the top level only: the sub-row is the agent's: %r" % ne["header"])
