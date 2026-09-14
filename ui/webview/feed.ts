@@ -1574,6 +1574,34 @@ let colOrder: string[] = [];                         // [] = each layout's own C
 // OFF by default); the sid is not persisted — a reloaded feed registers and is told again.
 let focusedSid: string | null = null;
 let showFocused = false;
+// THE JUMP SCROLL (T414, the user 2026-09-15): with the section on, a click on a card's summary line jumps into that
+// session, the chat's active tab changes, and the section then shows THAT session's cards; the reader must see them,
+// so the feed's scroll box goes to the top when the switch lands. The click records the session it jumps to; the
+// kernel's activeChat frame for that session (the event, not a clock) settles it with one plain scroll to the top
+// (the reader's own gesture's consequence: no animation). A user scroll in between cancels the pending scroll, and
+// the scroll stands until the user scrolls again (the standing scroll rule). A click on the session ALREADY
+// focused changes no tab, so no frame comes: it scrolls to the top at once (the section already holds that
+// session's cards; the reader asked to look at them). With the section off nothing here runs.
+let pendingFocusScroll: string | null = null;
+let progScrollGuard = false;   // set around the feed's own scrollTop writes, so the scroll listener knows a user's scroll from ours
+function scrollFeedTop(): void {
+  const list = document.getElementById("feed-list");
+  if (!list) return;
+  progScrollGuard = true;
+  list.scrollTop = 0;
+  requestAnimationFrame(() => { progScrollGuard = false; });
+}
+function noteFocusJump(sid: string): void {
+  if (!showFocused) return;
+  if (sid === focusedSid) { scrollFeedTop(); return; }   // no tab change, no frame: the section holds this session already
+  pendingFocusScroll = sid;
+}
+function settleFocusScroll(): void {
+  if (pendingFocusScroll && focusedSid === pendingFocusScroll) { pendingFocusScroll = null; scrollFeedTop(); }
+}
+document.getElementById("feed-list")?.addEventListener("scroll", () => {
+  if (!progScrollGuard) pendingFocusScroll = null;   // the reader scrolled on their own: the pending jump scroll yields
+}, { passive: true });
 // The section's OWN block layout (T410, the user 2026-09-13, who wanted the section's blocks movable, resizable
 // and collapsible on their own, none leaving the section): its dragged block order ([] = follow the board's
 // arrangement, as the section did from T347), the blocks' flex weights by column key (a missing key = 1, the
@@ -2330,7 +2358,7 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   if (distillShown && it.summaryAnchorUuid) {
     dl.classList.add("fask-distill-link");
     dl.title = "jump to where this was written";
-    dl.onclick = (ev: Event) => { ev.stopPropagation(); focusEcho(it.sid); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: it.itemId, sid: it.sid, t: it.t, anchor: "work", anchorUuid: it.summaryAnchorUuid, quote: it.summaryAnchorQuote || undefined }); };
+    dl.onclick = (ev: Event) => { ev.stopPropagation(); focusEcho(it.sid); noteFocusJump(it.sid); vscodeApi?.postMessage({ type: "showOnTimeline", itemId: it.itemId, sid: it.sid, t: it.t, anchor: "work", anchorUuid: it.summaryAnchorUuid, quote: it.summaryAnchorQuote || undefined }); };
   } else if (distillShown) {
     // No anchor recorded (a card minted from a postal delegate, a completion turn not yet landed) — the
     // line must still ACKNOWLEDGE the click instead of rendering as silently dead text (the user
@@ -5626,7 +5654,9 @@ function render() {
       : lensOutN + (lensOutN === 1 ? " card" : " cards") + " outside this tag filter \u2014 show all";
   }
   ensureHostLoad(list);
+  progScrollGuard = true;   // our restore, not the reader's scroll (T414: the jump scroll's cancel listens for theirs)
   list.scrollTop = prevScroll;
+  requestAnimationFrame(() => { progScrollGuard = false; });
   // Stale-freeze heal (hover-freeze): a LOCAL render can detach or re-key the hovered element with
   // no mouseleave — a removed element never fires leave events (typing in search filters the card
   // out; toggling Group swaps the ask card for a group card in place). :hover is live pointer
@@ -5897,7 +5927,7 @@ function flushFreeze(): void {
     const m = pendingFeedPayload;
     pendingFeedPayload = null;
     if (m) applyFeedPayload(m);          // render() repaints the badges away (nothing pending)
-    else if (focusStale) render();       // a tab switch that landed while a card was held paints now (T347)
+    else if (focusStale) { render(); settleFocusScroll(); }   // a tab switch that landed while a card was held paints now (T347), and the jump scroll it carried settles with it (T414)
     focusStale = false;                  // either way the section is current: applyFeedPayload renders too
   });
 }
@@ -6281,9 +6311,11 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
     // card is held under the pointer (hover-freeze) the repaint waits for the release, like a payload does:
     // the held card's rect standing still is that gate's whole contract, and the section's height sits above it.
     focusedSid = typeof m.id === "string" && m.id ? m.id : null;
+    if (pendingFocusScroll && focusedSid !== pendingFocusScroll) pendingFocusScroll = null;   // the focus went elsewhere: the jump scroll is moot (T414)
     if (!showFocused) return;
     if (freezeKey || tabScopeKey) { focusStale = true; return; }
     render();
+    settleFocusScroll();   // the section now shows the session the summary click jumped to: the top of the feed (T414)
   } else if (m.type === "hoverCards") {
     // rail-dot hover in the CHAT panel → white-outline the card(s) built from
     // that turn, plus the matching ROWS inside an open modal (eid). The host

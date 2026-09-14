@@ -49,7 +49,7 @@ test("the hint covers the WHOLE pending window: escalate at 45s, remove only on 
   assert.match(FEED, /syncHostloadBackstops\(\);/);
   // both board states: the strip rides under the cards AND under the empty wordmark
   assert.match(FEED, /ensureHostLoad\(list\);   \/\/ an attached host's cards may be the ONLY thing coming — say so here too/);
-  assert.match(FEED, /ensureHostLoad\(list\);\s*\n\s*list\.scrollTop = prevScroll;/);
+  assert.match(FEED, /ensureHostLoad\(list\);\s*\n\s*progScrollGuard = true;[^\n]*\n\s*list\.scrollTop = prevScroll;/);
   // round two (the user 2026-08-25): the first cut's 45s backstop RETIRED the hint while the host
   // genuinely still pended — the signal knew, the backstop overrode it. Now 45s = COPY ESCALATION,
   // never removal; the pending list itself (payload/detach recompute) is the only way off the board.

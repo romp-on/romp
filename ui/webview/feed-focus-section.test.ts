@@ -49,7 +49,7 @@ test("the activeChat frame sets the focused sid and re-renders; nothing in the s
 test("a tab switch that lands while a card is held under the pointer paints on the release (the hover-freeze contract)", () => {
   assert.match(FEED, /let focusStale = false;/);
   const flush = FEED.slice(FEED.indexOf("function flushFreeze(): void {"), FEED.indexOf('window.addEventListener("blur", () => { releaseTabScope();'));
-  assert.match(flush, /if \(m\) applyFeedPayload\(m\);[^\n]*\n\s*else if \(focusStale\) render\(\);[^\n]*\n\s*focusStale = false;/,
+  assert.match(flush, /if \(m\) applyFeedPayload\(m\);[^\n]*\n\s*else if \(focusStale\) \{ render\(\); settleFocusScroll\(\); \}[^\n]*\n\s*focusStale = false;/,
     "the release renders the section when no payload was queued; a queued payload's render covers it");
 });
 
