@@ -3978,6 +3978,36 @@ Where to read it: `/version` carries `taskTracking` at the top level and in `set
 off. `kernel/judge.py` `MODEL_CALLERS` is the census of every judge that makes a model call, each declaring its relation
 to the switch; an ast test holds it to the module's call sites, and the entry point refuses an undeclared name.
 
+## The judges' process (stage three)
+
+`~/.local/state/romp/judges-process` reading `on` moves the judges' passes out of the kernel into one long-lived
+`romp-judge --serve` child (plans/judges-process.md): each producer wake sends one `pass` line over the child's stdin and
+reads one `done` line from its stdout; the kernel's bookkeeping (the episode boundary tick, the goals snapshot, the
+compact, the recovery re-arm, the generation bump) stands around the request in the loop's order. Absent, or anything
+but `on`, the tiers run in the kernel as before and no child starts; a file that cannot be read or decoded reads as
+off and says so once (a sync notice). Effective on the next pass; the child is ended on the pass where the switch
+turns off.
+
+Bounds and counters, all on `/perf` under `judge`:
+
+- `JUDGE_CHILD_PASS_HARD_S` (900 s): a child that answers nothing by then, a partial line included, is killed and the
+  pass counted `passesLost`; it comes back on the next wake (`childRestarts`). A line that is not the pass's own `done`
+  and a `ready` with a protocol version the kernel does not speak are handled the same way.
+- `childFallbacks`: after three passes lost in a row from fresh starts the judges run in the kernel until the switch
+  file is written again, said as a sync notice.
+- `orphansSwept`: a child left by a kernel that is gone (its pid record under the state root, one per kernel pid as
+  `judge-child.<pid>.json`, names a parent that answers no signal) is ended at the next kernel's boot and again at its
+  first request, so the goal stores keep one writer. On Linux the child also dies with its parent by construction (a
+  parent-death signal, asked for between fork and exec through a pointer the kernel bound at import, so the forked child
+  does no work of its own); the kernel's exit road ends it first in every case, signaling at once even with a pass in
+  flight (that pass is lost and counted) and waiting only shares of the manager's SIGTERM grace for the quit, the
+  terminate and the kill (a tenth, a tenth and a twentieth), so the exit stays inside the grace whatever the child does.
+- On the child road `parses.judge` and the `goals` block read zero: the judges' parses and store writes happen in the
+  child, and their per-pass figures ride its done line as `judge.child.parses` and `judge.child.goalIo`.
+- `cpu_ms_sum` counts the child's tier and worker CPU as it counts the in-process tiers and pools; `cpu_ms_child_workers`
+  is the workers' share alone; `child` is the last done line (its wall, tier starts, CPU, failures, record cache and
+  checkpoint blocks); `tierStarts` is counted at the request, so a long pass reads it during the pass.
+
 ## Switches
 
 Effective immediately, no restart.
