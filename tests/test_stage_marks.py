@@ -116,6 +116,7 @@ CALLBACK_ALLOW = {
     ("SdkBackend", "push", "_pusher_wake.set"): "sets the pusher's wake event",
     ("SdkBackend", "log", "_backend_log"): "a stderr line through the exit log",
     ("SdkBackend", "boot_phase", "_mark_boot"): "a boot-row stamp (censusDone, attachDone)",
+    ("SdkBackend", "on_session_return", "_repromote_returned_session"): "a skeleton-set discard and a pusher wake; builds nothing",
     ("CodexBackend", "notify", "_send_to_app"): "a frame to the app over its socket",
     ("CodexBackend", "poke", "_wake_kernel"): "sets the kernel's wake event",
     ("CodexBackend", "push", "_pusher_wake.set"): "sets the pusher's wake event",

@@ -18075,7 +18075,8 @@ def _sdk_locked():
                 # the old kernel's last state as current above the restart row. /version's `started` is the
                 # same start in whole seconds.
                 boot_at=_STARTED,
-                code_version=_kernel_sha())   # stamped on every session lease this kernel writes (T305)
+                code_version=_kernel_sha(),   # stamped on every session lease this kernel writes (T305)
+                on_session_return=_repromote_returned_session)   # a returned session (fresh lease/host re-attach) re-promotes the focused remote tab of a relay client watching it (2026-09-15)
             # a limit-shaped judge error envelope pokes ONE exact usage poll (get_usage rides turn
             # ends, so an idle fleet's usage.json goes stale — measured ~15h — and the rate gate is
             # only as good as that file); the backend picks any live login session to ask
@@ -46096,6 +46097,28 @@ def _release_skeleton_locked(c, sid):
 def _release_skeleton(c, sid):
     with _client_lock(c):
         return _release_skeleton_locked(c, sid)
+
+
+def _repromote_returned_session(sid):
+    """A session RETURNED after a death or restart (the backend minted a fresh lease / re-attached its host): a relay
+    client whose ACTIVE names it must get it FULL again on the next push, not the death's leftover skeleton and not
+    only on a focus change (the long-session scroll-back wall, 2026-09-15: a user-invoked whole-sessions Restart re-listed the
+    session under a focused remote tab, and the relay client kept serving it a ~19-unit skeleton with no head gap).
+    Clear the sid from the skeleton set of every RELAY client watching it (scoped to the active, never every relay
+    client's whole set: a whole-sessions Restart re-lists every session at once, and clearing all their skeletons
+    would make the next push a board-full send the WS backlog budget (T278) would drop, dropping the client), then
+    wake the pusher so the promotion lands. Called from SdkBackend at the session-return event; a no-op for any
+    client not watching the sid, so a plain connect/start never over-serves."""
+    if not sid:
+        return
+    with _clients_lock:
+        watching = [c for c in _clients if c.get("app") == "chat" and c.get("kind") == "relay" and c.get("active") == sid]
+    woke = False
+    for c in watching:
+        if _release_skeleton(c, sid):   # discard from the skeleton set + drop its status slot; the next push sends the full
+            woke = True
+    if woke:
+        _pusher_wake.set()
 
 
 COMPACT_TAIL_WINDOW = 256 * 1024                   # the tail read's first window for _compact_boundary_since; widened 4x while

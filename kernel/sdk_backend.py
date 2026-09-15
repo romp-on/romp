@@ -6541,6 +6541,9 @@ class SdkSession:
                     # periodic cycle, a fresh session wore the opening dots seconds after its CLI was
                     # ready to take a message (measured live 2026-08-10: connect done ~1.5s after
                     # create, the ready chip landing at 5-12s with the cycle).
+                    self.backend._fire_session_return(self.sid)   # the session is (re)open on this road (a host attach/spawn or a
+                    #   kernel child, the hosts-off kill switch included): re-promote it for a relay client watching it, before the
+                    #   session push below, so the memo is reset for the full to land (the lease-mint site common to both roads, 2026-09-15)
                     self.backend._push_session(self.sid)
                     self._connected.set()   # the control channel exists from here (move() waits on this)
                     if self._host is None:
@@ -9485,7 +9488,8 @@ class SdkBackend:
     def __init__(self, state_dir, claude_bin: str, notify, poke=None, push=None,
                  push_session=None,
                  mcp_config: str | None = None, append_prompt_path: str | None = None,
-                 log=None, reconcile: bool = False, boot_at=None, code_version=None, boot_phase=None):
+                 log=None, reconcile: bool = False, boot_at=None, code_version=None, boot_phase=None,
+                 on_session_return=None):
         self.state_dir = Path(state_dir)
         self.claude_bin = claude_bin
         self.code_version = str(code_version or "")   # the kernel's git sha, stamped on every lease this kernel
@@ -9510,6 +9514,8 @@ class SdkBackend:
         self._owns_memo: dict = {}         # sid -> ((reg mtime_ns, size), owns?) — see owns()
         self._known_fsids_memo: dict = {}  # sid -> ((reg, episodes, states) stat keys, frozenset of fsids) — see known_fsids()
         self._push_cb = push               # wake the kernel's PUSHER → immediate chat push (live tail)
+        self._on_session_return_cb = on_session_return   # kernel._repromote_returned_session: a returned session
+        #   (a fresh lease / a host re-attach) un-skeletons the focused remote tab of a relay client watching it (2026-09-15)
         self._push_session_cb = push_session   # targeted ONE-session push (kernel _push_session_now) for
         #   per-session chip events (the connect handshake): a wake alone leaves the flip riding the next
         #   full push cycle, which runs seconds on a busy fleet (the user 2026-08-10)
@@ -10007,6 +10013,18 @@ class SdkBackend:
         sess._host = t
         self._log("host (%s): started a session host (pid %d)" % (sess.name, proc.pid))
         return t
+
+    def _fire_session_return(self, sid):
+        """Tell the kernel a session RETURNED (a fresh lease minted or a host re-attached), so a relay client whose
+        active names it is re-promoted from the death's leftover skeleton to a full frame on the next push (the
+        session-return event, 2026-09-15). Best-effort: a raising callback must never fail the connect."""
+        cb = self._on_session_return_cb
+        if cb is None:
+            return
+        try:
+            cb(str(sid))
+        except Exception as e:
+            self._log("session-return callback failed (%s): %s" % (sid, e))
 
     def _new_host_transport(self, sess, sock, offset):
         ht = _ht()

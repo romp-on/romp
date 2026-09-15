@@ -848,6 +848,47 @@ class SkeletonReconnect(unittest.TestCase):
             km._PENDING_REVEAL[0] = None
 
 
+    # ── the re-promotion of a returned session (2026-09-15): the long-session scroll-back wall ──
+    def test_a_returned_session_re_promotes_the_relay_client_watching_it(self):
+        # A user-invoked whole-sessions Restart re-listed a session under a focused remote tab, and the relay client kept
+        # serving that tab a ~19-unit skeleton with no head gap. A relay client watching S1 (active=S1) that holds S1 as a
+        # skeleton (the death's leftover) must, when S1 RETURNS (the backend's session-return event), get S1 FULL again on
+        # the next push, not a status frame and not only on a focus change.
+        c = self._client(kind="relay", active=S1, skeleton={S1}, echat={}, proto=2)
+        km._clients.append(c)
+        km._push([c])
+        self.assertIn(S1, [sid for sid, _ in self._statuses(c)], "the buggy state: the watched tab S1 is served a skeleton status")
+        self.assertNotIn(S1, self._sessions(c), "…and not a full session frame")
+        km._repromote_returned_session(S1)   # the session RETURNED (a fresh lease / a host re-attach): the backend fires this
+        self.assertNotIn(S1, c["skeleton"], "the returned session is cleared from the watching relay client's skeleton set")
+        c["_frames"].clear()
+        km._push([c])
+        self.assertIn(S1, self._sessions(c), "the next push promotes S1 to a FULL session frame")
+
+    def test_the_re_promotion_is_scoped_to_the_active_watching_relay_client(self):
+        # never every relay client's whole skeleton set (a whole-sessions Restart would clear a board into one push the
+        # WS backlog budget drops, dropping the client): a relay client NOT watching S1, and a local page, keep S1.
+        relay_other = self._client(kind="relay", active=S2, skeleton={S1}, echat={}, proto=2)
+        page = self._client(kind="page", active=S1, skeleton={S1}, echat={}, proto=2)
+        km._clients.extend([relay_other, page])
+        km._repromote_returned_session(S1)
+        self.assertIn(S1, relay_other["skeleton"], "a relay client NOT watching S1 keeps its skeleton (no board-full storm)")
+        self.assertIn(S1, page["skeleton"], "a local page (kind page, not relay) is unchanged")
+
+    def test_the_backend_fires_the_return_event_at_the_connect_common_to_every_road(self):
+        # the wiring: the backend fires _fire_session_return(self.sid) at the CONNECT, the road common to a host
+        # attach/spawn and a kernel child, so with session-hosts off (the kill switch) it fires too — NOT at the host
+        # attach/start alone (inside _host_transport_for, past its hosts-off early return). SdkBackend takes an
+        # on_session_return callback, and the kernel passes _repromote_returned_session as it.
+        root = os.path.dirname(HERE)
+        be = open(os.path.join(root, "kernel", "sdk_backend.py")).read()
+        self.assertIn("self.backend._fire_session_return(self.sid)", be, "fired at the connect, common to every road")
+        self.assertNotIn("self._fire_session_return(sess.sid)", be, "not at the host attach/start (that missed the hosts-off road)")
+        self.assertIn("on_session_return=None", be, "SdkBackend takes the callback")
+        ker = open(os.path.join(root, "kernel", "kernel.py")).read()
+        self.assertIn("on_session_return=_repromote_returned_session", ker, "the kernel wires the re-promotion callback")
+
+
 
 class RestartDiet(unittest.TestCase):
     """The user's ruling (2026-09-14): after a reload the selected tab builds first, the strip's other tabs spread over later refreshes,
