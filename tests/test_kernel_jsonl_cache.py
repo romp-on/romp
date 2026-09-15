@@ -43,16 +43,19 @@ class JsonlCacheEviction(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="jsonl-cache-")
         em._JSONL_CACHE.clear()
         # Spy on the parse layer: every (bytes, base_offset) actually scanned. A cache hit
-        # scans nothing, so "no new spy entries" == "served from cache".
-        self._real_scan = em._scan_jsonl_bytes
+        # scans nothing, so "no new spy entries" == "served from cache". The reader streams its scan off the open
+        # file (measured 2026-09-15: the whole-blob scan was the read's transient peak), so the bytes a scan cost are
+        # what it returns having read them, not the length of a blob handed in.
+        self._real_scan = em._scan_jsonl_stream
         self.scans = []
-        def spy(data, base_offset, *a, **k):     # the reader hands the scan an offsets array too (T323 stage 4)
-            self.scans.append((len(data), base_offset))
-            return self._real_scan(data, base_offset, *a, **k)
-        em._scan_jsonl_bytes = spy
+        def spy(fh, base_offset, *a, **k):       # the reader hands the scan an offsets array too (T323 stage 4)
+            out = self._real_scan(fh, base_offset, *a, **k)
+            self.scans.append((out[2], base_offset))
+            return out
+        em._scan_jsonl_stream = spy
 
     def tearDown(self):
-        em._scan_jsonl_bytes = self._real_scan
+        em._scan_jsonl_stream = self._real_scan
         em._JSONL_CACHE.clear()
 
     def _p(self, name):
@@ -177,15 +180,15 @@ class RecordCacheByteBudget(unittest.TestCase):
         em._JSONL_CACHE.clear(); em._JSONL_CACHE_BYTES[0] = 0
         for k in em._RECORD_CACHE_STATS: em._RECORD_CACHE_STATS[k] = 0
         self._budget = em._JSONL_CACHE_BUDGET_BYTES
-        self._real_scan = em._scan_jsonl_bytes
+        self._real_scan = em._scan_jsonl_stream
         self.scans = []
-        def spy(data, base_offset, *a, **k):
-            self.scans.append((len(data), base_offset)); return self._real_scan(data, base_offset, *a, **k)
-        em._scan_jsonl_bytes = spy
+        def spy(fh, base_offset, *a, **k):
+            out = self._real_scan(fh, base_offset, *a, **k); self.scans.append((out[2], base_offset)); return out
+        em._scan_jsonl_stream = spy
 
     def tearDown(self):
         em._JSONL_CACHE_BUDGET_BYTES = self._budget
-        em._scan_jsonl_bytes = self._real_scan
+        em._scan_jsonl_stream = self._real_scan
         em._JSONL_CACHE.clear(); em._JSONL_CACHE_BYTES[0] = 0
 
     def _file(self, name, n):
@@ -246,13 +249,13 @@ class DropAfterQuiescentFold(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="jsonl-drop-")
         em._JSONL_CACHE.clear(); em._JSONL_CACHE_BYTES[0] = 0
         for k in em._RECORD_CACHE_STATS: em._RECORD_CACHE_STATS[k] = 0
-        self._real_scan = em._scan_jsonl_bytes; self.scans = []
-        def spy(data, base_offset, *a, **k):
-            self.scans.append((len(data), base_offset)); return self._real_scan(data, base_offset, *a, **k)
-        em._scan_jsonl_bytes = spy
+        self._real_scan = em._scan_jsonl_stream; self.scans = []
+        def spy(fh, base_offset, *a, **k):
+            out = self._real_scan(fh, base_offset, *a, **k); self.scans.append((out[2], base_offset)); return out
+        em._scan_jsonl_stream = spy
 
     def tearDown(self):
-        em._scan_jsonl_bytes = self._real_scan
+        em._scan_jsonl_stream = self._real_scan
         em._JSONL_CACHE.clear(); em._JSONL_CACHE_BYTES[0] = 0
 
     def _fold(self, cache, path, **kw):

@@ -1668,7 +1668,13 @@ def _scan_jsonl_bytes(data, base_offset, offsets=None):
     """(records, consumed) for a bytes blob of jsonl starting at base_offset: parsed objects of every
     COMPLETE line, and the byte offset just past the last complete line (a trailing partial is left).
     `offsets`, an array when given, receives each parsed record's (byte offset, byte length) as two
-    appended values: the assembly checkpoint names a record by where it sits (T323 stage 4)."""
+    appended values: the assembly checkpoint names a record by where it sits (T323 stage 4).
+    The reader itself no longer calls this: it streams its lines off the open file (_scan_jsonl_stream
+    below, measured 2026-09-15), because this scanner copies the blob to its last newline and splits the
+    copy into a list of every line before it decodes one record: two copies of the source live at once beside
+    the records (the blob and the list of its lines; a third, the copy to the last newline, only when a partial
+    line trails, since CPython hands the same object back for a full slice). It stays as the REFERENCE the
+    streaming scanner is held equal to (tests/test_reader_stream_peak.py) and has no other caller."""
     end = data.rfind(b"\n")
     if end < 0:
         return [], base_offset
@@ -1687,6 +1693,73 @@ def _scan_jsonl_bytes(data, base_offset, offsets=None):
         if offsets is not None:
             offsets.append(base_offset + at); offsets.append(len(line))
     return records, base_offset + end + 1
+
+
+def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None):
+    """(records, consumed, bytes_read) for the jsonl from `fh`'s CURRENT position to its end, decoded line by line off
+    the open binary file: the parsed objects of every COMPLETE line, the byte offset just past the last complete line
+    (a trailing line with no newline yet is a writer caught mid-append and is left for the next read, as
+    _scan_jsonl_bytes leaves it), and the bytes the stream pulled, which the caller's byte counters take the way they
+    took len() of the one read this replaces. `offsets`, as for _scan_jsonl_bytes, receives each parsed record's
+    (byte offset, byte length); the values are identical to the reference scanner's. `limit`, when given, is the
+    number of bytes past the current position that existed when the caller statted the file: the read ENDS there, a
+    line crossing it is left as a partial for the next read, so a reader never chases a fast writer's appends (the one
+    read this replaces captured its end at read time; a line-by-line loop over a file being appended would otherwise
+    run for as long as the writer keeps ahead of the decode: review find, 2026-09-15).
+
+    Why a stream (measured 2026-09-15): the reader pulled the file, or its grown tail, into one bytes object and handed
+    it to _scan_jsonl_bytes, which copied it up to the last newline and split that copy into a list of every line
+    before decoding a single record, so about three copies of the source were live at once beside the records being
+    built, and the allocator kept the arenas that peak took. Over a 37.7 MB transcript in a lab process the records
+    weighed 107.6 MB (2.86 live heap bytes per source byte) but the read peaked at 183.8 MB and left the process
+    223 MB larger (155 MB with tracemalloc off; VmRSS deltas of 217,900 and 151,140 KiB): the temporaries are the
+    whole blob and the list of every line, and the copy to the last newline when the blob ends in a partial line
+    (CPython hands the same object back for a full slice), so up to three copies beside the records;
+    on the live kernel a 40-minute sample stepped the resident size by 5.8 bytes per source byte the record cache
+    admitted (+525 MB against +94.5 MB of source; one +60 MB read, +332 MB), the retained heap the lag investigation
+    traced, of which the lab attributes about one byte per source byte to this transient (4.1 to 3.1 resident bytes
+    per source byte with tracemalloc off); the rest is the records the cache holds. Streamed, the same read peaks
+    10 KB over its records and leaves the process 116 MB larger with tracemalloc off (113,320 KiB): the records
+    themselves, which a reader must hold. Iterating the file yields one line at a time, so what is live beside the records is bounded by the largest line (with its strip and decode copies) and the file's read buffer, not by the file; what is live beyond the
+    records is the line in hand and the file's read buffer. The file stays a binary file object, so the caller's
+    seek and tell after the iteration are exact (a text wrapper's are not).
+
+    The boundaries are the reference's exactly: file iteration yields newline-terminated lines, and each is then split
+    with the same bytes.splitlines(keepends=True) _scan_jsonl_bytes ran over the whole body, so a bare \\r inside a line
+    breaks it into the same pieces (a \\r\\n ending stays one boundary; \\x0c, \\x0b and \\x1c-\\x1e break under neither,
+    those are str.splitlines' boundaries), and a malformed line such as `{"a":1}<CR>junk` yields the object before the
+    \\r under both. Splitting the concatenation equals concatenating the splits, since b"\\n" is itself a boundary, so
+    records, consumed offset and offsets are identical for every input, valid or not (review find, 2026-09-15: the
+    first cut split at b"\\n" alone and documented the bare-\\r case as a difference; parity costs one splitlines call
+    per line). tests/test_reader_stream_peak.py pins the equivalence, the bare-\\r case included."""
+    records = []
+    seen = 0                                              # bytes iterated so far, complete lines and the trailing partial alike
+    consumed = 0                                          # bytes of complete lines: what the next read resumes after
+    remaining = limit
+    while True:
+        line = fh.readline() if remaining is None else fh.readline(remaining)   # the bound is in the read itself: a growing
+        if not line:                                                            #  line with no newline yet cannot be pulled past
+            break                                                               #  the captured end, nor keep the reader busy there
+        if not line.endswith(b"\n"):
+            seen += len(line)
+            break                                         # the file's last line with no newline yet, or a line running past the
+        #                                                   end the caller captured (a writer still appending): a partial, left as is
+        if remaining is not None:
+            remaining -= len(line)
+        for piece in line.splitlines(keepends=True):      # the reference's boundaries within the line (a bare \r splits)
+            at = seen
+            seen += len(piece)
+            piece_s = piece.strip()
+            if not piece_s:
+                continue
+            try:
+                records.append(json.loads(piece_s.decode("utf-8", "replace")))
+            except Exception:
+                continue
+            if offsets is not None:
+                offsets.append(base_offset + at); offsets.append(len(piece))
+        consumed = seen
+    return records, base_offset + consumed, seen
 
 
 def _entry_offsets_gen(path):
@@ -1866,10 +1939,9 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
                 _count_read(path, len(tail))
                 if fh.read(len(tail)) == tail:            # the file really is our cached prefix + more
                     if tail_ok or base0 == 0:
-                        data = fh.read()
-                        _count_read(path, len(data))
                         offs = array.array("q", hit[7]) if len(hit) > 7 else array.array("q")
-                        new, offset = _scan_jsonl_bytes(data, offset, offs)
+                        new, offset, nread = _scan_jsonl_stream(fh, offset, offs, limit=max(0, st.st_size - fh.tell()))   # the appended lines, one at a time
+                        _count_read(path, nread)
                         records = (records + new) if records else new   # a NEW list — never extend the served one in place
                         base, gen, done = base0, gen0, True
                         kind = "restore" if restored is not None else "grown"
@@ -1878,10 +1950,9 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
                                 _CKPT_STATS["restored"] += 1
                     else:                                 # a whole reader over a tail entry: the whole file, same gen
                         fh.seek(0)
-                        data = fh.read()
-                        _count_read(path, len(data))
                         offs = array.array("q")
-                        records, offset = _scan_jsonl_bytes(data, 0, offs)
+                        records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size)
+                        _count_read(path, nread)
                         base, gen, done, kind = 0, gen0, True, "upgrade"
                 else:
                     kind = "guard"                        # prefix changed → a rewrite → full re-read, a fresh generation
@@ -1893,10 +1964,9 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
                     _ckpt_fallback(path, kind)
             if not done:
                 fh.seek(0)
-                data = fh.read()
-                _count_read(path, len(data))
                 offs = array.array("q")
-                records, offset = _scan_jsonl_bytes(data, 0, offs)
+                records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size)   # line by line, to the size the stat saw
+                _count_read(path, nread)
                 base, gen = 0, _next_gen()                # a from-zero read: a generation no cursor of this path can hold
             tail_from = max(0, offset - _JSONL_TAIL_GUARD)
             fh.seek(tail_from)
@@ -1916,13 +1986,13 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
                     if not isinstance(table, dict):       # a harness that zeroes every counter zeroes this one too: a table again
                         table = _RECORD_CACHE_STATS["wholeReads"] = {}
                     wr = table.setdefault("%s<-%s" % (kind, who), {"count": 0, "bytes": 0})
-                    wr["count"] += 1; wr["bytes"] += len(data)
+                    wr["count"] += 1; wr["bytes"] += nread    # what the stream read: the whole file, as len(data) was
                     stg = _read_stage() or "none"          # T401: the same read under its stage, so a job's reads name their callers
                     bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")
                     if not isinstance(bys, dict):
                         bys = _RECORD_CACHE_STATS["wholeReadsByStage"] = {}
                     ws = bys.setdefault("%s:%s<-%s" % (stg, kind, who), {"count": 0, "bytes": 0})
-                    ws["count"] += 1; ws["bytes"] += len(data)
+                    ws["count"] += 1; ws["bytes"] += nread
             if _READER_TRACE:
                 fr, inner = sys._getframe(1), []          # the caller outside this module, and the path through it
                 while fr is not None and fr.f_code.co_filename == __file__:
