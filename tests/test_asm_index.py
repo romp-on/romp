@@ -429,7 +429,8 @@ class ScalarWalkers(Restored):
         self.assertEqual(em.asm_index_stats()["materialized"], n_built, "...builds nothing and, holding what it read, asks the parent nothing")
         with em._MAT_LOCK:                                        # an eviction in the parent: the view keeps what it read (its build's
             for key in list(em._MAT_LRU):                         # lifetime), as the plain-list slice it replaces did; a slot it never
-                lz, j = em._MAT_LRU.pop(key); list.__setitem__(lz, j, em._UNMAT)   # read is rebuilt from the parent
+                ref, j = em._MAT_LRU.pop(key); list.__setitem__(ref(), j, em._UNMAT)   # read is rebuilt from the parent (the LRU
+                #                                                                        holds the list weakly: the value is (ref, row))
         self.assertTrue(view._unbuilt(), "the json guard reads the parent's slots")
         self.assertIs(view[0], a0, "a slot the view read stays")
         fresh = em.segments(pre)[0]["atoms"]

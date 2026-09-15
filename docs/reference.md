@@ -2071,10 +2071,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   handed, since a backend runs those on threads of its own) holds every
   thread marked or listed as a pure I/O helper and every handed callback
   marked or listed, and a `none` row on a live `/perf` names a thread or a
-  callback the census missed), `resident` (the
-  process-wide LRU, `cap` atoms across every session: the machine's memory
-  over 32 KiB, never under 500,000; eviction drops the memo, never a field in
-  place), `evictions`, and `restoredTurns`.
+  callback the census missed), `resident` (the entries in the
+  process-wide LRU, `cap` of them across every session: the machine's memory
+  over 32 KiB, never under 500,000; the LRU holds each turn's atom list by a
+  weak reference, so a tree nobody holds any more keeps nothing resident but
+  entries that expire, and `resident` counts those too until they do:
+  before this (measured 2026-09-15) a strong reference kept every superseded
+  generation's atoms, and its whole index behind them, resident until they
+  aged past the cap, about 1.2 GiB on a box whose LRU sat exactly at its cap
+  of a million entries, and live atoms evicted by stale ones were rebuilt),
+  `evictions` (a live entry past the cap: its slot's memo dropped, never a
+  field in place), `expired` (an entry whose list has been collected, dropped
+  when it reaches the cap or when a live list registers a slot under the id the
+  dead one held, no slot touched either way), `released` (entries popped the moment the
+  assembly entry that owned their index was dropped or replaced, rather than
+  a million entries later at the cap), `rowDecodes` (document rows decoded,
+  a build's or a light read's), `userFacts` (below), and `restoredTurns`.
 - `skillLoadIndex`: the judge's skill-load boot pass (the tops older stores minted from
   the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and

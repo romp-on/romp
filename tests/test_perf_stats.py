@@ -194,7 +194,9 @@ class Collector(unittest.TestCase):
         the gauge was documented on /perf but never exposed)."""
         st = km.em.asm_index_stats()
         self.assertEqual(set(st), {"cap", "evictions", "materialized", "materializedBy", "materializedByStage", "resident", "restoredTurns",
-                                   "rowDecodes", "userFacts"})
+                                   "rowDecodes", "userFacts", "released", "expired"})   # released, expired: the LRU's weak ownership
+        #                                                                                   (measured 2026-09-15: superseded generations
+        #                                                                                   sat resident at the cap)
         self.assertIsInstance(st["userFacts"], int); self.assertGreaterEqual(st["userFacts"], 0)
 
     def test_the_feed_build_block_carries_the_per_session_card_memo(self):
