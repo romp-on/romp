@@ -270,20 +270,27 @@ sit side by side instead of behind each other's tabs. Every column is one full c
 own tab strip and its own composer, and each session lives in exactly one column: the first
 column holds every session not shown elsewhere. Drag a tab to the right edge of the chat and a
 new column opens there on that session; drag a tab onto another column and the session moves
-to it. Without the mouse, **⌘** / **Ctrl** with the backslash key, or **Move this session to a
-new column** in the command palette, moves the session you are on to a new column at the right;
+to it. Drag a tab to the bottom edge of the chat and a second row of columns opens below the
+first, with that session as its column; drag a tab to the right edge of the bottom row to add a
+column beside it, while the top row keeps its own right edge. Any arrangement of the four columns
+over the two rows will do, and the gutter between the rows drags to share the height. Without the
+mouse, **⌘** / **Ctrl** with the backslash key, or **Move this session to a
+new column** in the command palette, moves the session you are on to a new column at the right,
+and **Move this session to a new column below** to one in the row below;
 **Move this session to the next column** and **Move this session to the previous column** in
-the palette walk it across the columns you have. Your unsent draft travels with the session.
+the palette walk it across the columns you have, the top row first and then the bottom one.
+Your unsent draft travels with the session.
 Drag the gutter between two columns to resize them. The **×** in a column's top-right corner
 closes it and returns its sessions to the first column, as does **Close this column** in the
 palette (the column you are in, or the last one when you are in the first); a column whose last
 tab leaves, whether moved away or ended, closes on its own (a column with a session still being
-created in it waits for that session to open). Clicking a card in the feed or a
+created in it waits for that session to open); when the bottom row's last column goes, the row
+folds away and the top row takes the full height. Clicking a card in the feed or a
 notification, or picking a session from the **+** picker, the switcher, an at-mention or a link
 in a transcript when it is shown in another column, lands you in the column that holds it, so
 no session is ever shown twice. The arrangement, each column's sessions and widths, is
-remembered per browser across reloads. Four columns at most; the phone shows one pane at a time
-and never splits.
+remembered per browser across reloads. Four columns at most, over the two rows; the phone shows
+one pane at a time and never splits.
 
 A tab can have a **hot key**: right-click it, pick **Hot key…**, press a combination, and the
 combination shows on the tab after its name; pressing it switches to that session, in the column that holds it. Once one is set the row reads

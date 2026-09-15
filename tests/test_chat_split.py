@@ -17,7 +17,12 @@ halves are checked here:
     message, another dashboard tab's write reconciled, the cross returning sessions home with their drafts,
     drafts travelling on a move, a created session claimed once and never stolen, the restore's seeding, the
     cap, and nothing on the phone — and THE DRAG (DragZonesExecute): a tab drag's zones mounted and unmounted, the
-    rectangle's geometry and cue, the drops calling the one mutation, the refused edge at the cap.
+    rectangle's geometry and cue, the drops calling the one mutation, the refused edge at the cap — and THE ROWS
+    (RowsExecute, the user 2026-09-15): a drop on the chat area's bottom zone opening a second row of columns under the
+    first, the bottom row's own right edge, every arrangement of the four columns over two rows, the store's row and
+    rowSplit fields (present only while a bottom row exists: without one the bytes are the shape above), the fold of an
+    emptied bottom row, the walk's order across rows, the halving within a row, the row gutter's share, and another
+    dashboard's rows reconciled.
 
 Synthetic only — invented sids, no network, no real DOM.
 """
@@ -162,10 +167,18 @@ class SplitSourcePins(unittest.TestCase):
             self.assertIn(needle, split, needle)
         self.assertNotIn("setTimeout", split, "nothing is timed")
         # the rectangle's element beside the divider drag's landing line: a child of .col, never a flex item of the row
-        self.assertIn("<div id=gv-ghost></div><div id=col-ghost></div>", self.html)
+        self.assertIn("<div id=gv-ghost></div><div id=col-ghost></div><div id=gv-ghost-h></div>", self.html)
         # the zones ride the panes (position:relative) above the iframe and the cross (z 7); the edge above the column zone
         self.assertIn(".col-drop{position:absolute;inset:0;z-index:8}", self.html)
         self.assertIn(".col-drop.col-drop-edge{left:auto;z-index:9}", self.html)
+        # the bottom zone (the chat rows, 2026-09-15) rides the chat area along its bottom edge, its height set inline
+        self.assertIn(".col-drop.col-drop-bottom{top:auto;z-index:9}", self.html)
+        self.assertIn("#chat-area{flex:var(--g-chat,60) 1 0;display:flex;flex-direction:column;position:relative;", self.html, "position:relative: the bottom zone's box")
+        for needle in ["function bottomRect(){", "function zoneRect(z){if(z.classList.contains('col-drop-bottom'))return bottomRect();",
+                       "var a=area.getBoundingClientRect(),h=(a.height-7)/2;return {top:a.top+a.height-h,height:h,left:a.left,width:a.width};",   # the new row's rectangle is the box the half split opens, gutter and all (review polish 2026-09-15)
+                       "function making(z){return z.classList.contains('col-drop-edge')||z.classList.contains('col-drop-bottom');}",
+                       "var b=zone(area,'col-drop-bottom',null,function(sid){if(b.getAttribute('data-refused'))refuse();else moveTab(sid,'below');});"]:
+            self.assertIn(needle, split, needle)
         # the dress: the accent wash (the value --accent-wash resolves to in styles.css) inside a 2 px ring through the token
         self.assertIn(".col-drop.over,#col-ghost{background:rgba(156,210,255,0.12);box-shadow:inset 0 0 0 2px var(--accent,#9cd2ff)}", self.html)
         self.assertIn("#col-ghost{display:none;position:fixed;pointer-events:none;z-index:40;align-items:center;justify-content:center;", self.html)
@@ -192,6 +205,10 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn(".chat-col>.col-x{position:absolute;top:4px;right:6px;z-index:7;", self.html)
         mobile = self.html[self.html.index("@media (max-width:820px),(pointer:coarse) and (max-width:1024px){"):]
         self.assertIn(".chat-col,.gv-chat{display:none!important}", mobile)
+        # the chat area's wrapper and its top row dissolve on the phone like the pane wrappers, so #f-chat tiles as before; the
+        # bottom row and the row gutter never show there (the chat rows, 2026-09-15)
+        self.assertIn("#chat-area,#chat-row-1{display:contents!important}#chat-row-2,#gv-rows{display:none!important}", mobile)
+        self.assertIn("#chat-area:not(.rows) #chat-row-2,#chat-area:not(.rows) #gv-rows{display:none}", self.html, "on the desktop the bottom row shows only while a column is in it")
 
     def test_the_shell_s_bridges_know_about_later_columns(self):
         # the picker lift marks the ASKING frame (e.source) and its pane
@@ -224,21 +241,93 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn("window.__rompWireEsc=function(f){", km._LANDING_ESC_JS)
         # the gutters: later columns register, gv-a/gv-b's left neighbour is the rightmost chat column
         gut = km._LANDING_JS
-        self.assertIn("window.__rompRegisterPane=function(id,k){KEYS[id]=k;if(PANES.indexOf(id)<0)PANES.splice(PANES.indexOf('fleet-pane'),0,id);};", gut)
+        self.assertIn("window.__rompRegisterPane=function(id,k){cancelGesture();KEYS[id]=k;if(PANES.indexOf(id)<0)PANES.splice(PANES.indexOf('fleet-pane'),0,id);};", gut)   # a pane made under a drag ends the drag first (2026-09-15)
         self.assertIn("window.__rompUnregisterPane=function(id){", gut)
-        self.assertIn("function key(id){return KEYS[id]||(id==='chat-pane'?'chat':id==='fleet-pane'?'fleet':id==='feed-pane'?'feed':'files');}", gut)
+        # the chat AREA wears the outer weight the first pane wore; the first pane has an inner one against its row's columns (the chat rows, 2026-09-15)
+        # an explicit map for the fixed panes, a split column's registration, and NONE for any other id (the seventh pass: an
+        # unregistered pane fell to 'files'); setGrow on no key is a no-op
+        self.assertIn("var FIXED={'chat-area':'chat','chat-pane':'chat1','fleet-pane':'fleet','feed-pane':'feed','files-pane':'files'};", gut)
+        self.assertIn("function key(id){return KEYS[id]||FIXED[id]||null;}", gut); self.assertIn("window.__rompPaneKey=key;", gut)
+        self.assertIn("function setGrow(k,v){if(!k)return;grow[k]=v;row.style.setProperty('--g-'+k,v);}", gut)
+        self.assertNotIn("?'feed':'files'", gut)
+        self.assertIn("function lastChat(){return 'chat-area';}", gut)
+        self.assertIn("window.__rompRowGutter=function(gid,topId,botId,apply){", gut, "the row gutter rides the same drag code, reporting the top row's share")
+        # a pre-rows pane store (no chat1): the area's weight is set once from the top-row columns the split restored, in the
+        # pixels of the pre-rows layout (review find 2026-09-15; tests/test_pane_gutters.py runs it)
+        self.assertIn("window.__rompSeedAreaWeight=function(){if(ingest()||!legacy)return false;if(!shown('chat-pane'))return false;return upgrade(false);};", gut)
+        # …no snapshot (review find 2026-09-15, fourth pass): while the store is pre-rows-shaped this shell keeps the PRE-ROWS fair grow
+        # (the old PANES.filter(shown), the chat area no pane of it), the upgrade reads the LIVE roster and weights when it runs, a peer's
+        # upgraded store is adopted rather than written over, and the store keeps its pre-rows shape meanwhile
+        self.assertNotIn("legacyGrow", gut); self.assertNotIn("legacyKeys", gut)
+        self.assertIn("function oldFair(){var v=PANES.filter(function(id){return id!=='chat-area'&&shown(id);}).map(function(id){return grow[key(id)];}).filter(finite);return v.length?v.reduce(function(a,b){return a+b;},0)/v.length:50;}", gut)
+        # a peer's upgrade is INGESTED at the event and FIRST in every entry point that reads or changes a weight, never from persist
+        # (review find 2026-09-15, fifth pass: adopting at the final write threw away the very action that wrote)
+        self.assertNotIn("sync(", gut)
+        self.assertIn("window.addEventListener('storage',function(e){if(e&&e.key===GK)ingest();});", gut, "the peer's write is the event")
+        self.assertIn("window.__rompGrowFair=function(k){if(k==='timeline')return;cancelGesture();ingest();", gut, "the rail's fair grow: a drag ended first, a peer's upgrade ingested, then the CURRENT rule (or the pre-rows one while still legacy)")
+        self.assertIn("if(legacy){if(k==='chat'){upgrade(true);return;}setGrow(k,oldFair());persist();return;}", gut, "the pre-rows rule while legacy; the chat pane coming on is the upgrade's moment")
+        self.assertIn("window.__rompGrowFairIfNew=function(k){ingest();if(typeof grow[k]==='number'&&isFinite(grow[k])){setGrow(k,grow[k]);return;}window.__rompGrowFair(k);};", gut, "a restored or peer-made column keeps a published weight")
+        self.assertIn("window.__rompUnregisterPane=function(id){cancelGesture();ingest();var k=KEYS[id];", gut, "unregister: a drag ended first, a peer's upgrade ingested, the key deleted, then the write carries the deletion")
+        self.assertIn("window.__rompSplitGrow=function(leftId,newKey){cancelGesture();ingest();", gut); self.assertIn("window.__rompSplitShrink=function(leftId,goneId){cancelGesture();ingest();", gut)
+        # a drag is ONE TRANSACTION (the sixth pass): a peer's write during it is only noted, endGesture is the one exit for every gutter,
+        # a commit rebases the pair against the ingested siblings so the divider lands where the line was, a cancel restores and writes nothing
+        self.assertNotIn("held", gut)
+        self.assertIn("var gesture=null;", gut); self.assertNotIn("ingestDue", gut)
+        # the store on disk is the ONE source (the eighth pass): the listener re-reads it, never the event's own value — two current
+        # writes queued behind a slow page had the older adopted and the newer written over; a re-read is never staler than the event
+        self.assertIn("function ingest(){if(!legacy)return false;if(gesture)return false;var cur=null;try{cur=JSON.parse(localStorage.getItem(GK)||'null');}catch(e){}", gut, "nothing applied while a gesture stands; the store re-read")
+        self.assertIn("window.addEventListener('storage',function(e){if(e&&e.key===GK)ingest();});", gut, "the peer's write is the event; the store as it stands is what is adopted")
+        self.assertNotIn("newValue", gut)
+        self.assertIn("function endGesture(commit){var g=gesture;if(!g)return;gesture=null;", gut)
+        self.assertIn("window.removeEventListener('mousemove',g.mv);window.removeEventListener('mouseup',g.up);", gut, "the gesture's listeners go at its end")
+        self.assertIn("if(g.vert){if(commit&&g.apply)g.apply(g.nL/g.sum);ingest();return;}", gut)
+        self.assertIn("var intact=commit&&!!g.L.isConnected&&!!g.R.isConnected&&key(g.L.id)===g.kL&&key(g.R.id)===g.kR;", gut, "a commit needs the pair as pressed: present and under the press-time keys")
+        self.assertIn("if(!intact){for(var k in g.w0)setGrow(k,g.w0[k]);ingest();return;}", gut, "a cancel: the press-time weights back, nothing written, then whatever the store holds")
+        self.assertIn("if(ingest()&&a+b<g.W)g.others.forEach(function(k){if(finite(grow[k]))so+=grow[k];});", gut, "the release ingests UNCONDITIONALLY, then rebases against what it adopted")
+        self.assertIn("if(so>0){var pair=so*(a+b)/(g.W-a-b);setGrow(g.kL,pair*a/(a+b));setGrow(g.kR,pair*b/(a+b));}else{setGrow(g.kL,a);setGrow(g.kR,b);}", gut, "the rebase; the plain write with nothing adopted; the press-time keys")
+        self.assertIn("var kL=key(L.id),kR=key(R.id);if(!vert&&(!kL||!kR))return;", gut, "a pane gutter's pair must be registered panes")
+        # a structural change ends a drag first: the pane-weight script's own mutations, the split's and the rail's
+        self.assertIn("function cancelGesture(){if(gesture)endGesture(false);}", gut); self.assertIn("window.__rompCancelGesture=cancelGesture;", gut)
+        for site in ["window.__rompRegisterPane=function(id,k){cancelGesture();", "window.__rompUnregisterPane=function(id){cancelGesture();ingest();",
+                     "window.__rompGrowFair=function(k){if(k==='timeline')return;cancelGesture();ingest();", "window.__rompSplitGrow=function(leftId,newKey){cancelGesture();ingest();",
+                     "window.__rompSplitShrink=function(leftId,goneId){cancelGesture();ingest();"]:
+            self.assertIn(site, gut, "a structural site ends the drag first: " + site)
+        for site in ["function make(n,sid,state){var have=document.getElementById(frameId(n));if(have)return have;cancelDrag();", "function moveTab(sid,to){if(typeof sid!=='string'||!sid)return null;cancelDrag();",
+                     "function close(n,keep){var i=idx(n);if(i<0)return;cancelDrag();", "function reconcile(r){cancelDrag();var next=r.cols;"]:
+            self.assertIn(site, km._LANDING_SPLIT_JS, "the split's structural site ends the drag first: " + site)
+        self.assertIn("function cancelDrag(){try{if(window.__rompCancelGesture)window.__rompCancelGesture();}catch(e){}}", km._LANDING_SPLIT_JS)
+        self.assertIn("if(window.__rompCancelGesture)window.__rompCancelGesture();   // a pane coming or going under a gutter drag ends the drag first", km._LANDING_COLLAPSE_JS)
+        # persist is write-only, and refuses (says so) rather than write a pre-rows shape over a peer's upgrade; the write is exported for that guard's test alone
+        self.assertIn("function persist(){if(legacy){var cur=null;try{cur=JSON.parse(localStorage.getItem(GK)||'null');}catch(e){}", gut)
+        self.assertIn("if(cur&&finite(cur.chat1)){try{console.warn(", gut); self.assertIn("window.__rompPersistGrow=persist;", gut)
+        for src in ["window.addEventListener('pointercancel',function(){endGesture(false);});", "window.addEventListener('blur',function(){endGesture(false);});",
+                    "document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden')endGesture(false);});", "if(gesture)endGesture(false);   // a new press while one stands"]:
+            self.assertIn(src, gut, "a cancel source: " + src)
+        self.assertIn("var w0=Object.assign({},grow),others=[],W=0;", gut, "the press-time weights, before the press's own normalisation")
+        self.assertIn("function mv(ev){if(gesture!==g)return;", gut); self.assertIn("function up(){if(gesture!==g)return;endGesture(true);}", gut, "a stale release is a no-op")
+        self.assertIn("window.__rompRowGutter=function(gid,topId,botId,apply){gutter(gid,function(){return topId;},botId,true,apply);};", gut, "the row gutter is the same gutter(): the same transaction")
+        self.assertIn("function upgrade(showing){if(ingest()||!legacy)return false;", gut)
+        self.assertIn("window.__rompGrowLegacy=function(){return legacy;};", gut)
+        self.assertIn("var cols=PANES.filter(function(id){var e=document.getElementById(id);return !!KEYS[id]&&!!e&&e.parentElement===host&&finite(grow[KEYS[id]]);}).map(function(id){return KEYS[id];});", gut, "the live roster: registered, present, in the first pane's row")
+        self.assertIn("if(showing)setGrow('chat1',oldFair());", gut)
+        self.assertIn("if(!cur||!finite(cur.chat1))return false;legacy=false;for(var k in cur){if(finite(cur[k]))setGrow(k,cur[k]);}return true;}", gut, "a current-shape store is adopted whole")
+        self.assertIn("var o=Object.assign({},grow);delete o.chat1;try{localStorage.setItem(GK,JSON.stringify(o));}catch(e){}return;}", gut, "persist writes what its caller produced: the pre-rows shape while legacy, nothing ingested here")
+        self.assertIn("if(window.__rompSeedAreaWeight)window.__rompSeedAreaWeight();", km._LANDING_SPLIT_JS, "called at the split's boot, no arguments: the roster is live")
+        boot = km._LANDING_SPLIT_JS[km._LANDING_SPLIT_JS.index("try{if(!mobile()){var r0=read();"):]
+        self.assertLess(boot.index("cols.forEach(function(c){make(c.n,seedFor(c),null);});"), boot.index("__rompSeedAreaWeight();"), "…after they are made and registered")
         self.assertIn("window.__rompGutter=gutter;", gut)
         self.assertIn("gutter('gv-a',function(){return lastChat();},'fleet-pane');", gut)
         # a pane with no grow yet never averages in as NaN (the first split opened 0px wide — review find 2026-09-08),
         # and a column keeps the width it was dragged to across reloads
         self.assertIn(".filter(function(g){return typeof g==='number'&&isFinite(g);});", gut)
-        self.assertIn("window.__rompGrowFairIfNew=function(k){if(typeof grow[k]==='number'&&isFinite(grow[k])){setGrow(k,grow[k]);return;}window.__rompGrowFair(k);};", gut)
+        self.assertIn("window.__rompGrowFairIfNew=function(k){ingest();if(typeof grow[k]==='number'&&isFinite(grow[k])){setGrow(k,grow[k]);return;}window.__rompGrowFair(k);};", gut)   # a peer's upgrade ingested first (2026-09-15)
         # …and a new column takes HALF the rightmost one (2026-09-11), through the gutters' own normalisation
         # (tests/test_pane_gutters.py runs it); the split calls it with the rightmost pane and the new key
         self.assertIn("window.__rompSplitGrow=function(leftId,newKey){", gut)
         self.assertIn("window.__rompSplitShrink=function(leftId,goneId){", gut, "…and its twin: a closing column's pixels go to the column on its left (review find 2026-09-11)")
         split = km._LANDING_SPLIT_JS
-        self.assertIn("if(window.__rompSplitGrow)window.__rompSplitGrow(lastPane(),'chat'+n);", split)
+        self.assertIn("var state=take(src,sid),n=nextNumber(),lp=lastPaneIn(nr);", split)
+        self.assertIn("if(lp&&window.__rompSplitGrow)window.__rompSplitGrow(lp,'chat'+n);", split, "the rightmost pane of the TARGET row is halved; the bottom row's first column has nothing to halve")
         self.assertIn("if(window.__rompGrowFairIfNew)window.__rompGrowFairIfNew('chat'+n);", split)
         # a refused move says why (the acknowledgement rule), and the tab menu can ask first
         self.assertIn("function canSplit(){return !mobile()&&cols.length+1<MAX;}", split)
@@ -254,7 +343,9 @@ class SplitSourcePins(unittest.TestCase):
     def test_the_partition_s_functions_exist_and_the_owner_lookup_reads_no_pane_s_dom(self):
         split = km._LANDING_SPLIT_JS
         # the store's shape and its one-shot migration
-        self.assertIn("JSON.stringify({v:2,cols:cols.map(function(c){return {n:c.n,ids:c.ids.slice()};})})", split)
+        # …row:2 on a bottom-row entry and a top-level rowSplit ONLY while a bottom row exists (the chat rows, 2026-09-15), so a
+        # browser that never stacks writes the bytes it always did (RowsExecute compares them)
+        self.assertIn("function save(){var o={v:2,cols:cols.map(function(c){var e={n:c.n,ids:c.ids.slice()};if(c.row===2)e.row=2;return e;})};if(hasRow2())o.rowSplit=rowSplit;", split)
         self.assertIn("if(Array.isArray(raw)){migrated=true;", split, "a v1 array of numbers is read once more…")
         self.assertIn("if(r0.migrated)save();", split, "…and written back in the new shape")
         # the three pure readers, the sets the pages read, the one mutation, the claim
@@ -284,7 +375,21 @@ class SplitSourcePins(unittest.TestCase):
                        "if(!keep&&busy(f)){notify(BUSY);return;}"]:
             self.assertIn(needle, split, needle)
         mt = split[split.index("function moveTab(sid,to){"):split.index("function close(n,keep){")]
-        self.assertLess(mt.index("var why=refusal(src,sid);"), mt.index("if(to==='new'){"), "refused before anything is taken or grown (the reason read first, T395)")
+        self.assertLess(mt.index("var why=refusal(src,sid);"), mt.index("var nr=to==='new'?1:to==='below'?2:0;"), "refused before anything is taken or grown (the reason read first, T395)")
+        # a new column in the row the session is already alone in is the refused twin; one in the other row is a move (the rows)
+        self.assertIn("if(se&&se.ids.length===1&&rowOf(from)===nr)return notify('This session is already alone in its column.');", mt)
+        # …and a lone member leaving for the OTHER row is refused over a create in flight BEFORE anything is taken, grown or
+        # written (review find 2026-09-15: a close refused after the write left an empty entry persisted, and another
+        # dashboard's sanitised write then closed the column here past the check, the creation's text with it)
+        busy_line = "if(se&&se.ids.length===1&&busy(src))return notify(BUSY);"
+        self.assertIn(busy_line, mt)
+        nb = mt.index("if(nr){"); nr_branch = mt[nb:mt.index("var tn=Number(to);")]
+        self.assertIn(busy_line, nr_branch)
+        for later in ("if(!canSplit())return refuse();", "var state=take(src,sid)", "__rompSplitGrow(lp,'chat'+n)", "unlist(sid)", "save();"):
+            self.assertLess(nr_branch.index(busy_line), nr_branch.index(later), "the busy refusal comes before " + later)
+        self.assertIn("if(nr===2&&!hasRow2())rowSplit=0.5;", nr_branch, "a bottom row opens at the half the rectangle promised")
+        self.assertIn("var left=unlist(sid);cols.push({n:n,ids:[sid],row:nr});save();", mt)
+        self.assertIn("var nf=make(n,sid,state);if(left)close(left);", mt, "the origin emptied by a move to the other row closes")
         self.assertLess(mt.index("busy(src)"), mt.index("var st=take(src,sid)"), "refused before the hand-off")
         # a column closed for emptiness tells the first column which of its gone ids the page's own cross removed, ahead of
         # the store write; nothing else is held (the vanishing tab, 2026-09-12)
@@ -298,10 +403,17 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn("if(t&&t!==sf&&loaded(t))adopt(t,sid,take(sf,sid));", split)
         # a closing column's width goes to the column on its left before its key is dropped (the halving's twin)
         cl = split[split.index("function close(n,keep){"):split.index("function closeFocused(){")]
-        self.assertIn("if(window.__rompSplitShrink)window.__rompSplitShrink(left,paneId(n));", cl)
+        self.assertIn("if(left&&window.__rompSplitShrink)window.__rompSplitShrink(left,paneId(n));", cl, "the bottom row's first column has no left neighbour to hand its width to")
         self.assertLess(cl.index("__rompSplitShrink(left,paneId(n))"), cl.index("__rompUnregisterPane(paneId(n))"))
-        self.assertLess(cl.index("var left=i>0?paneId(cols[i-1].n):'chat-pane';"), cl.index("cols.splice(i,1);"))
-        self.assertIn("window.addEventListener('storage',function(e){if(!e||e.key!==CK||mobile())return;var r=read();if(!r.migrated)reconcile(r.cols);});", split)
+        self.assertLess(cl.index("var left=prevIn(n),fs=frames(),fi=fs.indexOf(f),pf=fi>0?fs[fi-1]:home;"), cl.index("cols.splice(i,1);"), "the left pane in its row and the frame before it in the walk are read before the entry goes")
+        self.assertIn("if(p)p.remove();if(g)g.remove();tidy();if(!hasRow2())rowSplit=0.5;applyRows();", cl, "a closed column may leave the bottom row empty (the fold: the share is forgotten with the row) or gutter-first (tidied)")
+        self.assertIn("window.addEventListener('storage',function(e){if(!e||e.key!==CK||mobile())return;var r=read();if(!r.migrated)reconcile(r);});", split)
+        # the rows' own readers and the gutter between them, wired once through the pane gutters' drag code
+        for needle in ["function rowOf(n){", "function rowCols(r){", "function hasRow2(){", "function lastPaneIn(r){", "function prevIn(n){",
+                       "function applyRows(){area.classList.toggle('rows',hasRow2());area.style.setProperty('--rs1',Math.round(rowSplit*1000)/10);area.style.setProperty('--rs2',Math.round((1-rowSplit)*1000)/10);}",   # weights out of 100: grow factors summing below 1 hand out only that fraction of the free space (served find 2026-09-15: a lone top row on 0.5 filled half the area)
+                       "if(window.__rompRowGutter)window.__rompRowGutter('gv-rows','chat-row-1','chat-row-2',function(s){rowSplit=Math.round(s*1000)/1000;applyRows();save();});",
+                       "window.__rompSplitChatBelow=function(sid){"]:
+            self.assertIn(needle, split, needle)
         # the cross's title reads as what it does now
         self.assertIn("x.title='Close this column';", split)
 
@@ -320,7 +432,8 @@ class SplitSourcePins(unittest.TestCase):
 HARNESS = r"""
 'use strict';
 let STORE = {};
-const CALLS = { register: [], unregister: [], growFair: [], splitGrow: [], splitShrink: [], gutter: [], wireFocus: [], wireEsc: [], colGone: [], events: [], posted: [], focus: [], notify: [], toggle: [], taken: [], sets: [] };
+const CALLS = { register: [], unregister: [], growFair: [], splitGrow: [], splitShrink: [], gutter: [], rowGutter: [], seedArea: [], wireFocus: [], wireEsc: [], colGone: [], events: [], posted: [], focus: [], notify: [], toggle: [], taken: [], sets: [] };
+let ROWAPPLY = null;      // the row gutter's release hook the split hands __rompRowGutter (the rows, 2026-09-15)
 let SEQ = [];             // the order of the shell's side effects across stubs (a store write, a post, a grow, a key drop)
 let UNMOVABLE = new Set(); // ids the pages answer "not a session a column can hold" for (a create in flight, a viewer)
 let LOCKED_SIDS = new Set(); // ids whose page answers 'locked' (the tab lock, T395): the toast names the gear's menu (T405)
@@ -389,16 +502,24 @@ global.__rompSplitGrow = (left, key) => { CALLS.splitGrow.push([left, key]); ret
 global.__rompNotify = (kind, text) => CALLS.notify.push([kind, text]);
 global.__rompPaneToggle = (k, to) => CALLS.toggle.push([k, to]);
 global.__rompGutter = (gid, leftPick, rightId) => CALLS.gutter.push({ gid, leftPick, rightId });
+global.__rompRowGutter = (gid, top, bot, apply) => { CALLS.rowGutter.push({ gid, top, bot }); ROWAPPLY = apply; };
+global.__rompSeedAreaWeight = () => { CALLS.seedArea.push(true); return true; };   // the pre-rows store's upgrade hook (tests/test_pane_gutters.py runs the real one)
 global.__rompWireFocus = (f) => CALLS.wireFocus.push(f.id);
 global.__rompWireEsc = (f) => CALLS.wireEsc.push(f.id);
 global.__rompColGone = (c) => CALLS.colGone.push(c);
 global.__rompFocusedChatId = () => FOCUSED;
 function boot(store, mobile) {
   STORE = Object.assign({}, store || {}); MOBILE = !!mobile; BYID = {}; WL = {}; TAKE = {}; FOCUSED = 'f-chat'; BODY_CLASSES = new Set(['po-chat', 'po-feed', 'po-timeline']);
-  SEQ = []; UNMOVABLE = new Set(); LOCKED_SIDS = new Set(); BUSY = {};
+  SEQ = []; UNMOVABLE = new Set(); LOCKED_SIDS = new Set(); BUSY = {}; ROWAPPLY = null;
   for (const k in CALLS) CALLS[k] = [];
   ROW = mkEl('div'); ROW.className = 'row';
-  const cp = mkEl('div'); cp.id = 'chat-pane'; const fc = mkEl('iframe'); fc.id = 'f-chat'; cp.appendChild(fc); ROW.appendChild(cp);
+  // the served markup (the chat rows, 2026-09-15): #chat-area wraps the top row (the first pane in it), the row gutter and the empty bottom row
+  const area = mkEl('div'); area.id = 'chat-area';
+  const r1 = mkEl('div'); r1.id = 'chat-row-1'; r1.className = 'chat-row';
+  const cp = mkEl('div'); cp.id = 'chat-pane'; cp.className = 'pane'; const fc = mkEl('iframe'); fc.id = 'f-chat'; cp.appendChild(fc); r1.appendChild(cp);
+  const gvr = mkEl('div'); gvr.id = 'gv-rows'; gvr.className = 'gh';
+  const r2 = mkEl('div'); r2.id = 'chat-row-2'; r2.className = 'chat-row';
+  area.appendChild(r1); area.appendChild(gvr); area.appendChild(r2); ROW.appendChild(area);
   const gva = mkEl('div'); gva.id = 'gv-a'; ROW.appendChild(gva);
   const fp = mkEl('div'); fp.id = 'fleet-pane'; ROW.appendChild(fp);
   const gvb = mkEl('div'); gvb.id = 'gv-b'; ROW.appendChild(gvb);
@@ -406,10 +527,14 @@ function boot(store, mobile) {
   const mt = mkEl('nav'); mt.id = 'mtabs';
   const cg = mkEl('div'); cg.id = 'col-ghost';   // the rectangle's element: a sibling of the row in the served markup, never a flex item of it
   ROW._rect = { left: 0, top: 30, width: 1400, height: 800 };
+  area._rect = { left: 0, top: 30, width: 1400, height: 800 }; r1._rect = { left: 0, top: 30, width: 1400, height: 800 }; r2._rect = { left: 0, top: 830, width: 1400, height: 0 };   // one row: the top row is the area
   (0, eval)(SPLIT_JS);
 }
 const SPLIT_JS = __SPLIT_JS__;
-function order() { return ROW.children.map((c) => c.id); }
+function order() { return BYID['chat-row-1'].children.map((c) => c.id); }    // the top row, left to right
+function order2() { return BYID['chat-row-2'].children.map((c) => c.id); }   // the bottom row
+function outer() { return ROW.children.map((c) => c.id); }                   // the shell's row: the chat area, then the other panes
+function areaState() { const a = BYID['chat-area']; return { cls: a.className, rs1: a.style._props['--rs1'], rs2: a.style._props['--rs2'] }; }
 function ids() { return window.__rompChatFrameIds(); }
 function cols() { return JSON.parse(STORE['romp-chat-cols'] || 'null'); }
 function blob(n) { return JSON.parse(STORE['romp-vscode-state-chat:' + n] || 'null'); }
@@ -424,7 +549,7 @@ const out = {};
 const WEB = '11111111-2222-3333-4444-555555555501', API = '11111111-2222-3333-4444-555555555502', TESTS = '11111111-2222-3333-4444-555555555503', X = '11111111-2222-3333-4444-555555555509';
 // A) a fresh desktop dashboard: one column, nothing made, every session the first column's
 boot({}, false);
-out.fresh = { ids: ids(), order: order(), lastPane: window.__rompLastChatPane(), sets: window.__rompChatSets(), stored: STORE['romp-chat-cols'] || null,
+out.fresh = { ids: ids(), order: order(), order2: order2(), outer: outer(), area: areaState(), rowGutter: CALLS.rowGutter.slice(), lastPane: window.__rompLastChatPane(), sets: window.__rompChatSets(), stored: STORE['romp-chat-cols'] || null,
               targetUnknown: tgt(X), targetNone: tgt(''), saves: saves() };
 // B) the v1 store (a bare array of column numbers) migrates once: a number whose blob names a session becomes that
 //    session's column; a number with no session is dropped; the v2 shape is written back
@@ -541,7 +666,7 @@ out.cap = { ids: ids(), fourth: window.__rompMoveTab(X, 'new'), notify: CALLS.no
 // K) the phone: nothing is restored, the one chat filters nothing, a move is refused, the store keeps the desktop's arrangement
 const PHONE_STORE = JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }] });
 boot({ 'romp-chat-cols': PHONE_STORE }, true);
-out.mobile = { ids: ids(), sets: window.__rompChatSets(), moved: window.__rompMoveTab(WEB, 'new'), order: order(), notify: CALLS.notify.slice(), canSplit: window.__rompCanSplit(),
+out.mobile = { ids: ids(), sets: window.__rompChatSets(), moved: window.__rompMoveTab(WEB, 'new'), movedBelow: window.__rompMoveTab(WEB, 'below'), order: order(), order2: order2(), outer: outer(), area: areaState(), notify: CALLS.notify.slice(), canSplit: window.__rompCanSplit(),
                stored: STORE['romp-chat-cols'], storedWas: PHONE_STORE, saves: saves(), target: tgt(WEB) };
 // L) REFUSALS the page decides (review finds 2026-09-11): an id no column can hold (a create in flight, a sub-agent viewer)
 //    is refused at the one mutation with a line and nothing changes, from the palette too; a column whose last listed
@@ -648,7 +773,11 @@ class SplitExecutes(unittest.TestCase):
     def test_a_fresh_dashboard_has_one_column_that_holds_everything(self):
         o = self.out["fresh"]
         self.assertEqual(o["ids"], ["f-chat"])
-        self.assertEqual(o["order"], ["chat-pane", "gv-a", "fleet-pane", "gv-b", "feed-pane"])
+        self.assertEqual(o["order"], ["chat-pane"], "the top row holds the first pane alone")
+        self.assertEqual(o["order2"], [], "no bottom row")
+        self.assertEqual(o["outer"], ["chat-area", "gv-a", "fleet-pane", "gv-b", "feed-pane"], "the shell's row: the chat area in the first pane's place")
+        self.assertEqual(o["area"], {"cls": "", "rs1": 50, "rs2": 50}, "no .rows class: the bottom row and its gutter stay hidden; the half is the default share, as weights out of 100")
+        self.assertEqual(o["rowGutter"], [{"gid": "gv-rows", "top": "chat-row-1", "bot": "chat-row-2"}], "the row gutter is wired once, at boot")
         self.assertEqual(o["lastPane"], "chat-pane")
         self.assertEqual(o["sets"], {}, "no later columns: the pages filter nothing")
         self.assertIsNone(o["stored"], "nothing written until something changes")
@@ -677,8 +806,8 @@ class SplitExecutes(unittest.TestCase):
         self.assertEqual(o["pane"], "chat-pane-2")
         self.assertEqual(o["paneCls"], "pane chat-col")
         self.assertEqual(o["flex"], "var(--g-chat2,60) 1 0", "its own grow var, the gutters' store")
-        self.assertEqual(o["order"], ["chat-pane", "gv-chat-2", "chat-pane-2", "gv-a", "fleet-pane", "gv-b", "feed-pane"])
-        self.assertEqual(o["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}]})
+        self.assertEqual(o["order"], ["chat-pane", "gv-chat-2", "chat-pane-2"], "appended to the top row behind its gutter")
+        self.assertEqual(o["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}]}, "no row, no rowSplit: the shape from before the rows")
         self.assertEqual(o["sets"], {"2": [API]}, "what every column page filters by")
         self.assertEqual(o["blob2"], {"activeId": API}, "the blob names the session BEFORE the frame exists: the shim's hint, the page's wantActive")
         self.assertEqual(o["splitGrow"], [["chat-pane", "chat2"]], "the rightmost column and the new one each take half its width")
@@ -706,11 +835,12 @@ class SplitExecutes(unittest.TestCase):
         self.assertEqual(t["id"], "f-chat-3")
         self.assertEqual(t["splitGrow"], [["chat-pane", "chat2"], ["chat-pane-2", "chat3"]], "the second new column halves the RIGHTMOST column")
         self.assertEqual(t["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}, {"n": 3, "ids": [TESTS]}]})
+        self.assertEqual(t["order"], ["chat-pane", "gv-chat-2", "chat-pane-2", "gv-chat-3", "chat-pane-3"])
         self.assertEqual(t["gutterLeft3"], "chat-pane-2")
         m = self.out["movedInto3"]
         self.assertEqual(m["target"], "f-chat-3", "the target's iframe comes back")
         self.assertEqual(m["ids"], ["f-chat", "f-chat-3"], "column 2 held only the moved session: it closed")
-        self.assertEqual(m["order"], ["chat-pane", "gv-chat-3", "chat-pane-3", "gv-a", "fleet-pane", "gv-b", "feed-pane"])
+        self.assertEqual(m["order"], ["chat-pane", "gv-chat-3", "chat-pane-3"])
         self.assertEqual(m["stored"], {"v": 2, "cols": [{"n": 3, "ids": [TESTS, API]}]}, "the id joins the target's entry; the emptied entry is gone whole")
         self.assertEqual(m["sets"], {"3": [TESTS, API]})
         self.assertEqual(m["posted"], [{"id": "f-chat-3", "m": {"type": "focus", "id": API}}], "a plain focus into the target: it is the owner now, so its own gate takes it; no `own`")
@@ -948,10 +1078,12 @@ class SplitExecutes(unittest.TestCase):
         m = self.out["mobile"]
         self.assertEqual(m["ids"], ["f-chat"])
         self.assertIsNone(m["sets"], "null sets: the one chat shows everything")
-        self.assertIsNone(m["moved"])
-        self.assertEqual(m["notify"], [["warn", "The phone shows one pane at a time — no split here."]])
+        self.assertIsNone(m["moved"]); self.assertIsNone(m["movedBelow"])
+        self.assertEqual(m["notify"], [["warn", "The phone shows one pane at a time — no split here."]] * 2, "a move to a new column, right or below, is refused with the phone's line")
         self.assertFalse(m["canSplit"])
-        self.assertEqual(m["order"], ["chat-pane", "gv-a", "fleet-pane", "gv-b", "feed-pane"])
+        self.assertEqual(m["order"], ["chat-pane"]); self.assertEqual(m["order2"], [], "the phone never opens a bottom row")
+        self.assertEqual(m["outer"], ["chat-area", "gv-a", "fleet-pane", "gv-b", "feed-pane"])
+        self.assertEqual(m["area"]["cls"], "", "…nor shows one restored from the store")
         self.assertEqual(m["stored"], m["storedWas"], "the desktop's arrangement stays in the store")
         self.assertEqual(m["saves"], 0)
         self.assertEqual(m["target"], "f-chat")
@@ -965,9 +1097,11 @@ const EV = () => { const ev = { prevented: false, dataTransfer: {}, relatedTarge
 const isZone = (c) => c.className.split(' ').includes('col-drop');
 const isEdge = (c) => c.className.split(' ').includes('col-drop-edge');
 const paneIds = () => ['chat-pane'].concat(window.__rompChatFrameIds().filter((f) => f !== 'f-chat').map(window.__rompChatPaneOf));
-function zonesOf(pid) { const p = BYID[pid]; return p ? p.children.filter(isZone).map((z) => ({ cls: z.className, col: z.getAttribute('data-col'), refused: z.getAttribute('data-refused'), width: z.style.width || '', top: z.style.top || '' })) : null; }
+const isBottom = (c) => c.className.split(' ').includes('col-drop-bottom');
+function zonesOf(pid) { const p = BYID[pid]; return p ? p.children.filter(isZone).map((z) => ({ cls: z.className, col: z.getAttribute('data-col'), row: z.getAttribute('data-row'), refused: z.getAttribute('data-refused'), width: z.style.width || '', height: z.style.height || '', top: z.style.top || '' })) : null; }
 function zoneIn(pid, edge) { return (BYID[pid] ? BYID[pid].children : []).find((c) => isZone(c) && isEdge(c) === !!edge) || null; }
-function allZones() { const o = {}; paneIds().forEach((pid) => { o[pid] = zonesOf(pid); }); return o; }
+function bottomZone() { return BYID['chat-area'].children.find(isBottom) || null; }   // the bottom zone rides the chat area, not a pane
+function allZones() { const o = {}; paneIds().forEach((pid) => { o[pid] = zonesOf(pid); }); o['chat-area'] = zonesOf('chat-area'); return o; }
 function ghost() { const g = BYID['col-ghost']; return { cls: g.className, text: g.textContent, top: g.style.top || '', height: g.style.height || '', left: g.style.left || '', width: g.style.width || '' }; }
 // the panes side by side, w px each behind 7 px gutters, in a row 800 px tall starting 30 px down
 function rects(w) { w = w || 400; let x = 0; paneIds().forEach((pid) => { const p = BYID[pid]; if (p) { p._rect = { left: x, top: 30, width: w, height: 800 }; x += w + 7; } }); }
@@ -1047,7 +1181,7 @@ out.single.dropped = { ids: ids(), stored: cols() };
 // I) the phone mounts nothing; a message from no chat column, or with no sid, mounts nothing
 boot({}, true);
 on(WEB, 'web', 'f-chat');
-out.phone = { zones: zonesOf('chat-pane'), body: Array.from(BODY_CLASSES).sort() };
+out.phone = { zones: zonesOf('chat-pane'), bottom: zonesOf('chat-area'), body: Array.from(BODY_CLASSES).sort() };
 boot({}, false); rects();
 msg({ romp: 'tabDrag', on: true, sid: WEB, name: 'web', stripH: 38 });
 out.unknown = { zones: zonesOf('chat-pane') };
@@ -1078,16 +1212,20 @@ class DragZonesExecute(unittest.TestCase):
 
     @staticmethod
     def _col(col, **kw):
-        return dict({"cls": "col-drop", "col": col, "refused": None, "width": "", "top": ""}, **kw)
+        return dict({"cls": "col-drop", "col": col, "row": None, "refused": None, "width": "", "height": "", "top": ""}, **kw)
 
     @staticmethod
-    def _edge(top, width="80px", refused=None):
-        return {"cls": "col-drop col-drop-edge", "col": None, "refused": refused, "width": width, "top": top}
+    def _edge(top, width="80px", refused=None, row="1"):
+        return {"cls": "col-drop col-drop-edge", "col": None, "row": row, "refused": refused, "width": width, "height": "", "top": top}
+
+    @staticmethod
+    def _bottom(height="160px", refused=None):   # a fifth of the last row's 800 px, on the chat area (the chat rows, 2026-09-15)
+        return {"cls": "col-drop col-drop-bottom", "col": None, "row": None, "refused": refused, "width": "", "height": height, "top": ""}
 
     def test_a_drag_from_the_first_column_mounts_a_column_zone_on_every_other_pane_and_the_edge_on_the_rightmost(self):
         o = self.out["fromFirst"]
-        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [self._col("2")], "chat-pane-3": [self._col("3"), self._edge("0px")]},
-                         "no zone on the source; a whole-pane zone on the others; the edge from the rightmost pane's top, a fifth of 400 px")
+        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [self._col("2")], "chat-pane-3": [self._col("3"), self._edge("0px")], "chat-area": [self._bottom()]},
+                         "no zone on the source; a whole-pane zone on the others; the edge from the rightmost pane's top, a fifth of 400 px; the bottom zone along the area's bottom edge (the rows)")
         self.assertEqual(o["ghost"], {"cls": "", "text": "", "top": "", "height": "", "left": "", "width": ""}, "the rectangle waits for the edge")
 
     def test_the_cue_marks_the_zone_under_the_pointer_alone_and_a_leave_clears_it(self):
@@ -1117,27 +1255,27 @@ class DragZonesExecute(unittest.TestCase):
         self.assertEqual(o["blob4"], {"activeId": WEB}, "the new column opens on the dragged session")
         self.assertEqual(o["targetWeb"], "f-chat-4")
         self.assertEqual(o["notify"], [])
-        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": [], "chat-pane-4": []}, "every zone unmounted at the drop")
+        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": [], "chat-pane-4": [], "chat-area": []}, "every zone unmounted at the drop")
         self.assertEqual(o["ghost"]["cls"], "", "the rectangle hidden at the drop"); self.assertEqual(o["ghost"]["text"], "")
         self.assertEqual(o["afterOff"]["zones"], o["zones"], "the page's dragend after the drop finds nothing left to unmount")
         self.assertEqual(o["afterOff"]["ghost"]["cls"], "")
 
     def test_a_drag_from_the_rightmost_column_puts_the_edge_under_its_strip_and_no_column_zone_on_it(self):
         o = self.out["fromLast"]
-        self.assertEqual(o["zones"], {"chat-pane": [self._col("")], "chat-pane-2": [self._col("2")], "chat-pane-3": [self._edge("44px")]},
+        self.assertEqual(o["zones"], {"chat-pane": [self._col("")], "chat-pane-2": [self._col("2")], "chat-pane-3": [self._edge("44px")], "chat-area": [self._bottom()]},
                          "the first column's zone carries data-col=''; the source pane has the edge alone, from the strip's bottom (its strip stays reorder territory)")
-        self.assertEqual(o["afterOff"]["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": []}, "tabDrag off unmounts everything")
+        self.assertEqual(o["afterOff"]["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": [], "chat-area": []}, "tabDrag off unmounts everything")
         self.assertEqual(o["afterOff"]["ghost"]["cls"], "")
         self.assertEqual(o["remounted"], o["zones"], "a second on (twice, even) re-mounts cleanly: never doubled")
 
     def test_a_later_column_holding_only_the_dragged_session_gets_no_edge_and_its_drop_on_another_column_closes_it(self):
         o = self.out["alone"]
-        self.assertEqual(o["zones"], {"chat-pane": [self._col("")], "chat-pane-2": [], "chat-pane-3": [self._col("3")]},
-                         "no edge anywhere: a new column would twin the origin and the origin would close")
+        self.assertEqual(o["zones"], {"chat-pane": [self._col("")], "chat-pane-2": [], "chat-pane-3": [self._col("3")], "chat-area": [self._bottom()]},
+                         "no edge in its row: a new column there would twin the origin and the origin would close; the bottom zone stands, since a row below is a move (RowsExecute)")
         d = o["dropped"]
         self.assertEqual(d["ids"], ["f-chat", "f-chat-3"], "__rompMoveTab(sid, 3): the emptied origin closed")
         self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 3, "ids": [TESTS, API]}]})
-        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-3": []})
+        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-3": [], "chat-area": []})
 
     def test_a_drop_on_the_first_column_s_zone_brings_the_session_home(self):
         o = self.out["home"]
@@ -1145,11 +1283,11 @@ class DragZonesExecute(unittest.TestCase):
         d = o["dropped"]
         self.assertEqual(d["ids"], ["f-chat", "f-chat-2"], "__rompMoveTab(sid, 1): the origin keeps its other member")
         self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 2, "ids": [TESTS]}]})
-        self.assertEqual(d["targetApi"], "f-chat"); self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-2": []})
+        self.assertEqual(d["targetApi"], "f-chat"); self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-area": []})
 
     def test_the_rightmost_pane_that_is_not_the_source_carries_both_zones_and_a_drop_on_its_column_zone_moves_there(self):
         o = self.out["into2"]
-        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [self._col("2"), self._edge("0px")]}, "the edge above the column zone (z 9 over z 8), from the top")
+        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [self._col("2"), self._edge("0px")], "chat-area": [self._bottom()]}, "the edge above the column zone (z 9 over z 8), from the top")
         self.assertEqual(o["dropped"]["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API, WEB]}]}, "__rompMoveTab(sid, 2)")
         self.assertEqual(o["dropped"]["ids"], ["f-chat", "f-chat-2"])
 
@@ -1157,13 +1295,14 @@ class DragZonesExecute(unittest.TestCase):
         o = self.out["cap"]
         self.assertEqual(o["refused"], "1", "mounted with data-refused")
         self.assertEqual(o["zones"]["chat-pane-4"], [self._col("4"), self._edge("0px", refused="1")])
+        self.assertEqual(o["zones"]["chat-area"], [self._bottom(refused="1")], "the bottom zone is refused at the cap too: a row below is a fifth column")
         self.assertEqual(sorted(o["ghost"]["cls"].split()), ["on", "refused"]); self.assertEqual(o["ghost"]["text"], "Four columns at most")
         d = o["dropped"]
         self.assertEqual(d["ids"], ["f-chat", "f-chat-2", "f-chat-3", "f-chat-4"], "nothing opened")
         self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB]}, {"n": 3, "ids": [API]}, {"n": 4, "ids": [TESTS]}]}, "nothing moved")
         self.assertEqual(d["notify"], [["warn", "Four chat columns at most — close one to open another."]], "the existing refusal, said once")
         self.assertEqual(d["saves"], 0)
-        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": [], "chat-pane-4": []}); self.assertEqual(d["ghost"]["cls"], "")
+        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": [], "chat-pane-4": [], "chat-area": []}); self.assertEqual(d["ghost"]["cls"], "")
 
     def test_the_geometry_is_a_fifth_of_the_pane_clamped_and_the_pane_s_right_half(self):
         g = self.out["geometry"]
@@ -1177,12 +1316,451 @@ class DragZonesExecute(unittest.TestCase):
 
     def test_one_column_is_both_source_and_rightmost_so_the_edge_alone_sits_under_its_strip(self):
         o = self.out["single"]
-        self.assertEqual(o["zones"], {"chat-pane": [self._edge("38px")]}, "stripH from the page's message")
+        self.assertEqual(o["zones"], {"chat-pane": [self._edge("38px")], "chat-area": [self._bottom()]}, "stripH from the page's message; the bottom zone beside it")
         self.assertEqual(o["dropped"]["ids"], ["f-chat", "f-chat-2"]); self.assertEqual(o["dropped"]["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB]}]})
 
     def test_the_phone_and_a_message_from_no_chat_column_mount_nothing(self):
-        self.assertEqual(self.out["phone"], {"zones": [], "body": ["po-chat", "po-feed", "po-timeline"]}, "no zone, and no body class for the gesture (nothing read one; review find 2026-09-11)")
+        self.assertEqual(self.out["phone"], {"zones": [], "bottom": [], "body": ["po-chat", "po-feed", "po-timeline"]}, "no zone, and no body class for the gesture (nothing read one; review find 2026-09-11)")
         self.assertEqual(self.out["unknown"], {"zones": [], "noSid": []})
+
+
+ROWS_DRIVER = r"""
+const out = {};
+const WEB = '11111111-2222-3333-4444-555555555501', API = '11111111-2222-3333-4444-555555555502', TESTS = '11111111-2222-3333-4444-555555555503', X = '11111111-2222-3333-4444-555555555509';
+const EV = () => { const ev = { prevented: false, dataTransfer: {}, relatedTarget: null, preventDefault() { ev.prevented = true; }, stopPropagation() {} }; return ev; };
+const isZone = (c) => c.className.split(' ').includes('col-drop');
+const isEdge = (c) => c.className.split(' ').includes('col-drop-edge');
+const isBottom = (c) => c.className.split(' ').includes('col-drop-bottom');
+function zonesOf(pid) { const p = BYID[pid]; return p ? p.children.filter(isZone).map((z) => ({ cls: z.className, col: z.getAttribute('data-col'), row: z.getAttribute('data-row'), refused: z.getAttribute('data-refused'), width: z.style.width || '', height: z.style.height || '', top: z.style.top || '' })) : null; }
+function zoneIn(pid, edge) { return (BYID[pid] ? BYID[pid].children : []).find((c) => isZone(c) && isEdge(c) === !!edge) || null; }
+function bottomZone() { return BYID['chat-area'].children.find(isBottom) || null; }
+function paneIds() { return ['chat-pane'].concat(window.__rompChatFrameIds().filter((f) => f !== 'f-chat').map(window.__rompChatPaneOf)); }
+function allZones() { const o = {}; paneIds().forEach((pid) => { o[pid] = zonesOf(pid); }); o['chat-area'] = zonesOf('chat-area'); return o; }
+function ghost() { const g = BYID['col-ghost']; return { cls: g.className, text: g.textContent, top: g.style.top || '', height: g.style.height || '', left: g.style.left || '', width: g.style.width || '' }; }
+function rows() { return { top: order(), bottom: order2(), area: areaState(), ids: ids(), stored: cols(), bytes: STORE['romp-chat-cols'] || null }; }
+// the geometry the browser would lay out: the area 1400 x 800 from (0, 30); with a bottom row, the top row 400 tall from
+// 30, the 7 px gutter, the bottom row 400 tall from 437; each row's panes side by side, w px each behind 7 px gutters
+function lay(w) { w = w || 400; const has2 = order2().length > 0; const a = BYID['chat-area'], r1 = BYID['chat-row-1'], r2 = BYID['chat-row-2'];
+  a._rect = { left: 0, top: 30, width: 1400, height: 800 };
+  r1._rect = has2 ? { left: 0, top: 30, width: 1400, height: 400 } : { left: 0, top: 30, width: 1400, height: 800 };
+  r2._rect = has2 ? { left: 0, top: 437, width: 1400, height: 400 } : { left: 0, top: 830, width: 1400, height: 0 };
+  [r1, r2].forEach((r) => { let x = 0; r.children.forEach((c) => { if (c.className.indexOf('pane') >= 0) { c._rect = { left: x, top: r._rect.top, width: w, height: r._rect.height }; x += w + 7; } }); }); }
+function on(sid, name, fromFid, stripH) { lay(); msg({ romp: 'tabDrag', on: true, sid, name, stripH: stripH === undefined ? 38 : stripH }, fromFid); }
+function off() { msg({ romp: 'tabDrag', on: false }); }
+function fire(z, kind, extra) { const ev = Object.assign(EV(), extra || {}); z.fire(kind, ev); return ev; }
+// A) ONE column, a tab dragged to the BOTTOM zone: the zones (the top row's edge under the source strip, the bottom zone a fifth of the
+//    area's height), the rectangle the area's bottom half, and the drop opening the bottom row on the session
+boot({}, false);
+on(API, 'api', 'f-chat');
+out.one = { zones: allZones() };
+fire(bottomZone(), 'dragenter'); out.one.ghost = ghost();
+fire(bottomZone(), 'dragleave'); out.one.afterLeave = ghost();
+fire(bottomZone(), 'dragenter'); const dropEv = fire(bottomZone(), 'drop');
+out.one.dropped = Object.assign(rows(), { prevented: dropEv.prevented, zones: allZones(), ghost: ghost(), splitGrow: CALLS.splitGrow.slice(), growFair: CALLS.growFair.slice(), gutter: CALLS.gutter.map((g) => g.gid),
+  register: CALLS.register.slice(), rowOf2: window.__rompChatRowOf(2), rowOf1: window.__rompChatRowOf(1), rowOfFirst: window.__rompChatRowOf(''), blob2: blob(2), focused: CALLS.focus.slice(), notify: CALLS.notify.slice(), lastPane: window.__rompLastChatPane(), targetApi: tgt(API) });
+off();
+// B) a second tab to the BOTTOM ROW's right edge: the zones over two rows (the bottom zone now a fifth of the bottom row's height), the
+//    rectangle the right half of the bottom row's rightmost pane at THAT row's height (the bottom zone promises the same, since it
+//    appends to the row), and the drop making a column beside the first, halving it
+on(TESTS, 'tests', 'f-chat');
+out.two = { zones: allZones() };
+const e2 = zoneIn('chat-pane-2', true);
+fire(e2, 'dragenter'); out.two.ghostEdge = ghost(); fire(e2, 'dragleave');
+fire(bottomZone(), 'dragenter'); out.two.ghostBottom = ghost(); fire(bottomZone(), 'dragleave');
+CALLS.splitGrow = []; CALLS.gutter = [];
+fire(e2, 'dragenter'); fire(e2, 'drop');
+out.two.dropped = Object.assign(rows(), { splitGrow: CALLS.splitGrow.slice(), gutter: CALLS.gutter.map((g) => ({ gid: g.gid, left: g.leftPick(), right: g.rightId })) });
+off();
+// C) a third to the TOP row's right edge: 2 x 2; the walk is the top row then the bottom
+on(WEB, 'web', 'f-chat');
+out.four = { zones: allZones() };
+const e1 = zoneIn('chat-pane', true);
+fire(e1, 'dragenter'); out.four.ghost = ghost();
+CALLS.splitGrow = [];
+fire(e1, 'drop');
+out.four.dropped = Object.assign(rows(), { splitGrow: CALLS.splitGrow.slice(), canSplit: window.__rompCanSplit() });
+off();
+// D) the CAP over two rows: every making zone refused, the rectangle says so on each, a drop notifies once and changes nothing; the
+//    palette's two moves are refused too
+on(X, 'x', 'f-chat');
+out.cap = { zones: allZones() };
+fire(bottomZone(), 'dragenter'); out.cap.ghostBottom = ghost(); fire(bottomZone(), 'dragleave');
+fire(zoneIn('chat-pane-3', true), 'dragenter'); out.cap.ghostEdge2 = ghost(); fire(zoneIn('chat-pane-3', true), 'dragleave');
+CALLS.notify = []; CALLS.sets = [];
+fire(bottomZone(), 'dragenter'); fire(bottomZone(), 'drop');
+out.cap.dropped = Object.assign(rows(), { notify: CALLS.notify.slice(), saves: saves(), zones: allZones() });
+off();
+CALLS.notify = [];
+out.cap.palette = { below: window.__rompMoveTab(X, 'below'), right: window.__rompMoveTab(X, 'new'), notify: CALLS.notify.slice(), stored: cols() };
+// E) the FOLD: the bottom row's members go home one by one. The first column of the bottom row closing tidies the gutter the second
+//    carried, hands no width left (nothing on its left) and rings the frame before it in the walk (the top row's last); the last
+//    member gone folds the row: the class off, rowSplit gone, the bytes the shape from before the rows
+CALLS.splitShrink = []; CALLS.focus = []; CALLS.unregister = [];
+window.__rompMoveTab(API, 1);
+out.fold = { first: Object.assign(rows(), { splitShrink: CALLS.splitShrink.slice(), focus: CALLS.focus.slice(), unregister: CALLS.unregister.slice() }) };
+CALLS.splitShrink = [];
+window.__rompMoveTab(TESTS, 1);
+out.fold.last = Object.assign(rows(), { splitShrink: CALLS.splitShrink.slice(), sameBytesAs: JSON.stringify({ v: 2, cols: [{ n: 4, ids: [WEB] }] }) });
+// F) the PALETTE's move below: the focused column's active tab; then the ALONE rule across rows — a session alone in the bottom row
+//    cannot go "below" (a twin) but can go to a new column at the top row's right (the origin closes, the row folds), and one alone in
+//    the top row can go below (the origin closes, its width to the pane on its left)
+BYID['f-chat']._active = TESTS; CALLS.notify = [];
+const fb = window.__rompSplitChatBelow();
+out.palette = Object.assign(rows(), { id: fb && fb.id, notify: CALLS.notify.slice(), blob2: blob(2) });
+BYID['f-chat']._active = ''; CALLS.notify = []; CALLS.sets = [];
+out.alone = { belowAgain: window.__rompMoveTab(TESTS, 'below'), notify: CALLS.notify.slice(), saves: saves() };
+CALLS.splitGrow = []; CALLS.splitShrink = []; CALLS.unregister = [];
+const fr = window.__rompMoveTab(TESTS, 'new');
+out.alone.toTop = Object.assign(rows(), { id: fr && fr.id, splitGrow: CALLS.splitGrow.slice(), splitShrink: CALLS.splitShrink.slice(), unregister: CALLS.unregister.slice() });
+CALLS.splitGrow = []; CALLS.splitShrink = []; CALLS.unregister = [];
+const fd = window.__rompMoveTab(TESTS, 'below');
+out.alone.toBottom = Object.assign(rows(), { id: fd && fd.id, splitGrow: CALLS.splitGrow.slice(), splitShrink: CALLS.splitShrink.slice(), unregister: CALLS.unregister.slice() });
+// G) the ZONES under the alone rule: from the column alone in the bottom row, no edge in that row and no bottom zone, the top row's
+//    edge stands; from the column alone in the top row, no edge there, the bottom row's edge and the bottom zone stand
+on(TESTS, 'tests', 'f-chat-2');
+out.aloneZones = { fromBottom: allZones() }; off();
+on(WEB, 'web', 'f-chat-4');
+out.aloneZones.fromTop = allZones(); off();
+// H) 3 + 1 and 1 + 3, by the palette's two moves
+boot({}, false);
+window.__rompMoveTab(WEB, 'new'); window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'below');
+out.threeOne = rows();
+boot({}, false); CALLS.splitGrow = [];
+window.__rompMoveTab(WEB, 'below'); window.__rompMoveTab(API, 'below'); window.__rompMoveTab(TESTS, 'below');
+out.oneThree = Object.assign(rows(), { splitGrow: CALLS.splitGrow.slice(), gutters: CALLS.gutter.map((g) => ({ gid: g.gid, left: g.leftPick() })) });
+// I) the RESTORE: a store with rows comes back in its rows at its share; one from before the rows is all top; junk shares fall to the half
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }, { n: 3, ids: [API, TESTS], row: 2 }], rowSplit: 0.7 }) }, false);
+out.restored = Object.assign(rows(), { saves: saves(), rowOf3: window.__rompChatRowOf(3), rowOf2: window.__rompChatRowOf(2), gutters: CALLS.gutter.map((g) => g.gid) });
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }, { n: 3, ids: [API] }] }) }, false);
+out.restoredFlat = Object.assign(rows(), { saves: saves() });
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB], row: 2 }], rowSplit: 1.5 }) }, false);
+out.restoredJunk = { area: areaState(), bottom: order2() };
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB], row: 2 }], rowSplit: 'x' }) }, false);
+out.restoredJunk.str = areaState();
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB], row: 3 }] }) }, false);
+out.restoredJunk.row3 = rows();
+// J) another dashboard tab's write with rows: a column it moved to the other row is remade there (its frame cannot change rows in
+//    place), one it added lands in its row, the share follows, nothing is written back; the row folds when its write empties it
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }] }) }, false);
+CALLS.sets = []; CALLS.unregister = []; CALLS.register = [];
+STORE['romp-chat-cols'] = JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB], row: 2 }, { n: 4, ids: [API, TESTS] }], rowSplit: 0.4 });
+window.dispatchEvent({ type: 'storage', key: 'romp-chat-cols' });
+out.reconciled = Object.assign(rows(), { saves: saves(), unregister: CALLS.unregister.slice(), register: CALLS.register.slice(), src2: BYID['f-chat-2'].src });
+STORE['romp-chat-cols'] = JSON.stringify({ v: 2, cols: [{ n: 4, ids: [API, TESTS] }] });
+window.dispatchEvent({ type: 'storage', key: 'romp-chat-cols' });
+out.reconciled.folded = Object.assign(rows(), { saves: saves() });
+// K) the ROW GUTTER's release: the share it reports is rounded, applied and persisted while a bottom row exists; with none it is applied
+//    (harmless) but never written, since the store carries no rowSplit without a row
+boot({}, false);
+window.__rompMoveTab(API, 'below');
+CALLS.sets = [];
+ROWAPPLY(0.62345);
+out.gutter = { area: areaState(), stored: cols(), saves: saves() };
+window.__rompMoveTab(API, 1);
+CALLS.sets = [];
+ROWAPPLY(0.3);
+out.gutter.noRow = { area: areaState(), stored: cols(), saves: saves(), bytes: STORE['romp-chat-cols'] };
+// L) the EMPTINESS message from the bottom row's last column folds the row like the cross does
+boot({}, false);
+window.__rompMoveTab(API, 'below'); window.__rompMoveTab(TESTS, 'below');
+crossOf('f-chat-3').fire('click', { stopPropagation() {} });
+out.emptied = { afterCross: rows() };
+msg({ romp: 'colEmpty', gone: [API] }, 'f-chat-2');
+out.emptied.afterEmpty = rows();
+// N) the BUSY guard across rows (review find 2026-09-15): a later column holding ONE listed session over a create in flight
+//    refuses that session a new column in the OTHER row — from the palette and from the bottom zone's drop — before anything is
+//    taken, grown or written; another dashboard's write of the same store then closes nothing; a column with two listed members
+//    lets one go; and the same from the bottom row towards the top
+boot({}, false);
+window.__rompMoveTab(API, 'new'); BUSY['f-chat-2'] = true;
+CALLS.notify = []; CALLS.sets = []; CALLS.taken = []; CALLS.splitGrow = []; CALLS.unregister = [];
+out.busyAcross = { below: window.__rompMoveTab(API, 'below'), notify: CALLS.notify.slice(), saves: saves(), taken: CALLS.taken.slice(), splitGrow: CALLS.splitGrow.slice(), stored: cols(), ids: ids(), bottom: order2(), area: areaState() };
+on(API, 'api', 'f-chat-2');
+out.busyAcross.zones = allZones();
+fire(bottomZone(), 'dragenter'); fire(bottomZone(), 'drop'); off();
+out.busyAcross.dropped = { notify: CALLS.notify.slice(), saves: saves(), stored: cols(), ids: ids(), bottom: order2(), zones: allZones() };
+window.dispatchEvent({ type: 'storage', key: 'romp-chat-cols' });   // another dashboard's write of the same (sanitised) store: the truth already
+out.busyAcross.otherTab = { ids: ids(), unregister: CALLS.unregister.slice(), saves: saves(), stored: cols() };
+window.__rompMoveTab(TESTS, 2); CALLS.notify = [];
+out.busyAcross.twoMembers = { below: (window.__rompMoveTab(TESTS, 'below') || {}).id, notify: CALLS.notify.slice(), stored: cols(), ids: ids() };
+boot({}, false);
+window.__rompMoveTab(API, 'below'); BUSY['f-chat-2'] = true;
+CALLS.notify = []; CALLS.sets = []; CALLS.taken = []; CALLS.splitGrow = []; CALLS.unregister = [];
+out.busyAcross.up = { right: window.__rompMoveTab(API, 'new'), notify: CALLS.notify.slice(), saves: saves(), taken: CALLS.taken.slice(), splitGrow: CALLS.splitGrow.slice(), stored: cols(), ids: ids(), bottom: order2(), area: areaState() };
+window.dispatchEvent({ type: 'storage', key: 'romp-chat-cols' });
+out.busyAcross.up.otherTab = { ids: ids(), unregister: CALLS.unregister.slice(), stored: cols() };
+// O) the SHARE is forgotten with the row (review find 2026-09-15): resized, folded, reopened — the rectangle's half is what the
+//    drop produces, in memory and in the store
+boot({}, false);
+window.__rompMoveTab(API, 'below'); ROWAPPLY(0.7);
+out.reopen = { resized: { area: areaState(), stored: cols() } };
+window.__rompMoveTab(API, 1);
+out.reopen.folded = { area: areaState(), stored: cols(), bytes: STORE['romp-chat-cols'] };
+on(TESTS, 'tests', 'f-chat');
+fire(bottomZone(), 'dragenter'); out.reopen.ghost = ghost(); fire(bottomZone(), 'drop'); off();
+out.reopen.reopened = { area: areaState(), stored: cols(), bottom: order2() };
+// …and a store carrying a share with NO bottom row (junk) opens the row at the half too
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }], rowSplit: 0.8 }) }, false);
+out.reopen.junkShare = { before: areaState() };
+window.__rompMoveTab(API, 'below');
+out.reopen.junkShare.after = { area: areaState(), stored: cols() };
+// P) the pre-rows pane store's upgrade hook is called once at boot, after every column is made and registered (it reads the live
+//    roster itself); not on the phone
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }, { n: 3, ids: [API], row: 2 }, { n: 4, ids: [TESTS] }], rowSplit: 0.5 }) }, false);
+out.seedArea = { calls: CALLS.seedArea.slice(), registered: CALLS.register.map((r) => r[0]) };
+boot({}, false); out.seedArea.fresh = CALLS.seedArea.slice();
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }] }) }, true); out.seedArea.phone = CALLS.seedArea.slice();
+// M) the phone restores no rows and refuses the move below
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB], row: 2 }], rowSplit: 0.5 }) }, true);
+CALLS.notify = [];
+out.phone = Object.assign(rows(), { below: window.__rompMoveTab(WEB, 'below'), notify: CALLS.notify.slice(), bytes: STORE['romp-chat-cols'] });
+console.log(JSON.stringify(out));
+"""
+
+
+class RowsExecute(unittest.TestCase):
+    """THE ROWS (the user 2026-09-15): the real _LANDING_SPLIT_JS against the DOM stub, whose #chat-area holds the two chat
+    rows and the gutter between them, driven through the zones, the one mutation and the store. Synthetic only."""
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        script = HARNESS.replace("__SPLIT_JS__", json.dumps(km._LANDING_SPLIT_JS)) + ROWS_DRIVER
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(script)
+            path = f.name
+        try:
+            r = subprocess.run(["node", path], capture_output=True, text=True, timeout=30)
+        finally:
+            os.unlink(path)
+        assert r.returncode == 0, "the rows' JS threw: " + r.stderr[:1500]
+        cls.out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    @staticmethod
+    def _col(col, **kw):
+        return dict({"cls": "col-drop", "col": col, "row": None, "refused": None, "width": "", "height": "", "top": ""}, **kw)
+
+    @staticmethod
+    def _edge(top, row, width="80px", refused=None):
+        return {"cls": "col-drop col-drop-edge", "col": None, "row": row, "refused": refused, "width": width, "height": "", "top": top}
+
+    @staticmethod
+    def _bottom(height, refused=None):
+        return {"cls": "col-drop col-drop-bottom", "col": None, "row": None, "refused": refused, "width": "", "height": height, "top": ""}
+
+    def test_a_tab_dropped_on_the_bottom_zone_opens_the_bottom_row_on_it(self):
+        o = self.out["one"]
+        self.assertEqual(o["zones"], {"chat-pane": [self._edge("38px", "1")], "chat-area": [self._bottom("160px")]},
+                         "one column: the top row's edge under the source strip, and the bottom zone a fifth of the area's 800 px")
+        self.assertEqual(o["ghost"], {"cls": "on", "text": "api", "top": "433.5px", "height": "396.5px", "left": "0px", "width": "1400px"},
+                         "the rectangle is the box the half split opens: the area's bottom half less the 7 px row gutter's share (800 - 7) / 2 from 30 + 800 - 396.5")
+        self.assertEqual(o["afterLeave"]["cls"], "")
+        d = o["dropped"]
+        self.assertTrue(d["prevented"])
+        self.assertEqual(d["ids"], ["f-chat", "f-chat-2"])
+        self.assertEqual(d["top"], ["chat-pane"]); self.assertEqual(d["bottom"], ["chat-pane-2"], "the bottom row's first column has no gutter ahead of it")
+        self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API], "row": 2}], "rowSplit": 0.5}, "row:2 on the entry, the half as the rows' share")
+        self.assertEqual(d["area"], {"cls": "rows", "rs1": 50, "rs2": 50}, "the class shows the row and its gutter; the two rows share the height by the split (weights out of 100)")
+        self.assertEqual(d["splitGrow"], [], "nothing to halve: the column has the row to itself")
+        self.assertEqual(d["growFair"], ["chat2"]); self.assertEqual(d["register"], [["chat-pane-2", "chat2"]])
+        self.assertEqual(d["gutter"], [], "no chat|chat gutter wired for it")
+        self.assertEqual(d["rowOf2"], 2); self.assertEqual(d["rowOf1"], 1); self.assertEqual(d["rowOfFirst"], 1)
+        self.assertEqual(d["blob2"], {"activeId": API}, "opened on the session, like a column at the right")
+        self.assertEqual(d["focused"], ["f-chat-2"]); self.assertEqual(d["notify"], [])
+        self.assertEqual(d["lastPane"], "chat-pane", "the top row's rightmost pane is still the first: the new column is below, not beside")
+        self.assertEqual(d["targetApi"], "f-chat-2")
+        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-area": []}); self.assertEqual(d["ghost"]["cls"], "")
+
+    def test_a_tab_dropped_on_the_bottom_row_s_right_edge_adds_a_column_beside_its_first(self):
+        o = self.out["two"]
+        self.assertEqual(o["zones"], {"chat-pane": [self._edge("38px", "1")], "chat-pane-2": [self._col("2"), self._edge("0px", "2")], "chat-area": [self._bottom("80px")]},
+                         "an edge per row (the bottom row's from its pane's top: not the source); the bottom zone a fifth of the bottom row's 400 px")
+        self.assertEqual(o["ghostEdge"], {"cls": "on", "text": "tests", "top": "437px", "height": "400px", "left": "200px", "width": "200px"},
+                         "the right half of the bottom row's rightmost pane, at THAT row's top and height")
+        self.assertEqual(o["ghostBottom"], o["ghostEdge"], "with the bottom row open the bottom zone appends to it, so it promises the same rectangle")
+        d = o["dropped"]
+        self.assertEqual(d["bottom"], ["chat-pane-2", "gv-chat-3", "chat-pane-3"]); self.assertEqual(d["top"], ["chat-pane"])
+        self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API], "row": 2}, {"n": 3, "ids": [TESTS], "row": 2}], "rowSplit": 0.5})
+        self.assertEqual(d["splitGrow"], [["chat-pane-2", "chat3"]], "the bottom row's rightmost column and the new one each take half its width")
+        self.assertEqual(d["gutter"], [{"gid": "gv-chat-3", "left": "chat-pane-2", "right": "chat-pane-3"}])
+        self.assertEqual(d["ids"], ["f-chat", "f-chat-2", "f-chat-3"])
+
+    def test_a_tab_dropped_on_the_top_row_s_right_edge_completes_two_by_two_and_the_walk_is_top_then_bottom(self):
+        o = self.out["four"]
+        self.assertEqual(o["zones"]["chat-pane"], [self._edge("38px", "1")])
+        self.assertEqual(o["zones"]["chat-pane-3"], [self._col("3"), self._edge("0px", "2")], "the bottom row's edge is on its rightmost pane, now column 3")
+        self.assertEqual(o["zones"]["chat-pane-2"], [self._col("2")])
+        self.assertEqual(o["ghost"], {"cls": "on", "text": "web", "top": "30px", "height": "400px", "left": "200px", "width": "200px"}, "the top row's rectangle at the top row's height")
+        d = o["dropped"]
+        self.assertEqual(d["top"], ["chat-pane", "gv-chat-4", "chat-pane-4"]); self.assertEqual(d["bottom"], ["chat-pane-2", "gv-chat-3", "chat-pane-3"])
+        self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API], "row": 2}, {"n": 3, "ids": [TESTS], "row": 2}, {"n": 4, "ids": [WEB]}], "rowSplit": 0.5},
+                         "store order is the order of making; a top-row entry carries no row")
+        self.assertEqual(d["splitGrow"], [["chat-pane", "chat4"]], "the TOP row's rightmost pane is halved, not the bottom's")
+        self.assertEqual(d["ids"], ["f-chat", "f-chat-4", "f-chat-2", "f-chat-3"], "the walk: the top row left to right, then the bottom row")
+        self.assertFalse(d["canSplit"], "four columns: the cap")
+
+    def test_the_cap_refuses_every_making_zone_and_both_palette_moves(self):
+        o = self.out["cap"]
+        self.assertEqual(o["zones"]["chat-pane-4"], [self._col("4"), self._edge("0px", "1", refused="1")])
+        self.assertEqual(o["zones"]["chat-pane-3"], [self._col("3"), self._edge("0px", "2", refused="1")])
+        self.assertEqual(o["zones"]["chat-area"], [self._bottom("80px", refused="1")])
+        for g in (o["ghostBottom"], o["ghostEdge2"]):
+            self.assertEqual(sorted(g["cls"].split()), ["on", "refused"]); self.assertEqual(g["text"], "Four columns at most")
+        d = o["dropped"]
+        self.assertEqual(d["notify"], [["warn", "Four chat columns at most — close one to open another."]]); self.assertEqual(d["saves"], 0)
+        self.assertEqual(d["ids"], ["f-chat", "f-chat-4", "f-chat-2", "f-chat-3"]); self.assertEqual(d["zones"]["chat-area"], [])
+        p = o["palette"]
+        self.assertIsNone(p["below"]); self.assertIsNone(p["right"])
+        self.assertEqual(p["notify"], [["warn", "Four chat columns at most — close one to open another."]] * 2)
+
+    def test_the_bottom_row_folds_when_its_last_column_goes_and_the_store_is_the_shape_from_before_the_rows(self):
+        f = self.out["fold"]["first"]
+        self.assertEqual(f["bottom"], ["chat-pane-3"], "the second column's gutter went with the first: nothing is on its left now")
+        self.assertEqual(f["splitShrink"], [], "the bottom row's first column had no pane on its left to hand its width to")
+        self.assertEqual(f["unregister"], ["chat-pane-2"])
+        self.assertEqual(f["focus"], ["f-chat-4", "f-chat"], "the ring goes to the frame before it in the walk (the top row's last), then to the move's target")
+        self.assertEqual(f["area"]["cls"], "rows", "a member remains: the row stands")
+        self.assertEqual(f["stored"], {"v": 2, "cols": [{"n": 3, "ids": [TESTS], "row": 2}, {"n": 4, "ids": [WEB]}], "rowSplit": 0.5})
+        l = self.out["fold"]["last"]
+        self.assertEqual(l["bottom"], []); self.assertEqual(l["top"], ["chat-pane", "gv-chat-4", "chat-pane-4"])
+        self.assertEqual(l["area"], {"cls": "", "rs1": 50, "rs2": 50}, "the class is off: the row and its gutter hide, the top row takes the height")
+        self.assertEqual(l["stored"], {"v": 2, "cols": [{"n": 4, "ids": [WEB]}]}, "no row key, no rowSplit")
+        self.assertEqual(l["bytes"], l["sameBytesAs"], "BYTE-IDENTICAL to the store a browser that never stacked writes")
+        self.assertEqual(l["splitShrink"], [])
+
+    def test_the_palette_moves_below_and_a_session_alone_in_a_row_can_only_go_to_the_other_row(self):
+        p = self.out["palette"]
+        self.assertEqual(p["id"], "f-chat-2", "the lowest free number, in the bottom row")
+        self.assertEqual(p["stored"], {"v": 2, "cols": [{"n": 4, "ids": [WEB]}, {"n": 2, "ids": [TESTS], "row": 2}], "rowSplit": 0.5})
+        self.assertEqual(p["bottom"], ["chat-pane-2"]); self.assertEqual(p["notify"], []); self.assertEqual(p["blob2"], {"activeId": TESTS})
+        a = self.out["alone"]
+        self.assertIsNone(a["belowAgain"]); self.assertEqual(a["notify"], [["warn", "This session is already alone in its column."]], "below again would twin it in its own row")
+        self.assertEqual(a["saves"], 0)
+        t = a["toTop"]
+        self.assertEqual(t["id"], "f-chat-3", "a new column at the top row's right: the lowest free number")
+        self.assertEqual(t["top"], ["chat-pane", "gv-chat-4", "chat-pane-4", "gv-chat-3", "chat-pane-3"]); self.assertEqual(t["bottom"], [])
+        self.assertEqual(t["stored"], {"v": 2, "cols": [{"n": 4, "ids": [WEB]}, {"n": 3, "ids": [TESTS]}]}, "the emptied origin is gone and with it the row: no rowSplit")
+        self.assertEqual(t["area"]["cls"], "")
+        self.assertEqual(t["splitGrow"], [["chat-pane-4", "chat3"]], "halved against the top row's rightmost")
+        self.assertEqual(t["splitShrink"], [], "the origin was the bottom row's only column: nothing on its left")
+        self.assertEqual(t["unregister"], ["chat-pane-2"])
+        b = a["toBottom"]
+        self.assertEqual(b["id"], "f-chat-2"); self.assertEqual(b["bottom"], ["chat-pane-2"]); self.assertEqual(b["top"], ["chat-pane", "gv-chat-4", "chat-pane-4"])
+        self.assertEqual(b["stored"], {"v": 2, "cols": [{"n": 4, "ids": [WEB]}, {"n": 2, "ids": [TESTS], "row": 2}], "rowSplit": 0.5})
+        self.assertEqual(b["splitGrow"], [], "the bottom row was empty: nothing to halve")
+        self.assertEqual(b["splitShrink"], [["chat-pane-4", "chat-pane-3"]], "the emptied top-row origin hands its width to the pane on its left")
+        self.assertEqual(b["unregister"], ["chat-pane-3"])
+
+    def test_the_zones_under_the_alone_rule_stand_only_where_a_drop_moves_the_session_across_rows(self):
+        o = self.out["aloneZones"]
+        self.assertEqual(o["fromBottom"], {"chat-pane": [self._col("")], "chat-pane-4": [self._col("4"), self._edge("0px", "1")], "chat-pane-2": [], "chat-area": []},
+                         "alone in the bottom row: no edge there and no bottom zone (both twins); the top row's edge, on its rightmost pane, is a move")
+        self.assertEqual(o["fromTop"], {"chat-pane": [self._col("")], "chat-pane-4": [], "chat-pane-2": [self._col("2"), self._edge("0px", "2")], "chat-area": [self._bottom("80px")]},
+                         "alone in the top row: no edge there; the bottom row's edge and the bottom zone move it down")
+
+    def test_three_over_one_and_one_over_three(self):
+        t = self.out["threeOne"]
+        self.assertEqual(t["top"], ["chat-pane", "gv-chat-2", "chat-pane-2", "gv-chat-3", "chat-pane-3"]); self.assertEqual(t["bottom"], ["chat-pane-4"])
+        self.assertEqual(t["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB]}, {"n": 3, "ids": [API]}, {"n": 4, "ids": [TESTS], "row": 2}], "rowSplit": 0.5})
+        self.assertEqual(t["ids"], ["f-chat", "f-chat-2", "f-chat-3", "f-chat-4"])
+        o = self.out["oneThree"]
+        self.assertEqual(o["top"], ["chat-pane"]); self.assertEqual(o["bottom"], ["chat-pane-2", "gv-chat-3", "chat-pane-3", "gv-chat-4", "chat-pane-4"])
+        self.assertEqual(o["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB], "row": 2}, {"n": 3, "ids": [API], "row": 2}, {"n": 4, "ids": [TESTS], "row": 2}], "rowSplit": 0.5})
+        self.assertEqual(o["splitGrow"], [["chat-pane-2", "chat3"], ["chat-pane-3", "chat4"]], "each halves the bottom row's rightmost")
+        self.assertEqual(o["gutters"], [{"gid": "gv-chat-3", "left": "chat-pane-2"}, {"gid": "gv-chat-4", "left": "chat-pane-3"}])
+
+    def test_the_restore_places_the_rows_and_reads_a_store_from_before_the_rows_as_all_top(self):
+        r = self.out["restored"]
+        self.assertEqual(r["top"], ["chat-pane", "gv-chat-2", "chat-pane-2"]); self.assertEqual(r["bottom"], ["chat-pane-3"])
+        self.assertEqual(r["ids"], ["f-chat", "f-chat-2", "f-chat-3"]); self.assertEqual(r["rowOf3"], 2); self.assertEqual(r["rowOf2"], 1)
+        self.assertEqual(r["area"]["cls"], "rows"); self.assertEqual(r["area"]["rs1"], 70); self.assertEqual(r["area"]["rs2"], 30)
+        self.assertEqual(r["saves"], 0, "a restore writes nothing"); self.assertEqual(r["gutters"], ["gv-chat-2"])
+        f = self.out["restoredFlat"]
+        self.assertEqual(f["top"], ["chat-pane", "gv-chat-2", "chat-pane-2", "gv-chat-3", "chat-pane-3"]); self.assertEqual(f["bottom"], [])
+        self.assertEqual(f["area"], {"cls": "", "rs1": 50, "rs2": 50}); self.assertEqual(f["saves"], 0)
+        j = self.out["restoredJunk"]
+        self.assertEqual(j["bottom"], ["chat-pane-2"]); self.assertEqual(j["area"], {"cls": "rows", "rs1": 50, "rs2": 50}, "a share outside (0, 1) falls to the half")
+        self.assertEqual(j["str"], {"cls": "rows", "rs1": 50, "rs2": 50}, "…as does a share that is not a number")
+        self.assertEqual(j["row3"]["top"], ["chat-pane", "gv-chat-2", "chat-pane-2"], "a row that is not 2 is the top")
+
+    def test_another_dashboard_s_rows_are_reconciled_without_writing_back(self):
+        r = self.out["reconciled"]
+        self.assertEqual(r["top"], ["chat-pane", "gv-chat-4", "chat-pane-4"]); self.assertEqual(r["bottom"], ["chat-pane-2"])
+        self.assertEqual(r["unregister"], ["chat-pane-2"], "the column the other tab moved down closed in the top row…")
+        self.assertEqual(r["register"], [["chat-pane-2", "chat2"], ["chat-pane-4", "chat4"]], "…and was remade in the bottom row, then the added column in the top")
+        self.assertEqual(r["src2"], "/chat?col=2&skeleton=1")
+        self.assertEqual(r["area"]["cls"], "rows"); self.assertEqual(r["area"]["rs1"], 40); self.assertEqual(r["area"]["rs2"], 60)
+        self.assertEqual(r["saves"], 0, "the other tab's store is the truth")
+        f = r["folded"]
+        self.assertEqual(f["bottom"], []); self.assertEqual(f["top"], ["chat-pane", "gv-chat-4", "chat-pane-4"])
+        self.assertEqual(f["area"], {"cls": "", "rs1": 50, "rs2": 50}, "its write emptied the row: folded, the share back at the default")
+        self.assertEqual(f["saves"], 0)
+
+    def test_the_row_gutter_s_release_persists_a_rounded_share_only_while_a_bottom_row_exists(self):
+        g = self.out["gutter"]
+        self.assertEqual(g["area"]["rs1"], 62.3); self.assertEqual(g["area"]["rs2"], 37.7, "the share as weights out of 100, one decimal")
+        self.assertEqual(g["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API], "row": 2}], "rowSplit": 0.623}); self.assertEqual(g["saves"], 1)
+        n = g["noRow"]
+        self.assertEqual(n["area"], {"cls": "", "rs1": 30, "rs2": 70})
+        self.assertEqual(n["stored"], {"v": 2, "cols": []}); self.assertEqual(n["bytes"], json.dumps({"v": 2, "cols": []}, separators=(",", ":")), "no rowSplit without a row")
+
+    def test_the_cross_and_the_emptiness_message_fold_the_bottom_row(self):
+        e = self.out["emptied"]
+        self.assertEqual(e["afterCross"]["bottom"], ["chat-pane-2"]); self.assertEqual(e["afterCross"]["area"]["cls"], "rows")
+        self.assertEqual(e["afterCross"]["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API], "row": 2}], "rowSplit": 0.5})
+        self.assertEqual(e["afterEmpty"]["bottom"], []); self.assertEqual(e["afterEmpty"]["area"]["cls"], "")
+        self.assertEqual(e["afterEmpty"]["stored"], {"v": 2, "cols": []})
+
+    def test_a_lone_member_over_a_create_in_flight_is_refused_the_other_row_before_anything_changes(self):
+        b = self.out["busyAcross"]
+        self.assertIsNone(b["below"]); self.assertEqual(b["notify"], [["warn", "A session is still being created in this column."]], "the existing notice")
+        self.assertEqual(b["saves"], 0, "no store write"); self.assertEqual(b["taken"], [], "no state taken from the source"); self.assertEqual(b["splitGrow"], [], "nothing grown")
+        self.assertEqual(b["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}]}, "the entry stands, whole"); self.assertEqual(b["ids"], ["f-chat", "f-chat-2"]); self.assertEqual(b["bottom"], [])
+        self.assertEqual(b["area"]["cls"], "", "no bottom row opened")
+        self.assertEqual(b["zones"]["chat-area"], [self._bottom("160px")], "the bottom zone is mounted (the busy answer is the drop's, not the mount's)…")
+        d = b["dropped"]
+        self.assertEqual(d["notify"], [["warn", "A session is still being created in this column."]] * 2, "…and the drop is refused with the same notice")
+        self.assertEqual(d["saves"], 0); self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}]}); self.assertEqual(d["ids"], ["f-chat", "f-chat-2"]); self.assertEqual(d["bottom"], [])
+        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-area": []}, "the zones go with the drop")
+        o = b["otherTab"]
+        self.assertEqual(o["unregister"], [], "another dashboard's write of the same store closes nothing: no empty entry was ever persisted")
+        self.assertEqual(o["ids"], ["f-chat", "f-chat-2"]); self.assertEqual(o["saves"], 0); self.assertEqual(o["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}]})
+        t = b["twoMembers"]
+        self.assertEqual(t["below"], "f-chat-3", "a column with two listed members lets one go below over the create")
+        self.assertEqual(t["notify"], []); self.assertEqual(t["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}, {"n": 3, "ids": [TESTS], "row": 2}], "rowSplit": 0.5})
+        u = b["up"]
+        self.assertIsNone(u["right"]); self.assertEqual(u["notify"], [["warn", "A session is still being created in this column."]], "the same guard from the bottom row towards the top")
+        self.assertEqual(u["saves"], 0); self.assertEqual(u["taken"], []); self.assertEqual(u["splitGrow"], [])
+        self.assertEqual(u["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API], "row": 2}], "rowSplit": 0.5}); self.assertEqual(u["ids"], ["f-chat", "f-chat-2"]); self.assertEqual(u["bottom"], ["chat-pane-2"])
+        self.assertEqual(u["area"]["cls"], "rows", "the bottom row stands")
+        self.assertEqual(u["otherTab"], {"ids": ["f-chat", "f-chat-2"], "unregister": [], "stored": {"v": 2, "cols": [{"n": 2, "ids": [API], "row": 2}], "rowSplit": 0.5}})
+
+    def test_the_share_is_forgotten_with_the_row_so_the_rectangle_s_half_is_what_a_reopen_produces(self):
+        r = self.out["reopen"]
+        self.assertEqual(r["resized"]["area"]["rs1"], 70); self.assertEqual(r["resized"]["stored"]["rowSplit"], 0.7)
+        f = r["folded"]
+        self.assertEqual(f["area"], {"cls": "", "rs1": 50, "rs2": 50}, "the fold forgets the share in memory too, not only in the store")
+        self.assertEqual(f["stored"], {"v": 2, "cols": []}); self.assertEqual(f["bytes"], json.dumps({"v": 2, "cols": []}, separators=(",", ":")))
+        self.assertEqual(r["ghost"], {"cls": "on", "text": "tests", "top": "433.5px", "height": "396.5px", "left": "0px", "width": "1400px"}, "the rectangle: the box the half split opens")
+        o = r["reopened"]
+        self.assertEqual(o["area"], {"cls": "rows", "rs1": 50, "rs2": 50}, "…and the row opens at the half, not the 0.7 of the folded row")
+        self.assertEqual(o["stored"], {"v": 2, "cols": [{"n": 2, "ids": [TESTS], "row": 2}], "rowSplit": 0.5}); self.assertEqual(o["bottom"], ["chat-pane-2"])
+        j = r["junkShare"]
+        self.assertEqual(j["before"]["cls"], ""); self.assertEqual(j["after"]["area"], {"cls": "rows", "rs1": 50, "rs2": 50}, "a stray share in a store with no bottom row does not shape the row it opens")
+        self.assertEqual(j["after"]["stored"]["rowSplit"], 0.5)
+
+    def test_the_pre_rows_pane_store_s_upgrade_hook_is_called_once_after_the_columns_are_made(self):
+        s = self.out["seedArea"]
+        self.assertEqual(s["calls"], [True], "once, at boot")
+        self.assertEqual(s["registered"], ["chat-pane-2", "chat-pane-3", "chat-pane-4"], "…after every column is made and registered (the hook reads the live roster)")
+        self.assertEqual(s["fresh"], [True], "no columns: called all the same (the hook then converts the one pane's weight alone)")
+        self.assertEqual(s["phone"], [], "not on the phone: nothing is restored there")
+
+    def test_the_phone_restores_no_rows_and_refuses_the_move_below(self):
+        p = self.out["phone"]
+        self.assertEqual(p["ids"], ["f-chat"]); self.assertEqual(p["bottom"], []); self.assertEqual(p["area"]["cls"], "")
+        self.assertIsNone(p["below"]); self.assertEqual(p["notify"], [["warn", "The phone shows one pane at a time — no split here."]])
+        self.assertEqual(json.loads(p["bytes"]), {"v": 2, "cols": [{"n": 2, "ids": [WEB], "row": 2}], "rowSplit": 0.5}, "the desktop's arrangement stays in the store")
 
 
 if __name__ == "__main__":

@@ -184,6 +184,10 @@ installMenuEcho();
   // chat.split (Mod+\) moves that column's active session to a new column at the right; chat.closeSplit closes
   // that column (the last one when the first column has the focus), its sessions returning to the first column.
   registerCommand({ id: "chat.split", title: "Move this session to a new column", run: () => { if (w.__rompSplitChat) w.__rompSplitChat(); } });
+  // …and to a new column in the row BELOW (the chat rows, 2026-09-15): the bottom row opens on the session when there is
+  // none, else the column joins that row at its right. Unbound by default like the rest of the column commands (the
+  // browser owns most chords); Keyboard shortcuts binds it, the way it binds chat.split's.
+  registerCommand({ id: "chat.splitBelow", title: "Move this session to a new column below", run: () => { if (w.__rompSplitChatBelow) w.__rompSplitChatBelow(); } });
   registerCommand({ id: "chat.closeSplit", title: "Close this column", run: () => { if (w.__rompCloseSplit) w.__rompCloseSplit(); } });
   // The keyboard path across columns, palette-only and unbound (Alt+Arrow is pane focus and Ctrl+Alt+Arrow an OS
   // binding on some desktops; the palette's rebinding covers anyone who wants a chord): the focused column's

@@ -285,9 +285,10 @@ out.s1 = await page.evaluate((sidB) => {
   const w = (id) => { const e = document.getElementById(id); return e ? e.getBoundingClientRect().width : null; };
   const pane1Before = w("chat-pane");
   const f = window.__rompMoveTab(sidB, "new");
-  const row = document.querySelector(".row"), kids = Array.from(row.children).map((e) => e.id);
+  // the top chat row's children (the chat rows, 2026-09-15: the columns live in #chat-row-1 inside #chat-area, which sits in .row where the first pane did)
+  const row = document.querySelector(".row"), kids = Array.from(document.getElementById("chat-row-1").children).map((e) => e.id), outer = Array.from(row.children).map((e) => e.id);
   return { frameId: f && f.id, tag: f && f.tagName, src: f && f.getAttribute("src"), paneCol: (document.getElementById("chat-pane-2") || {}).getAttribute?.("data-col"),
-           order: kids, gIdx: kids.indexOf("gv-chat-2"), pIdx: kids.indexOf("chat-pane-2"), aIdx: kids.indexOf("gv-a"),
+           order: kids, outer, gIdx: kids.indexOf("gv-chat-2"), pIdx: kids.indexOf("chat-pane-2"), aIdx: outer.indexOf("gv-a"),
            pane1Before, pane1W: w("chat-pane"), pane2W: w("chat-pane-2"), gChat2Inline: row.style.getPropertyValue("--g-chat2"),
            gChat2: getComputedStyle(row).getPropertyValue("--g-chat2"), cols: localStorage.getItem("romp-chat-cols"), sets: window.__rompChatSets() };
 }, cfg.sidB);
@@ -504,8 +505,10 @@ const g = await (await page.$("#gv-chat-2")).boundingBox();
 await page.mouse.move(g.x + g.width / 2, g.y + g.height / 2);
 await page.mouse.down();
 out.s4.dragClass = await page.evaluate(() => document.body.classList.contains("drag"));
-// the grab normalises every shown pane's grow to its px width: what the store holds the instant after mousedown
-out.s4.growAtGrab = await page.evaluate(() => { const st = document.querySelector(".row").style; return { chat: parseFloat(st.getPropertyValue("--g-chat")), chat2: parseFloat(st.getPropertyValue("--g-chat2")), feed: parseFloat(st.getPropertyValue("--g-feed")) }; });
+// the grab normalises the top row's shown panes to their px widths (the first pane on its inner weight chat1; the chat rows,
+// 2026-09-15 — the outer chat weight and the feed's are another container's and stay): what the vars hold the instant after mousedown
+out.s4.growBefore = await page.evaluate(() => { const st = document.querySelector(".row").style; return { chat: parseFloat(st.getPropertyValue("--g-chat")), feed: parseFloat(st.getPropertyValue("--g-feed")) }; });
+out.s4.growAtGrab = await page.evaluate(() => { const st = document.querySelector(".row").style; return { chat: parseFloat(st.getPropertyValue("--g-chat")), chat1: parseFloat(st.getPropertyValue("--g-chat1")), chat2: parseFloat(st.getPropertyValue("--g-chat2")), feed: parseFloat(st.getPropertyValue("--g-feed")) }; });
 await page.mouse.move(g.x + g.width / 2 + cfg.dragPx, g.y + g.height / 2, { steps: 10 });
 await page.mouse.up();
 out.s4.after1 = await width("chat-pane"); out.s4.after2 = await width("chat-pane-2");
@@ -844,11 +847,12 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(s["paneCol"], "2")
         self.assertEqual(json.loads(s["cols"]), {"v": 2, "cols": [{"n": 2, "ids": [SID_B]}]}, "the v2 store: column 2 holds B")
         self.assertEqual(s["sets"], {"2": [SID_B]}, "what every column page filters by")
-        # row order: … chat-pane, gv-chat-2, chat-pane-2, gv-a …
+        # the top chat row: chat-pane, gv-chat-2, chat-pane-2 — and the chat area sits in the shell's row ahead of gv-a
         self.assertGreaterEqual(s["gIdx"], 0, s["order"])
         self.assertEqual(s["pIdx"], s["gIdx"] + 1, "the gutter sits directly ahead of its column: %r" % s["order"])
-        self.assertLess(s["pIdx"], s["aIdx"], "the new column slots before gv-a: %r" % s["order"])
+        self.assertEqual(s["pIdx"], len(s["order"]) - 1, "the new column is the top row's last child: %r" % s["order"])
         self.assertEqual(s["order"][s["gIdx"] - 1], "chat-pane", "…and right after the first column: %r" % s["order"])
+        self.assertEqual(s["outer"].index("chat-area") + 1, s["aIdx"], "the chat area slots before gv-a in the shell's row: %r" % s["outer"])
         # the honest half (__rompSplitGrow): the two columns share the old column's width, less the new 7px gutter
         half = (s["pane1Before"] - 7) / 2
         self.assertLessEqual(abs(s["pane1W"] - half), SLACK_PX, "column 1 is about half its old width: %r" % s)
@@ -947,15 +951,16 @@ class ServedChatSplit(unittest.TestCase):
         self.assertTrue(s["dragClass"], "the grab arms the drag (body.drag makes the iframes let the pointer through)")
         self.assertFalse(s["dragClassAfter"], "…and the release disarms it")
         g0 = s["growAtGrab"]
-        self.assertLessEqual(abs(g0["chat"] - s["before1"]), 2, "the grab records column 1 at its real width: %r" % s)
+        self.assertLessEqual(abs(g0["chat1"] - s["before1"]), 2, "the grab records column 1 at its real width (its inner weight, the chat rows): %r" % s)
         self.assertLessEqual(abs(g0["chat2"] - s["before2"]), 2, "the grab records column 2 at its real width, not a half-relaid one: %r" % s)
+        self.assertEqual({"chat": g0["chat"], "feed": g0["feed"]}, s["growBefore"], "a chat|chat grab leaves the outer row's weights (the chat area's, the feed's) where they were: %r" % s)
         d1, d2 = s["after1"] - s["before1"], s["after2"] - s["before2"]
         self.assertLessEqual(abs(d1 - DRAG_PX), SLACK_PX, "column 1 grows by about the drag: %r" % s)
         self.assertLessEqual(abs(d2 + DRAG_PX), SLACK_PX, "column 2 shrinks by about the drag: %r" % s)
         g = (s["grow"] or {}).get("chat2")
         self.assertIsInstance(g, (int, float), "romp-pane-grow carries column 2's weight: %r" % s["grow"])
         self.assertTrue(g == g and abs(g) != float("inf"))
-        self.assertIsInstance((s["grow"] or {}).get("chat"), (int, float))
+        self.assertIsInstance((s["grow"] or {}).get("chat1"), (int, float), "…and the first pane's inner weight")
 
     def test_5_the_picker_in_column_2_lifts_that_column_only_and_unlifts_on_toggle(self):
         s = self._r()["s5"]
@@ -1013,9 +1018,11 @@ class ServedChatSplit(unittest.TestCase):
         the rectangle honest to the drop's geometry, the drops through __rompMoveTab, everything unmounted after."""
         s = self._r()["s9"]
         p1, row = s["pane1"], s["row"]
-        # one column: the first is the source AND the rightmost, so the edge zone alone, under the strip, a fifth of the pane
-        self.assertEqual(len(s["zones"]), 1, "no column zone on the source pane, none on the other panes: %r" % s["zones"])
-        e = s["zones"][0]
+        # one column: the first is the source AND the rightmost, so the edge zone alone on it, under the strip, a fifth of the pane —
+        # and beside it the chat area's BOTTOM zone (the chat rows, 2026-09-15; tests/test_chat_rows_served.py drives that one)
+        self.assertEqual(sorted(z["cls"] for z in s["zones"]), ["col-drop col-drop-bottom", "col-drop col-drop-edge"], "no column zone on the source pane, none on the other panes: %r" % s["zones"])
+        self.assertEqual([z["pane"] for z in s["zones"] if "col-drop-bottom" in z["cls"]], ["chat-area"], "the bottom zone rides the chat area, not a pane")
+        e = next(z for z in s["zones"] if "col-drop-edge" in z["cls"])
         self.assertEqual(e["cls"], "col-drop col-drop-edge"); self.assertEqual(e["pane"], "chat-pane"); self.assertIsNone(e["refused"])
         want_w = max(72, min(180, 0.2 * p1["width"]))
         self.assertLessEqual(abs(e["width"] - want_w), 1, "the edge is a fifth of the pane, 72 to 180 px: %r for a pane %r wide" % (e["width"], p1["width"]))
@@ -1047,7 +1054,8 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(d["cls"], "", "the rectangle hidden after the drop"); self.assertEqual(d["display"], "none")
         self.assertEqual(d["zones"], 0, "every zone unmounted")
         # back: from column 2, alone, onto column 1's pane — one zone (no edge for a twin), the cue on it, the drop brings B home and closes column 2
-        self.assertEqual([(z["pane"], z["col"], z["cls"]) for z in s["backZones"]], [("chat-pane", "", "col-drop")], "column 1's whole-pane zone alone: %r" % s["backZones"])
+        self.assertEqual([(z["pane"], z["col"], z["cls"]) for z in s["backZones"]], [("chat-pane", "", "col-drop"), ("chat-area", None, "col-drop col-drop-bottom")],
+                         "column 1's whole-pane zone, and the chat area's bottom zone (a row below moves B out of its column: the chat rows, 2026-09-15); no edge, since a new column beside B's would twin it: %r" % s["backZones"])
         z1 = s["backZones"][0]
         self.assertLessEqual(abs(z1["width"] - s["pane1W"]), 1, "the zone covers the whole pane"); self.assertEqual(z1["top"], "")
         self.assertEqual(s["overBack"], ["chat-pane"], "the cue on the zone under the pointer"); self.assertEqual(s["ghostBack"], "", "no rectangle for a column zone")

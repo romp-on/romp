@@ -175,10 +175,13 @@ test("every chat-directed shell command lands in the column last worked in", () 
 test("the column commands exist under their new meanings, the move to a new column keeps the editor convention, the rest are unbound, and a new column gets the chords", () => {
   assert.match(MAIN, /registerCommand\(\{ id: "chat\.split", title: "Move this session to a new column", run: \(\) => \{ if \(w\.__rompSplitChat\) w\.__rompSplitChat\(\); \} \}\);/);
   assert.match(MAIN, /registerCommand\(\{ id: "chat\.closeSplit", title: "Close this column", run: \(\) => \{ if \(w\.__rompCloseSplit\) w\.__rompCloseSplit\(\); \} \}\);/);
+  // the chat rows (2026-09-15): the same move to a column in the row below, through the shell's own door for it
+  assert.match(MAIN, /registerCommand\(\{ id: "chat\.splitBelow", title: "Move this session to a new column below", run: \(\) => \{ if \(w\.__rompSplitChatBelow\) w\.__rompSplitChatBelow\(\); \} \}\);/);
+  assert.ok(KERNEL.includes("window.__rompSplitChatBelow=function(sid){"), "the shell answers it: the focused column's active tab to a new column in the bottom row");
   assert.match(MAIN, /registerCommand\(\{ id: "chat\.moveToNextColumn", title: "Move this session to the next column", run: \(\) => moveActiveSession\(1\) \}\);/);
   assert.match(MAIN, /registerCommand\(\{ id: "chat\.moveToPrevColumn", title: "Move this session to the previous column", run: \(\) => moveActiveSession\(-1\) \}\);/);
   assert.match(COMMANDS, /"chat\.split": "Mod\+\\\\",/);
-  for (const id of ["chat.closeSplit", "chat.moveToNextColumn", "chat.moveToPrevColumn"]) assert.ok(!COMMANDS.includes('"' + id + '":'), id + " stays unbound by default — the palette owns it");
+  for (const id of ["chat.closeSplit", "chat.splitBelow", "chat.moveToNextColumn", "chat.moveToPrevColumn"]) assert.ok(!COMMANDS.includes('"' + id + '":'), id + " stays unbound by default — the palette owns it");
   // the fixed four are wired as before, and a column the split makes later through the shell's event
   assert.match(MAIN, /\["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline", "f-settings"\]\.forEach\(\(id\) => wireKeys\(pane\(id\)\)\);/);   // + the Files pane and the settings iframe (main, 2026-09-10: the gear's document holds the keyboard while open)
   assert.match(MAIN, /window\.addEventListener\("romp-chat-cols", \(e\) => wireKeys\(/);

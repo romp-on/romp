@@ -234,10 +234,11 @@ class Shell(unittest.TestCase):
         _has(self, "var PN=" + json.dumps(dict(km._PANE_ORDER)) + ";", km._LANDING_ERRS_JS)
         self.assertEqual(dict(km._PANE_ORDER).get("files"), "Files")
         _has(self, "files:document.getElementById('f-files')", km._LANDING_MOBILE_JS)
-        _has(self, "var PANES=['chat-pane','fleet-pane','feed-pane','files-pane'];", self.html)
-        _has(self, "grow={chat:60,fleet:34,feed:40,files:40}", self.html)
-        _has(self, "id==='feed-pane'?'feed':'files'", self.html)
-        # the chat side of gv-c is the RIGHTMOST chat column (the split, 2026-09-08: lastChat() is 'chat-pane' with no split)
+        # the chat area and the first pane are both registered (the chat rows, 2026-09-15): the area on the outer weight, the pane on its inner one
+        _has(self, "var PANES=['chat-area','chat-pane','fleet-pane','feed-pane','files-pane'];", self.html)
+        _has(self, "grow={chat:60,chat1:60,fleet:34,feed:40,files:40}", self.html)
+        _has(self, "var FIXED={'chat-area':'chat','chat-pane':'chat1','fleet-pane':'fleet','feed-pane':'feed','files-pane':'files'};", self.html)   # the files pane's key, in the one map (no other id falls to it: 2026-09-15)
+        # the chat side of gv-c is the chat AREA (the chat rows, 2026-09-15: lastChat() is 'chat-area', whatever columns it holds)
         _has(self, "gutter('gv-c',function(){var c=document.body.classList;return c.contains('po-feed')?'feed-pane':"
                       "c.contains('po-fleet')?'fleet-pane':lastChat();},'files-pane');", self.html)
 

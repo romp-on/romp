@@ -51,7 +51,9 @@ class PaneRailTest(unittest.TestCase):
     def test_four_top_panes_in_fixed_order_then_the_timeline_band(self):
         # the TOP row is chat | gv-a | fleet (the Outline) | gv-b | feed | gv-c | files; the timeline is the bottom band (gh +
         # #tl-pane) AFTER the row closes, so the DOM order is row panes first, then the gh gutter, then #tl-pane.
-        order = ["id=chat-pane", "id=gv-a", "id=fleet-pane", "id=gv-b", "id=feed-pane", "id=gv-c", "id=files-pane", "id=gh", "id=tl-pane"]
+        # …and the chat panes sit inside the static #chat-area wrapper (the chat rows, 2026-09-15): the top row around the
+        # first pane, then the row gutter, then the empty bottom row, all in the markup before gv-a
+        order = ["id=chat-area", "id=chat-row-1", "id=chat-pane", "id=gv-rows", "id=chat-row-2", "id=gv-a", "id=fleet-pane", "id=gv-b", "id=feed-pane", "id=gv-c", "id=files-pane", "id=gh", "id=tl-pane"]
         idxs = [self.html.index(tok) for tok in order]
         self.assertEqual(idxs, sorted(idxs), "row panes, then the gh gutter, then the timeline band")
         self.assertNotIn("id=gv-d", self.html)                   # no 5th-pane gutter
@@ -116,17 +118,28 @@ class PaneRailTest(unittest.TestCase):
     def test_panes_are_resizable_by_flex_grow_persisted_per_pane(self):
         # each pane grows by a per-pane var the gutters write; the drag normalises visible panes to their px
         # widths first (so it shifts only the pair it sits between) and persists the grows across reloads
-        self.assertIn("#chat-pane{flex:var(--g-chat,60) 1 0}#fleet-pane{flex:var(--g-fleet,34) 1 0}#feed-pane{flex:var(--g-feed,40) 1 0}#files-pane{flex:var(--g-files,40) 1 0}", self.html)
+        # the chat AREA takes the outer row's --g-chat weight (the chat rows, 2026-09-15); the first pane inside it grows by an
+        # inner weight of its own, --g-chat1, against the top row's split columns
+        self.assertIn("#chat-area{flex:var(--g-chat,60) 1 0;display:flex;flex-direction:column;position:relative;min-width:0;min-height:0}", self.html)
+        self.assertIn("#chat-pane{flex:var(--g-chat1,60) 1 0}#fleet-pane{flex:var(--g-fleet,34) 1 0}#feed-pane{flex:var(--g-feed,40) 1 0}#files-pane{flex:var(--g-files,40) 1 0}", self.html)
+        self.assertIn("body:not(.po-chat) #chat-area{display:none}", self.html, "the chat toggle hides the whole area, rows and all")
         self.assertNotIn("--g-timeline", self.html)              # timeline is the fixed-height band, not a row grow
         self.assertIn("var GK='romp-pane-grow'", self.html)
         # two passes (2026-09-08): every shown width is READ before any grow is written — a write re-flows the row,
-        # and a read after it came back at a mixed scale, ballooning the first column on a fresh browser's first drag
-        self.assertIn("var px={};PANES.forEach(function(id){if(shown(id))px[id]=document.getElementById(id).offsetWidth;});", self.html)
-        self.assertIn("Object.keys(px).forEach(function(id){setGrow(key(id),px[id]);});", self.html)
-        self.assertIn("localStorage.setItem(GK,JSON.stringify(grow))", self.html)
-        # gv-b picks its left neighbour live: the outline (fleet) when shown, else the RIGHTMOST chat column (so it's the
-        # chat|feed gutter too; lastChat() is the last split column, or #chat-pane when there is no split —
-        # split screen, the user 2026-09-08)
+        # and a read after it came back at a mixed scale, ballooning the first column on a fresh browser's first drag.
+        # Over the grabbed pane's SIBLINGS (the chat rows, 2026-09-15): the shown panes sharing its container, so a
+        # chat|chat grab inside a row never writes the outer row's weights, nor an outer grab a row's
+        self.assertIn("function normalise(ids){var px={};ids.forEach(function(id){px[id]=document.getElementById(id).offsetWidth;});Object.keys(px).forEach(function(id){setGrow(key(id),px[id]);});return px;}", self.html)
+        self.assertIn("function sibs(id){var el=document.getElementById(id),par=el?el.parentElement:null;return PANES.filter(function(p){var e=document.getElementById(p);return !!e&&shown(p)&&e.parentElement===par;});}", self.html)
+        self.assertIn("if(!vert){var ids=sibs(L.id),px=normalise(ids);ids.forEach(function(id){W+=px[id];if(id!==L.id&&id!==R.id)others.push(key(id));});}", self.html)   # the press: the container to px, its width and the pair's siblings kept for the release (2026-09-15)
+        self.assertIn("function endGesture(commit){var g=gesture;if(!g)return;gesture=null;", self.html)   # one exit for every gutter drag
+        # the one write of the store (persist): the pre-rows shape — no chat1 — while a pre-rows store's upgrade waits for the chat pane
+        # to show; a peer's upgrade is ingested at its storage event and first in every entry point, never here
+        self.assertIn("function persist(){if(legacy){var cur=null;try{cur=JSON.parse(localStorage.getItem(GK)||'null');}catch(e){}", self.html)
+        self.assertIn("var o=Object.assign({},grow);delete o.chat1;try{localStorage.setItem(GK,JSON.stringify(o));}catch(e){}return;}", self.html)   # …and refuses, saying so, rather than write that shape over a store a peer has upgraded (2026-09-15)
+        self.assertIn("window.addEventListener('storage',function(e){if(e&&e.key===GK)ingest();});", self.html)   # the store as it stands is what is adopted, never the event's own value (2026-09-15, eighth pass)
+        # gv-b picks its left neighbour live: the outline (fleet) when shown, else the chat AREA (so it's the chat|feed
+        # gutter too; lastChat() is #chat-area, the wrapper every chat column lives in — the chat rows, 2026-09-15)
         self.assertIn("document.body.classList.contains('po-fleet')?'fleet-pane':lastChat()", self.html)
         self.assertIn("gutter('gv-a',function(){return lastChat();},'fleet-pane')", self.html)
 
