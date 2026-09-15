@@ -21,7 +21,7 @@ from test_asm_checkpoint import kernel_module   # noqa: E402
 
 JOB_NAME_RE = r"_job_stage\(['\"](\w+)['\"]"
 
-PUSHER_JOBS = ("beginCheckpointCycle", "applyPendingOps", "turnNotify", "persistCheckpoints", "convergeCheckpoints",
+PUSHER_JOBS = ("beginCheckpointCycle", "sessionsListing", "applyPendingOps", "turnNotify", "persistCheckpoints", "convergeCheckpoints",
                "bootRowBackstop", "kernelSample", "apiHealth")
 HOUSEKEEPING = ("liftSpentAwaiting", "deathSweep", "endOnIdle", "deferralSweep", "autoNudge", "interruptBlock",
                 "persistTickSeen", "persistIntrMarks", "persistSpendTrees", "autoPauseOnLimit", "usagePoll", "autoPauseOnSpend",

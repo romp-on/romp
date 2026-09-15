@@ -3101,6 +3101,18 @@ def read_reg_for_rmw(state_dir: Path, sid: str) -> "dict | None":
     return {} if _reg_absent_for_write(_reg_path(state_dir, sid)) else None
 
 
+REG_REV = [0]   # the registry's revision: advanced by every write and removal of a registration file in this process, so a
+#                 listing keyed on it (the kernel's /sessions rows: lastSid, the comment-thread rows) rebuilds on the event and
+#                 serves from memory otherwise (plans/sessions-route-from-the-cycle.md). One write path (write_reg) carries the
+#                 bump: this backend never unlinks a registration (a dead session's reg stays, alive false), so a write is the
+#                 only way the table moves; tests/test_sessions_listing.py enumerates the writers.
+
+
+def reg_rev() -> int:
+    return REG_REV[0]
+
+
+
 def write_reg(state_dir: Path, sid: str, reg: dict) -> None:
     p = _reg_path(state_dir, sid)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -3112,6 +3124,8 @@ def write_reg(state_dir: Path, sid: str, reg: dict) -> None:
     try:
         tmp.write_text(json.dumps(reg))
         os.replace(tmp, p)
+        REG_REV[0] += 1                                 # the table moved (after the publish, so a reader that took the revision
+        #                                                  before its read misses on its next check)
     finally:
         try:                                        # never leave a stray temp on a failed write
             os.unlink(tmp)

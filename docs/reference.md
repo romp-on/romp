@@ -2202,7 +2202,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   with the target it did not pull, and the next kernel converges on its own;
   after the pull, after-pull with the checkout it moved, which the successor
   boots on; either way a `main-converge-declined` row stands in the
-  restart-audit ledger where a second sigterm used to); `nudgeWalk` is the auto-nudge walk's
+  restart-audit ledger where a second sigterm used to); `sessionsListing` is
+  the kept GET /sessions listing (`built` by the pusher's cycle when its key
+  moved, `served` to requests from memory, `requestBuilt` once before the first
+  cycle, `faultBuilt` per request while a cycle's build failed and the kept
+  listing may be stale, `missBy` the key input that moved: rows, names, notes
+  or registry); `nudgeWalk` is the auto-nudge walk's
   parse gate (T401): `looks`, `skippedParses` (a session whose files are
   unchanged since its last completed look and whose clock legs, noted by that
   look with the instant each could flip, have not come due; the skip repeats

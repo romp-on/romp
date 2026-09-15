@@ -94,6 +94,8 @@ class ThreadRowsRoute(unittest.TestCase):
 
     def setUp(self):
         self._saved = (km._session_rows, km._thread_rows)
+        if hasattr(km, "_sessions_listing_reset"):
+            km._sessions_listing_reset()                         # the kept listing is process-global: a stubbed builder must not serve an earlier build
         km._session_rows = lambda: [{"id": PARENT, "name": "web", "state": "working"}]
         km._thread_rows = lambda: [{"id": TSID, "name": "web-comment-1", "state": "working",
                                     "thread": True, "parent": PARENT}]
