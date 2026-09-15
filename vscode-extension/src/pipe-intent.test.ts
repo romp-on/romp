@@ -17,7 +17,7 @@ test("explicit state-changing picks are intent", () => {
   // setTimelineViews and tagEdit are the two views writes (a lens/order blob; a targeted tag edit,
   // 2026-09-05) — a tag renamed during a reconnect window must still land
   for (const t of ["setModel", "setEffort", "setMode", "setFast", "interrupt", "endSession",
-    "nodeOverride", "askClear", "answerAsk", "submitAsk", "renameSession", "moveSession",
+    "nodeOverride", "askClear", "answerAsk", "submitAsk", "renameSession", "moveSession", "noticeAction",
     "setTimelineViews", "tagEdit", "editTag"]) {
     assert.ok(intentOp(t), `${t} must survive a reconnect`);
   }

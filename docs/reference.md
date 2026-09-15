@@ -124,6 +124,10 @@ identifies the turn within it. There is no `summaries/` directory; an older
 layout had one, and reading it fails silently, since a missing directory just
 yields nothing rather than an error.
 
+### Notice cards: a feed card without a judge
+
+`romp card --key <key> --title <text> [--body <markdown> | --body-file <path>] [--session <name>] [--attach <path>] [--needs-you] [--expires <seconds>] [--producer <label>]` posts a **notice card** to the feed: a card the kernel makes from what you hand it, with no judge involved (design: plans/notice-cards.md). Inside a session the card belongs to that session; `--session <name>` names another. The `--key` is the card's stable name and is required: a second post under the same key is a **revision** of the card (it replaces the earlier one on the board, and shows again even if you had dismissed the earlier one, since it carries new information); a different key is a new card. `--needs-you` files it under Blocked, else under Completed. `--attach` names an image, a PDF or a text file the card shows inline or by name; the kernel judges the path the way the file preview does (your home or the session's folder, no secrets-shaped names, the size caps) and keeps a pinned copy of an image as posted. A card leaves the board on your dismissal (Clear; Undo restores it), on a revision, or at `--expires` seconds from the post. The kernel keeps every post in `notices/<session>.jsonl` under the state directory and archives dismissed, expired and superseded rows to `notices-archive/`; a session shows at most fifty live keys at once, the oldest superseded past that. The same door is `POST /notice` on the kernel (the `/watch` shape: `{"id"|"name", "key", "title", "body"?, "attachment"?, "needsYou"?, "expiresAt"?, "producer"?}`), and producers inside romp use it for cards such as the messages dropped at a restart.
+
 ### Moving a session to another folder
 
 A session's working directory can change after it starts, so when a subproject

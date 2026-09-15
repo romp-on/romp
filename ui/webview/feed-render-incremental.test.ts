@@ -1065,3 +1065,66 @@ test("a far host's parked-question note shows on its own line with no brief, in 
   assert.equal(card("g1")._relayNote.style.display, "none");
   mock.timers.reset();
 });
+
+test("a NOTICE CARD (T370) renders its producer, body, pinned image and action buttons; an action posts noticeAction with the sid, latches, and re-arms on noticeActionDone", async () => {
+  // the kernel's card (build_feed _notice_cards): the AskItem base plus the notice flavour; the body is markdown, the
+  // attachment an image the kernel allowed and pinned, one /send action
+  const n1 = cardOf("notice:" + WEB + ":figure:2", WEB, "web", "#3366cc", "A new version of the accuracy figure is ready", "completed", {
+    live: false, tree: [], blocked: null,
+    notice: { producer: "figure", key: "figure", rev: 2, body: "Regenerated after the sweep on **tests** finished.\n\n<img src=\"https://evil.example/x.png\">",
+              attachment: { path: "/srv/notes-api/figures/accuracy.png", kind: "image", allowed: true, why: "", pin: "abc123.png" },
+              actions: [{ label: "Send again", route: "/send", body: { text: "please regenerate" } }], expiresAt: null, dismissOnAction: true } });
+  await dispatch(frame([g1, g2, g3, n1], { working: ["web"] }));
+  const c = card("notice:" + WEB + ":figure:2");
+  assert.ok(c, "the card is on the board"); assert.equal(colOf("notice:" + WEB + ":figure:2"), "col-completed-list", "an informational notice files under Completed");
+  assert.equal(c._nProd.textContent, "via figure"); assert.equal(c._nProd.style.display, "");
+  assert.match(c._nBody.textContent, /Regenerated after the sweep on \*{0,2}tests\*{0,2} finished\./, "the body says its words (under the document stand-in the sanitizer has no DOM, so the plain-text fall-back; the served lab reads the rendered markdown)");
+  assert.equal(c._nBody.querySelectorAll("img").length, 0, "no image element is ever adopted from the body");
+  // the document stand-in has no location, so canPreview() cannot say http: the attachment shows as its file name (no
+  // fetch); the served lab, in a browser, reads the inline picture from the file route with its pin
+  assert.equal(c._nAttach.querySelectorAll("img").length, 0, "no fetch where the page cannot reach the kernel");
+  const fname = c._nAttach.querySelector(".fask-nfile");
+  assert.ok(fname, "the attachment's name stands in"); assert.equal(fname.textContent, "accuracy.png"); assert.match(fname.title, /accuracy\.png \(image\)$/);
+  const btns = c._nActions.querySelectorAll("button");
+  assert.equal(btns.length, 1); assert.equal(btns[0].textContent, "Send again");
+  const sent = posted.length;
+  btns[0].onclick(ev);
+  assert.deepEqual(posted.slice(sent).filter((m) => m.type === "noticeAction"),
+    [{ type: "noticeAction", itemId: "notice:" + WEB + ":figure:2", sid: WEB, route: "/send", body: { text: "please regenerate" } }], "the gesture carries the sid: federation routes by it");
+  assert.equal(btns[0].disabled, true); assert.equal(btns[0].textContent, "Send again…", "latched on the click");
+  // a click on a down socket is dropped and never answered (a kernel restart): the next push, identical or not, lets the latch
+  // go, so the button never reads "Send again…" for good (the review of PR 1757, medium 2)
+  await dispatch(frame([g1, g2, g3, n1], { working: ["web"] }));
+  assert.equal(btns[0].disabled, false); assert.equal(btns[0].textContent, "Send again", "re-armed from the payload on an identical push with no answer");
+  btns[0].onclick(ev);
+  assert.equal(btns[0].disabled, true, "latched again on the next click");
+  await dispatch({ type: "noticeActionDone", itemId: "notice:" + WEB + ":figure:2", ok: false, error: "no running backend owns web" });
+  assert.equal(btns[0].disabled, false); assert.equal(btns[0].textContent, "Send again", "re-armed on the kernel's answer");
+  assert.match(body.querySelector(".feed-toast")?.textContent ?? "", /refused: no running backend owns web/, "a refusal says why");
+  // round four, high: a SUCCESS on a card that dismisses on its action takes the card off the board at once with no re-arm
+  // (re-armed, it invited a second click that delivered the words again before the kernel's rebuild landed); a success on
+  // a card that stays re-arms
+  btns[0].onclick(ev);
+  await dispatch({ type: "noticeActionDone", itemId: "notice:" + WEB + ":figure:2", ok: true, error: "" });
+  assert.equal(card("notice:" + WEB + ":figure:2"), null, "the dismissing card left on the success answer");
+  const n3 = cardOf("notice:" + WEB + ":stays:1", WEB, "web", "#3366cc", "A card that stays", "completed", {
+    live: false, tree: [], blocked: null, notice: { producer: "figure", key: "stays", rev: 1, body: "", attachment: null,
+    actions: [{ label: "Ping", route: "/send", body: { text: "ping" } }], expiresAt: null, dismissOnAction: false } });
+  await dispatch(frame([g1, g2, g3, n3], { working: ["web"] }));
+  const b3 = card("notice:" + WEB + ":stays:1")._nActions.querySelectorAll("button")[0];
+  b3.onclick(ev); assert.equal(b3.disabled, true);
+  await dispatch({ type: "noticeActionDone", itemId: "notice:" + WEB + ":stays:1", ok: true, error: "" });
+  assert.ok(card("notice:" + WEB + ":stays:1"), "a card that stays is still on the board"); assert.equal(b3.disabled, false, "…and its button let go");
+  // a needs-you notice files under Blocked; a card with no body, attachment or actions hides those blocks
+  const n2 = cardOf("notice:" + API + ":dropped-sends:1", API, "api", "#cc6633", "1 message you typed before the restart was not re-sent", "needs_input", {
+    live: false, tree: [], blocked: null, notice: { producer: "dropped-sends", key: "dropped-sends", rev: 1, body: "", attachment: null, actions: [], expiresAt: null, dismissOnAction: true } });
+  await dispatch(frame([g1, g2, g3, n1, n2], { working: ["web"] }));
+  const c2 = card("notice:" + API + ":dropped-sends:1");
+  assert.equal(colOf("notice:" + API + ":dropped-sends:1"), "col-needsInput-list", "needsYou files under Blocked");
+  assert.equal(c2._nBody.style.display, "none"); assert.equal(c2._nAttach.style.display, "none"); assert.equal(c2._nActions.style.display, "none");
+  assert.equal(c2._nProd.textContent, "via dropped-sends");
+  // Clear on a notice card is the ordinary askClear with the sid
+  const sent2 = posted.length;
+  c2._clr.onclick(ev);
+  assert.deepEqual(posted.slice(sent2).filter((m) => m.type === "askClear"), [{ type: "askClear", itemId: "notice:" + API + ":dropped-sends:1", sid: API }]);
+});

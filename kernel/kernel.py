@@ -852,7 +852,8 @@ class _PerfStats:
                           # sets, the fold's sealed postal cards, the ledger's goal-tree walk, the task fold
                           ("chatMergeSets", _merge_sets_report), ("chatPostal", _chat_postal_report),
                           ("chatLedger", _ledger_memo_report), ("chatFoldTasks", _task_fold_report),
-                          ("outlineProvisional", _prov_ledger_memo_report)):
+                          ("outlineProvisional", _prov_ledger_memo_report),
+                          ("notices", _notice_memo_report)):   # the notice files' parsed rows (T370): bytes against their bound
             try:
                 memos[key] = read()
             except Exception:
@@ -18112,6 +18113,9 @@ def _sdk_locked():
             # observes the transition; the judge store owns the card; the kernel wires the two
             type(_sdk_backend).on_model_fallback = staticmethod(
                 lambda sid, frm, to: (jd.mint_fallback_card(sid, frm, to), _push_soon()))
+            # a producer inside the backend posts a NOTICE CARD through the same door every producer takes (T370,
+            # plans/notice-cards.md): the backend resolves it with getattr, so its tests' bare stand-ins carry no hook
+            type(_sdk_backend).on_notice = staticmethod(post_notice)
             # a SAFEGUARDS refusal the CLI retried on a fallback model (T279): the same wiring shape —
             # the backend observes the frame (and names the capacity card this turn's learn minted for
             # the swap), the judge store files the refusal and folds that card into it, the kernel
@@ -23491,6 +23495,492 @@ def _watches_save():
         _atomic_write(WATCH_FILE, json.dumps(rows))
     except Exception:
         sys.stderr.write("watches save: %s\n" % traceback.format_exc())
+
+
+# ── NOTICE CARDS (T370, plans/notice-cards.md; issue #1750) ──────────────────────────────────────────────────────────
+# A notice card is a kernel-made feed card a PRODUCER posts, never a judge: one per-session append-only file
+# STATE/notices/<sid>.jsonl holds every post, revision and expiry; ONE function, post_notice, validates and appends behind
+# three doors (this in-process helper, which the SDK backend reaches through the class-level hook type(_sdk_backend).on_notice
+# wired at boot; POST /notice in the /watch shape; `romp card` in bin/romp); the feed attaches the newest revision per key as
+# a card under the item id notice:<sid>:<key>:<rev> (a namespaced family: it joins _CLEARED_NO_SESSION). A card moves only on
+# the user's dismissal (the cleared ledger), a producer revision under the same key (a new item id, so it re-shows after a
+# dismissal) or a producer-declared expiry; no judge ever reads the file. Its column is needs_input when the producer says
+# the user must act (needsYou) and completed otherwise, the model-switch card's column, so an informational notice inflates
+# no badge and rings no bell. Actions are {label, route, body} against the allowlist below (/send only at first), executed
+# by the kernel on the card's gesture (the noticeAction socket op) so a card is never a way to make the kernel issue an
+# arbitrary request. An attachment is judged at post time by the hover preview's confinement (_slice_allowed) and an image is
+# pinned (_pin_mention), so the card keeps the picture it was posted with and never shows a file the preview would refuse.
+NOTICE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+NOTICE_PRODUCER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+NOTICE_TITLE_MAX = 200
+NOTICE_BODY_MAX = 64 * 1024
+NOTICE_ACTIONS_MAX = 4
+NOTICE_ACTION_LABEL_MAX = 60
+NOTICE_ACTION_ROUTES = ("/send",)          # each further route needs its own argument for why a button may call it
+NOTICE_LIVE_KEYS_MAX = 50                  # live keys per session: past it the oldest keys are superseded into the archive (round two, low a)
+_notice_lock = threading.Lock()            # one appender at a time per kernel; the file is append-only between sweeps
+
+
+def _notice_dir():
+    return jd.STATE / "notices"
+
+
+def _notice_archive_dir():
+    return jd.STATE / "notices-archive"
+
+
+def _notice_path(sid):
+    return _notice_dir() / (str(sid) + ".jsonl")
+
+
+def _notice_memo_bound():
+    """The parsed notice files' byte bound: ROMP_NOTICE_MEMO_BYTES when it names a positive integer, else a two-hundred-
+    fifty-sixth of the machine's memory (32 MB on an 8 GB box, half a gigabyte on 128 GB), _spend_tree_memo_bound's shape.
+    Read once at import; GET /perf reports it beside the memo's bytes (memos.notices)."""
+    raw = os.environ.get("ROMP_NOTICE_MEMO_BYTES", "")
+    try:
+        if raw and int(raw) > 0:
+            return int(raw)
+    except ValueError:
+        pass
+    return _mem_total_bytes() // 256
+
+
+_NOTICE_MEMO = {}                          # sid -> [stat key, rows, bytes, served-at]; one writer per read under the lock
+# NOTICE_MEMO_BYTES itself is bound beside SPEND_GUARD_TREE_MEMO_BYTES below, after _mem_total_bytes is defined
+_NOTICE_MEMO_STATS = {"hit": 0, "miss": 0, "evicted": 0}
+
+
+def _notice_rows(sid):
+    """Every row of STATE/notices/<sid>.jsonl in file order (a bad line is skipped), memoized on the file's stat taken BEFORE
+    the read (the chain-memo rule, as _cleared_ids); an absent file is [] and never cached. The memo is bounded in bytes
+    (NOTICE_MEMO_BYTES): over it the largest entries go first, and only the deficit is shed. Callers never mutate the rows."""
+    sid = str(sid)
+    p = _notice_path(sid)
+    st = _stat_key(p)
+    if st is None:
+        with _notice_lock:
+            _NOTICE_MEMO.pop(sid, None)
+        return []
+    with _notice_lock:
+        ent = _NOTICE_MEMO.get(sid)
+        if ent is not None and ent[0] == st:
+            _NOTICE_MEMO_STATS["hit"] += 1
+            ent[3] = time.time()
+            return ent[1]
+    rows, size = [], 0
+    try:
+        raw = p.read_text()
+    except OSError:
+        return []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(o, dict) and o.get("op") and o.get("key"):
+            rows.append(o)
+    size = len(raw)
+    with _notice_lock:
+        _NOTICE_MEMO_STATS["miss"] += 1
+        _NOTICE_MEMO[sid] = [st, rows, size, time.time()]
+        total = sum(e[2] for e in _NOTICE_MEMO.values())
+        if total > NOTICE_MEMO_BYTES:                          # shed the deficit, largest first, this entry included
+            for k in sorted(_NOTICE_MEMO, key=lambda k: -_NOTICE_MEMO[k][2]):
+                if total <= NOTICE_MEMO_BYTES:
+                    break
+                total -= _NOTICE_MEMO[k][2]
+                del _NOTICE_MEMO[k]
+                _NOTICE_MEMO_STATS["evicted"] += 1
+    return rows
+
+
+def _notice_memo_report():
+    """GET /perf memos.notices: entries, their bytes and the bound they are held under, so a bound that binds is visible."""
+    with _notice_lock:
+        return {"entries": len(_NOTICE_MEMO), "bytes": sum(e[2] for e in _NOTICE_MEMO.values()), "bound": NOTICE_MEMO_BYTES,
+                **_NOTICE_MEMO_STATS}
+
+
+def _notice_session_known(sid):
+    """A notice belongs to a session the kernel knows: one the names registry lists (alive or not) or one that is live."""
+    try:
+        if _name_of(sid):
+            return True
+        return sid in Sessions.live()
+    except Exception:
+        return False
+
+
+def _notice_attachment(fp, sid):
+    """The attachment verdict stored with the row: {path, kind, allowed, why, pin}. Judged by the hover preview's confinement
+    (_slice_allowed: a regular file, the secrets denylist, the kind by name, the session's folder or the home, the size
+    caps), so a card never shows a file the preview would refuse; an image is pinned (_pin_mention) so the card keeps the
+    version it was posted with after a regeneration under the same name."""
+    fp = str(fp or "")
+    kind, why = _slice_allowed(fp, sid)
+    if not kind:
+        return {"path": fp, "kind": None, "allowed": False, "why": why, "pin": None}
+    pin = _pin_mention(fp) if kind == "image" else None
+    return {"path": fp, "kind": kind, "allowed": True, "why": "", "pin": pin}
+
+
+def _notice_actions_check(actions):
+    """The producer's actions, validated: up to NOTICE_ACTIONS_MAX {label, route, body} entries, the route in the allowlist,
+    the body an object; a /send body names the text to deliver. Two refusals guard the user's click (the review of PR 1757):
+    a /send body may not name a target (no id, no name: the notice's own session receives it), and its text may not begin
+    with a slash (a stored action is a message, never a typed command). (list, "") or (None, why)."""
+    if actions is None:
+        return [], ""
+    if not isinstance(actions, list):
+        return None, "actions must be a list of {label, route, body}"
+    if len(actions) > NOTICE_ACTIONS_MAX:
+        return None, "at most %d actions on one notice" % NOTICE_ACTIONS_MAX
+    out = []
+    for a in actions:
+        if not isinstance(a, dict):
+            return None, "an action is {label, route, body}"
+        label = str(a.get("label") or "").strip()
+        route = str(a.get("route") or "").strip()
+        body = a.get("body")
+        if not label or len(label) > NOTICE_ACTION_LABEL_MAX:
+            return None, "an action needs a label (up to %d characters)" % NOTICE_ACTION_LABEL_MAX
+        if route not in NOTICE_ACTION_ROUTES:
+            return None, "action route %r is not allowed (allowed: %s)" % (route, ", ".join(NOTICE_ACTION_ROUTES))
+        if not isinstance(body, dict):
+            return None, "an action's body must be an object"
+        if route == "/send":
+            # the notice's OWN session is the target, always (the review of PR 1757, high): a body that names one would let a
+            # producer route the user's click at another session under this card's name and colour
+            if "id" in body or "name" in body:
+                return None, "an action's body names no target: the notice's own session receives it"
+            text = str(body.get("text") or "")
+            if not text.strip():
+                return None, "a /send action's body needs text"
+            if text.lstrip().startswith("/"):
+                return None, "an action's text is a message, never a command (it may not begin with a slash)"
+        out.append({"label": label, "route": route, "body": body})
+    return out, ""
+
+
+def post_notice(sid, key, title, body="", *, producer, attachment=None, needs_you=False, expires_at=None, actions=None,
+                dismiss_on_action=False, t=None, now=None):
+    """Post a notice card for session `sid` (plans/notice-cards.md). Returns (row, error): the appended row on success, else a
+    human-readable refusal, never a silent drop (add_watch's contract). One validation for every door: the key's grammar,
+    the title and body caps, the producer label, the session known to this kernel, the attachment's verdict (a refusal
+    carries its why), the actions' allowlist and cap. The kernel assigns `rev`, the revision count for the key in the
+    session, stamps `at`, appends under the lock, marks the views dirty and wakes the pusher."""
+    now = int(now if now is not None else time.time())
+    sid = str(sid or "").strip()
+    key = str(key or "").strip()
+    title = " ".join(str(title or "").split())
+    body = str(body or "")
+    producer = str(producer or "").strip()
+    if not sid:
+        return None, "a notice needs a session"
+    if not NOTICE_KEY_RE.match(key):
+        return None, "the key must match [A-Za-z0-9_.-]{1,64}"
+    if not title:
+        return None, "a notice needs a title"
+    if len(title) > NOTICE_TITLE_MAX:
+        return None, "the title is too long (%d characters max)" % NOTICE_TITLE_MAX
+    if len(body.encode("utf-8", "replace")) > NOTICE_BODY_MAX:
+        return None, "the body is too long (%d bytes max)" % NOTICE_BODY_MAX
+    if not NOTICE_PRODUCER_RE.match(producer):
+        return None, "the producer label must match [A-Za-z0-9_.-]{1,32}"
+    if not _notice_session_known(sid):
+        return None, 'no session answers to "%s"' % sid
+    exp = None
+    if expires_at not in (None, "", 0):
+        try:
+            exp = int(expires_at)
+        except (TypeError, ValueError):
+            return None, "expiresAt must be epoch seconds"
+        if exp <= now:
+            return None, "expiresAt is already past"
+    acts, aerr = _notice_actions_check(actions)
+    if aerr:
+        return None, aerr
+    att = None
+    if attachment:
+        att = _notice_attachment(attachment, sid)
+        if not att["allowed"]:
+            return None, "attachment refused: %s" % att["why"]
+    try:
+        tt = int(t) if t not in (None, "") else now
+    except (TypeError, ValueError):
+        return None, "t must be epoch seconds"
+    with _notice_lock:
+        prior = [r for r in _notice_rows_unlocked(sid) if r.get("op") == "post" and r.get("key") == key]
+        rev = 1 + max([int(r.get("rev") or 0) for r in prior] or [0])
+        row = {"op": "post", "t": tt, "at": now, "key": key, "rev": rev, "sid": sid, "producer": producer,
+               "title": title, "body": body, "attachment": att, "actions": acts, "needsYou": bool(needs_you),
+               "expiresAt": exp, "dismissOnAction": bool(dismiss_on_action)}
+        err = _notice_append(sid, row)
+    if err:
+        return None, err
+    sys.stderr.write("notice: posted %s key=%s rev=%d producer=%s\n" % (sid[:8], key, rev, producer))   # never the title or the body
+    _mark_views_dirty()
+    _push_soon()
+    return dict(row), None
+
+
+def expire_notice(sid, key, now=None):
+    """A producer retires its newest revision of `key` early: an {op: expire} row, so the file is the whole history. (row, error)."""
+    now = int(now if now is not None else time.time())
+    sid, key = str(sid or "").strip(), str(key or "").strip()
+    with _notice_lock:
+        posts = [r for r in _notice_rows_unlocked(sid) if r.get("op") == "post" and r.get("key") == key]
+        if not posts:
+            return None, "no notice with key %r on that session" % key
+        rev = max(int(r.get("rev") or 0) for r in posts)
+        row = {"op": "expire", "t": now, "key": key, "rev": rev, "sid": sid}
+        err = _notice_append(sid, row)
+    if err:
+        return None, err
+    _mark_views_dirty()
+    _push_soon()
+    return dict(row), None
+
+
+def _notice_rows_unlocked(sid):
+    """The rows for a WRITER holding _notice_lock: a fresh read of the file (the memo is keyed on the stat the next reader takes)."""
+    p = _notice_path(sid)
+    rows = []
+    try:
+        for line in p.read_text().splitlines():
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(o, dict) and o.get("op") and o.get("key"):
+                rows.append(o)
+    except OSError:
+        pass
+    return rows
+
+
+def _notice_append(sid, row):
+    """Append one row under the lock the caller holds; "" or the write fault's prose (a write that fails is said, never lost)."""
+    try:
+        d = _notice_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with open(_notice_path(sid), "a") as f:
+            f.write(json.dumps(row) + "\n")
+        return ""
+    except OSError as e:
+        return "the notice could not be saved (%s)" % e
+
+
+def _notice_projection(sid, now, cleared=()):
+    """The newest revision per key that still stands: not retired by an expire row, not past its expiresAt, not in the cleared
+    ledger, in post order, and at most NOTICE_LIVE_KEYS_MAX of them (the newest by post time). The ledger is applied BEFORE
+    the cap (round three, low a): a dismissed row held a cap slot until the sweep and hid the oldest undismissed card. A key
+    past the cap is superseded into the archive by the sweep with no further signal (the reference and the help line say so)."""
+    newest, retired = {}, set()
+    for r in _notice_rows(sid):
+        k = r.get("key")
+        if r.get("op") == "post":
+            cur = newest.get(k)
+            if cur is None or int(r.get("rev") or 0) >= int(cur.get("rev") or 0):
+                newest[k] = r
+        elif r.get("op") == "expire":
+            retired.add((k, int(r.get("rev") or 0)))
+    out = []
+    for k, r in newest.items():
+        if (k, int(r.get("rev") or 0)) in retired:
+            continue
+        exp = r.get("expiresAt")
+        if exp and now >= int(exp):
+            continue
+        if _notice_item_id(sid, k, r.get("rev") or 0) in cleared:
+            continue
+        out.append(r)
+    out.sort(key=lambda r: (int(r.get("t") or 0), r.get("key") or ""))
+    if len(out) > NOTICE_LIVE_KEYS_MAX:                    # the cap (round two, low a): the newest keys stand, the oldest yield
+        out = out[len(out) - NOTICE_LIVE_KEYS_MAX:]
+    return out
+
+
+def _notice_item_id(sid, key, rev):
+    return "notice:%s:%s:%d" % (sid, key, int(rev))
+
+
+def _notice_cards(now, cleared):
+    """The notice cards for build_feed: every session with a notice file, its standing newest revision per key, minus the
+    cleared item ids, as AskItem-shaped cards under notice:<sid>:<key>:<rev>. Every field but the fold's age colour is a
+    function of the row alone, so the per-client dedup holds across unchanged builds. Best-effort []."""
+    out = []
+    try:
+        sids = sorted(n[:-6] for n in os.listdir(_notice_dir()) if n.endswith(".jsonl"))
+    except OSError:
+        return out
+    for sid in sids:
+        for r in _notice_projection(sid, now, cleared):
+            item_id = _notice_item_id(sid, r.get("key"), r.get("rev") or 0)
+            t = int(r.get("t") or 0)
+            out.append({
+                "itemId": item_id, "sid": sid, "name": _name_of(sid) or sid[:8], "color": _name_color(sid),
+                "text": r.get("title") or "", "t": t, "live": False,
+                "trgb": list(cm.age_rgb(now - t, _colormap())),   # the age colour stamped here: this attach is post-loop, no fold pops a private field
+                "turnId": item_id, "origin": None,
+                "followupPending": None, "waitingOn": None,
+                "summary": None, "blockSummary": None, "background": None, "summaryAnchorUuid": None, "warns": None,
+                "nudged": None, "blocked": None,
+                "notice": {"producer": r.get("producer") or "", "key": r.get("key"), "rev": int(r.get("rev") or 0),
+                           "body": r.get("body") or "", "attachment": r.get("attachment"),
+                           "actions": r.get("actions") or [], "expiresAt": r.get("expiresAt"),
+                           "dismissOnAction": bool(r.get("dismissOnAction"))},
+                "column": "needs_input" if r.get("needsYou") else "completed",
+                "tree": []})
+    out.sort(key=lambda c: (c["t"], c["itemId"]))
+    return out
+
+
+_notice_inflight = set()                   # (item id, route, body json) of the actions running right now: one delivery per click
+
+
+def _notice_action(item_id, route, body):
+    """Execute one STORED action of a notice card on the user's gesture: (ok, error). The action must match one the card's
+    revision carries exactly (route and body), its route in the allowlist; a card is never a way to issue an arbitrary
+    request. /send delivers through the same door POST /send takes. With dismissOnAction a success clears the card. One
+    delivery per click (round three, low c): the pane re-arms its button on every push, and a push the delivery itself
+    causes can land before the answer, so a second click while the first is in flight is refused here rather than delivered
+    twice."""
+    m = re.match(r"^notice:([^:]+):([^:]+):(\d+)$", str(item_id or ""))
+    if not m:
+        return False, "not a notice card"
+    _fk = (str(item_id), str(route), json.dumps(body, sort_keys=True, default=str))
+    with _notice_lock:
+        if _fk in _notice_inflight:
+            return False, "that action is already in flight"
+        _notice_inflight.add(_fk)
+    try:
+        return _notice_action_run(m, item_id, route, body)
+    finally:
+        with _notice_lock:
+            _notice_inflight.discard(_fk)
+
+
+def _notice_action_run(m, item_id, route, body):
+    sid, key, rev = m.group(1), m.group(2), int(m.group(3))
+    row = next((r for r in _notice_rows(sid) if r.get("op") == "post" and r.get("key") == key and int(r.get("rev") or 0) == rev), None)
+    if row is None:
+        return False, "that notice is gone"
+    act = next((a for a in (row.get("actions") or []) if a.get("route") == route and a.get("body") == body), None)
+    if act is None or route not in NOTICE_ACTION_ROUTES:
+        return False, "no such action on that card"
+    if row.get("dismissOnAction") and item_id in _cleared_ids():
+        # the event this action's success writes is the card's dismissal (the cleared ledger); a repeat click after it
+        # would deliver the user's words a second time (round four, high). A card that does not dismiss on its action
+        # is meant to run again.
+        return False, "that card was dismissed: its action ran already"
+    if route == "/send":
+        # the target is the notice's OWN session, read from the row, whatever the stored body says (the check refuses a body
+        # naming one; an older row's is ignored), and the text takes the plain-message door: no typed-command routing, so a
+        # stored action can never change a session's model, effort or mode (the review of PR 1757, high)
+        target = str(row.get("sid") or sid)
+        try:
+            ok, err, _queued = _deliver_text(target, str(body.get("text") or ""), plain=True)
+        except Exception as e:                         # a delivery fault is the answer, never the socket's death
+            return False, "the action could not be delivered (%s)" % e
+    else:
+        return False, "no such action on that card"
+    if ok and row.get("dismissOnAction"):
+        _clear_ask(item_id)
+        _mark_views_dirty()
+    return ok, err
+
+
+def _compact_notices(now=None):
+    """The retention pass beside _compact_goal_stores: move each session's dismissed (in the cleared ledger), expired and
+    superseded rows, and every expire row with its target, into STATE/notices-archive/<sid>.jsonl; nothing is deleted.
+    Triggers on the presence of archivable rows and a moved modification time, never on bytes (the _USAGE_PRUNE_BYTES
+    lesson). Returns the count moved."""
+    now = int(now if now is not None else time.time())
+    moved = 0
+    try:
+        names = [n[:-6] for n in os.listdir(_notice_dir()) if n.endswith(".jsonl")]
+    except OSError:
+        return 0
+    cleared = _cleared_ids()
+    for sid in names:
+        p = _notice_path(sid)
+        st = _stat_key(p)
+        if st is None or _NOTICE_SWEPT.get(sid) == st:
+            continue
+        with _notice_lock:
+            rows = _notice_rows_unlocked(sid)
+            newest = {}
+            for r in rows:
+                if r.get("op") == "post":
+                    k, rv = r.get("key"), int(r.get("rev") or 0)
+                    if rv >= newest.get(k, 0):
+                        newest[k] = rv
+            retired = {(r.get("key"), int(r.get("rev") or 0)) for r in rows if r.get("op") == "expire"}
+            # the live cap (round two, low a): the keys past NOTICE_LIVE_KEYS_MAX, oldest by their newest post's time, are
+            # superseded into the archive whole, so the live file holds what the projection shows
+            live_keys = [r for r in rows if r.get("op") == "post" and int(r.get("rev") or 0) == newest.get(r.get("key"), 0)
+                         and (r.get("key"), int(r.get("rev") or 0)) not in retired and _notice_item_id(sid, r.get("key"), int(r.get("rev") or 0)) not in cleared
+                         and not (r.get("expiresAt") and now >= int(r.get("expiresAt")))]
+            live_keys.sort(key=lambda r: (int(r.get("t") or 0), r.get("key") or ""))
+            capped = {r.get("key") for r in live_keys[:max(0, len(live_keys) - NOTICE_LIVE_KEYS_MAX)]}
+            keep, arch = [], []
+            for r in rows:
+                k, rv = r.get("key"), int(r.get("rev") or 0)
+                gone = (r.get("op") == "expire" or rv < newest.get(k, 0) or (k, rv) in retired
+                        or _notice_item_id(sid, k, rv) in cleared
+                        or (r.get("expiresAt") and now >= int(r.get("expiresAt")))
+                        or k in capped)
+                (arch if gone else keep).append(r)
+            if arch:
+                try:
+                    _notice_archive_dir().mkdir(parents=True, exist_ok=True)
+                    with open(_notice_archive_dir() / (sid + ".jsonl"), "a") as f:
+                        for r in arch:
+                            f.write(json.dumps(r) + "\n")
+                    tmp = p.with_name(p.name + ".tmp.%d" % os.getpid())
+                    tmp.write_text("".join(json.dumps(r) + "\n" for r in keep))
+                    os.replace(tmp, p)
+                    moved += len(arch)
+                except OSError as e:
+                    sys.stderr.write("notice: the archive pass could not move %s's rows (%s)\n" % (sid[:8], e))
+                    continue
+            _NOTICE_SWEPT[sid] = _stat_key(p)
+    return moved
+
+
+_NOTICE_SWEPT = {}                         # sid -> the stat key the sweep last saw: an unmoved file is skipped
+
+
+def _deliver_text(sid, text, plain=False):
+    """Deliver `text` to session `sid` the way POST /send does, for every caller of that door (the route, a notice card's /send
+    action): (ok, error, queued). The postal-isolation gate, the remote forward over the session's tunnel, a typed /model,
+    /effort or /fast through the setters, else the composer's own park-or-send. `plain` skips the typed-command routing: the
+    text is a MESSAGE whatever its first character (a notice card's stored action, which must never reach a setter)."""
+    if _postal_shaped(text) and _postal_isolated(sid):
+        return False, ("isolation: the target session's mailbox is OFF — agent mail is refused on every route; the refusal is "
+                       "final (the user can toggle its mailbox back on)"), False
+    r = _host_for_sid(sid)
+    if r is not None:
+        res = _remote_forward(r, "/send", {"id": sid, "text": text})
+        if res is None:
+            return False, ("the remote kernel for this session (%s) isn't answering — message not delivered" % r.get("host", "?")), False
+        if isinstance(res, dict) and res.get("ok") is False:
+            return False, str(res.get("error") or "the remote kernel refused it"), False
+        return True, "", bool(isinstance(res, dict) and res.get("queued"))
+    be = Sessions.backend_for(sid)
+    meta = {}
+    if not plain and _route_meta_command(be, sid, text, state=meta):
+        if meta.get("refused"):
+            return False, "no running backend owns %s — the command was not delivered" % sid, False
+        return True, "", bool(meta.get("queued"))
+    res = _send_or_park(be, sid, text, user="<!-- romp-tag: " not in text)
+    if res is None:
+        return False, "no running backend owns %s — the message was not delivered" % sid, False
+    return True, "", bool(res)
 
 
 def add_watch(cmd, sid, every=None, timeout_s=None, note="", now=None):
@@ -37267,7 +37757,7 @@ _CLEARED_STATS = {"served": 0, "derived": 0}   # bumped from the pusher AND sock
 # clearAll handler) clears every ask build_feed lists, these included, so their rows arrive live and, the log being
 # append-only, accumulate. An explicit list rather than a shape test on the stem: the goals/ stems are the ground
 # truth for a session id and any uuid text is a valid one; a new family that keys no session is added here.
-_CLEARED_NO_SESSION = ("parked:", "quarantine:", "provisional:", "awaiting:", "blocked:")
+_CLEARED_NO_SESSION = ("parked:", "quarantine:", "provisional:", "awaiting:", "blocked:", "notice:")   # notice: T370, plans/notice-cards.md
 
 
 def _cleared_foreign(cleared):
@@ -40381,6 +40871,9 @@ def build_feed(now, live_map=None):
     # QUARANTINED PEER MAIL (per-host trust model): mail from a DIRECTED federated host is held, never
     # auto-injected — each is a human decision (approve/deny/edit), so it surfaces as a needs-you card.
     asks.extend(_quarantine_cards(now, cleared))
+    # NOTICE CARDS (T370, plans/notice-cards.md): a producer's card, posted without the judges; read live from the
+    # per-session notice files (a stat-keyed, byte-bounded memo), the newest revision per key, minus the cleared ids
+    asks.extend(_notice_cards(now, cleared))
     # per-card bell (the user 2026-07-28): one pass over the FINAL ask list — goal cards, placeholders,
     # parked handoffs and quarantine cards alike — so every card's right-click menu reflects its armed
     # state, EFFECTIVE (card override > session override > the master default, 2026-08-09) — with the
@@ -41226,6 +41719,7 @@ def _spend_tree_memo_bound():
     return _mem_total_bytes() // 64
 
 
+NOTICE_MEMO_BYTES = _notice_memo_bound()         # the notice files' parsed rows (T370): over it the largest entry goes first
 SPEND_GUARD_TREE_MEMO_BYTES = _spend_tree_memo_bound()   # the tree memos together (their path strings, estimated); over
 #                                                          it the largest goes first, and only the deficit is shed
 FEED_MEMO_BYTES = _feed_memo_bound()             # the feed's per-session card memo (T368, defined beside build_feed): its
@@ -53299,6 +53793,9 @@ def _producer():
                 moved = _compact_goal_stores() if tracking else 0   # cards out of the live goal stores (keeps build_feed flat); off, the stores rest (T404)
                 if moved:                              # the first pass migrates the whole backlog of cleared nodes.
                     sys.stderr.write("compact: archived %d cleared goal node(s)\n" % moved)
+                _nmoved = _compact_notices()            # notice cards (T370): dismissed, expired and superseded rows to the archive
+                if _nmoved:
+                    sys.stderr.write("compact: archived %d notice row(s)\n" % _nmoved)
             except Exception:
                 sys.stderr.write("compact: %s\n" % traceback.format_exc())
             try:                                       # judge calls served again after failing (the degraded→
@@ -61593,59 +62090,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, json.dumps({"ok": False, "error":
                         "id and text required (optional tag: one word, letters/digits/dashes, <=24 chars)"}), "application/json")
                 sid = _sid_of(body["who"])
-                # POSTAL ISOLATION holds on every sanctioned route (the user 2026-07-10): postal-SHAPED
-                # content to a mailbox-off session is agent mail arriving by the wrong door — refuse it
-                # here exactly like the bus does. Plain text still passes: /send is the HUMAN channel,
-                # and the user must always reach their own isolated session. (A local agent could still
-                # impersonate plain user text — that residual is closed by policy, not this gate: the
-                # postal norms declare an isolation refusal FINAL, never to be rerouted.)
-                if _postal_shaped(body["text"]) and _postal_isolated(sid):
-                    return self._send(200, json.dumps({"ok": False, "error":
-                        "isolation: the target session's mailbox is OFF — agent mail is refused on every "
-                        "route; the refusal is final (the user can toggle its mailbox back on)"}), "application/json")
-                r = _host_for_sid(sid)
-                if r is not None:                                   # remote session → forward over its -L tunnel
-                    res = _remote_forward(r, "/send", {"id": sid, "text": body["text"]})
-                    if res is None:                                 # the far kernel didn't answer — say so, never
-                        return self._send(200, json.dumps({"ok": False, "error":   # pretend it was delivered
-                            "the remote kernel for this session (%s) isn't answering — message not delivered"
-                            % r.get("host", "?")}), "application/json")
-                    if isinstance(res, dict) and res.get("ok") is False:
-                        return self._send(200, json.dumps(res), "application/json")   # its refusal, verbatim
-                    # the far kernel's `queued` rides through (an older remote without the field reads False)
-                    return self._send(200, json.dumps({"ok": True, "queued": bool(isinstance(res, dict)
-                                                                                  and res.get("queued"))}),
-                                      "application/json")
-                # PARKS like a composer send (the user 2026-07-24), through the same FIFO: a message handed
-                # in by a local tool while the account is rate-limited — or while the session compacts —
-                # waits its turn instead of buying a red API-error card. ok:true still means ACCEPTED,
-                # which is all it ever meant on this route. No optimistic echo: an external/postal send
-                # isn't a human composer bubble. A typed /model, /effort or /fast takes the setters,
-                # exactly as the composer's does — same door, same registry.
-                be = Sessions.backend_for(sid)
-                meta = {}
-                if _route_meta_command(be, sid, body["text"], state=meta):
-                    if meta.get("refused"):
-                        return self._send(200, json.dumps({"ok": False, "error":
-                            "no running backend owns %s — the command was not delivered" % (body.get("who") or sid)}),
-                                          "application/json")
-                    queued = bool(meta.get("queued"))              # a parked /model, /effort or /fast says so too
-                else:
-                    # who speaks (T315): an untagged `romp send` is treated as the user's words (this is the human
-                    # channel, and the composer's own route); a TAGGED one (`romp send --tag`, the route's marker
-                    # for a machine-sent message: a scheduled or scripted sender) is a machine's, and is queued
-                    # behind a stood-down attach instead of retrying it
-                    res = _send_or_park(be, sid, body["text"], user="<!-- romp-tag: " not in body["text"])
-                    if res is None:
-                        # the backend REFUSED the handover (a session no backend owns, a dead one): said, never
-                        # answered ok — `romp send` prints this and exits non-zero (review find, 2026-09-11)
-                        return self._send(200, json.dumps({"ok": False, "error":
-                            "no running backend owns %s — the message was not delivered" % (body.get("who") or sid)}),
-                                          "application/json")
-                    queued = bool(res)
-                # `queued` says which arm it took (the /compact route's shape): a sender that IS the
-                # target's open turn — an agent running `romp send <self> /clear` from its own Bash tool —
-                # read 'ok' otherwise and could not know the command waits for that turn to end (2026-09-03).
+                # the one delivery door (T370: a notice card's /send action takes it too): the postal-isolation gate (the
+                # user 2026-07-10), the remote forward over the session's tunnel, a typed setter command, else the
+                # composer's own park-or-send. `queued` says which arm it took (the /compact route's shape): a sender that
+                # IS the target's open turn read 'ok' otherwise and could not know the command waits (2026-09-03).
+                ok, err, queued = _deliver_text(sid, body["text"])
+                if not ok:
+                    if err.startswith("no running backend owns "):
+                        err = err.replace(sid, body.get("who") or sid, 1)
+                    return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
                 return self._send(200, json.dumps({"ok": True, "queued": queued}), "application/json")
             if u.path in ("/fork-comment", "/fork-promote"):
                 # Parallel review dispatch (the user 2026-08-31, via the Obsidian track-changes
@@ -62192,6 +62645,32 @@ class Handler(BaseHTTPRequestHandler):
                 if hint:
                     resp["hint"] = hint
                 return self._send(200, json.dumps(resp), "application/json")
+            if u.path == "/notice":
+                # Post a NOTICE CARD (T370, plans/notice-cards.md): door two of post_notice, in /watch's shape. Body:
+                # {"id"|"name": <session>, "key", "title", "body"?, "attachment"?, "needsYou"?, "expiresAt"?, "actions"?,
+                # "dismissOnAction"?, "producer"?, "t"?}; or {"id"|"name", "expire": <key>} to retire the newest revision early.
+                # 400 for a malformed body or a missing key, title or session; 200 {"ok": false, "error"} for a refusal with
+                # its reason (an unknown session, a bad key, an oversize body, a refused attachment, a disallowed action);
+                # 200 {"ok": true, "notice": <row>} on success.
+                b, berr = _json_object_body(raw_body)
+                if berr:
+                    return self._send(400, json.dumps({"ok": False, "error": berr}), "application/json")
+                who = str(b.get("id") or b.get("name") or "").strip()
+                if b.get("expire"):
+                    if not who:
+                        return self._send(400, json.dumps({"ok": False, "error": "id|name (the session) required"}), "application/json")
+                    row, err = expire_notice(_sid_of(who), str(b["expire"]))
+                    return self._send(200, json.dumps({"ok": False, "error": err} if err else {"ok": True, "notice": row}), "application/json")
+                if not who or not str(b.get("key") or "").strip() or not str(b.get("title") or "").strip():
+                    return self._send(400, json.dumps({"ok": False, "error":
+                        "key, title and id|name (the session the card belongs to) required"}), "application/json")
+                row, err = post_notice(_sid_of(who), b.get("key"), b.get("title"), b.get("body") or "",
+                                       producer=b.get("producer") or "http", attachment=b.get("attachment"),
+                                       needs_you=bool(b.get("needsYou")), expires_at=b.get("expiresAt"), actions=b.get("actions"),
+                                       dismiss_on_action=bool(b.get("dismissOnAction")), t=b.get("t"))
+                if err:
+                    return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
+                return self._send(200, json.dumps({"ok": True, "notice": row}), "application/json")
             if u.path in ("/flag", "/views", "/order"):
                 # The Obsidian timeline panel's state writes -- the setSessionFlag / setTimelineViews /
                 # reorderTabs socket ops for a client with no socket (_state_write_route has the why and
@@ -63208,6 +63687,15 @@ class Handler(BaseHTTPRequestHandler):
             if _ids:
                 _send_to_app("chat", {"type": "dropCitation", "itemId": _ids[0], "itemIds": _gone})
             _mark_views_dirty()
+        elif msg and msg.get("type") == "noticeAction" and msg.get("itemId"):
+            # a NOTICE CARD's action button (T370, plans/notice-cards.md): the kernel executes the STORED action (its route
+            # in the allowlist, matched exactly) and answers the asking pane by the card's item id, so the feed re-arms the
+            # button on a refusal and the next push drops the card when dismissOnAction cleared it
+            try:
+                _nok, _nerr = _notice_action(str(msg["itemId"]), str(msg.get("route") or ""), msg.get("body") if isinstance(msg.get("body"), dict) else {})
+            except Exception as e:                     # said to the asking pane; the socket lives on
+                _nok, _nerr = False, "the action failed (%s)" % e
+            client["send"](json.dumps({"type": "noticeActionDone", "itemId": str(msg["itemId"]), "ok": bool(_nok), "error": _nerr or ""}))
         elif msg and msg.get("type") == "quarantineDecision" and msg.get("mid"):
             # Human verdict on a DIRECTED peer's held message (per-host trust): approve delivers it
             # (optionally with human-edited text), deny drops it. The bus owns delivery + the held-message

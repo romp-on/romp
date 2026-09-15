@@ -762,7 +762,9 @@ class WhoSpeaks(unittest.TestCase):
 
     def test_the_send_route_treats_an_untagged_send_as_the_users_and_a_tagged_one_as_a_machines(self):
         src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "kernel", "kernel.py")).read()
-        self.assertIn('user="<!-- romp-tag: " not in body["text"]', src, "POST /send: untagged is the user's, `romp send --tag` is a machine's")
+        # the route's local arm is the one delivery door _deliver_text since the notice cards (T370): the who-speaks rule sits there
+        self.assertIn('user="<!-- romp-tag: " not in text', src, "the delivery door: untagged is the user's, `romp send --tag` is a machine's")
+        self.assertIn('ok, err, queued = _deliver_text(sid, body["text"])', src, "POST /send takes that door")
         self.assertIn("user=not msg.get(\"nudge\")", src, "a follow-up is the user's; a nudge is romp's")
         self.assertIn('_send_or_park(be, sid, text) is not None', src, "the watch deliverer passes nothing")
 

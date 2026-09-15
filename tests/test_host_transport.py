@@ -995,7 +995,7 @@ class Pins(unittest.TestCase):
                       "the retry counter resets inside the connected block: consecutive incomplete attaches only (the commit-10 review's first item)")
         ksrc = open(os.path.join(ROOT, "kernel", "kernel.py")).read()
         self.assertIn("if _send_with_id(be, sid, text, qid, user=user, paths=paths) is False:", ksrc, "the park-or-send route hands on who speaks and what rode along; the caller that knows classifies (T315; the attachment list, T373)")
-        self.assertIn('user="<!-- romp-tag: " not in body["text"]', ksrc, "POST /send: an untagged send is the user's, a tagged one a machine's")
+        self.assertIn('user="<!-- romp-tag: " not in text', ksrc, "POST /send: an untagged send is the user's, a tagged one a machine's")   # the one delivery door since T370
         self.assertIn('return "user" in inspect.signature(fn).parameters', ksrc, "read from the signature, so a stand-in send without the keyword is called as before")
 
     def test_construction_reads_no_setting_and_the_file_is_the_toggle_read_on_each_ask(self):

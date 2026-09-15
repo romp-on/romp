@@ -16,7 +16,8 @@ test("the swirl element is built in the body, right after the distiller line, an
   assert.match(FEED, /const awaitSpin = el\("div", "fask-awaiting"\); awaitSpin\.style\.display = "none";/);
   assert.match(FEED, /const awaitGlyph = el\("span", "fask-awaiting-swirl"\)/);
   // distill now rides inside the takeaway section (takeSec), with the background section above it (2026-07-02)
-  assert.match(FEED, /main\.append\(row1, row2, row3, secs, qbody, awaitSpin, checklist, delegations\)/);
+  // the notice card's body, attachment and actions (T370) sit between the quarantine body and the swirl
+  assert.match(FEED, /main\.append\(row1, row2, row3, secs, qbody, nbody, nattach, nactions, awaitSpin, checklist, delegations\)/);
   assert.match(FEED, /a\._awaitSpin = awaitSpin; a\._awaitWhy = awaitWhy;/);
 });
 

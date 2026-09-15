@@ -2123,3 +2123,16 @@ body.filebrowse-open { overflow: hidden; }
   font-size: 12px; line-height: 1; cursor: pointer; }
 .fsm-chipx:hover { color: var(--fg); background: rgba(255, 255, 255, 0.10); }
 @media (prefers-reduced-motion: reduce) { #feed-search input { transition: none; } }
+
+/* NOTICE CARDS (T370, plans/notice-cards.md): the producer label beside the session name; the body in the takeaway's
+   typography (.fask-distill's size), the attachment as an inline picture capped to the card, the action buttons in the
+   card's own button style (.fdismiss) */
+.fask-nprod { font-size: 0.82em; opacity: 0.7; margin-left: 6px; white-space: nowrap; }
+.fask-nbody { font-size: 0.86em; line-height: 1.4; margin: 2px 0 2px; color: var(--fg); opacity: 0.9; overflow-wrap: anywhere; }
+.fask-nbody p { margin: 0 0 4px; }
+.fask-nbody pre, .fask-nbody code { font-size: 0.92em; }
+.fask-nattach { margin: 4px 0 2px; }
+.fask-nimg { display: block; max-width: 100%; max-height: 240px; border-radius: 4px; }
+.fask-nfile { font-size: 0.82em; opacity: 0.75; font-family: var(--vscode-editor-font-family, monospace); }
+.fask-nactions { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 2px; }
+.fdismiss.fnact { opacity: 0.95; }

@@ -15,6 +15,7 @@ export const INTENT_OPS: ReadonlySet<string> = new Set([
   "setModel", "setEffort", "setMode", "setFast", "setAuth",
   "renameSession", "moveSession", "endSession", "reviveSession",
   "nodeOverride", "askClear", "undoClear", "cardMove", "cardNotify", "redistill",
+  "noticeAction",   // a notice card's button: a re-send of the user's own words, a click that mutates kernel state (T370)
   "answerAsk", "submitAsk", "toggleAsk", "cancelAsk",
   "setSessionFlag", "setSessionColor", "setGlobalRetryPaused", "setTimelineViews", "tagEdit", "openTagsDialog",
   // the REMOTE-tag edit (a tag homed on another kernel). Dropped with the view chatter it was simply

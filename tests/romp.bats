@@ -104,6 +104,7 @@ if [[ -n "${MOCK_CURL_FAIL_SEND:-}" && "$url" == */send ]]; then exit 22; fi
 if [[ -n "${MOCK_CURL_FAIL_NEW:-}" && "$url" == */new ]]; then exit 7; fi
 if [[ -n "${MOCK_CURL_SEND_QUEUED:-}" && "$url" == */send ]]; then echo '{"ok": true, "queued": true}'; exit 0; fi
 if [[ -n "${MOCK_CURL_SEND_REFUSED:-}" && "$url" == */send ]]; then echo '{"ok": false, "error": "no running backend owns web — the message was not delivered"}'; exit 0; fi
+if [[ -n "${MOCK_CURL_NOTICE_REFUSE:-}" && "$url" == */notice ]]; then echo '{"ok": false, "error": "attachment refused: not a file"}'; exit 0; fi
 if [[ -n "${MOCK_CURL_WATCH_PR_REFUSE:-}" && "$url" == */watch-pr ]]; then
   echo '{"ok": false, "retryable": true, "error": "the watch could not be saved ([Errno 28] No space left on device) - nothing is watching TESTORG/testrepo#7; retry once the state directory takes writes again"}'
   exit 0
@@ -2454,3 +2455,49 @@ PY
     ! grep -q 'serviceEnvHasRef\|PROVIDER_VARS' "$(dirname "$ROMP_SCRIPT")/romp-manager"
 }
 
+
+@test "card: posts key, title, body and session to /notice; ROMP_SID is the default; usage errors exit 2" {
+    # T370 (plans/notice-cards.md): door three of the kernel's post_notice, romp watch's mechanics
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card --title "A new version of the figure is ready" --body "regenerated after the sweep" --key figure --needs-you --producer figure
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp card: posted"* ]]
+    grep '/notice' "$MOCK_LOG" | grep -q '"key": *"figure"'
+    grep '/notice' "$MOCK_LOG" | grep -q '"title": *"A new version of the figure is ready"'
+    grep '/notice' "$MOCK_LOG" | grep -q '"body": *"regenerated after the sweep"'
+    grep '/notice' "$MOCK_LOG" | grep -q '"needsYou": *true'
+    grep '/notice' "$MOCK_LOG" | grep -q '"producer": *"figure"'
+    grep '/notice' "$MOCK_LOG" | grep -q '"id": *"11111111-2222-3333-4444-555555555555"'
+    # the token never rides the command line: curl reads it from the piped config
+    [ "$(grep '/notice' "$MOCK_LOG" | grep -c 'testtok')" -eq 0 ]
+    # --session sends a NAME
+    run env ROMP_SID= "$ROMP_SCRIPT" card --key sweep --title "Sweep done: see the plot" --session web
+    [ "$status" -eq 0 ]
+    grep '/notice' "$MOCK_LOG" | grep -q '"name": *"web"'
+    grep '/notice' "$MOCK_LOG" | grep -q '"key": *"sweep"'
+    # the key is REQUIRED (a slug of the title made an edited title a second card): usage, exit 2, nothing posted
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card --title "Sweep done: see the plot"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--key is the card's stable name"* ]]
+    [ "$(grep -c '/notice' "$MOCK_LOG")" -eq 2 ]
+    # outside a session with no --session: a loud usage refusal, never a silent guess
+    run env ROMP_SID= "$ROMP_SCRIPT" card --key x --title "x"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--session <name> required"* ]]
+    run run_romp card
+    [ "$status" -eq 2 ]
+    run run_romp card --key x --title "x" --expires soon
+    [ "$status" -eq 2 ]
+}
+
+@test "card: a refused post is relayed with the kernel's reason and exit 1, never reported as posted" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 MOCK_CURL_NOTICE_REFUSE=1 "$ROMP_SCRIPT" card --key x --title "x" --attach /nowhere.png
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp card: refused — attachment refused: not a file"* ]]
+    [[ "$output" != *"romp card: posted"* ]]
+}

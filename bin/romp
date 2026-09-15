@@ -82,6 +82,7 @@ EOF
     _romp_cmd "romp watch-pr <n> [--repo o/r]" -        "One mail here when the PR lands or fails — the kernel owns the watch, so it survives restarts (replaces the mortal shell loop)"
     _romp_cmd "romp login add|list|remove <label>" -    "The stored Claude logins a session can be billed to beside the machine's own: add records a COMMAND that prints the login's setup-token on demand (--cmd '<shell line>'; how the token is kept is the user's); list and remove print labels only, never a token"
     _romp_cmd "romp watch --cmd '<pred>' [...]" -       "One mail when the command exits 0 (or the timeout passes) — kernel-owned like watch-pr, for ANY background wait (--every Ns --timeout Ns --note '...' | --list | --cancel <id>)"
+    _romp_cmd "romp card --key <key> --title <text> [...]" - "Post a NOTICE CARD to the feed for a session (no judge): the key is the card's stable name (a second post under it is a revision); --body/--body-file, --attach <path>, --needs-you, --expires <s>, --producer; the card moves only on your dismissal, a new revision or its expiry; a session shows at most fifty live cards, the oldest superseded past that"
     _romp_cmd "romp mail ..."              romp-postal-service  "Romp Postal Service: send <to> <text> | inbox | agents | remote"
     _romp_cmd "romp send <session> [--tag <label>] <text>" - "Hand a session a message; scripts/cron SHOULD pass --tag so it renders machine-sent, not as your typed words"
     _romp_cmd "romp compact <session> [--wait]" -       "Compact a session's context in place (Claude's /compact) — queued safely if a turn is open; --wait blocks until it finishes (--timeout <s>, default 600)"
@@ -1112,6 +1113,71 @@ print(json.dumps(b))' "$_w_cmd" "$_w_key" "$_w_who" "$_w_every" "$_w_timeout" "$
     fi
     _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
     echo "romp watch: refused — $_err" >&2
+    exit 1
+fi
+
+# `romp card --key <key> --title <text> [--body <markdown> | --body-file <path>] [--session <name>] [--attach <path>]
+#             [--needs-you] [--expires <seconds>] [--producer <label>]` (T370, plans/notice-cards.md): door three of the
+# kernel's post_notice, following `romp watch`'s mechanics exactly: the session defaults to $ROMP_SID under body key id,
+# --session sends name, neither outside a session refuses with exit 2; the token and the body go through _romp_token_cfg and
+# python3 -c 'import json'; one `romp card: posted` line on success, a `romp card: refused` line naming the error and exit 1.
+# The kernel judges the attachment and keeps the card's history; the card is never a way to issue a request (no --action here:
+# actions are for producers inside romp, against the kernel's allowlist).
+if [[ "${1:-}" == "card" ]]; then
+    shift
+    _c_usage="usage: romp card --key <key> --title <text> [--body <markdown> | --body-file <path>] [--session <name>]
+       [--attach <path>] [--needs-you] [--expires <seconds>] [--producer <label>]
+  --key is the card's stable name: a second post under the same key is a REVISION of the card, a different key a new card"
+    _c_title=""; _c_body=""; _c_bodyfile=""; _c_sess=""; _c_attach=""; _c_key=""; _c_needs=0; _c_expires=""; _c_prod="cli"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title)     shift; [[ $# -eq 0 || -z "$1" ]] && { echo "$_c_usage" >&2; exit 2; }; _c_title="$1"; shift ;;
+            --body)      shift; [[ $# -eq 0 ]] && { echo "$_c_usage" >&2; exit 2; }; _c_body="$1"; shift ;;
+            --body-file) shift; [[ $# -eq 0 || ! -f "$1" ]] && { echo "$_c_usage" >&2; exit 2; }; _c_bodyfile="$1"; shift ;;
+            --session)   shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_c_usage" >&2; exit 2; }; _c_sess="$1"; shift ;;
+            --attach)    shift; [[ $# -eq 0 || -z "$1" ]] && { echo "$_c_usage" >&2; exit 2; }; _c_attach="$1"; shift ;;
+            --key)       shift; [[ $# -eq 0 || -z "$1" ]] && { echo "$_c_usage" >&2; exit 2; }; _c_key="$1"; shift ;;
+            --needs-you) _c_needs=1; shift ;;
+            --expires)   shift; [[ $# -eq 0 || ! "$1" =~ ^[0-9]+$ ]] && { echo "$_c_usage" >&2; exit 2; }; _c_expires="$1"; shift ;;
+            --producer)  shift; [[ $# -eq 0 || -z "$1" ]] && { echo "$_c_usage" >&2; exit 2; }; _c_prod="$1"; shift ;;
+            *)           echo "$_c_usage" >&2; exit 2 ;;
+        esac
+    done
+    if [[ -z "$_c_title" || -z "$_c_key" ]]; then echo "$_c_usage" >&2; exit 2; fi   # the key is required: a slug of the title made an edited title a second card (round two, low d)
+    if [[ -n "$_c_bodyfile" ]]; then _c_body="$(cat "$_c_bodyfile")"; fi
+    _tok="$(_romp_token)"
+    _kport="${ROMP_KERNEL_PORT:-29855}"
+    if [[ -z "$_tok" ]]; then
+        echo "romp card: the kernel isn't running (no serve token). Start romp first." >&2
+        exit 1
+    fi
+    _c_who="$_c_sess"
+    if [[ -z "$_c_who" ]]; then
+        if [[ -z "${ROMP_SID:-}" ]]; then
+            echo "romp card: --session <name> required outside a romp SDK session (ROMP_SID is not set)" >&2
+            exit 2
+        fi
+        _c_who="$ROMP_SID"
+    fi
+    _c_key_name="id"; [[ -n "$_c_sess" ]] && _c_key_name="name"
+    if [[ -n "$_c_attach" && "$_c_attach" != /* ]]; then _c_attach="$(cd "$(dirname "$_c_attach")" 2>/dev/null && pwd)/$(basename "$_c_attach")"; fi
+    _payload="$(python3 -c 'import json,sys,time
+b = {sys.argv[1]: sys.argv[2], "key": sys.argv[3], "title": sys.argv[4], "producer": sys.argv[8]}
+if sys.argv[5]: b["body"] = sys.argv[5]
+if sys.argv[6]: b["attachment"] = sys.argv[6]
+if sys.argv[7] == "1": b["needsYou"] = True
+if sys.argv[9]: b["expiresAt"] = int(time.time()) + int(sys.argv[9])
+print(json.dumps(b))' "$_c_key_name" "$_c_who" "$_c_key" "$_c_title" "$_c_body" "$_c_attach" "$_c_needs" "$_c_prod" "$_c_expires")"
+    _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/notice" \
+                  -H 'Content-Type: application/json' -d "$_payload")" \
+        || { echo "romp card: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+        _crev="$(python3 -c 'import json,sys; n = json.loads(sys.argv[1]).get("notice") or {}; print("%s rev %s" % (n.get("key"), n.get("rev")))' "$_resp" 2>/dev/null || true)"
+        echo "romp card: posted${_crev:+ ($_crev)}: it shows on the feed until you dismiss it, a new revision replaces it, or it expires"
+        exit 0
+    fi
+    _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+    echo "romp card: refused — $_err" >&2
     exit 1
 fi
 

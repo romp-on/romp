@@ -14926,6 +14926,21 @@ class SdkBackend:
         return s.resolve_ask(kind, payload)    # the DELIVERY outcome, not mere routing (T214)
 
     # ---- callbacks used by sessions ----
+    def post_notice(self, sid, key, title, body="", **kw):
+        """A producer inside the backend posts a NOTICE CARD (T370, plans/notice-cards.md) through the kernel's one door: the
+        class-level hook the kernel wires at boot (type(_sdk_backend).on_notice = staticmethod(post_notice)), resolved with
+        getattr and a callable check because this module never imports the kernel and its tests bind methods onto bare
+        stand-in classes that carry no hooks. Returns post_notice's (row, error); with no door wired, (None, why), said,
+        never a silent drop. The first consumer is the dropped-sends producer (PR 1496): one notice per session per boot,
+        needsYou true, a Send-again action per message and Dismiss."""
+        door = getattr(type(self), "on_notice", None)
+        if not callable(door):
+            return None, "no notice door is wired on this backend (the kernel wires on_notice at boot)"
+        try:
+            return door(sid, key, title, body, **kw)
+        except Exception as e:                       # a producer's post never takes the backend down with it
+            return None, "the notice could not be posted (%s)" % e
+
     def _emit_ask(self, sess: SdkSession, ask: dict):
         # STORE the ask (not just a bool): the kernel's _ask_poll replays it to chat clients each tick, so a
         # blocked SDK session still shows its prompt to a client that connects/refocuses/reloads AFTER the ask
