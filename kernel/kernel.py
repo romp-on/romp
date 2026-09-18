@@ -40593,7 +40593,7 @@ def _feed_row_key(tm):
         set falls to the transcript scan, an empty set is authoritative) and each task's (toolUseId, type, desc, since,
         taskId), the fields _bg_live_norm reads. desc stays: a task_progress event may rename a task, and
         _agent_task_label renders the name.
-    Not the whole row (2026-09-18): ctxTokens, context and ctxOver move on every context refresh (after each landed
+    Not the whole row (2026-09-18): the raw token count, context and ctxOver move on every context refresh (after each landed
     turn, on connect, on a model switch) and a background agent's last tool (the bgTasks row field) on its every tool call; no card
     reads them, yet the sorted whole row re-derived the owning session in every cycle that saw them moved (row rode
     1454 of 4132 misses on the live kernel at the design's read, 2568 of 6245 at the review's; the row-only share is
@@ -40675,7 +40675,7 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         subagent's (agentId, type, since); whether the row carries a task set and each task's (toolUseId, type, desc,
         since, taskId)); None when not live. Read by `live`, perm_state, the blocked placeholder's since, the `ask`
         gate's state read below, _session_retrying, _cap_switch_offer, _login_refusal_label, _warm_wanted's state,
-        _awaiting_live_rows' agents, _bg_live_norm's tasks. Not the whole row (2026-09-18): ctxTokens, context and
+        _awaiting_live_rows' agents, _bg_live_norm's tasks. Not the whole row (2026-09-18): the raw token count, context and
         ctxOver move on every context refresh and a background agent's last tool on its every tool call, none read
         here, and the sorted whole row re-derived the session on each (row rode 1454 of 4132 misses on the live kernel
         at the design's read, 2568 of 6245 at the review's). The merged row (Sessions.live) is the only shape read here,
