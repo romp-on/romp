@@ -190,6 +190,10 @@ const filled = async (fid) => {
   await page.waitForTimeout(1800);
   return await fr.evaluate((id) => { const regions = (typeof window.__rompRegions === "function") ? window.__rompRegions(id) : null; return { turns: document.querySelectorAll("#content .turn[data-uuid]").length, filled: !!(regions && regions.some((r) => r.kind === "run" && r.lo === 0)), regions }; }, cfg.bot);
 };
+// a wait that names itself (2026-09-18): the label says WHICH wait ran out (the zone's mount, the store write, the bottom
+// pane's iframe mount) where a bare "Timeout 20000ms exceeded" left the four failing runner lines to be read from their
+// geometry. The bounds are unchanged: where the drop has not happened, no bound helps.
+const named = async (label, p) => { try { return await p; } catch (e) { throw new Error(label + ": " + String(e).slice(0, 200)); } };
 try {
   await page.goto(cfg.url);
   await page.waitForFunction((t) => { const f = document.getElementById("f-chat"); const d = f && f.contentDocument; return !!(d && d.querySelector('#tabs .tab[data-id="' + t + '"]')); }, cfg.top, { timeout: 40000 });
@@ -219,16 +223,37 @@ try {
   if (!t) throw new Error("no drag start: the bottom session's tab (data-id " + cfg.bot + ") never rendered as a visible, draggable box in f-chat's strip within 40s");
   out.pane = await page.evaluate(() => { const p = document.getElementById("chat-pane"); const r = p.getBoundingClientRect(); return { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }; });
   await page.mouse.move(t.x, t.y); await page.mouse.down(); await page.mouse.move(t.x + 24, t.y + 6, { steps: 4 });
-  await page.waitForFunction(() => !!document.querySelector("#chat-pane > .col-drop.col-drop-bottom"), null, { timeout: 20000 });
+  await named("the split-down zone's mount after the drag start", page.waitForFunction(() => !!document.querySelector("#chat-pane > .col-drop.col-drop-bottom"), null, { timeout: 20000 }));
   const bz = await page.evaluate(() => { const z = document.querySelector("#chat-pane > .col-drop.col-drop-bottom"); const r = z.getBoundingClientRect(); const p = z.parentElement.getBoundingClientRect(); return { col: z.getAttribute("data-col"), top: Math.round(r.top), height: Math.round(r.height), x: r.left + r.width / 2, y: r.top + r.height / 2, paneTop: Math.round(p.top), paneHeight: Math.round(p.height) }; });
   out.bottomZone = bz;
   // move the pointer over the bottom zone: the ghost shows the pane's BOTTOM half with the dragged session's name
   await page.mouse.move(bz.x, bz.y, { steps: 8 });
   await page.waitForFunction(() => document.getElementById("col-ghost").classList.contains("on"), null, { timeout: 10000 }).catch(() => {});
+  // Re-aim before releasing (2026-09-18). The zone can move while the drag is held: the shell's timeline band auto-fits its
+  // content about two seconds after the browser opens, the chat pane grows by what the band gave up, and the bottom zone is
+  // pinned to the pane's bottom, so it moves with the pane (on the runner the pane went from 533 to 686 px between the zone
+  // measurement above and the ghost read below, the zone with it, while the pointer stayed at the zone's OLD centre). Under
+  // Playwright's intercepted drags a dragover fires only on a pointer move and the drop is dispatched at the last pointer
+  // position, with no dragover or dragleave in between, so the ghost stays on over its stale rectangle and a release aimed
+  // at the zone's old place lands on the pane's iframe: no drop event reaches the shell, moveTab never runs, nothing writes
+  // the store, and the store wait below ran out its 20 s. So the zone is measured again, in one in-page step; if the pointer
+  // is outside its current rect, it moves onto the current centre (the dragover re-cues the ghost against the current pane)
+  // and waits for the ghost again; then the ghost is read (so it and the pane it is compared with in test_2 come from the
+  // same layout) and the release happens where the pointer actually is. What remains is the instant between the re-aim and
+  // the release, and a failure there now says where it released and what was under the pointer.
+  let rel = { x: bz.x, y: bz.y };
+  const zr = await page.evaluate(() => { const z = document.querySelector("#chat-pane > .col-drop.col-drop-bottom"); if (!z) return null; const r = z.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, top: r.top, bottom: r.bottom, left: r.left, right: r.right }; });
+  if (zr && (rel.y < zr.top || rel.y > zr.bottom || rel.x < zr.left || rel.x > zr.right)) {
+    rel = { x: zr.x, y: zr.y };
+    await page.mouse.move(rel.x, rel.y, { steps: 2 });
+    await named("the ghost after re-aiming at the zone's current place", page.waitForFunction(() => document.getElementById("col-ghost").classList.contains("on"), null, { timeout: 10000 }));
+  }
   out.ghost = await page.evaluate(() => { const g = document.getElementById("col-ghost"); const r = g.getBoundingClientRect(); const p = document.getElementById("chat-pane").getBoundingClientRect(); return { cls: g.className, text: g.textContent, left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height), paneTop: Math.round(p.top), paneHeight: Math.round(p.height), paneLeft: Math.round(p.left), paneWidth: Math.round(p.width) }; });   // the pane rect AT GHOST TIME (the layout settles as the sessions load)
-  // the drop: the column splits into a top and a bottom pane, a place:'below' entry keyed on parent 1
+  // the drop: the column splits into a top and a bottom pane, a place:'below' entry keyed on parent 1. The release is at
+  // rel, where the pointer is; what the page has under that point is read first, for the store wait's label.
+  const under = await page.evaluate(([x, y]) => { const el = document.elementFromPoint(x, y); return el ? (el.className || el.id || el.tagName) : null; }, [rel.x, rel.y]);
   await page.mouse.up();
-  await page.waitForFunction(() => { const cc = JSON.parse(localStorage.getItem("romp-chat-cols") || "{}"); return (cc.cols || []).some((c) => c.place === "below"); }, null, { timeout: 20000 });
+  await named("the drop's store write (a place:'below' entry in romp-chat-cols; released at " + Math.round(rel.x) + "," + Math.round(rel.y) + " over " + under + ")", page.waitForFunction(() => { const cc = JSON.parse(localStorage.getItem("romp-chat-cols") || "{}"); return (cc.cols || []).some((c) => c.place === "below"); }, null, { timeout: 20000 }));
   await page.waitForTimeout(500);
   out.afterDrop = await page.evaluate(() => {
     const cc = JSON.parse(localStorage.getItem("romp-chat-cols") || "{}"); const be = (cc.cols || []).find((c) => c.place === "below");
@@ -237,7 +262,7 @@ try {
              ghostCls: g.className, zones: document.querySelectorAll(".col-drop").length, paneSplit: !!(bot && bot.closest(".pane") && bot.closest(".pane").classList.contains("split-v")) };
   });
   const botFid = out.afterDrop.botId;
-  if (botFid) { await page.waitForFunction((fid) => !!document.getElementById(fid), botFid, { timeout: 20000 }); await page.waitForTimeout(600); out.botFill = await filled(botFid); }
+  if (botFid) { await named("the bottom pane's iframe mount", page.waitForFunction((fid) => !!document.getElementById(fid), botFid, { timeout: 20000 })); await page.waitForTimeout(600); out.botFill = await filled(botFid); }
 } catch (e) { out.died = String(e).slice(0, 500); }
 process.stdout.write("RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
