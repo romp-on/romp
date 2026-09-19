@@ -2841,5 +2841,590 @@ class EnsureCodexSdk(unittest.TestCase):
         self.assertEqual(sys.path, self.path_before)
 
 
+def _hold_turn_open(fake, tid="T-1", turn="t-1", text="long"):
+    """Script the NEXT turn to stay open. hold_open alone changes nothing about the default echo turn, which
+    carries its own turn/completed; an injected script WITHOUT one is what keeps the turn open (the steer and
+    interrupt tests' idiom), and hold_open then stops the fake from appending the completion itself."""
+    fake.hold_open = True
+    fake.scripts = [[("item/completed", {"threadId": tid, "turnId": turn, "completedAtMs": 1781100000000,
+                                        "item": {"type": "userMessage", "id": "u-1",
+                                                 "content": [{"type": "text", "text": text}]}})]]
+
+
+def _lock_free(be, sid, timeout=5.0):
+    """The turn is over AND the worker has released the turn lock. Between the finally that clears turn_id
+    (busy() False from there) and the `with s.mode_lock` exit there is a real sliver in which
+    CodexBackend.clear answers "busy" (the worker still holds the lock a clear must take); a test that
+    wants the idle verdict waits for the lock itself, not for busy()."""
+    s = be._session(sid)
+
+    def free():
+        if be.busy(sid):
+            return False
+        if s.mode_lock.acquire(blocking=False):
+            s.mode_lock.release()
+            return True
+        return False
+    return until(free, timeout=timeout)
+
+
+class NativeClear(unittest.TestCase):
+    """CodexBackend.clear (2026-09-19): a fresh conversation for the SAME session. A typed /clear on a Codex
+    session used to reach the model as a prompt (the app-server has no slash parser): the thread, the
+    transcript file and the parent chain were unchanged, so no romp surface saw a boundary. clear() mints a
+    new app-server thread under the same sid — thread/start with sessionStartSource "clear" and the row's
+    cwd, mode and model — swaps the registry row's tid to it under the turn lock, resets the normalizer on
+    the new empty file (its first record is a ROOT, the episode boundary's cue), leaves an acknowledging
+    "/clear" chip, and keeps name, mode, model, effort, note, color and the durable queue. The bracket
+    clearing() holds from before thread/start until the new tid is durable, or the attempt raises."""
+
+    def _turned(self, mode="auto", model="gpt-5-picked"):
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR")
+        if mode:
+            self.assertTrue(be.set_mode(sid, mode))
+        if model:
+            self.assertTrue(be.set_model(sid, model))
+        self.assertTrue(be.send(sid, "first synthetic turn"))
+        self.assertTrue(_lock_free(be, sid))
+        return be, fake, tmp, sid
+
+    def _row(self, be, sid):
+        return json.loads(be._reg_path().read_text())[sid]
+
+    def test_clear_mints_a_new_thread_under_the_same_sid(self):
+        be, fake, tmp, sid = self._turned()
+        old = self._row(be, sid)
+        enc = cb._enc_cwd("/TESTDIR")
+        old_file = Path(tmp) / "codex" / "projects" / enc / "T-1.jsonl"
+        self.assertTrue(old_file.read_text().strip(), "the first turn materialized")
+        self.assertIsNotNone(be.live_sessions()[sid]["context"], "the first turn's tokenUsage set the fill")
+        self.assertEqual(be.clear(sid), "")
+        starts = fake.called("thread_start")
+        self.assertEqual(len(starts), 2, "one thread at spawn, one at the clear")
+        self.assertEqual(starts[-1][1], {"cwd": "/TESTDIR", "approvalPolicy": "on-request",
+                                         "approvalsReviewer": "auto_review",
+                                         "permissions": cb.WORKSPACE_PERMISSION,
+                                         "runtimeWorkspaceRoots": ["/TESTDIR"],
+                                         "model": "gpt-5-picked", "sessionStartSource": "clear"},
+                         "the row's cwd, mode and picked model ride the create, tagged as Codex's own /clear")
+        row = self._row(be, sid)
+        self.assertEqual(row["tid"], "T-2")
+        for key in ("name", "cwd", "model", "effort", "mode", "dead", "queue", "note", "color"):
+            self.assertEqual(row[key], old[key], key)
+        self.assertIsNone(row["launchError"])
+        new_file = Path(tmp) / "codex" / "projects" / enc / "T-2.jsonl"
+        self.assertTrue(new_file.exists(), "the fresh transcript exists before the row names it")
+        self.assertEqual(new_file.read_text(), "", "an empty file parses as an empty conversation")
+        self.assertTrue(old_file.exists() and old_file.read_text().strip(), "the cleared conversation stays on disk")
+        self.assertEqual(fake.called("thread_set_name")[-1], ("thread_set_name", "T-2", "web"))
+        live = be.live_sessions()[sid]
+        self.assertIsNone(live["context"], "the normalizer reset: no fill until the fresh thread's first turn")
+        self.assertEqual(live["model"], "gpt-5-picked")
+        self.assertIs(be.clearing(sid), False)
+        self.assertTrue(be.send(sid, "second synthetic turn"))
+        self.assertTrue(until(lambda: not be.busy(sid)))
+        self.assertEqual(fake.called("turn_start")[-1][1], "T-2", "the next turn runs on the fresh thread")
+        self.assertEqual(fake.called("thread_resume"), [], "loaded stands: same client generation, no resume")
+        first = json.loads(new_file.read_text().splitlines()[0])
+        self.assertIsNone(first.get("parentUuid"), "a ROOT head: the episode boundary's cue")
+        self.assertEqual(first["sessionId"], "T-2")
+
+    def test_clear_brackets_clearing_until_the_tid_is_saved(self):
+        class Blocking(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.block = threading.Event()
+                self.entered = threading.Event()
+
+            def thread_start(self, params=None):
+                if self.called("thread_start"):          # spawn's first create returns at once
+                    self.entered.set()
+                    self.block.wait(5)
+                return super().thread_start(params)
+
+        fake = Blocking()
+        be, _, _ = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertIs(be.clearing(sid), False, "no bracket before a clear")
+        out = []
+        th = threading.Thread(target=lambda: out.append(be.clear(sid)), daemon=True)
+        th.start()
+        self.assertTrue(fake.entered.wait(5))
+        self.assertIs(be.clearing(sid), True, "latched before thread/start returns")
+        self.assertEqual(self._row(be, sid)["tid"], "T-1", "the row still names the old thread")
+        fake.block.set()
+        th.join(5)
+        self.assertEqual(out, [""])
+        self.assertIs(be.clearing(sid), False, "dropped the instant the new tid is durable")
+        self.assertEqual(self._row(be, sid)["tid"], "T-2")
+
+    def test_a_model_pick_landing_inside_the_bracket_survives_the_swap(self):
+        # Nothing reads busy through the bracket and the model setter never takes the turn lock the bracket holds,
+        # so a /model pick can land while thread/start is in flight: accepted and saved — and the swap then wrote
+        # the model read BEFORE the request back onto the row (review find, 2026-09-19): memory, the registry, the
+        # live listing and the next turn's params all back on the pre-clear model. The swap takes the row's current
+        # value, as _create_thread does; the pre-request model rides the start params only.
+        class Blocking(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.block = threading.Event()
+                self.entered = threading.Event()
+
+            def thread_start(self, params=None):
+                if self.called("thread_start"):          # spawn's first create returns at once
+                    self.entered.set()
+                    self.block.wait(5)
+                return super().thread_start(params)
+
+        fake = Blocking()
+        be, _, _ = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.set_model(sid, "gpt-5-picked"))
+        out = []
+        th = threading.Thread(target=lambda: out.append(be.clear(sid)), daemon=True)
+        th.start()
+        self.assertTrue(fake.entered.wait(5), "thread/start is in flight")
+        self.assertIs(be.clearing(sid), True)
+        self.assertTrue(be.set_model(sid, "gpt-5-later"), "the pick lands inside the bracket")
+        self.assertEqual(self._row(be, sid)["model"], "gpt-5-later", "and is saved")
+        fake.block.set()
+        th.join(5)
+        self.assertEqual(out, [""])
+        self.assertEqual(fake.called("thread_start")[-1][1]["model"], "gpt-5-picked",
+                         "the start carried the model read before the request")
+        s = be._session(sid)
+        with s.lock:
+            self.assertEqual(s.model, "gpt-5-later", "memory keeps the pick")
+        self.assertEqual(self._row(be, sid)["model"], "gpt-5-later", "the registry keeps the pick")
+        self.assertEqual(be.live_sessions()[sid]["model"], "gpt-5-later", "the live listing keeps the pick")
+        self.assertTrue(be.send(sid, "next synthetic turn"))
+        self.assertTrue(until(lambda: not be.busy(sid)))
+        last = fake.called("turn_start")[-1]
+        self.assertEqual((last[1], last[3]["model"]), ("T-2", "gpt-5-later"),
+                         "the next turn runs the pick on the fresh thread")
+
+    def test_the_chip_carries_the_command_as_typed(self):
+        # The composer retires its optimistic bubble only by the exact text it sent (or a copy id, which a clear
+        # does not carry), so a typed /new or "/clear now" acknowledged by a literal "/clear" chip left the sending
+        # bubble standing (review find, 2026-09-19): the words as typed ride the verb onto the echo, its uuid and the
+        # durable twin; the contract's default is "/clear".
+        be, fake, tmp, sid = self._turned()
+        self.assertEqual(be.clear(sid, "/new"), "")
+        a = be.live_atoms(sid)[-1]
+        self.assertEqual((a["_echo_text"], a["command"], a["uuid"]), ("/new", "/new", "cmd:%d:new" % a["t"]))
+        self.assertEqual(be.clear(sid, "/clear now"), "")
+        a = be.live_atoms(sid)[-1]
+        self.assertEqual((a["_echo_text"], a["command"]), ("/clear now", "/clear now"))
+        rows = [json.loads(l) for l in (Path(tmp) / "states" / (sid + ".jsonl")).read_text().splitlines()]
+        self.assertEqual([r["cmdGesture"] for r in rows if "cmdGesture" in r], ["/new", "/clear now"],
+                         "the twins carry the same words")
+        self.assertEqual(self._row(be, sid)["tid"], "T-3")
+
+    def test_create_thread_touches_the_file_before_the_save_that_names_its_tid(self):
+        # The order the clear keeps, in the create branch too (review find, 2026-09-19): discovery skips a row whose
+        # file does not stat, so a registry write naming a tid whose file did not exist yet opened a gap in which a
+        # discovery (the restart fallback's included) listed the board without the session until the next save.
+        # Pinned at the save itself: every save naming tid finds the file; a rollback removes it, on both branches.
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR")
+        s = be._session(sid)
+        enc = cb._enc_cwd("/TESTDIR")
+        real_save = be._save_registry
+        at_save = []
+
+        def save(sess, *, fields=(), **k):
+            if "tid" in fields:
+                at_save.append(be._path_for(sess.cwd, sess.tid).exists())
+            return real_save(sess, fields=fields, **k)
+        be._save_registry = save
+        self.assertTrue(be._create_thread(s, fake, "/TESTDIR", ""))
+        self.assertEqual(at_save, [True], "the file exists at the save that names the tid")
+        self.assertEqual(self._row(be, sid)["tid"], "T-2")
+        self.assertEqual((Path(tmp) / "codex" / "projects" / enc / "T-2.jsonl").read_text(), "")
+        # a raising save: the swap rolls back and the touched file leaves with it
+        be._save_registry = mock.Mock(side_effect=OSError(28, "no space"))
+        with self.assertRaises(OSError):
+            be._create_thread(s, fake, "/TESTDIR", "")
+        with s.lock:
+            self.assertEqual(s.tid, "T-2", "rolled back")
+        self.assertFalse((Path(tmp) / "codex" / "projects" / enc / "T-3.jsonl").exists(),
+                         "the touched file left with the rollback")
+        self.assertEqual(self._row(be, sid)["tid"], "T-2", "nothing published")
+        # a session killed while the create was in flight: nothing published, no file left behind
+        be._save_registry = real_save
+
+        class Killing(FakeClient):
+            def thread_start(self, params=None):
+                self._rec("thread_start", params)
+                with s.lock:
+                    s.dead = True
+                return SimpleNamespace(thread=SimpleNamespace(id="K-1"), model="gpt-5-test")
+        self.assertFalse(be._create_thread(s, Killing(), "/TESTDIR", ""))
+        self.assertFalse((Path(tmp) / "codex" / "projects" / enc / "K-1.jsonl").exists(),
+                         "the dead branch leaves no file behind")
+        self.assertEqual(self._row(be, sid)["tid"], "T-2")
+
+    def test_clear_rolls_back_when_the_registry_write_raises(self):
+        be, fake, tmp, sid = self._turned()
+        s = be._session(sid)
+        new_file = Path(tmp) / "codex" / "projects" / cb._enc_cwd("/TESTDIR") / "T-2.jsonl"
+        at_save = []
+
+        def save(*a, **k):
+            # the file the write would have named exists ALREADY (review find, 2026-09-19): the verb catches
+            # Exception, so an assert here would surface only as the refusal's text; recorded, asserted after
+            at_save.append(new_file.exists())
+            raise OSError(28, "no space")
+        with mock.patch.object(be, "_save_registry", side_effect=save):
+            why = be.clear(sid)
+        self.assertEqual(at_save, [True], "the fresh file existed at the registry write that would have named it")
+        self.assertTrue(why.startswith("Couldn't start a fresh conversation"), why)
+        self.assertIn("no space", why)
+        self.assertIs(be.clearing(sid), False)
+        with s.lock:
+            self.assertEqual(s.tid, "T-1", "the swap rolled back")
+            self.assertEqual(s.model, "gpt-5-picked")
+        self.assertFalse(new_file.exists(), "the touched file leaves with the rollback")
+        self.assertEqual(self._row(be, sid)["tid"], "T-1")
+        self.assertTrue(be.send(sid, "after the failed clear"))
+        self.assertTrue(until(lambda: not be.busy(sid)))
+        self.assertEqual(fake.called("turn_start")[-1][1], "T-1", "the conversation continues where it was")
+
+    def test_clear_refuses_busy_while_a_turn_is_open(self):
+        be, fake, _ = build()
+        sid = be.spawn("web", "/TESTDIR")
+        _hold_turn_open(fake)
+        self.assertTrue(be.send(sid, "long"))
+        self.assertTrue(until(lambda: be.live_sessions()[sid]["state"] == "working"), "the turn is open")
+        self.assertEqual(be.clear(sid), "busy")
+        self.assertEqual(len(fake.called("thread_start")), 1, "no thread minted under an open turn")
+        self.assertIs(be.clearing(sid), False)
+        self.assertTrue(be.interrupt(sid))
+        self.assertTrue(until(lambda: not be.busy(sid)))
+
+    def test_clear_refuses_busy_for_a_queued_send_the_worker_has_not_taken(self):
+        # The belt behind the turn lock: a send that is queued but whose worker has not yet taken the lock
+        # reads busy() True to the kernel, and a clear that took the lock first would land that message on
+        # the fresh thread — a message typed BEFORE the /clear, answered without its context.
+        be, fake, _ = build()
+        sid = be.spawn("web", "/TESTDIR")
+        s = be._session(sid)
+        stop = threading.Event()
+        stand_in = threading.Thread(target=stop.wait, daemon=True)   # alive, so no real worker starts
+        stand_in.start()
+        with s.lock:
+            s.worker = stand_in
+        try:
+            self.assertTrue(be.send(sid, "typed before the clear"))
+            self.assertTrue(be.busy(sid))
+            self.assertEqual(be.clear(sid), "busy")
+            self.assertEqual(len(fake.called("thread_start")), 1)
+        finally:
+            stop.set()
+            stand_in.join(5)
+            with s.lock:
+                s.worker = None
+        self.assertTrue(be.wake(sid))
+        self.assertTrue(until(lambda: not be.busy(sid)))
+        self.assertEqual(fake.called("turn_start")[-1][1], "T-1", "the queued send ran on the thread it was typed into")
+
+    def test_a_prompt_typed_during_the_bracket_starts_the_fresh_conversation_at_a_root(self):
+        # The normalizer reset belongs UNDER the turn lock (review find, 2026-09-19). A prompt typed while
+        # thread/start is in flight is handed over (busy() reads False through the bracket) and queues a worker
+        # on mode_lock; the instant the clear releases it, the worker takes _ensure_norm as a local for its whole
+        # turn. With the reset AFTER the release, a scheduler switch let that read return the OLD normalizer (the
+        # old thread id, the old leaf as parent) while transcript_path already followed the NEW tid: the fresh
+        # file's first record chained to the old conversation, stamped with the old thread — no root head, so no
+        # boundary, ever, for that file. The stand-in lock makes the switch certain rather than rare: the clear's
+        # release returns only after the worker has read its normalizer, so the ORDER of reset and release is the
+        # whole outcome.
+        class Blocking(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.block = threading.Event()
+                self.entered = threading.Event()
+
+            def thread_start(self, params=None):
+                if self.called("thread_start"):          # spawn's first create returns at once
+                    self.entered.set()
+                    self.block.wait(5)
+                return super().thread_start(params)
+
+        fake = Blocking()
+        be, _, tmp = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.send(sid, "first synthetic turn"))
+        self.assertTrue(_lock_free(be, sid))
+        s = be._session(sid)
+        worker_read = threading.Event()
+        real_ensure = be._ensure_norm
+
+        def ensure(sess):
+            out = real_ensure(sess)
+            if sess is s and threading.current_thread() is getattr(sess, "worker", None):
+                worker_read.set()                        # the worker holds its normalizer for the turn from here
+            return out
+        be._ensure_norm = ensure
+        clearer = []
+
+        class Handover:
+            """s.mode_lock's stand-in: every take and release passes through; the CLEAR's release returns only
+            once the worker queued behind it has read its normalizer."""
+            def __init__(self, real):
+                self._real = real
+
+            def acquire(self, blocking=True, timeout=-1):
+                return self._real.acquire(blocking, timeout)
+
+            def release(self):
+                self._real.release()
+                if clearer and threading.current_thread() is clearer[0]:
+                    worker_read.wait(5)
+
+            def __enter__(self):
+                self._real.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                self._real.release()
+                return False
+        with s.lock:
+            s.mode_lock = Handover(s.mode_lock)
+        out = []
+        th = threading.Thread(target=lambda: out.append(be.clear(sid)), daemon=True)
+        clearer.append(th)
+        th.start()
+        self.assertTrue(fake.entered.wait(5), "thread/start is in flight")
+        self.assertIs(be.clearing(sid), True)
+        self.assertFalse(be.busy(sid), "the kernel's gate reads not busy through the bracket: the send is handed over")
+        self.assertTrue(be.send(sid, "typed during the bracket"))
+        fake.block.set()
+        th.join(10)
+        self.assertEqual(out, [""])
+        self.assertTrue(worker_read.is_set(), "the worker read its normalizer on the release")
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)), "the typed prompt ran")
+        self.assertEqual(fake.called("turn_start")[-1][1], "T-2", "on the fresh thread")
+        new_file = Path(tmp) / "codex" / "projects" / cb._enc_cwd("/TESTDIR") / "T-2.jsonl"
+        first = json.loads(new_file.read_text().splitlines()[0])
+        self.assertIsNone(first.get("parentUuid"),
+                          "the fresh conversation's first record is a ROOT, not a child of the old leaf: %r" % first)
+        self.assertEqual(first["sessionId"], "T-2", "and it carries the fresh thread's id, not the old one")
+
+    def test_a_raise_after_the_swap_leaves_the_clear_done_and_kicks_the_queue(self):
+        # Everything after the swap is bookkeeping on a clear that HAPPENED (review find, 2026-09-19): the live
+        # chip, its durable twin on disk, the Codex-side name. Unguarded, the twin's write raising at ENOSPC
+        # escaped a verb whose contract promises a string — the route logged it and said nothing, the drain's
+        # per-sid except dropped the sid's whole queue, and the kick a queue parked on the old thread's
+        # rejection waits for never came: it sat un-run on a thread that no longer existed.
+        class InvalidParamsError(RuntimeError):
+            def __init__(self, message):
+                super().__init__(message)
+                self.code = -32602
+
+        class Rejecting(FakeClient):
+            def turn_start(self, tid, input_items, params=None):
+                if tid == "T-1":
+                    self._rec("turn_start", tid, input_items, params, None)
+                    raise InvalidParamsError("model is not available")
+                return super().turn_start(tid, input_items, params)
+
+        fake = Rejecting()
+        logs = []
+        tmp = tempfile.mkdtemp()
+        be = cb.CodexBackend(tmp, client_factory=lambda: fake, log=logs.append)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.send(sid, "keep this durable"))
+        self.assertTrue(until(lambda: be.launch_error(sid) is not None))
+        self.assertTrue(_lock_free(be, sid))
+        with mock.patch.object(cb, "_append_cmd_gesture", side_effect=OSError(28, "No space left on device")):
+            self.assertEqual(be.clear(sid), "", "the clear happened: the answer says so whatever the tail did")
+        self.assertEqual(self._row(be, sid)["tid"], "T-2", "the swap is durable")
+        self.assertIs(be.clearing(sid), False)
+        self.assertIn("/clear", [a.get("command") for a in be.live_atoms(sid)],
+                      "the live chip was appended before the twin's write failed (beside the queued send's echo)")
+        rows = (Path(tmp) / "states" / (sid + ".jsonl"))
+        self.assertFalse(rows.exists() and "cmdGesture" in rows.read_text(), "the twin did not land")
+        self.assertTrue(any("No space left" in m for m in logs), "the raise is logged, not swallowed: %r" % logs)
+        self.assertTrue(until(lambda: not be.pending_queued(sid) and not be.busy(sid)),
+                        "the queue parked on the old thread's rejection was kicked into the fresh one")
+        last = fake.called("turn_start")[-1]
+        self.assertEqual(last[1], "T-2")
+        self.assertEqual([i["text"] for i in last[2]], ["keep this durable"])
+
+    def test_clear_leaves_a_command_chip_that_the_next_human_record_retires(self):
+        be, fake, tmp, sid = self._turned()
+        self.assertEqual(be.clear(sid), "")
+        atoms = be.live_atoms(sid)
+        self.assertEqual(len(atoms), 1)
+        a = atoms[0]
+        self.assertEqual((a["_echo_text"], a["command"]), ("/clear", "/clear"))
+        self.assertTrue(a["uuid"].startswith("cmd:"), "the SDK's acknowledging-chip id form, not a kernel echo id")
+        self.assertEqual(a["fsid"], "T-2", "the chip belongs to the fresh conversation")
+        rows = [json.loads(l) for l in (Path(tmp) / "states" / (sid + ".jsonl")).read_text().splitlines()]
+        self.assertIn({"t": a["t"], "cmdGesture": "/clear"}, rows,
+                      "the durable twin: it renders in the fresh conversation until the boundary tick, then closes the "
+                      "cleared conversation's episode")
+        be.prune_live(sid, set(), {}, human_floor=a["t"])
+        self.assertEqual(len(be.live_atoms(sid)), 1, "a human record in the chip's own second keeps it")
+        be.prune_live(sid, set(), {}, human_floor=a["t"] + 1)
+        self.assertEqual(be.live_atoms(sid), [], "the next human record retires the chip")
+        s = be._session(sid)
+        with s.lock:
+            s.echoes.append({"text": "plain", "t": a["t"], "uuid": "echo-22222222"})
+        be.prune_live(sid, set(), {}, human_floor=a["t"] + 100)
+        self.assertEqual(len(be.live_atoms(sid)), 1, "no floor retires a PLAIN echo (the existing rule)")
+
+    def test_a_queue_parked_on_a_rejection_rides_into_the_fresh_thread(self):
+        class InvalidParamsError(RuntimeError):
+            def __init__(self, message):
+                super().__init__(message)
+                self.code = -32602
+
+        class Rejecting(FakeClient):
+            def turn_start(self, tid, input_items, params=None):
+                if tid == "T-1":
+                    self._rec("turn_start", tid, input_items, params, None)
+                    raise InvalidParamsError("model is not available")
+                return super().turn_start(tid, input_items, params)
+
+        fake = Rejecting()
+        be, _, _ = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.send(sid, "keep this durable"))
+        self.assertTrue(until(lambda: be.launch_error(sid) is not None))
+        self.assertFalse(be.busy(sid), "parked on the rejection: not busy")
+        self.assertTrue(_lock_free(be, sid))
+        self.assertEqual(be.clear(sid), "")
+        self.assertTrue(until(lambda: not be.pending_queued(sid) and not be.busy(sid)))
+        last = fake.called("turn_start")[-1]
+        self.assertEqual(last[1], "T-2")
+        self.assertEqual([i["text"] for i in last[2]], ["keep this durable"], "the durable queue rode the swap")
+        self.assertIsNone(be.launch_error(sid), "the fresh thread starts clean")
+
+    def test_a_clear_on_the_turn_end_poke_finds_the_lock_free(self):
+        # The turn-end poke is the kernel's cue to drain parked ops (the drain then calls clear). It used to
+        # fire from inside the worker's turn lock, so a clear parked mid-turn met "busy" on the very poke
+        # that announced the turn's end and waited for the pusher's clock instead. The poke now follows the
+        # lock's release: the event and the retry are the same moment.
+        be, fake, _ = build()
+        sid = be.spawn("web", "/TESTDIR")
+        _hold_turn_open(fake)
+        answers = []
+        real = be.poke
+
+        def poke():
+            if not be.busy(sid) and not answers:
+                answers.append(be.clear(sid))
+            real()
+        be.poke = poke
+        self.assertTrue(be.send(sid, "long"))
+        self.assertTrue(until(lambda: be.live_sessions()[sid]["state"] == "working"), "the turn is open")
+        self.assertTrue(be.interrupt(sid))
+        self.assertTrue(until(lambda: answers))
+        self.assertEqual(answers, [""], "the clear pressed on the turn-end poke runs, never 'busy'")
+        self.assertEqual(fake.called("thread_start")[-1][1]["sessionStartSource"], "clear")
+        self.assertEqual(self._row(be, sid)["tid"], "T-2")
+
+    def test_clear_on_a_dead_or_unknown_session_refuses_in_words(self):
+        be, fake, _, sid = self._turned()
+        self.assertTrue(be.kill(sid))
+        why = be.clear(sid)
+        self.assertIn("ended", why)
+        self.assertNotIn("backend", why)
+        self.assertEqual(len(fake.called("thread_start")), 1)
+        why = be.clear("11111111-2222-4333-8444-000000000000")
+        self.assertTrue(why and why != "busy", "an unknown sid gets the contract's refusal, never a raise")
+
+    # ── the fresh thread across a kernel restart ─────────────────────────────────────────────────
+
+    def _restarted(self, tmp, client):
+        be2 = cb.CodexBackend(tmp, client_factory=lambda: client)
+        return be2
+
+    class _NoRolloutError(RuntimeError):
+        """The pinned SDK's InvalidRequestError shape for `-32600 no rollout found for thread id …`, which the
+        app-server answers a thread/resume of a thread with no turn yet (live probe, 2026-09-19)."""
+        def __init__(self, message):
+            super().__init__(message)
+            self.code = -32600
+    _NoRolloutError.__name__ = "InvalidRequestError"
+
+    def test_a_restart_before_the_first_turn_recreates_the_fresh_thread_instead_of_parking_the_resume(self):
+        outer = self
+
+        class Fresh(FakeClient):
+            """A new app-server after a kernel restart: it has never seen T-2 and no rollout exists for a
+            thread that ran no turn, so its resume fails; its own thread ids must not collide with the
+            files the first server's threads left."""
+            def thread_resume(self, tid, params=None):
+                self._rec("thread_resume", tid, params)
+                raise outer._NoRolloutError("JSON-RPC error -32600: Invalid request: no rollout found for thread id %s" % tid)
+
+            def thread_start(self, params=None):
+                self._rec("thread_start", params)
+                return SimpleNamespace(thread=SimpleNamespace(id="R-%d" % len(self.called("thread_start"))),
+                                       model="gpt-5-test")
+
+        be, fake, tmp, sid = self._turned()
+        self.assertEqual(be.clear(sid), "")
+        self.assertEqual(self._row(be, sid)["tid"], "T-2")
+        for _, sess in be._session_items():                  # the old kernel's worker goes
+            with sess.lock:
+                sess.dead = True
+            sess.kick.set()
+        fake.close()
+        logs = []
+        fresh = Fresh()
+        be2 = cb.CodexBackend(tmp, client_factory=lambda: fresh, log=logs.append)
+        self.assertEqual(be2._session(sid).tid, "T-2", "the restart reads the fresh tid")
+        self.assertTrue(be2.send(sid, "first prompt after the restart"))
+        self.assertTrue(until(lambda: not be2.busy(sid) and not be2.pending_queued(sid)))
+        self.assertEqual([c[1] for c in fresh.called("thread_resume")], ["T-2"], "one resume, refused by the server")
+        starts = fresh.called("thread_start")
+        self.assertEqual(len(starts), 1, "ONE re-create, no loop")
+        self.assertEqual(starts[0][1]["cwd"], "/TESTDIR")
+        self.assertEqual(starts[0][1]["model"], "gpt-5-picked", "the pick outlives the re-create")
+        self.assertEqual(starts[0][1]["approvalPolicy"], "on-request", "the row's mode rides")
+        row = self._row(be2, sid)
+        self.assertEqual(row["tid"], "R-1", "the row names the re-created thread")
+        self.assertIsNone(row["launchError"])
+        self.assertEqual(fresh.called("turn_start")[-1][1], "R-1", "the prompt ran on it")
+        enc = cb._enc_cwd("/TESTDIR")
+        self.assertFalse((Path(tmp) / "codex" / "projects" / enc / "T-2.jsonl").exists(),
+                         "the empty file of the thread that never ran leaves with it")
+        new_file = Path(tmp) / "codex" / "projects" / enc / "R-1.jsonl"
+        first = json.loads(new_file.read_text().splitlines()[0])
+        self.assertIsNone(first.get("parentUuid"), "still a ROOT head: the boundary lands on this prompt")
+        self.assertTrue(any("no rollout" in m and "T-2" in m for m in logs), "loudly logged: %r" % logs)
+
+    def test_a_no_rollout_answer_for_a_thread_that_did_run_stays_a_parked_rejection(self):
+        # The re-create is keyed on BOTH facts: the server's exact refusal AND romp's own record that no turn
+        # ever ran on the thread (its materialized file is empty). A refusal for a thread whose file holds
+        # records is a real inconsistency (the rollout went missing server-side) and parks loudly as before,
+        # never re-creates over a conversation romp has records of.
+        outer = self
+
+        class Fresh(FakeClient):
+            def thread_resume(self, tid, params=None):
+                self._rec("thread_resume", tid, params)
+                raise outer._NoRolloutError("JSON-RPC error -32600: Invalid request: no rollout found for thread id %s" % tid)
+
+        be, fake, tmp, sid = self._turned()      # T-1 ran a turn: its file has records
+        for _, sess in be._session_items():
+            with sess.lock:
+                sess.dead = True
+            sess.kick.set()
+        fake.close()
+        fresh = Fresh()
+        be2 = cb.CodexBackend(tmp, client_factory=lambda: fresh)
+        self.assertTrue(be2.send(sid, "after the restart"))
+        self.assertTrue(until(lambda: be2.launch_error(sid) is not None))
+        self.assertIn("no rollout found", be2.launch_error(sid)["text"])
+        self.assertEqual(fresh.called("thread_start"), [], "no re-create over a conversation with records")
+        self.assertEqual(self._row(be2, sid)["tid"], "T-1")
+        self.assertEqual(be2.pending_queued(sid), ["after the restart"], "the send stays, parked")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

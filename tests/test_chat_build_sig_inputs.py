@@ -121,6 +121,7 @@ CENSUS = {
     "_op_qid": ("pure", "over a parked op"),
     "_orphan_replies": ("sig", "states"),
     "_parked_md": ("pure", "over a parked op"),
+    "_parked_clear_op": ("pure", "over a parked op and the owning backend's identity (the row's backend, fixed for the session's life): the drain's rule that a one-line Codex command op by a clear head is a clear, read by the clearing fold too (2026-09-19)"),
     "_op_paths": ("pure", "over a parked op (its attachment list, T373 fold)"),
     "_parse": ("sig", "transcript", "memoized on the transcript's (mtime, size), the pending cut (cut) and the states file (states)"),
     "_parse_task_notification": ("pure", "over a reminder string"),

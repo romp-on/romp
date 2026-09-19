@@ -51,8 +51,9 @@ _runtime = load_source("romp_codex_runtime", HERE / "codex_runtime.py")
 # copy of that module when it is loaded (kernel.py loads it as romp_session_backend, and its
 # _UnownedBackend subclasses that copy's ABC); otherwise the file is loaded under its OWN module name, as sdk_backend
 # does, so re-executing the source never rebinds the ABC out from under a subclass.
-echo_text_key = (sys.modules.get("romp_session_backend")
-                 or load_source("romp_session_backend_keys", HERE / "session_backend.py")).echo_text_key
+_contract = (sys.modules.get("romp_session_backend")
+             or load_source("romp_session_backend_keys", HERE / "session_backend.py"))
+echo_text_key = _contract.echo_text_key
 
 SDK_PIN = "openai-codex==0.144.4"     # bin/romp-codex-setup installs exactly this into codexvenv
 SETUP_HINT = ("Session not created: the Codex backend isn't installed. "
@@ -248,6 +249,29 @@ def _dump(payload):
     return getattr(payload, "params", None) or {}
 
 
+def _append_cmd_gesture(state_dir, sid, text, t):
+    """Record a command GESTURE at the moment it was asked for — the twin of sdk_backend.append_cmd_gesture,
+    same record ({"t", "cmdGesture"}) in the same file (<state>/states/<sid>.jsonl), because this module cannot
+    import the SDK-gated one and the kernel reads both (_cmd_gestures). How the twin renders (2026-09-19): it is
+    stamped at the clear, before the fresh conversation's first record, so it shows in the fresh conversation only
+    until the boundary tick, which records the boundary at that first record's time and floors the live build's
+    notes there; from then on it renders as the last gesture row of the cleared conversation's episode. Written by
+    clear() for its acknowledging chip, with the command as typed."""
+    p = Path(state_dir) / "states" / (str(sid) + ".jsonl")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"t": int(t), "cmdGesture": str(text)}) + "\n")
+
+
+def _unlink_quiet(path):
+    """Remove a file this module touched and no longer wants (a rollback's), swallowing a filesystem refusal: the
+    caller is already on its failure path, and a second raise there would mask the first (2026-09-19)."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _tail_state(path):
     """(last_uuid, recent uuids) off a materialized file, to re-anchor the normalizer's chain and
     seed its replay dedup after a restart. Reads the whole file once; keeps only the tail's uuids —
@@ -306,6 +330,9 @@ class _Session:
         self.queue_ids = []           # stable durable identity parallel to queue (public API stays text-only)
         self.echoes = []              # optimistic user-atom echoes ahead of the materialized file
         self.turn_id = None           # the active turn (interrupt/steer target), else None
+        self.clearing = False         # the clear bracket (CodexBackend.clear, 2026-09-19): latched before
+                                      # thread/start, dropped when the new tid is durable or the attempt raises
+        self.turn_ended = False       # a turn ended under mode_lock; _run_turn pokes for it after the release
         self.loaded = False           # thread/resume done in THIS process
         self.loaded_client_generation = None  # ...on WHICH app-server (client generation): a
                                               # replacement server has never seen the thread, so
@@ -894,15 +921,21 @@ class CodexBackend:
                 self.log("global pump: %s" % traceback.format_exc())
 
     # ── the materialized transcript ──────────────────────────────────────────────────────────────
+    def _path_for(self, cwd, tid):
+        """The one path rule: projects/<encoded cwd>/<tid>.jsonl, its directory made. transcript_path reads
+        it for the session's CURRENT tid; clear() for a tid the row does not name yet — the fresh file must
+        exist BEFORE the registry names it (2026-09-19)."""
+        d = self.projects / _enc_cwd(cwd)
+        d.mkdir(parents=True, exist_ok=True)
+        return d / ("%s.jsonl" % tid)
+
     def transcript_path(self, sid):
         s = self._session(sid)
         if not s:
             return None
         with s.lock:
             cwd, tid = s.cwd, s.tid
-        d = self.projects / _enc_cwd(cwd)
-        d.mkdir(parents=True, exist_ok=True)
-        return d / ("%s.jsonl" % tid)
+        return self._path_for(cwd, tid)
 
     def _ensure_norm(self, s):
         with s.norm_lock:
@@ -1044,6 +1077,19 @@ class CodexBackend:
                 return True
             parked = s.turn_rejection is not None and s.turn_rejection[0] == s.change_generation
             return bool(s.queue) and not parked
+
+    def clearing(self, sid):
+        """AUTHORITATIVE 'is a clear in progress right now' (SessionBackend.clearing): the bracket clear() holds
+        from before thread/start until the new thread id is durable, or the attempt raises. None when no session
+        or ended. The kernel's _clearing_now reads it for the chip, the chat's live "Clearing conversation…"
+        element and the fold of a queued "/clear" chip — no kernel literal changes for Codex (2026-09-19)."""
+        s = self._session(sid)
+        if not s:
+            return None
+        with s.lock:
+            if s.dead:
+                return None
+            return bool(s.clearing)
 
     # ── control ──────────────────────────────────────────────────────────────────────────────────
     def send(self, sid, text):
@@ -1258,6 +1304,149 @@ class CodexBackend:
 
     def set_fast(self, sid, value):
         return False   # no Codex equivalent
+
+    def clear(self, sid, text="/clear"):
+        """A fresh conversation for the SAME session (SessionBackend.clear, 2026-09-19): a new app-server thread
+        under the same sid — thread/start with sessionStartSource "clear" (Codex's own tag for its /clear and
+        /new; the runtime validates the enum and reflects nothing back, live probe 2026-09-19) and the row's
+        cwd, mode and picked model — swapped into the registry row under the turn lock, the normalizer reset on
+        the new EMPTY file so its first record is a ROOT (what the kernel's episode boundary keys on: the old
+        cards settle and the "Conversation cleared" card appears on the fresh thread's first prompt), and an
+        acknowledging chip carrying `text` as typed ("/clear", "/new", "/clear now") left in the live tail: the
+        composer retires its optimistic bubble by that exact text, so a literal "/clear" chip for a typed /new
+        left the bubble standing (review find, 2026-09-19). Everything else on the row survives because it lives
+        on the row, keyed by sid: name, cwd, model, effort, mode, color, note, the durable queue; tags and the
+        mailbox are kernel stores keyed by sid. The old thread is LEFT on the app-server: romp reads only its own
+        materialized file, which stays where build_episode's sibling lookup finds it; an archive would be one
+        more RPC that can raise after the swap committed, and a thread with no turn has no rollout to archive.
+
+        Idle only. The worker holds mode_lock across thread preparation and the whole turn (_run_turn), so a
+        non-blocking take of it is the exact "a turn is in flight" test set_mode uses, and the swap under it can
+        never race a worker between _prepare_thread and turn_start (a worker that read the OLD normalizer and the
+        NEW tid would chain the new file's first record to the old leaf: no root head, no boundary). The belt
+        behind it is busy()'s own rule: a queued send whose worker has not yet taken the lock reads busy() True
+        to the kernel and would otherwise land on the fresh thread — a message typed BEFORE the /clear, answered
+        without its context — so it answers "busy" too; a queue PARKED on a permanent rejection rides into the
+        fresh thread instead (busy() says not busy for it, and this explicit change is what re-arms it, as
+        set_mode does). "busy" is the kernel's word to park on (it retries at the turn's end) and is never shown.
+
+        The bracket: s.clearing is latched before thread/start and dropped when the new tid is durable (the
+        deciding event) or the attempt raises; clearing() publishes it. The swap's order: the fresh file is
+        touched BEFORE the registry names its tid, because discovery signs registry.json's mtime and skips a row
+        whose file does not stat — saved first, a discover landing in the gap would cache a list WITHOUT this
+        session until the next registry write. A raising registry write publishes NOTHING (_prepare_thread's
+        discipline): the in-memory swap rolls back and the touched file leaves with it. The chip lives here and
+        not in the kernel because the composer's optimistic "/clear" bubble ends only on a landed user event with
+        its text (the "cmd:<t>:<command>" id is not the kernel-echo form, so send-pending takes it by text) and the
+        kernel has no live-atom store of its own — the SDK puts the same chip in its setters (_ack_cmd_chip)."""
+        cmd = str(text or "").strip() or "/clear"   # the words as typed ride the chip, its uuid and the twin (see above)
+        s = self._session(sid)
+        if not s:
+            return _contract.SessionBackend.clear(self, sid, cmd)
+        c = self._get_client()
+        if c is None:
+            return self._client_failure_text()
+        if not s.mode_lock.acquire(blocking=False):
+            return "busy"
+        try:
+            with s.lock:
+                if s.dead:
+                    return "this session has ended — revive it first"
+                parked = s.turn_rejection is not None and s.turn_rejection[0] == s.change_generation
+                if s.turn_id or (s.queue and not parked):
+                    return "busy"
+                cwd, mode, model, name = s.cwd, s.mode, s.model, s.name
+                s.clearing = True
+            self.push_session(sid)             # the chip reads "clearing" from here
+            params = {"cwd": cwd, **_approval_params(mode), **_execution_permissions(cwd, thread_start=True),
+                      "sessionStartSource": "clear"}
+            if model:
+                params["model"] = model
+            touched = None
+            try:
+                resp = c.thread_start(params)
+                new_tid = resp.thread.id
+                loaded_client_generation = self._client_generation_for(c)
+                touched = self._path_for(cwd, new_tid)
+                touched.touch()                # the fresh file exists before the row names it (see above)
+                with s.lock:
+                    if s.dead:
+                        touched.unlink(missing_ok=True)
+                        s.clearing = False
+                        return "this session has ended — revive it first"
+                    prior = (s.tid, s.model, s.loaded, s.loaded_client_generation, s.launch_error)
+                    s.tid = new_tid
+                    # the row's CURRENT model, as _create_thread reads it (review find, 2026-09-19): nothing reads busy
+                    # through the bracket and set_model never takes mode_lock, so a /model pick can land while
+                    # thread/start is in flight, accepted and saved — and the model read before the request, written
+                    # back here, reverted it in memory, the registry, the live listing and the next turn's params. The
+                    # pre-request model rides the start params only; the server's reply fills an empty pick
+                    s.model = s.model or getattr(resp, "model", "") or ""
+                    s.loaded = True
+                    s.loaded_client_generation = loaded_client_generation
+                    s.launch_error = None      # the fresh thread starts clean; a parked rejection named the old one
+                    try:
+                        self._save_registry(s, fields=("tid", "model", "launchError"))
+                    except BaseException:
+                        (s.tid, s.model, s.loaded, s.loaded_client_generation, s.launch_error) = prior
+                        raise
+                    s.clearing = False         # THE deciding event: the new tid is durable
+                    s.change_generation += 1   # re-arms a queue parked on a rejection of the old thread
+                    queued = bool(s.queue)
+            except Exception as e:
+                if touched is not None:
+                    try:
+                        touched.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                with s.lock:
+                    s.clearing = False
+                self.push_session(sid)
+                self.log("clear %s: %s" % (s.name, e))
+                return "Couldn't start a fresh conversation: %s" % str(e)[:200]
+            # A fresh normalizer anchored on the new empty file: last_uuid None, so the first record is a ROOT. Reset
+            # UNDER the turn lock, as _create_thread does under the worker's (review find, 2026-09-19): a prompt typed
+            # while thread/start was in flight has queued a worker on mode_lock (busy() reads False through the
+            # bracket, so the kernel hands it over), and that worker takes _ensure_norm as a local for its whole turn
+            # the instant the lock is released — reset AFTER the release, a scheduler switch let it read the OLD
+            # normalizer with the NEW tid and chain the fresh file's first record to the old leaf, stamped with the old
+            # thread (no root head, so no boundary, ever, for that file: transcript_head memoizes the first record).
+            # Reset under norm_lock and rebuilt after ITS release — _ensure_norm takes the same non-reentrant lock
+            # itself, exactly as _prepare_thread does; the global pump routes by s.tid, so a straggler for the old
+            # thread is dropped, and none is expected between turns. Guarded: the swap is durable, the answer is
+            # already "", and a worker rebuilds a missing normalizer itself.
+            try:
+                with s.norm_lock:
+                    s.norm = None
+                self._ensure_norm(s)
+            except Exception as e:
+                self.log("clear %s: normalizer reset after the swap: %s" % (s.name, e))
+        finally:
+            s.mode_lock.release()
+        # After the swap (review find, 2026-09-19): everything from here is bookkeeping on a clear that HAPPENED, and
+        # the answer is "" whatever it does. Unguarded, a raise here (the durable twin's write at ENOSPC — the class
+        # this module's own _log wrapper exists for) escaped a verb whose contract promises a string: the route logged
+        # it and said nothing (the bracket had dropped, the composer's optimistic bubble stood), the drain's per-sid
+        # except dropped the sid's whole queue, and the kick a queue parked on the old thread's rejection waits for
+        # never came. The kick and the pushes run whatever the tail did.
+        t = int(time.time())
+        try:
+            with s.lock:
+                s.echoes.append({"text": cmd, "t": t, "uuid": "cmd:%d:%s" % (t, cmd.lstrip("/")), "command": cmd})
+            _append_cmd_gesture(self.state, sid, cmd, t)     # the durable twin, on disk before the push that rebuilds the chat
+            try:
+                c.thread_set_name(new_tid, name)
+            except Exception:
+                pass                           # cosmetic on the Codex side, as rename treats it; the registry is the truth
+        except Exception as e:
+            self.log("clear %s: after the swap: %s" % (s.name, e))
+        finally:
+            if queued:
+                self._ensure_worker(s)
+                s.kick.set()
+            self.push()
+            self.push_session(sid)
+        return ""
 
     # ── lifecycle ────────────────────────────────────────────────────────────────────────────────
     def _publish_spawn_name(self, s, bg="", fg=""):
@@ -1511,46 +1700,82 @@ class CodexBackend:
                                         name="codex:%s" % s.name)   # kind:payload: the kernel's stack sample keeps the kind
             s.worker.start()
 
+    def _create_thread(self, s, c, cwd, model):
+        """thread/start for `s` and the swap of its row onto the new thread: the body _prepare_thread's
+        placeholder branch always had, shared since 2026-09-19 with the restart fallback below. False when
+        the session was killed while the create was in flight."""
+        params = {"cwd": cwd, **_approval_params(s.mode),
+                  **_execution_permissions(cwd, thread_start=True)}
+        if model:
+            params["model"] = model    # picked while the row was a placeholder: born on it
+        resp = c.thread_start(params)
+        loaded_client_generation = self._client_generation_for(c)
+        touched = self._path_for(cwd, resp.thread.id)
+        touched.touch()                # BEFORE the row names the tid (review find, 2026-09-19): discovery skips a row whose
+        #                                file does not stat, so saved first, a discover landing in the gap (the restart
+        #                                fallback's included) listed the board without this session until the next save;
+        #                                the order clear() keeps. Both rollbacks below remove it again
+        with s.lock:
+            if s.dead:
+                _unlink_quiet(touched)
+                return False
+            prior = (s.tid, s.model, s.loaded, s.loaded_client_generation)
+            s.tid = resp.thread.id
+            # The pick outlives the create. The server's reply names ITS model, never empty
+            # (ThreadStartResponse.model is a required string), so `resp.model or s.model` let
+            # the default overwrite a model the user chose on the pending-/failed- row, saved
+            # it below, and ran every turn on it with no word to anyone (2026-09-11).
+            s.model = s.model or getattr(resp, "model", "") or ""
+            s.loaded = True
+            s.loaded_client_generation = loaded_client_generation
+            try:
+                self._save_registry(s, fields=("tid", "model"))
+            except BaseException:
+                # publish NOTHING on a raise: with the real tid only in memory, every retry
+                # took the resume path and never re-saved it — the next kernel restart
+                # loaded 'pending-…' and silently started a FRESH Codex thread (the r29
+                # verification). Rolled back, the loud retry re-runs thread_start; an
+                # orphaned server-side thread beats a silently forked conversation.
+                (s.tid, s.model, s.loaded, s.loaded_client_generation) = prior
+                _unlink_quiet(touched)
+                raise
+        with s.norm_lock:
+            s.norm = None
+        self._ensure_norm(s)
+        return True
+
+    @staticmethod
+    def _never_turned(path):
+        """romp's own record that no turn ever ran on a thread: the materialized file it touched at the
+        thread's birth (spawn, clear) is still EMPTY — every turn appends at least its user record. An
+        unreadable or missing file is not that record (2026-09-19)."""
+        try:
+            return os.path.getsize(str(path)) == 0
+        except OSError:
+            return False
+
     def _prepare_thread(self, s, c):
-        """Resume a durable thread, or turn a visible pending/failed placeholder into a real one."""
+        """Resume a durable thread, or turn a visible pending/failed placeholder into a real one.
+
+        A thread that never ran a turn has no rollout on the app-server, so a fresh app-server (a kernel
+        restart, a replaced client) refuses to resume it — `no rollout found for thread id …`, an
+        InvalidRequestError the permanent-rejection rule would park the queue on for good (live probe,
+        2026-09-19). clear() mints exactly such a thread and saves its tid (spawn's thread is the same until
+        its first turn), so on THAT refusal, for a thread romp's own record says never turned (its file is
+        empty, _never_turned), the thread is re-created ONCE with the row's params and the row swapped onto
+        the new one — the create branch's own transaction, with its rollback — loudly logged; the empty file
+        of the thread that never ran leaves with it. Keyed on both facts: the same refusal for a thread whose
+        file holds records is a real inconsistency (a rollout gone missing server-side) and parks as before,
+        never a re-create over a conversation romp has records of. The re-created thread is still turn-less
+        with an empty file, so its first record is a ROOT and the episode boundary lands where it would have."""
         with s.lock:
             if s.dead:
                 return False
             tid, cwd, model = s.tid, s.cwd, s.model
             create = tid.startswith("pending-") or tid.startswith("failed-")
         if create:
-            params = {"cwd": cwd, **_approval_params(s.mode),
-                      **_execution_permissions(cwd, thread_start=True)}
-            if model:
-                params["model"] = model    # picked while the row was a placeholder: born on it
-            resp = c.thread_start(params)
-            loaded_client_generation = self._client_generation_for(c)
-            with s.lock:
-                if s.dead:
-                    return False
-                prior = (s.tid, s.model, s.loaded, s.loaded_client_generation)
-                s.tid = resp.thread.id
-                # The pick outlives the create. The server's reply names ITS model, never empty
-                # (ThreadStartResponse.model is a required string), so `resp.model or s.model` let
-                # the default overwrite a model the user chose on the pending-/failed- row, saved
-                # it below, and ran every turn on it with no word to anyone (2026-09-11).
-                s.model = s.model or getattr(resp, "model", "") or ""
-                s.loaded = True
-                s.loaded_client_generation = loaded_client_generation
-                try:
-                    self._save_registry(s, fields=("tid", "model"))
-                except BaseException:
-                    # publish NOTHING on a raise: with the real tid only in memory, every retry
-                    # took the resume path and never re-saved it — the next kernel restart
-                    # loaded 'pending-…' and silently started a FRESH Codex thread (the r29
-                    # verification). Rolled back, the loud retry re-runs thread_start; an
-                    # orphaned server-side thread beats a silently forked conversation.
-                    (s.tid, s.model, s.loaded, s.loaded_client_generation) = prior
-                    raise
-            with s.norm_lock:
-                s.norm = None
-            self._ensure_norm(s)
-            self.transcript_path(s.sid).touch()
+            if not self._create_thread(s, c, cwd, model):
+                return False
             try:
                 self._write_name(s)
             except (OSError, UnicodeDecodeError) as e:
@@ -1574,8 +1799,23 @@ class CodexBackend:
                              "a same-name create may collide meanwhile" % (s.sid, e))
             self.push()
             return True
-        c.thread_resume(tid, {"cwd": cwd, **_approval_params(s.mode),
-                              **_execution_permissions(cwd, thread_start=True)})
+        try:
+            c.thread_resume(tid, {"cwd": cwd, **_approval_params(s.mode),
+                                  **_execution_permissions(cwd, thread_start=True)})
+        except Exception as e:
+            stale = self._path_for(cwd, tid)
+            if "no rollout found" not in str(e) or not self._never_turned(stale):
+                raise
+            self.log("codex: thread %s of %s has no rollout on this app-server and never ran a turn; "
+                     "re-creating it instead of parking the resume (%s)" % (tid, s.name, e))
+            if not self._create_thread(s, c, cwd, model):
+                return False
+            try:
+                stale.unlink(missing_ok=True)  # the empty file of the thread that never ran
+            except OSError:
+                pass
+            self.push()
+            return True
         loaded_client_generation = self._client_generation_for(c)
         with s.lock:
             if s.dead:
@@ -1666,8 +1906,20 @@ class CodexBackend:
     def _run_turn(self, s):
         # Mode changes take effect between turns. Nonblocking set_mode refuses while this
         # lock is held, including thread preparation and the turn/start acknowledgement gap.
-        with s.mode_lock:
-            return self._run_turn_in_mode(s)
+        # The turn-end poke and push fire AFTER the lock is released (2026-09-19): the kernel's parked-op
+        # drain runs on that poke, and a clear() it fires takes this same lock non-blocking — poked from
+        # inside the lock, every clear parked mid-turn met "busy" on the very poke that announced the
+        # turn's end and waited for the pusher's clock instead. Released first, the poke IS the retry
+        # event. _run_turn_in_mode records that a turn ended and leaves the announcing to here.
+        try:
+            with s.mode_lock:
+                return self._run_turn_in_mode(s)
+        finally:
+            with s.lock:
+                ended, s.turn_ended = s.turn_ended, False
+            if ended:
+                self.poke()                    # the turn END is the kernel's cue (parked ops deliver on it): every
+                self.push_session(s.sid)       # in-loop poke above fired while turn_id was set, i.e. busy() True
 
     def _run_turn_in_mode(self, s):
         c = self._get_client()
@@ -1829,8 +2081,7 @@ class CodexBackend:
                 s.turn_id = None
                 s.state = "waiting"
                 s.since = time.time()
-            self.poke()                    # the turn END is the kernel's cue (parked ops deliver on it): every
-            self.push_session(s.sid)       # in-loop poke above fired while turn_id was set, i.e. busy() True
+                s.turn_ended = True        # _run_turn pokes and pushes once the turn lock is released (see there)
         return True
 
     # ── chat tail ────────────────────────────────────────────────────────────────────────────────
@@ -1852,8 +2103,13 @@ class CodexBackend:
             # queued-bubble pass enlists it while the session is busy. Without the marker an echo paints
             # as a solid user atom beside its own queued bubble and forces the last turn open: a false
             # "working" chip for a session whose only live item is a pending send.
+            # `command` rides only on clear()'s acknowledging chip (2026-09-19): the kernel dedups the durable
+            # gesture against it, renders it on the user's side, and _merge_live_atoms never counts a command
+            # atom as live work; prune_live retires it by the human floor, the one exit a chip whose text never
+            # lands has
             return [{"type": "user", "uuid": e["uuid"], "session_id": sid, "fsid": s.tid,
                      "t": e["t"], "parentUuid": None, "author": "human", "_echo_text": e["text"],
+                     **({"command": e["command"]} if e.get("command") else {}),
                      "message": {"role": "user",
                                  "content": [{"type": "text", "text": e["text"]}]}}
                     for e in s.echoes]
@@ -1876,10 +2132,12 @@ class CodexBackend:
         block per send; _atom_user_texts yields each block, so this prune lands every echo of such a turn
         too).
 
-        `human_floor` (the newest genuine-human record's time) is accepted and retires nothing here. No
-        floor retires a plain input echo on any backend: a send the app-server never records must stay
-        visible. The SDK uses the floor to retire its streamed slash-command feedback, atoms carrying
-        `command`, and no Codex echo carries that flag: send() mints plain echoes only."""
+        `human_floor` (the newest genuine-human record's time) retires only a COMMAND chip by it (2026-09-19:
+        clear()'s acknowledging "/clear" echo, the one echo here carrying `command`) — the SDK's stale-command
+        rule, the one exit a chip whose text never lands has, and STRICTLY later (the kernel's _echo_overtaken
+        rule, not the SDK's at-or-later), so a first prompt into the fresh conversation in the chip's own second
+        leaves the chip until the next human record. No floor retires a PLAIN input echo on any backend: a send
+        the app-server never records must stay visible; send() mints plain echoes only."""
         s = self._session(sid)
         if not s:
             return
@@ -1890,6 +2148,8 @@ class CodexBackend:
         def _landed(e):
             if e.get("uuid") in uuids:
                 return True
+            if e.get("command") and human_floor and float(human_floor) > float(e.get("t") or 0):
+                return True                    # the next human record retires the acknowledging chip
             key = echo_text_key(e.get("text"))
             if not key:
                 return False

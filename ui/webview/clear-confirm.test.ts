@@ -7,7 +7,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
+import { isClearCmd, isNewCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
@@ -19,6 +19,15 @@ test("isClearCmd mirrors the kernel's _is_clear_cmd truth table", () => {
   assert.ok(!isClearCmd("/cleared"));
   assert.ok(!isClearCmd("please /clear"));
   assert.ok(!isClearCmd("/compact"));
+});
+
+test("isNewCmd: Codex's own word for the same operation, the same truth table", () => {
+  assert.ok(isNewCmd("/new"));
+  assert.ok(isNewCmd("  /new  "));
+  assert.ok(isNewCmd("/new please"));
+  assert.ok(!isNewCmd("/newx"));
+  assert.ok(!isNewCmd("please /new"));
+  assert.ok(!isNewCmd("/clear"));
 });
 
 test("openTopTitles counts exactly what the boundary settle takes: open tops, blocked included", () => {
@@ -64,6 +73,16 @@ test("sendComposer gates a /clear behind showConfirm — Cancel first (safe defa
   assert.match(gate, /if \(v === "clear"\) deliver\(\)/);
   // the deliver closure is pinned to the session the confirm was armed for
   assert.match(RENDER, /if \(activeId !== sid\) return;/);
+});
+
+test("a typed /new gets the same confirm on a Codex session only: the kernel runs it as a clear there, and a Claude session never sees a confirm for a command its CLI refuses (2026-09-19)", () => {
+  const at = RENDER.indexOf("const newDetail");
+  assert.ok(at > 0, "the /new gate exists beside the /clear one");
+  const gate = RENDER.slice(at, at + 400);
+  assert.match(gate, /liveSession\(sid\)\?\.status\?\.backend === "codex" && isNewCmd\(text\)/, "read from the session's status, Codex only");
+  assert.match(gate, /clearConfirmDetail\(openTopTitles\(ledgers\.get\(sid\)\?\.tree\)\)/, "the same open-top population");
+  assert.match(gate, /const detail = dropDetail \|\| newDetail;/);
+  assert.match(RENDER, /import \{[^}]*\bisNewCmd\b[^}]*\} from "\.\/clear-confirm";/);
 });
 
 test("the chat boundary card counts the dropped cards, and hover names them", () => {

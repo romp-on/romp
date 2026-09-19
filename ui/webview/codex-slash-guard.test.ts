@@ -66,6 +66,6 @@ test("the timeline battery on a Codex lane: an inert cursor, the reason in the t
   assert.match(TL, /if \(e\.button !== 0\) return;\s*\n\s*if \(s\.backend === 'codex'\) return;/, "declined right after the button test, before the stamp and the post");
 });
 
-test("the kernel-served shell's bell explains the refused kind's new tenant: a slash command a session has no such command for", () => {
-  assert.match(KERNEL, /refused:"[^"]*Or a slash command sent to a session that has no such command \(a Codex session has no \/clear or \/compact\): nothing was sent, and the entry names it/);
+test("the kernel-served shell's bell explains the refused kind's new tenants: a slash command a session has no such command for, and a clear a Codex session could not run", () => {
+  assert.match(KERNEL, /refused:"[^"]*Or a slash command sent to a session that has no such command \(a Codex session has no \/compact\): nothing was sent, and the entry names it\. Or a \/clear a Codex session could not run/);
 });

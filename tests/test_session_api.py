@@ -64,6 +64,27 @@ class AbcContract(unittest.TestCase):
         self.assertIn("\n    def move(self, sid: str, new_cwd: str) -> str:", src,
                       "SdkBackend implements move")
 
+    def test_clear_is_a_concrete_default_that_refuses_and_codex_implements_it(self):
+        # clear (2026-09-19: a typed /clear on a Codex session starts a fresh conversation for the SAME
+        # session) is a CONCRETE default on the ABC in move()'s idiom — a backend with no way to restart
+        # its conversation answers with the reason, never "" (which would read as success), never "busy"
+        # (which would park a retry forever) and never a raise; worded for no backend in particular, so a
+        # new backend never reads as clearable by omission, and without the word "backend", which reaches a
+        # toast. CodexBackend implements it (a new app-server thread under the same sid); the SDK backend
+        # does not (the CLI executes the text), asserted at the source level like the abstract set.
+        self.assertNotIn("clear", ABSTRACT, "clear is a concrete default (a backend without one inherits the refusal)")
+        why = sb.SessionBackend.clear(object(), "sid")
+        self.assertIsInstance(why, str)
+        self.assertTrue(why, "the default is a REASON, not an empty success")
+        self.assertNotEqual(why, "busy")
+        self.assertIn("fresh conversation", why)
+        self.assertNotIn("backend", why, "a toast in the user's terms")
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "codex_backend.py"), encoding="utf-8").read()
+        self.assertIn("\n    def clear(self, sid, text=\"/clear\"):", src,
+                      "CodexBackend implements clear, and takes the command as typed for its chip (2026-09-19)")
+        sdk = open(os.path.join(BIN, "romp_sdk_backend.py"), encoding="utf-8").read()
+        self.assertNotIn("\n    def clear(self, sid", sdk, "the SDK backend leaves /clear to the CLI")
+
     def test_sdk_backend_honors_every_abstract_method(self):
         # SdkBackend is SDK-gated so it can't import the ABC when the dep is absent; it conforms by
         # duck-typing. Assert at the SOURCE level (no SDK dep needed) that it DEFINES each abstract method,

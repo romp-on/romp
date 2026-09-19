@@ -10,7 +10,10 @@ Codex session it lets /model and /effort through to the setter arms and refuses 
 predicate that parks (_is_slash_command), with the words on the delivering socket (or a broadcast when no
 socket carried the op), in `state` for POST /send and `romp send`, and on the bell's ring. The parked-op
 drain routes already-parked Codex command ops through the same refusal; _compact_or_park refuses ahead of
-any park or stamp; the composer's "/" palette lists what a Codex session takes.
+any park or stamp; the composer's "/" palette lists what a Codex session takes. Since the native clear
+registered its heads (tests/test_codex_clear_route.py), /clear and /new are TAKEN, not refused: the refused
+examples here are /compact and the rest — and a /clear that is not the whole message (a second line after it),
+which the route refuses rather than clearing with the rest of the text dropped (2026-09-19).
 
 Fixtures are synthetic: a private placeholder sid (parked ops and notices are keyed by sid, and another
 module's journal must never land on this one), an invented copy id in the kernel's echo form, the demo
@@ -59,6 +62,10 @@ class _CodexFake:
     def send(self, sid, text):
         self.calls.append(("send", text))
         return True
+
+    def clear(self, sid, text="/clear"):
+        self.calls.append(("clear", sid))              # the native clear's verb; never reached by a refusal
+        return ""
 
     def set_model(self, sid, v):
         self.calls.append(("model", v))
@@ -126,9 +133,9 @@ class _Guarded(unittest.TestCase):
 
 
 class CodexSlashRefused(_Guarded):
-    def test_a_typed_clear_never_reaches_the_backend(self):
+    def test_a_typed_compact_never_reaches_the_backend(self):
         # the composer's press: the sendMessage arm, with the copy id the client minted
-        self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": "/clear", "qid": QID}, self.client))
+        self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": "/compact", "qid": QID}, self.client))
         self.assertEqual(self.be.calls, [], "the backend never saw the text: no send, no echo, no prompt")
         self.assertEqual(len(self.sent), 1, "one frame on the delivering socket")
         frame = self.sent[0]
@@ -136,7 +143,7 @@ class CodexSlashRefused(_Guarded):
                          "the warn names the session and the press, so the chat retires the bubble it drew")
         self.assertIn("runs in Codex", frame["text"])
         self.assertIn("nothing was sent", frame["text"])
-        self.assertIn("/clear", frame["text"], "the refused command is named")
+        self.assertIn("/compact", frame["text"], "the refused command is named")
         row = self._last_notice()
         self.assertEqual(row["kind"], "refused")
         self.assertIn(frame["text"], row["text"], "the bell keeps the same words after the toast fades")
@@ -144,15 +151,15 @@ class CodexSlashRefused(_Guarded):
         self.assertNotIn(SID, km._pending_ops, "a refusal is not an op: nothing parked")
 
     def test_the_refused_set_is_the_parked_set(self):
-        for text in ("/compact", "/new", "/fast on", "/autocompact off", "/help", "/model", "/clear\nand more",
-                     "/mcp servers"):
+        for text in ("/compact", "/fast on", "/autocompact off", "/help", "/model", "/compact\nand more",
+                     "/clear\nand more", "/mcp servers"):   # a taken head that is not the whole message is refused too
             state = {}
             self.assertTrue(km._route_meta_command(self.be, SID, text, self.client, state=state), text)
             self.assertIn("refused", state, text)
             self.assertEqual(self.be.calls, [], text)
         # a bare "/mcp" never reaches the kernel from the composer (the client opens the MCP panel), so the palette's
         # /mcp entry and this route agree; with words after it, it is a command Codex has not got, like the rest
-        for text in ("/tmp/x is a path", "hello /clear", "prose"):
+        for text in ("/tmp/x is a path", "hello /compact", "prose"):
             state = {}
             self.assertFalse(km._route_meta_command(self.be, SID, text, self.client, state=state), text)
             self.assertEqual(state, {}, "%r is not slash-shaped: the route says nothing and the caller sends it" % text)
@@ -182,12 +189,12 @@ class CodexSlashRefused(_Guarded):
     def test_no_gate_is_evaluated_by_a_refusal(self):
         gate_calls = []
         with mock.patch.object(km, "_ops_gate", lambda sid: (gate_calls.append(str(sid)), False)[1]):
-            for text in ("/clear", "/compact", "/model"):
+            for text in ("/help", "/compact", "/model"):
                 self.assertTrue(km._route_meta_command(self.be, SID, text, self.client, state={}), text)
         self.assertEqual(gate_calls, [], "a refusal evaluates no drive-op gate (the setter arms' invariant, extended)")
 
     def test_post_send_answers_with_the_words(self):
-        ok, err, queued = km._deliver_text(SID, "/clear")
+        ok, err, queued = km._deliver_text(SID, "/compact")
         self.assertEqual((ok, queued), (False, False))
         self.assertIn("runs in Codex", err)
         self.assertIn("nothing was sent", err)
@@ -211,7 +218,7 @@ class ParkedBeforeTheGuard(_Guarded):
     def test_a_parked_command_and_compact_are_drained_through_the_refusal(self):
         # ops parked before the guard existed (pending-ops.json survives a restart), or by a caller that skips the
         # route: drained ONCE through the refusal, the setter behind them still delivers on the same pass
-        km._pending_ops[SID] = [("command", "/clear", "human", QID, True), ("compact",), ("effort", "high")]
+        km._pending_ops[SID] = [("command", "/help", "human", QID, True), ("compact",), ("effort", "high")]
         km._save_pending_ops()
         km._apply_pending_ops()
         self.assertEqual(self.be.calls, [("effort", "high")], "neither refused op reached the backend; the setter did")
@@ -225,7 +232,7 @@ class ParkedBeforeTheGuard(_Guarded):
             self.assertIn("runs in Codex", msg["text"])
             self.assertNotIn("the session's backend refused it", msg["text"], "the generic toast does not follow the words")
         self.assertEqual(warns[0][1].get("qid"), QID, "the parked copy's id rides, so the chat retires its bubble")
-        self.assertIn("/clear", warns[0][1]["text"])
+        self.assertIn("/help", warns[0][1]["text"])
         self.assertNotIn("qid", warns[1][1], "a compact op carries no press id")
         self.assertIn("/compact", warns[1][1]["text"])
         self.assertFalse(any("the session's backend refused it" in str(msg.get("text")) for _, msg in self.broadcast))
@@ -258,7 +265,7 @@ class Palette(_Guarded):
         with mock.patch.object(km, "_session_backend", lambda sid, tm: "codex"):
             cmds, warming = km._commands_for_sid(SID)
         self.assertEqual((cmds, warming), ([dict(c) for c in km._CODEX_COMMANDS], False))
-        self.assertEqual([c["name"] for c in cmds], ["model", "effort", "mcp"])
+        self.assertEqual([c["name"] for c in cmds], ["clear", "new", "model", "effort", "mcp"])
         self.assertIsNot(cmds[0], km._CODEX_COMMANDS[0], "a copy: the constant is never handed out to be mutated")
         seen = []
         with mock.patch.object(km, "_session_backend", lambda sid, tm: "sdk"), \
@@ -306,7 +313,7 @@ class Served(_Guarded):
         self.assertEqual(self.marked, [])
 
     def test_post_send_answers_the_words(self):
-        code, resp = self._req("/send", {"id": SID, "text": "/clear"})
+        code, resp = self._req("/send", {"id": SID, "text": "/compact"})
         self.assertEqual(code, 200)
         self.assertIs(resp["ok"], False)
         self.assertIn("runs in Codex", resp["error"])
@@ -316,7 +323,7 @@ class Served(_Guarded):
     def test_get_commands_for_a_codex_sid(self):
         code, resp = self._req("/commands?sid=" + SID)
         self.assertEqual(code, 200)
-        self.assertEqual([c["name"] for c in resp["commands"]], ["model", "effort", "mcp"])
+        self.assertEqual([c["name"] for c in resp["commands"]], ["clear", "new", "model", "effort", "mcp"])
         self.assertIs(resp["warming"], False)
 
 
@@ -401,18 +408,19 @@ class RealBackendGuard(unittest.TestCase):
                 out.append(w)
         return out
 
-    def test_a_typed_clear_reaches_no_client_call_and_no_queue(self):
+    def test_a_typed_compact_reaches_no_client_call_and_no_queue(self):
         sid = self.be.spawn("web", "/TESTDIR", sid=SID2)
         self.assertEqual(sid, SID2)
         self.assertIs(km.Sessions.backend_for(SID2), self.be, "the real singleton owns the row")
-        self.assertTrue(km._drive({"type": "sendMessage", "id": SID2, "text": "/clear", "qid": QID}, self.client))
+        self.assertTrue(km._drive({"type": "sendMessage", "id": SID2, "text": "/compact", "qid": QID}, self.client))
         self.assertEqual(self.fake.called("turn_start"), [], "no turn opened with the word")
         self.assertEqual(self.fake.called("turn_steer"), [], "no steer with the word")
         self.assertEqual(self.be.live_atoms(SID2), [], "no echo minted: the backend's send never ran")
         self.assertEqual(self.be._session(SID2).queue, [], "the durable queue took nothing")
         self.assertEqual(len(self.sent), 1)
         self.assertEqual((self.sent[0]["type"], self.sent[0]["sid"], self.sent[0]["qid"]), ("warn", SID2, QID))
-        self.assertIn("has no /clear", self.sent[0]["text"])
+        self.assertIn("has no /compact", self.sent[0]["text"])
+        self.assertEqual(len(self.fake.called("thread_start")), 1, "no thread minted either: a refusal is not a clear")
         self.assertIn("web: ", km._SYNC_NOTICES[-1]["text"], "the bell row names the session")
 
 

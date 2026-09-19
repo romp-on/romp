@@ -17,7 +17,7 @@ abstract method, so the duck-typing can't drift.
 
 Method groups:
   liveness/identity — owns, live_sessions
-  control           — send, interrupt, set_model, set_mode, set_effort, set_fast
+  control           — send, interrupt, set_model, set_mode, set_effort, set_fast, clear
   lifecycle         — spawn, resume, move, connect, kill, rename
   coordination      — working_note, set_working_note, wake   (backend-agnostic: the kernel keeps the note in
                       its own store, and the SDK backend wakes a session by an enqueue)
@@ -154,6 +154,24 @@ class SessionBackend(ABC):
         settle. A backend with no bracket keeps the None default (the tmux backend did: a TUI /clear there
         surfaced as a fork lane with no bracket, the gap plans/clear-episodes.md records)."""
         return None
+
+    def clear(self, sid: str, text: str = "/clear") -> str:
+        """Start a FRESH conversation for the same session (2026-09-19): name, mailbox, tags, color, note, mode,
+        model, effort and any queued sends stay; the conversation the agent can see restarts. "" on success;
+        "busy" when a turn is in flight (the kernel parks the op and retries at turn end); any other string is
+        the reason, shown to the user verbatim. `text` is the command as the user typed it, whitespace-trimmed
+        ("/clear", "/new", "/clear now"): the acknowledging chip a backend leaves carries those exact words,
+        because the composer retires its optimistic bubble only by that text (or a copy id, which a clear does
+        not carry), and a typed /new acknowledged by a literal "/clear" chip left the bubble standing (review
+        find, 2026-09-19). Codex implements it as a new app-server thread under the same
+        sid (CodexBackend.clear), bracketed by clearing() from before thread/start until the new thread id is
+        durable. The Claude Code backend does not implement it: a typed /clear on an SDK session still goes to
+        the CLI as literal text, which executes it (SdkBackend.send brackets it); the kernel routes to this
+        verb only for the backend that owns it (kernel _route_meta_command). The default is a refusal in
+        move()'s idiom, worded for no backend in particular, so a new backend never reads as clearable by
+        omission — and deliberately without the word "backend", which reaches a toast."""
+        return ("this session can't start a fresh conversation from here — "
+                "start a new session instead")
 
     def launch_error(self, sid: str):
         """Why this session's CLI could NOT start — {text, at, limit} — or None when it started fine (and

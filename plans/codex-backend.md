@@ -151,7 +151,12 @@ file), `send` (turn_start; mid-turn → `turn/steer`), `interrupt`, `busy`,
 `pending_queued`, `live_atoms`, `prune_live`, `launch_error` (missing
 login/binary surfaces as text, incl. `limit:true` on out-of-usage),
 `working_note`/`set_working_note`/`wake`/`deliver` (kernel-side store +
-enqueue, as the SDK backend).
+enqueue, as the SDK backend), `clear` (2026-09-19: `thread/start` with
+`sessionStartSource: "clear"` under the SAME sid — the registry row's tid swaps
+to the new thread, the normalizer resets on its empty file so the first record
+is a root head, the old thread is left in place; a thread with no turn yet has
+no rollout, so a resume of it from a fresh app-server is refused and the worker
+re-creates it once instead of parking).
 
 Documented-empty (loud, not faked): `set_fast` False (no Codex equivalent),
 `set_mode` False in phase 1 — spawn pins `approvalPolicy:never` +

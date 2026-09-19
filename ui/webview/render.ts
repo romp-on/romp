@@ -43,7 +43,7 @@ import { delegate } from "./actions";
 import { flash } from "./actions";   // its own line: the import above is pinned verbatim by click-safe.test.ts (the file-view precedent)
 import { awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, listBreakdown, keptWord, GROUP_TITLE, ROW_KINDS, workingFor, type AwaitRow } from "./spin-caption";
 import { CHIP_LABEL, chipWords, statusChip, type ChipState } from "./status-chip";   // the session status chip: its words and its classes, the one builder the bar and the tag overview's rows share (T322b)
-import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail, RENAME_SUBLINE, END_SESSION_STANDING } from "./clear-confirm";
+import { isClearCmd, isNewCmd, openTopTitles, clearConfirmDetail, endConfirmDetail, RENAME_SUBLINE, END_SESSION_STANDING } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
 import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
@@ -19724,9 +19724,13 @@ function setupComposer() {
       openMcpPanel(sid);
       return;
     }
+    // /new is the same operation on a Codex session (the kernel runs it as a clear there, 2026-09-19): the same
+    // confirm, read from the session's status so a Claude session never sees one for a command its CLI refuses
     const dropDetail = isClearCmd(text) ? clearConfirmDetail(openTopTitles(ledgers.get(sid)?.tree)) : null;
-    if (dropDetail) {
-      showConfirm("Clear this conversation?", dropDetail,
+    const newDetail = (liveSession(sid)?.status?.backend === "codex" && isNewCmd(text)) ? clearConfirmDetail(openTopTitles(ledgers.get(sid)?.tree)) : null;
+    const detail = dropDetail || newDetail;
+    if (detail) {
+      showConfirm("Clear this conversation?", detail,
         [{ label: "Cancel", value: "cancel" }, { label: "Clear anyway", value: "clear", danger: true }],
         (v) => { if (v === "clear") deliver(); });
       return;
