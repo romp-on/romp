@@ -36318,13 +36318,19 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None, 
     """The one route every typed or sent slash command takes (the composer's sendMessage arm, the lane menu's
     sendCommand arm, POST /send and `romp send` through _deliver_text), in front of the setter body it used to
     BE (_route_setter_command: its arms and docstring are unchanged). A Codex session takes only what romp
-    itself performs: /model X and /effort X through the setter arms. Every other slash-shaped text — /clear,
-    /compact, /new, /fast, a bare /model, a skill — is refused here, ABOVE the setter body's one-token guard
-    (which returned False for a bare /clear and let it fall to _send_or_park as prose the model then answered),
-    by the same predicate that parks (_is_slash_command), so the refused set equals the parked set and a refused
-    command is never a ("command",) op. _CODEX_SLASH_HANDLERS is the seam a native /clear or /compact plugs
-    into: a head registered there takes the text instead of the refusal. `qid` is the press-minted copy id
-    (the sendMessage arm's _wire_qid), carried on the refusal frame so the chat retires the bubble it drew. The
+    itself performs: /model X and /effort X through the setter arms. The slash commands the kernel KNOWS a
+    Codex session cannot take (_CODEX_REFUSED_HEADS: /clear, /compact, /new and the rest of that set) and a
+    setter head in the wrong shape (a bare /model) are refused here, ABOVE the setter body's one-token guard
+    (which returned False for a bare /clear and let it fall to _send_or_park as prose the model then answered).
+    The refused set is the KNOWN set, not the parked set: _is_slash_command matches a shape (a leading slash
+    token), and shape is not command-ness ("/tmp is nearly out of space", "/s to skip" are ordinary things
+    to type), so a slash-shaped text whose head is outside the set is prose to a Codex session and takes the
+    road every other backend takes (the setter body answers False for it; the caller sends it idle, parks it
+    as a ("command",) op busy, and the drain hands it to the model). _codex_refuses is the one predicate this
+    arm and the drain read, so the live road and the parked road refuse the same texts by construction.
+    _CODEX_SLASH_HANDLERS is the seam a native /clear or /compact plugs into: a head registered there takes the
+    text instead of the refusal. `qid` is the press-minted copy id (the sendMessage arm's _wire_qid), carried on
+    the refusal frame so the chat retires the bubble it drew. The
     Claude Code and unowned routes are unchanged and take the setter body directly: a dead Codex session routes
     to _UNOWNED (CodexBackend.owns is False once dead) and keeps the unowned refusal, so the identity test is
     the existing arms' `be is _codex()`, not _session_backend. Cost: _is_slash_command (a regex) runs FIRST, so
@@ -36338,7 +36344,9 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None, 
             return handler(be, sid, text, client, state, qid)
         if head in _CODEX_SETTER_HEADS and _route_setter_command(be, sid, text, client, floating=floating, state=state):
             return True
-        return _refuse_codex_slash(be, sid, text, client=client, state=state, qid=qid)
+        if _codex_refuses(text):
+            return _refuse_codex_slash(be, sid, text, client=client, state=state, qid=qid)
+        # any other head is prose to a Codex session: the road below, which the setter body answers False for
     return _route_setter_command(be, sid, text, client, floating=floating, state=state)
 
 
@@ -36348,13 +36356,40 @@ def _not_claude_code_reason(be):
     return "this one runs in Codex" if (be is not None and be is _codex()) else "no running backend owns this one"
 
 
-# The setter arms own these for a Codex session (one Codex value each, _route_setter_command); every other slash-shaped
-# text is refused for it (_route_meta_command, 2026-09-19).
+# The setter arms own these for a Codex session (one Codex value each, _route_setter_command); a bare one or a wrong
+# shape is refused with the hint (_codex_slash_refusal, 2026-09-19).
 _CODEX_SETTER_HEADS = ("/model", "/effort")
+# The slash commands the kernel KNOWS a Codex session cannot take: what romp's own surfaces mint for a session or its
+# docs and palette name, and the Codex app-server has no parser for. Census of literal slash heads over kernel/,
+# ui/webview, the timeline view, cli/, bin/ and the extension source (tests excluded): /compact (the chat and timeline
+# battery, _compact_or_park, the judge and event model), /clear (the chat's clear confirm, sdk_backend), /fast (the
+# settings menu and the setter body), /mcp (the composer's palette; the bare form is intercepted client-side, the form
+# with words after it reaches the route), and the Claude CLI commands romp's docs and comments name as things a session
+# types: /new (docs/codex.md, the _CODEX_COMMANDS comment) and /autocompact (the drain's command arm). /help is named
+# by no surface: a Claude CLI built-in the guard has refused since it landed, kept so a typed /help never lands in a Codex
+# conversation as prose. The kernel refuses what it KNOWS a Codex session cannot take, never what looks like a command:
+# a leading slash token is not a decidable command marker ("/tmp is nearly out of space", "/s to skip" are ordinary prose),
+# and for a Codex session there is no CLI to ask what executes. The per-cwd Claude CLI command cache (_commands_for_cwd)
+# is deliberately NOT a source: its warmth would make the same text refused one minute and delivered the next. A Claude
+# built-in outside this set (/init, /cost) typed at a Codex session reaches the model as text; docs/codex.md says so.
+# A head added here is refused on the route and at the drain at once (_codex_refuses); a native handler registered in
+# _CODEX_SLASH_HANDLERS takes precedence on the route (2026-09-19).
+_CODEX_REFUSED_HEADS = ("/clear", "/compact", "/new", "/fast", "/autocompact", "/help", "/mcp")
 # head -> handler(be, sid, text, client, state, qid) -> bool. Empty in this change: a native /clear and /new, then a
 # native /compact, register here, and the refusal stops for each by that one registration (2026-09-19).
 _CODEX_SLASH_HANDLERS = {}
 _CODEX_VALUE_EXAMPLE = {"/model": "/model gpt-5", "/effort": "/effort high"}
+
+
+def _codex_refuses(text):
+    """The one predicate for a slash command a Codex session is refused: the text's head is in the known set
+    (_CODEX_REFUSED_HEADS) or is a setter head (_CODEX_SETTER_HEADS: on the route a bare /model or a wrong shape
+    reaches this after the setter body declined it; at the drain a parked setter head is one a caller that skips
+    the route parked as text). Read by the route (_route_meta_command) and the parked-op drain (_apply_pending_ops)
+    alike, so the live road and the parked road refuse the same texts by construction. False for empty text and
+    for every other head, which is prose to a Codex session (2026-09-19)."""
+    parts = (text or "").strip().split()
+    return bool(parts) and (parts[0] in _CODEX_REFUSED_HEADS or parts[0] in _CODEX_SETTER_HEADS)
 
 
 def _codex_slash_refusal(head):
@@ -36584,10 +36619,12 @@ def _apply_pending_ops(now=None):
                         # send batch (or forwarded mid-turn) it reaches the model as text instead of executing
                         # (the user 2026-08-13: /autocompact absorbed mid-turn got a polite reply and no
                         # setting change). Echo stamped at fire time, like a delivered send.
-                        if be is not None and be is _codex():
-                            # parked before the route refused these (or by a caller that skips the route: a follow-up body
-                            # that is bare slash text): drained ONCE through the same refusal, with the copy's id so the
-                            # chat retires its bubble; never handed to the backend, never replayed (2026-09-19)
+                        if be is not None and be is _codex() and _codex_refuses(op[1]):
+                            # a KNOWN head parked before the route refused it (or by a caller that skips the route: a
+                            # follow-up body that is bare slash text): drained ONCE through the same refusal, with the
+                            # copy's id so the chat retires its bubble; never handed to the backend, never replayed. A
+                            # slash-shaped text outside the known set is prose to a Codex session and takes the road
+                            # below, like every other backend's (2026-09-19)
                             _refuse_codex_slash(be, sid, op[1], qid=_op_qid(op))
                             refused = True
                             said = True

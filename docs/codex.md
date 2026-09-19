@@ -157,14 +157,21 @@ turn, interrupts, model and reasoning-effort switches, resume after restarts,
 and postal delivery into Codex sessions.
 
 Slash commands: `/model` and `/effort` work (they apply at the session's next
-turn). Anything else (`/clear`, `/compact`, `/new`, a skill) typed into the
-composer, sent from the timeline's lane menu, or sent with `romp send` is
-refused with a notice and not sent to the model as text, and the composer's
-`/` list shows only what a Codex session takes. Two paths still reach the
-model as text until the native clear lands: a follow-up typed from a card
-whose whole body is a slash command, and a slash command a Codex session had
-already queued before this guard existed. Clearing and compacting a Codex
-conversation natively are coming (`plans/codex-backend.md`).
+turn). The slash commands romp knows a Codex session cannot take, `/clear`,
+`/compact`, `/new`, `/fast`, `/autocompact`, `/help` and `/mcp` (a bare `/mcp`
+typed into the composer opens the MCP panel instead of reaching romp), are
+refused with a notice and never sent to the model as text, whether typed
+into the composer, sent from the timeline's lane menu, sent with `romp send`,
+or already queued behind an open turn. Any other message that begins with a
+slash (a path such as `/tmp`, a word such as `/s`, a skill's name, a Claude
+Code built-in such as `/init`) reaches the model as text: romp refuses only
+the commands it knows and does not judge a message by its first character.
+The composer's `/` list shows only what a Codex session takes. One path still
+reaches the model as text until the native clear lands: a follow-up typed from
+a card whose whole body is one of these commands, sent while the session is
+idle (a busy session queues it, and it is refused when its turn comes).
+Clearing and compacting a Codex conversation natively are coming
+(`plans/codex-backend.md`).
 
 The chat and timeline effort menus use the selected model's supported levels
 from the Codex app-server's model catalog. Romp also validates effort changes

@@ -6,11 +6,15 @@ every slash-shaped text it does not own straight to the backend. Codex's app-ser
 same text reached the model as a prompt ("/clear" on a long thread got a polite reply and cleared nothing;
 the battery's compact click sent the word "/compact" and stamped a compacting cue for a compaction that
 never began). The guard lives in the route every entry point already takes (_route_meta_command): for a
-Codex session it lets /model and /effort through to the setter arms and refuses everything else by the same
-predicate that parks (_is_slash_command), with the words on the delivering socket (or a broadcast when no
-socket carried the op), in `state` for POST /send and `romp send`, and on the bell's ring. The parked-op
-drain routes already-parked Codex command ops through the same refusal; _compact_or_park refuses ahead of
-any park or stamp; the composer's "/" palette lists what a Codex session takes.
+Codex session it lets /model and /effort through to the setter arms and refuses the slash commands the kernel
+KNOWS a Codex session cannot take (_CODEX_REFUSED_HEADS, plus a setter head in the wrong shape), with the words
+on the delivering socket (or a broadcast when no socket carried the op), in `state` for POST /send and
+`romp send`, and on the bell's ring. Shape is not the test: a message that merely begins with a slash
+("/tmp is nearly out of space", "/s to skip") is prose to a Codex session and reaches the model as text,
+idle or parked, as it did before the guard existed. The parked-op drain reads the same predicate
+(_codex_refuses) as the route, so a parked known head drains through the refusal and parked slash-shaped
+prose drains to the model; _compact_or_park refuses ahead of any park or stamp; the composer's "/" palette
+lists what a Codex session takes.
 
 Fixtures are synthetic: a private placeholder sid (parked ops and notices are keyed by sid, and another
 module's journal must never land on this one), an invented copy id in the kernel's echo form, the demo
@@ -20,6 +24,7 @@ two setters answer True, and `_session`/`owns` answer for the one sid so _sessio
 (the /commands route) resolves it to "codex" without a live registry."""
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -47,6 +52,11 @@ _HOSTS.write_text("off")
 SID = "11111111-2222-4333-8444-0c0d0e0f1011"      # private to this module
 SID2 = "11111111-2222-4333-8444-0c0d0e0f1012"     # the end-to-end class's own (a real registry row is written for it)
 QID = "echo:" + "ab" * 16                          # the press-minted copy id, in the kernel's echo form (_wire_qid admits it)
+# Ordinary things to type that begin with a slash token: a directory, a mount, a shorthand. Every one matches the
+# parking predicate's shape (a leading slash token ending at whitespace, _is_slash_command) and none is a command a
+# Codex session takes or refuses; before the guard these reached the model as prose, and they must again. A path with
+# a second slash ("/etc/hosts has the entry") never matched the shape and is a control in the tests, not a member.
+SLASH_SHAPED_PROSE = ("/tmp is nearly out of space", "/workspace is mounted read-only", "/s to skip")
 
 
 class _CodexFake:
@@ -84,6 +94,7 @@ def _forget(sid):
     km._save_pending_ops()
     km._moving.discard(sid)
     km._drain_hold.pop(sid, None)
+    km._inflight_ops.pop(sid, None)                  # a drain a test cut short must not leave its head marked for the next
     km._model_switch_pending.pop(sid, None)
 
 
@@ -118,11 +129,19 @@ class _Guarded(unittest.TestCase):
         p = mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: self.be))
         p.start()
         self.addCleanup(p.stop)
-        self.ring0 = len(km._SYNC_NOTICES)
+        self.ring0 = km._sync_notice_count()             # the ring's sequence, not its length: the ring is capped (SYNC_RING)
 
     def _last_notice(self):
-        self.assertGreater(len(km._SYNC_NOTICES), self.ring0, "a refusal files one row on the bell's ring")
+        self.assertGreater(km._sync_notice_count(), self.ring0, "a refusal files one row on the bell's ring")
         return km._SYNC_NOTICES[-1]
+
+    def _drain(self):
+        """One pusher pass over SID's parked ops, then the check that the pass ran them: the walk returns silently
+        from its own gates (a non-blocking acquire of the queue lock, a hold on the sid), and a pass that never ran
+        must read as that, not as a wrong list of backend calls."""
+        km._apply_pending_ops()
+        self.assertIn(km._pending_ops.get(SID), (None, []),
+                      "the drain did not consume the queue: an early return (the lock was held, or the sid was held)")
 
 
 class CodexSlashRefused(_Guarded):
@@ -143,7 +162,7 @@ class CodexSlashRefused(_Guarded):
         self.assertFalse(row["ok"])
         self.assertNotIn(SID, km._pending_ops, "a refusal is not an op: nothing parked")
 
-    def test_the_refused_set_is_the_parked_set(self):
+    def test_the_refused_set_is_the_known_set(self):
         for text in ("/compact", "/new", "/fast on", "/autocompact off", "/help", "/model", "/clear\nand more",
                      "/mcp servers"):
             state = {}
@@ -151,13 +170,109 @@ class CodexSlashRefused(_Guarded):
             self.assertIn("refused", state, text)
             self.assertEqual(self.be.calls, [], text)
         # a bare "/mcp" never reaches the kernel from the composer (the client opens the MCP panel), so the palette's
-        # /mcp entry and this route agree; with words after it, it is a command Codex has not got, like the rest
-        for text in ("/tmp/x is a path", "hello /clear", "prose"):
+        # /mcp entry and this route agree; with words after it, it is a command Codex has not got, like the rest.
+        # Slash-SHAPED prose is outside the set: the parking predicate says command, the route says nothing, because
+        # a leading slash token is not a decidable command marker and the kernel refuses only what it knows
+        for text in SLASH_SHAPED_PROSE:
+            self.assertIs(km._is_slash_command(text), True, "%r is slash-shaped: shape no longer decides" % text)
+            state = {}
+            self.assertFalse(km._route_meta_command(self.be, SID, text, self.client, state=state), text)
+            self.assertEqual(state, {}, "%r is prose to a Codex session: the route says nothing and the caller sends it" % text)
+        for text in ("/tmp/x is a path", "/etc/hosts has the entry", "hello /clear", "prose"):
+            self.assertIs(km._is_slash_command(text), False, text)
             state = {}
             self.assertFalse(km._route_meta_command(self.be, SID, text, self.client, state=state), text)
             self.assertEqual(state, {}, "%r is not slash-shaped: the route says nothing and the caller sends it" % text)
-            self.assertIs(km._is_slash_command(text), False, "the refused set is exactly the parked set")
         self.assertEqual(self.be.calls, [])
+
+    def test_slash_shaped_prose_reaches_the_model(self):
+        # the three doors a typed message takes: the route alone, the composer's press (the sendMessage arm), and
+        # POST /send or `romp send` (_deliver_text). Each hands the text to the backend as a send, refuses nothing;
+        # the path with a second slash rides along as the control that was never parked or refused
+        for text in SLASH_SHAPED_PROSE + ("/etc/hosts has the entry",):
+            self.be.calls, self.sent[:] = [], []
+            state = {}
+            self.assertFalse(km._route_meta_command(self.be, SID, text, self.client, state=state), text)
+            self.assertEqual(state, {}, text)
+            self.assertEqual(self.be.calls, [], "the route itself sends nothing: the caller does")
+            self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": text, "qid": QID}, self.client), text)
+            self.assertEqual(self.be.calls, [("send", text)], "the press reaches the backend as a send: %r" % text)
+            self.assertEqual([f for f in self.sent if f.get("type") == "warn"], [], "no warn frame for prose: %r" % text)
+            self.assertEqual(km._deliver_text(SID, text), (True, "", False), text)
+            self.assertEqual(self.be.calls, [("send", text), ("send", text)], text)
+            self.assertNotIn(SID, km._pending_ops, "idle: sent now, nothing parked")
+        self.assertEqual(km._sync_notice_count(), self.ring0, "no bell row: nothing was refused")
+
+    def test_every_known_head_is_refused_at_the_route_and_the_drain(self):
+        self.assertTrue(km._CODEX_REFUSED_HEADS, "the set is checked in and not empty")
+        for head in km._CODEX_REFUSED_HEADS:
+            self.assertTrue(km._is_slash_command(head), "%r is slash-shaped, so the parking predicate parks it" % head)
+            self.assertNotIn(head, km._CODEX_SETTER_HEADS, "a setter head is refused by shape, never listed twice")
+            for text in (head, head + " with an argument"):
+                # the route: refused, nothing sent, the words in state
+                state = {}
+                self.assertTrue(km._route_meta_command(self.be, SID, text, self.client, state=state), text)
+                self.assertIn("has no %s" % head, state["refused"], text)
+                self.assertEqual(self.be.calls, [], text)
+                # the drain: a parked copy drains ONCE through the same refusal, with its press id, never to the backend
+                warns0 = len([m for a, m in self.broadcast if m.get("type") == "warn"])
+                km._pending_ops[SID] = [("command", text, "human", QID, True)]
+                km._save_pending_ops()
+                self._drain()
+                warns = [m for a, m in self.broadcast if m.get("type") == "warn"][warns0:]
+                self.assertEqual(len(warns), 1, "one broadcast warn per parked known head: %r -> %r" % (text, warns))
+                self.assertEqual((warns[0]["sid"], warns[0].get("qid")), (SID, QID), text)
+                self.assertIn("has no %s" % head, warns[0]["text"], text)
+                self.assertEqual(self.be.calls, [], "the backend never saw %r" % text)
+                self.assertIn(km._pending_ops.get(SID), (None, []), "popped, never replayed: %r" % text)
+        self.assertEqual(self.marked, [], "no compacting cue for any refused head")
+
+    def test_the_doc_names_every_refused_head(self):
+        # the user reads docs/codex.md for what a Codex session takes. The paragraph makes two claims and the pin
+        # reads them apart: BEFORE "Any other message that begins with a slash" every refused head is named in
+        # backticks; AFTER it, every backticked slash word is an example of what reaches the model, so none may be
+        # a member of the set (a head listed as refused and named as prose would be the doc contradicting the code)
+        doc = open(os.path.join(os.path.dirname(HERE), "docs", "codex.md"), encoding="utf-8").read()
+        paras = [p for p in doc.split("\n\n") if "`/model` and `/effort` work" in p]
+        self.assertEqual(len(paras), 1, "one slash-commands paragraph")
+        para = " ".join(paras[0].split())                 # the doc wraps its lines; a phrase may span one
+        pivot = "Any other message that begins with a slash"
+        self.assertIn(pivot, para)
+        refused, prose = para.split(pivot, 1)
+        for head in km._CODEX_REFUSED_HEADS:
+            self.assertIn("`%s`" % head, refused, "the doc names %s as refused, ahead of the prose examples" % head)
+        examples = re.findall(r"`(/[A-Za-z]+)`", prose)
+        self.assertTrue(examples, "the doc gives examples of a slash-led message that reaches the model")
+        for head in examples:
+            self.assertNotIn(head, km._CODEX_REFUSED_HEADS, "%s is the doc's example of prose, so it is not refused" % head)
+        for text in SLASH_SHAPED_PROSE:
+            self.assertNotIn("`%s`" % text.split()[0], refused, "%r's head is prose, never listed as refused" % text)
+        self.assertIn("reaches the model as text", prose)
+        self.assertNotIn("Anything else", para, "the doc no longer claims every other slash-shaped text is refused")
+
+    def test_a_registered_handler_takes_the_head_ahead_of_the_refusal(self):
+        # the seam a native /clear plugs into: a head registered in _CODEX_SLASH_HANDLERS takes the text on the route,
+        # with the press id, and the refusal never runs for it; the same head unregistered is refused as before
+        taken = []
+        def handler(be, sid, text, client, state, qid):
+            taken.append((be, str(sid), text, client, state, qid))
+            return True
+        with mock.patch.dict(km._CODEX_SLASH_HANDLERS, {"/clear": handler}):
+            self.assertIn("/clear", km._CODEX_REFUSED_HEADS, "the registered head is one the set refuses otherwise")
+            for text in ("/clear", "/clear the thread"):
+                state = {}
+                self.assertTrue(km._route_meta_command(self.be, SID, text, self.client, state=state, qid=QID), text)
+                self.assertEqual(taken[-1], (self.be, SID, text, self.client, state, QID), "the handler got the text")
+                self.assertNotIn("refused", state, "a handled head is not refused: %r" % text)
+            self.assertEqual(len(taken), 2)
+            self.assertEqual(self.sent, [], "no warn frame: the handler answered, not the refusal")
+            self.assertEqual(km._sync_notice_count(), self.ring0, "no bell row")
+            self.assertEqual(self.be.calls, [], "the handler, not a send, took the text")
+        self.assertNotIn("/clear", km._CODEX_SLASH_HANDLERS, "the registration was the test's own")
+        state = {}
+        self.assertTrue(km._route_meta_command(self.be, SID, "/clear", self.client, state=state, qid=QID))
+        self.assertIn("has no /clear", state["refused"], "unregistered again, the head is refused")
+        self.assertEqual(len(taken), 2, "the handler is not consulted once unregistered")
 
     def test_the_setters_still_land_and_a_wrong_shape_is_refused_with_the_hint(self):
         state = {}
@@ -208,12 +323,44 @@ class CodexSlashRefused(_Guarded):
 
 
 class ParkedBeforeTheGuard(_Guarded):
+    def test_parked_slash_shaped_prose_drains_to_the_model(self):
+        # slash-shaped prose parked behind an open turn (the parking predicate parks it as a command op, to fire alone):
+        # at the drain it takes the road every other backend takes, a send with its press id, and no refusal is worded
+        text = SLASH_SHAPED_PROSE[0]
+        km._pending_ops[SID] = [("command", text, "human", QID, True)]
+        km._save_pending_ops()
+        self._drain()
+        self.assertEqual(self.be.calls, [("send", text)], "the parked prose reached the backend as a send")
+        self.assertEqual([m for a, m in self.broadcast if m.get("type") == "warn"], [], "no warn: nothing was refused")
+        self.assertIn(km._pending_ops.get(SID), (None, []), "the op popped")
+        self.assertEqual(self.marked, [], "no compacting cue: the head is not /compact")
+        self.assertEqual(km._sync_notice_count(), self.ring0, "no bell row")
+
+    def test_a_parked_setter_head_drains_through_the_refusal_with_the_hint(self):
+        # a bare setter or a wrong shape parked as a command op by a caller that skips the route (a follow-up whose whole
+        # body is bare slash text): the drain's predicate is the route's, so the same hint is worded on the chat panes
+        # with the copy's id, nothing reaches the backend, and each op files its own bell row
+        ops = [("command", "/model", "human", QID, True), ("command", "/effort one two", "human", QID, True)]
+        km._pending_ops[SID] = list(ops)
+        km._save_pending_ops()
+        self._drain()
+        self.assertEqual(self.be.calls, [], "neither setter head reached the backend as prose")
+        warns = [(app, msg) for app, msg in self.broadcast if msg.get("type") == "warn"]
+        self.assertEqual(len(warns), 2, "one broadcast per parked setter head: %r" % (self.broadcast,))
+        for (app, msg), (_, text, _, qid, _) in zip(warns, ops):
+            head = text.split()[0]
+            self.assertEqual((app, msg["sid"], msg.get("qid")), ("chat", SID, qid), text)
+            self.assertIn("%s takes one Codex value here" % head, msg["text"], text)
+            self.assertIn(km._CODEX_VALUE_EXAMPLE[head], msg["text"], "the hint shows the shape that lands")
+        self.assertEqual(km._sync_notice_count(), self.ring0 + 2, "one bell row per refused op")
+        self.assertEqual(self.marked, [], "no compacting cue")
+
     def test_a_parked_command_and_compact_are_drained_through_the_refusal(self):
         # ops parked before the guard existed (pending-ops.json survives a restart), or by a caller that skips the
         # route: drained ONCE through the refusal, the setter behind them still delivers on the same pass
         km._pending_ops[SID] = [("command", "/clear", "human", QID, True), ("compact",), ("effort", "high")]
         km._save_pending_ops()
-        km._apply_pending_ops()
+        self._drain()
         self.assertEqual(self.be.calls, [("effort", "high")], "neither refused op reached the backend; the setter did")
         self.assertEqual(self.marked, [], "no compacting cue for a compaction that never started")
         self.assertIn(km._pending_ops.get(SID), (None, []), "both refused ops popped, never replayed")
