@@ -130,6 +130,10 @@ export interface Shown {
   /** the pane ids whose ELEMENTS exist (shown or hidden); absent, every parked id is kept. A park keeps a MOUNTED
    *  iframe (section 5); a closed chat column has none, so its park is pruned rather than kept forever. */
   present?: PaneId[];
+  /** where the NEXT new chat column docks (a tab dropped in a zone: the target's edge), instead of its default place
+   *  right of the last chat. Set by the engine around the shipped split's column open; consumed by the first new
+   *  chat column the reconcile meets. */
+  newChatDock?: { target: PaneId; edge: Edge };
 }
 
 /** Seed a layout from the shipped stores, plans/pane-docking.md section 6: the row of shown panes weighted by
@@ -180,6 +184,7 @@ export function reconcileShown(cur: Layout, sh: Shown): Layout {
   // open what is new, in row order (so the outline lands right of the chat before the feed asks for the outline)
   const order = ROW_ORDER.concat(sh.row.filter((p) => !ROW_ORDER.includes(p)));
   const missing = order.filter((p) => want.has(p) && !has(lay.tree, p));
+  let hint = sh.newChatDock || null;
   for (const p of missing) {
     if (leaves(lay.tree).every((q) => !want.has(q))) {
       // the tree holds only panes that should be hidden (every shown pane was parked): start over from this pane,
@@ -188,7 +193,8 @@ export function reconcileShown(cur: Layout, sh: Shown): Layout {
       lay = { v: 1, tree: { pane: p }, parked: lay.parked.concat(dropped).filter((q) => q !== p) };
       continue;
     }
-    const d = defaultDock(lay.tree, p);
+    let d = defaultDock(lay.tree, p);
+    if (hint && isChatPane(p) && p !== CHAT && has(lay.tree, hint.target) && hint.target !== p) { d = hint; hint = null; }   // the dropped tab's pane lands where the outline said
     if (d && has(lay.tree, d.target)) {
       const r = openPane(lay, p, d.target, d.edge);
       if (r.ok) lay = r.layout;

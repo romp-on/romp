@@ -144,6 +144,7 @@ class Engine {
   private altOn = false;
   private savedWriters: Record<string, unknown> | null = null;
   private tab: { sid: string; name: string; from: PaneId | null; stripH: number } | null = null;   // a session tab in flight (the chat's dragstart)
+  private newChatDock: { target: PaneId; edge: Edge } | null = null;   // where the next new column docks (a tab's drop edge), for the reconcile the shipped split's event raises
   private tabZones: HTMLElement[] = [];
 
   constructor() {
@@ -266,7 +267,9 @@ class Engine {
     try { const g = JSON.parse(localStorage.getItem(GROW_KEY) || "null"); if (g && typeof g === "object") grow = g; } catch { grow = {}; }
     const band = this.poOn("timeline") && !!byId(BAND);
     const present = this.allPaneEls().map((el) => el.id).filter(Boolean);   // a closed column's element is gone: its park goes with it
-    return { row, band, bandPx: this.bandPx(), grow, present };
+    const out: Shown = { row, band, bandPx: this.bandPx(), grow, present };
+    if (this.newChatDock) out.newChatDock = this.newChatDock;
+    return out;
   }
   private bandPx(): number {
     const c = this.col;
@@ -631,16 +634,20 @@ class Engine {
     const plan = planTabDrop(zone, t.sid, sets);
     if (plan.kind === "refuse") { this.notify(plan.why); return; }
     if (plan.kind === "join") { try { if (typeof w.__rompMoveTab === "function") w.__rompMoveTab(t.sid, plan.col); } catch { /* the shipped mutation says why */ } this.reconcile(); return; }
-    let pane: PaneId | null = null;
-    if (plan.kind === "moveColumn") pane = plan.pane;
-    else {
-      let nf: any = null;
-      try { nf = typeof w.__rompMoveTab === "function" ? w.__rompMoveTab(t.sid, "new") : null; } catch { nf = null; }   // the shipped split opens the column; its romp-chat-cols event mirrored the leaf right of the last chat
-      const pn = nf && typeof nf.closest === "function" ? (nf.closest(".pane") as HTMLElement | null) : null;
-      pane = pn ? pn.id : null;
+    if (plan.kind === "newColumn") {
+      // the shipped split opens the column; its romp-chat-cols event runs the reconcile at once, and the dock hint puts
+      // the new leaf at the drop edge directly (never right of the last chat first, which would halve that chat's share
+      // and re-flow the row on the way)
+      if (zone.strip) return;
+      this.newChatDock = { target: zone.target, edge: zone.edge as Edge };
+      try { if (typeof w.__rompMoveTab === "function") w.__rompMoveTab(t.sid, "new"); } catch { /* the shipped mutation says why */ }
+      this.reconcile();
+      this.newChatDock = null;
+      return;
     }
+    const pane: PaneId = plan.pane;   // moveColumn: the lone column's own pane goes to the drop edge
     this.reconcile();
-    if (!pane || !this.lay || !has(this.lay.tree, pane) || zone.strip || pane === zone.target) return;
+    if (!this.lay || !has(this.lay.tree, pane) || zone.strip || pane === zone.target) return;
     try { this.lay = { v: 1, tree: move(this.lay.tree, pane, zone.target, zone.edge as Edge), parked: this.lay.parked }; }
     catch (err) { this.notify(String((err as Error).message || err)); return; }
     this.persist(); this.render();

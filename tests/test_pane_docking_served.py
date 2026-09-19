@@ -756,6 +756,10 @@ class ServedPaneDocking(unittest.TestCase):
         col, feed = t["rects"]["chat-pane-2"], t["rects"]["feed-pane"]
         self._near(col["x"], feed["x"], 1.5, "the new pane sits under the feed: same left"); self.assertGreater(col["y"], feed["y"] + feed["h"] - 1, "below it")
         self._near(col["w"], feed["w"], 1.5, "same width")
+        # only the TARGET split: the feed kept its width and gave the new pane half its height; the other panes did not move
+        self._near(feed["w"], fd["w"], 1.5, "the feed's width is what it was before the drop (no detour right of the last chat)")
+        self._near(feed["x"], fd["x"], 1.5, "and its left")
+        self._near(col["h"], (fd["h"] - 7) / 2, 2, "the new pane took half the feed's height, less the gutter")
         lv = t["leaves"]; self.assertEqual(lv.index("chat-pane-2"), lv.index("feed-pane") + 1, "right after the feed in the tree: %r" % lv)
         self._frames_fill(t["rects"], "after the tab drop")
         self.assertEqual(t["zonesAfter"], 0, "the hit areas go with the gesture")

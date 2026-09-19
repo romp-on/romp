@@ -178,3 +178,18 @@ test("planTabDrop: a strip joins that column, a non-chat strip refuses, an edge 
   assert.equal(planTabDrop({ target: "chat-pane-3", edge: "left" }, "s-c", sets).kind, "refuse", "a lone column on its own edge");
   assert.deepEqual(planTabDrop({ target: FEED, edge: "top" }, "s-a", null), { kind: "newColumn" }, "no sets: the first column");
 });
+
+test("reconcileShown: a dock hint puts the next new chat column at the drop edge; without one it lands right of the last chat", () => {
+  const base = seedLayout({ row: [CHAT, FLEET, FEED], band: false, bandPx: 0, grow: { chat: 50, fleet: 25, feed: 25 } });
+  const hinted = reconcileShown(base, { row: [CHAT, "chat-pane-2", FLEET, FEED], band: false, bandPx: 0, grow: {}, newChatDock: { target: FEED, edge: "bottom" } });
+  const row = hinted.tree as Split;
+  assert.equal(row.dir, "row"); assert.deepEqual(leaves(hinted.tree), [CHAT, FLEET, FEED, "chat-pane-2"]);
+  const last = row.kids[2] as Split;
+  assert.ok(isSplit(last) && last.dir === "col", "the feed's slot became a column: the feed over the new pane");
+  assert.deepEqual(row.ratios.map((r) => Math.round(r * 100) / 100), [0.5, 0.25, 0.25], "the other panes' shares are untouched");
+  const plain = reconcileShown(base, { row: [CHAT, "chat-pane-2", FLEET, FEED], band: false, bandPx: 0, grow: {} });
+  assert.deepEqual(leaves(plain.tree), [CHAT, "chat-pane-2", FLEET, FEED], "no hint: right of the last chat");
+  // the hint names a target that is not in the tree, or the pane itself: the default dock
+  const stray = reconcileShown(base, { row: [CHAT, "chat-pane-2", FLEET, FEED], band: false, bandPx: 0, grow: {}, newChatDock: { target: "ghost", edge: "left" } });
+  assert.deepEqual(leaves(stray.tree), [CHAT, "chat-pane-2", FLEET, FEED]);
+});
