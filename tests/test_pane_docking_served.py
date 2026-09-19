@@ -316,6 +316,57 @@ async function drag(page, x0, y0, waypoints, { release = true, escape = false } 
     await frame(page);
     return { opened, up, gone, before, withCol, after: { rects: await rectsOf(page), store: await store(page), leaves: await leavesOf(page), parked: await page.evaluate(() => window.__rompPaneDock.layout().parked) } };
   })();
+  // TABS AS DROP PAYLOADS (plans/pane-docking.md section 4; the user 2026-09-19: a tab dragged out of the strip into a
+  // zone becomes its own pane, a group of tabs is separable, a pane dropped on a strip joins it). A REAL HTML5 drag of
+  // a session tab: the press, a few moves past the browser's threshold (the page's dragstart posts tabDrag to the shell,
+  // heard here), the pointer into a zone, the release.
+  const tabCentre = (fid, sid) => page.waitForFunction((a) => { const f = document.getElementById(a.fid); let d = null; try { d = f && f.contentDocument; } catch (e) { d = null; }
+    const el = d && d.querySelector('#tabs .tab[data-id="' + a.sid + '"]'); if (!el || !el.draggable) return null; const r = el.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return null;
+    const fr = f.getBoundingClientRect(); return { x: fr.left + f.clientLeft + r.left + r.width / 2, y: fr.top + f.clientTop + r.top + r.height / 2 }; }, { fid, sid }, { timeout: 30000 }).then((h) => h.jsonValue()).catch(() => null);
+  const startNativeDrag = async (pt) => {
+    await page.evaluate(() => { window.__labTabDrag = null; if (!window.__labTabDragWired) { window.__labTabDragWired = true; window.addEventListener("message", (e) => { if (e && e.data && e.data.romp === "tabDrag") window.__labTabDrag = e.data; }); } });
+    await page.mouse.move(pt.x, pt.y); await page.mouse.down();
+    for (const st of [[2, 0], [6, 2], [12, 6], [20, 12], [30, 20]]) await page.mouse.move(pt.x + st[0], pt.y + st[1]);
+    return await page.waitForFunction(() => !!(window.__labTabDrag && window.__labTabDrag.on), null, { timeout: 15000 }).then(() => true).catch(() => false);
+  };
+  const tabIn = (fid, sid) => page.evaluate((a) => { const f = document.getElementById(a.fid); let d = null; try { d = f && f.contentDocument; } catch (e) { d = null; } return !!(d && d.querySelector('#tabs .tab[data-id="' + a.sid + '"]')); }, { fid, sid });
+  o.tabToZone = await (async () => {
+    const pt = await tabCentre("f-chat", cfg.api); if (!pt) return { tab: null };
+    const started = await startNativeDrag(pt);
+    const zones = await page.waitForFunction(() => document.querySelectorAll(".pd-tabzone").length >= 3, null, { timeout: 10000 }).then(() => true).catch(() => false);
+    const feed = (await rectsOf(page))["feed-pane"];
+    await page.mouse.move(feed.x + feed.w / 2, feed.y + feed.h * 0.85, { steps: 10 }); await frame(page);
+    const outline = await outlineRect(page); const feedNow = (await rectsOf(page))["feed-pane"];
+    await page.mouse.up(); await frame(page);
+    const landed = await page.waitForFunction(() => { const el = document.getElementById("chat-pane-2"); const lay = window.__rompPaneDock.layout(); const lv = (n) => n.pane ? [n.pane] : n.kids.flatMap(lv); return !!(el && lay && lv(lay.tree).includes("chat-pane-2")); }, null, { timeout: 20000 }).then(() => true).catch(() => false);
+    const moved = await page.waitForFunction((sid) => { const f = document.getElementById("f-chat-2"); let d = null; try { d = f && f.contentDocument; } catch (e) { d = null; } const g = document.getElementById("f-chat"); let d0 = null; try { d0 = g && g.contentDocument; } catch (e) { d0 = null; }
+      return !!(d && d.querySelector('#tabs .tab[data-id="' + sid + '"]') && d0 && !d0.querySelector('#tabs .tab[data-id="' + sid + '"]')); }, cfg.api, { timeout: 30000 }).then(() => true).catch(() => false);
+    await frame(page);
+    return { tab: pt, started, zones, outline, feedNow, landed, moved, rects: await rectsOf(page), leaves: await leavesOf(page), store: await store(page), zonesAfter: await page.evaluate(() => document.querySelectorAll(".pd-tabzone").length) };
+  })();
+  o.tabToStrip = await (async () => {
+    const pt = await tabCentre("f-chat-2", cfg.api); if (!pt) return { tab: null };
+    const started = await startNativeDrag(pt);
+    const chat = (await rectsOf(page))["chat-pane"];
+    await page.mouse.move(chat.x + chat.w * 0.7, chat.y + cfg.ring + 12, { steps: 10 }); await frame(page);   // the first chat's strip band, right of its tabs
+    const outline = await outlineRect(page);
+    await page.mouse.up(); await frame(page);
+    const rejoined = await page.waitForFunction((sid) => { const g = document.getElementById("f-chat"); let d0 = null; try { d0 = g && g.contentDocument; } catch (e) { d0 = null; } const lay = window.__rompPaneDock.layout(); const lv = (n) => n.pane ? [n.pane] : n.kids.flatMap(lv);
+      return !!(d0 && d0.querySelector('#tabs .tab[data-id="' + sid + '"]') && !document.getElementById("chat-pane-2") && lay && !lv(lay.tree).includes("chat-pane-2")); }, cfg.api, { timeout: 30000 }).then(() => true).catch(() => false);
+    await frame(page);
+    return { tab: pt, started, outline, rejoined, leaves: await leavesOf(page), parked: await page.evaluate(() => window.__rompPaneDock.layout().parked), rects: await rectsOf(page) };
+  })();
+  o.paneToStrip = await (async () => {
+    // a column opened by the shipped split (the api session alone in it), dragged by its ring onto the first chat's strip: its session joins
+    const opened = await page.evaluate((sid) => { try { return !!(window.__rompMoveTab && window.__rompMoveTab(sid, "new")); } catch (e) { return String(e); } }, cfg.api);
+    const up = await page.waitForFunction(() => { const el = document.getElementById("chat-pane-2"); const lay = window.__rompPaneDock.layout(); const lv = (n) => n.pane ? [n.pane] : n.kids.flatMap(lv); return !!(el && lay && lv(lay.tree).includes("chat-pane-2") && el.querySelector(":scope > iframe")); }, null, { timeout: 20000 }).then(() => true).catch(() => false);
+    await frame(page);
+    const rr = await rectsOf(page); const col = rr["chat-pane-2"]; const chat = rr["chat-pane"];
+    if (!col) return { opened, up, col: null };
+    const rec = await drag(page, col.x + col.w / 2, col.y + 1, [{ x: chat.x + chat.w * 0.7, y: chat.y + cfg.ring + 12 }]);
+    const rejoined = await page.waitForFunction((sid) => { const g = document.getElementById("f-chat"); let d0 = null; try { d0 = g && g.contentDocument; } catch (e) { d0 = null; } return !!(d0 && d0.querySelector('#tabs .tab[data-id="' + sid + '"]') && !document.getElementById("chat-pane-2")); }, cfg.api, { timeout: 30000 }).then(() => true).catch(() => false);
+    await frame(page);
+    return { opened, up, rec, rejoined, leaves: await leavesOf(page), rects: await rectsOf(page) };
   o.offOn = await (async () => {
     const ff = frameOfApp(page, /\/feed(\?|$)/); if (!ff) return { frame: false };
     const docState = () => ff.evaluate(() => ({ cls: document.body.className, script: document.querySelectorAll("#pd-grab").length, css: !!document.getElementById("pd-grab-css"), detector: !!window.__rompPaneGrab }));
@@ -465,7 +516,7 @@ class ServedPaneDocking(unittest.TestCase):
     def _drive(cls):
         cfg = os.path.join(cls.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"url": "http://127.0.0.1:%d/?token=%s" % (cls.port, cls.token), "api": SID_API, "shots": os.environ.get("PANE_DOCK_SHOTS", "")}, f)
+            json.dump({"url": "http://127.0.0.1:%d/?token=%s" % (cls.port, cls.token), "api": SID_API, "ring": RING, "shots": os.environ.get("PANE_DOCK_SHOTS", "")}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         Path(driver).write_text(DRIVER)
         p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=420,
@@ -690,6 +741,48 @@ class ServedPaneDocking(unittest.TestCase):
         self.assertTrue(e["armed"]["outline"]); self.assertEqual(e["armed"]["bodyCursor"], "grabbing")
         self.assertFalse(e["after"]["dragging"], "Escape drops it where it was")
 
+    def test_12_a_tab_dragged_out_of_the_strip_into_a_zone_becomes_its_own_pane_there(self):
+        o = self._on()
+        t = o["tabToZone"]
+        self.assertTrue(t.get("tab"), "the api tab was found, draggable and laid out in the first chat's strip")
+        self.assertTrue(t["started"], "the real drag started (the page posted tabDrag on)")
+        self.assertTrue(t["zones"], "the kit mounted a hit area per docked pane for the gesture")
+        fd = t["feedNow"]; ol = t["outline"]
+        self.assertTrue(ol and ol["on"] and not ol["free"] and not ol["refused"], "the outline shows a landing half over the feed: %r" % ol)
+        self._near(ol["y"] + ol["h"], fd["y"] + fd["h"], 1.5, "the feed's bottom half: its bottom is the pane's bottom")
+        self._near(ol["h"], (fd["h"] - 7) / 2, 2, "half the feed's height less the gutter's share")
+        self.assertTrue(t["landed"], "a new column pane is a leaf of the tree: %r" % t["leaves"])
+        self.assertTrue(t["moved"], "the tab left the first strip and shows in the new pane's strip")
+        col, feed = t["rects"]["chat-pane-2"], t["rects"]["feed-pane"]
+        self._near(col["x"], feed["x"], 1.5, "the new pane sits under the feed: same left"); self.assertGreater(col["y"], feed["y"] + feed["h"] - 1, "below it")
+        self._near(col["w"], feed["w"], 1.5, "same width")
+        lv = t["leaves"]; self.assertEqual(lv.index("chat-pane-2"), lv.index("feed-pane") + 1, "right after the feed in the tree: %r" % lv)
+        self._frames_fill(t["rects"], "after the tab drop")
+        self.assertEqual(t["zonesAfter"], 0, "the hit areas go with the gesture")
+
+    def test_13_a_tab_dragged_onto_a_chat_strip_joins_it_and_the_emptied_pane_closes(self):
+        o = self._on()
+        t = o["tabToStrip"]
+        self.assertTrue(t.get("tab"), "the api tab was found in the new pane's strip")
+        self.assertTrue(t["started"], "the real drag started")
+        ol = t["outline"]
+        self.assertTrue(ol and ol["on"] and not ol["refused"], "the outline shows the strip as a join zone: %r" % ol)
+        self.assertIn("joins", ol["text"], "the outline says the session joins: %r" % ol)
+        self.assertTrue(t["rejoined"], "the tab is back in the first chat's strip, the emptied pane is gone from the page and the tree: %r" % t["leaves"])
+        self.assertNotIn("chat-pane-2", t["parked"], "a closed column's park is pruned")
+        self._frames_fill(t["rects"], "after the join")
+
+    def test_14_a_chat_pane_dropped_on_a_strip_joins_its_sessions_to_that_strip(self):
+        o = self._on()
+        t = o["paneToStrip"]
+        self.assertEqual(t["opened"], True, "the shipped split opened a column for the api session: %r" % t["opened"])
+        self.assertTrue(t["up"], "the column is a leaf with an iframe")
+        self.assertTrue(t.get("col") is not False and t.get("rec"), "the column's pane had a rect to press on: %r" % {k: v for k, v in t.items() if k != "rec"})
+        w = t["rec"]["way"][0]
+        self.assertTrue(w["outline"]["on"] and not w["outline"]["refused"], "a chat pane over another chat's strip is a join, not a refusal: %r" % w["outline"])
+        self.assertIn("joins", w["outline"]["text"])
+        self.assertTrue(t["rejoined"], "its session joined the first chat's strip and the emptied column closed: %r" % t["leaves"])
+        self._frames_fill(t["rects"], "after the pane joined a strip")
     def test_15_the_outlines_empty_list_blurs_a_focused_field_on_a_click_and_arms_on_a_drag(self):
         o = self._on()
         e = o["outlineEmpty"]

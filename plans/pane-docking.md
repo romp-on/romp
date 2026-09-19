@@ -379,6 +379,17 @@ the pattern of `tests/test_chat_line_raster_served.py`, the shipped 1-and-2 case
    edit; `romp-chat-cols` is read to seed and then the tree is authoritative while the kit is on. The
    take/adopt handoff (section 0) is unchanged. Served labs: a long session in every pane (the wall
    lesson from `plans/chat-vertical-split.md` section 6), reorder within a strip still green.
+   **First step, landed ahead of the fold (2026-09-19, the user's bar: a tab dropped in a zone is a pane
+   there, a pane dropped on a strip joins it):** tabs are drop payloads under the KIT's own zones. The
+   chat's dragstart hands the shell the tab; the shell lays one hit area per docked pane (the source
+   pane's strip left uncovered for its live reorder), shows the landing half or the strip it would join,
+   and on the drop opens the column through the shipped mutation (`__rompMoveTab(sid, "new")`, or moves
+   a lone column's own pane) and moves its leaf to the target's edge; a tab on a chat strip joins that
+   column; a chat pane released on another chat's strip moves every session it holds there and the
+   emptied column closes. Membership stays the shipped store's (`romp-chat-cols`, written by the split
+   script under the kit as before) and the tree owns where each pane sits; the fold of membership into the
+   tree's leaf groups, with `moveTab` as a tree edit and the old key untouched under the kit, is the rest
+   of this phase.
 4. **Presets, reset, and the palette moves** (section 5).
 5. **The phone story** (section 8): the tree flattened into `#mtabs`, and a decision on touch docking.
 

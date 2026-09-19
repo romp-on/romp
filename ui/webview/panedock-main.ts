@@ -35,7 +35,7 @@ import {
 } from "./pane-tree";
 import {
   BAND, CHAT, FEED, FILES, FLEET, GUTTER, LAYOUT_KEY, RING, type Payload, type Shown, type Zone,
-  bandPxOf, crossedSlop, grabbable, growKey, isChatPane, landingRect, reconcileShown, roundRect, seedLayout, zoneAt,
+  bandPxOf, colNumberOf, crossedSlop, grabbable, growKey, isChatPane, landingRect, planTabDrop, reconcileShown, roundRect, seedLayout, zoneAt,
 } from "./pane-dock";
 
 export const PANE_DOCKING_CLASS = "pane-docking";
@@ -103,6 +103,9 @@ const SHELL_CSS = [
   `#pd-outline.refused{background:transparent;box-shadow:inset 0 0 0 1px var(--accent,#9cd2ff)}`,
   // the divider drag's deferred landing line, the #gv-ghost dress
   `#pd-ghost{display:none;position:fixed;pointer-events:none;z-index:40;background:linear-gradient(90deg,transparent 3px,var(--accent,#9cd2ff) 3px,var(--accent,#9cd2ff) 4px,transparent 4px)}`,
+  // a TAB drag's hit areas (plans/pane-docking.md section 4: a tab is a drop payload under the kit's own zones): one
+  // transparent layer per docked pane, above the pane and the shipped zones inside it, for the gesture's length
+  `body.${PANE_DOCKING_CLASS} .pd-tabzone{position:absolute;z-index:12}`,
 ].join("\n");
 
 // Injected into the CHAT and FILES documents while the kit is on: the open hand over the top row's empty run
@@ -140,6 +143,8 @@ class Engine {
   private offs: Array<() => void> = [];
   private altOn = false;
   private savedWriters: Record<string, unknown> | null = null;
+  private tab: { sid: string; name: string; from: PaneId | null; stripH: number } | null = null;   // a session tab in flight (the chat's dragstart)
+  private tabZones: HTMLElement[] = [];
 
   constructor() {
     const w = window as any;
@@ -226,7 +231,7 @@ class Engine {
 
   private stop(): void {
     this.on = false;
-    this.cancelPress(); this.endDiv(false);
+    this.cancelPress(); this.endDiv(false); this.endTabDrag();
     document.body.classList.remove(PANE_DOCKING_CLASS, DRAG_CLASS, RESIZE_CLASS, ALT_CLASS);
     this.offs.forEach((f) => f()); this.offs = [];
     if (this.obs) { this.obs.disconnect(); this.obs = null; }
@@ -415,6 +420,7 @@ class Engine {
       if (this.press && !this.press.armed) this.cancelPress();
       return;
     }
+    if (m.romp === "tabDrag") { if (m.on) this.startTabDrag(e.source, m); else this.endTabDrag(); return; }
     if (m.romp !== "paneGrab" || this.press || this.div) return;
     const f = this.allFrames().find((x) => x.contentWindow === e.source);
     if (!f || !f.contentWindow) return;
@@ -519,7 +525,11 @@ class Engine {
     if (!o) return;
     o.classList.add("on"); o.classList.remove("free", "refused");
     let r: Rect | null = zone ? landingRect(rects, zone, strips) : null;
-    if (zone && zone.strip) { o.classList.add("refused"); o.textContent = "A pane is not a tab"; }
+    if (zone && zone.strip) {
+      const joins = colNumberOf(p.pane) !== null && colNumberOf(zone.target) !== null && colNumberOf(p.pane) !== colNumberOf(zone.target);
+      if (joins) o.textContent = paneTitle(p.pane) + " joins";   // a chat pane's sessions join that strip (a group is separable, and rejoinable)
+      else { o.classList.add("refused"); o.textContent = "A pane is not a tab"; }
+    }
     else if (zone) o.textContent = paneTitle(p.pane);
     else { o.classList.add("free"); o.textContent = paneTitle(p.pane); r = { x: pt.x - 80, y: pt.y - 40, w: 160, h: 80 }; }
     if (r) { const rr = roundRect(r); o.style.left = rr.x + "px"; o.style.top = rr.y + "px"; o.style.width = rr.w + "px"; o.style.height = rr.h + "px"; }
@@ -534,7 +544,8 @@ class Engine {
     this.trackZone(pt, p);   // re-read the rects right before the release: the zone is decided on what is on screen now
     const zone = p.zone;
     this.cancelPress();
-    if (!zone || zone.strip || !this.lay) return;   // no zone, or a strip (a pane is not a tab): a cancel
+    if (!zone || !this.lay) return;   // no zone: a cancel
+    if (zone.strip) { this.joinPaneToStrip(p.pane, zone.target); return; }   // a chat pane on a strip: its sessions join; any other pane: a cancel (the outline said refused)
     this.drop(p.pane, zone.target, zone.edge as Edge);
   }
 
@@ -562,6 +573,103 @@ class Engine {
   private notify(text: string): void {
     const w = window as any;
     try { if (w.__rompNotify) w.__rompNotify("warn", text); } catch { /* no notice surface */ }
+  }
+
+  // ── tabs as drop payloads (plans/pane-docking.md section 4; the user 2026-09-19: a tab dragged out of the strip into
+  //    a zone becomes its own pane, a group of tabs is separable, a pane dropped on a strip joins it) ──────────────
+  /** The chat page's dragstart ({romp:"tabDrag", on:true, sid, name, stripH}): one transparent hit area per docked pane
+   *  for the gesture's length, above the pane and the shipped zones inside it (which never hear the pointer now). The
+   *  SOURCE pane's strip stays uncovered, so the page's own live reorder keeps its dragover. */
+  private startTabDrag(source: MessageEventSource | null, m: any): void {
+    if (this.press || this.div || !this.lay || typeof m.sid !== "string" || !m.sid) return;
+    const f = this.allFrames().find((x) => x.contentWindow === source);
+    const fromPane = f ? (f.closest(".pane") as HTMLElement | null) : null;
+    this.endTabDrag();
+    this.tab = { sid: m.sid, name: typeof m.name === "string" ? m.name : "", from: fromPane ? fromPane.id : null, stripH: Math.max(0, Number(m.stripH) || 0) };
+    for (const pane of leaves(this.lay.tree)) {
+      const el = byId(pane);
+      if (!el) continue;
+      const z = document.createElement("div"); z.className = "pd-tabzone"; z.setAttribute("data-pane", pane);
+      const top = pane === this.tab.from ? this.tab.stripH + RING : 0;
+      z.style.left = el.offsetLeft + "px"; z.style.top = (el.offsetTop + top) + "px"; z.style.width = el.offsetWidth + "px"; z.style.height = Math.max(0, el.offsetHeight - top) + "px";
+      const over = (ev: DragEvent) => { ev.preventDefault(); try { if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move"; } catch { /* fine */ } this.trackTabZone({ x: ev.clientX, y: ev.clientY }); };
+      z.addEventListener("dragenter", over); z.addEventListener("dragover", over);
+      z.addEventListener("dragleave", (ev) => { const r = ev.relatedTarget; if (r instanceof Element && r.classList.contains("pd-tabzone")) return; this.hideOutline(); });
+      z.addEventListener("drop", (ev) => { ev.preventDefault(); const zone = this.tabZoneAt({ x: ev.clientX, y: ev.clientY }); const t = this.tab; this.endTabDrag(); if (t && zone) this.dropTab(t, zone); });
+      (this.col || document.body).appendChild(z); this.tabZones.push(z);
+    }
+  }
+  private endTabDrag(): void {
+    this.tabZones.forEach((z) => z.remove()); this.tabZones = [];
+    this.tab = null;
+    this.hideOutline();
+  }
+  private hideOutline(): void {
+    if (this.outline) { this.outline.classList.remove("on", "free", "refused"); this.outline.textContent = ""; }
+  }
+  private tabZoneAt(pt: { x: number; y: number }): Zone | null {
+    return zoneAt(this.viewportRects(), pt, { self: null, payload: "tab" as Payload, strips: this.strips() });
+  }
+  /** The outline for a tab in flight: the landing half of the pane under the pointer, or the strip it would join. */
+  private trackTabZone(pt: { x: number; y: number }): void {
+    const o = this.outline;
+    if (!o || !this.tab) return;
+    const rects = this.viewportRects(), strips = this.strips();
+    const zone = zoneAt(rects, pt, { self: null, payload: "tab" as Payload, strips });
+    const r = zone ? landingRect(rects, zone, strips) : null;
+    if (!zone || !r) { this.hideOutline(); return; }
+    o.classList.add("on"); o.classList.remove("free", "refused");
+    o.textContent = zone.strip ? (this.tab.name || "the session") + " joins" : this.tab.name || "a session";
+    const rr = roundRect(r); o.style.left = rr.x + "px"; o.style.top = rr.y + "px"; o.style.width = rr.w + "px"; o.style.height = rr.h + "px";
+  }
+  /** A tab dropped in a zone: a strip joins that column (the shipped mutation); an edge opens a new column with the
+   *  session (or, for a session alone in a later column, takes that column's pane) and moves its leaf to the target's
+   *  edge. The membership store stays the shipped script's; the tree owns where the pane sits. */
+  private dropTab(t: { sid: string; name: string }, zone: Zone): void {
+    const w = window as any;
+    const sets = (typeof w.__rompChatSets === "function" ? w.__rompChatSets() : null) as Record<string, string[]> | null;
+    const plan = planTabDrop(zone, t.sid, sets);
+    if (plan.kind === "refuse") { this.notify(plan.why); return; }
+    if (plan.kind === "join") { try { if (typeof w.__rompMoveTab === "function") w.__rompMoveTab(t.sid, plan.col); } catch { /* the shipped mutation says why */ } this.reconcile(); return; }
+    let pane: PaneId | null = null;
+    if (plan.kind === "moveColumn") pane = plan.pane;
+    else {
+      let nf: any = null;
+      try { nf = typeof w.__rompMoveTab === "function" ? w.__rompMoveTab(t.sid, "new") : null; } catch { nf = null; }   // the shipped split opens the column; its romp-chat-cols event mirrored the leaf right of the last chat
+      const pn = nf && typeof nf.closest === "function" ? (nf.closest(".pane") as HTMLElement | null) : null;
+      pane = pn ? pn.id : null;
+    }
+    this.reconcile();
+    if (!pane || !this.lay || !has(this.lay.tree, pane) || zone.strip || pane === zone.target) return;
+    try { this.lay = { v: 1, tree: move(this.lay.tree, pane, zone.target, zone.edge as Edge), parked: this.lay.parked }; }
+    catch (err) { this.notify(String((err as Error).message || err)); return; }
+    this.persist(); this.render();
+  }
+  /** A chat pane released over another chat pane's strip: every session it holds joins that column (a group of tabs is
+   *  separable and rejoinable); the emptied column closes through the shipped script and its park is pruned. */
+  private joinPaneToStrip(pane: PaneId, target: PaneId): void {
+    const w = window as any;
+    const col = colNumberOf(target), from = colNumberOf(pane);
+    if (col === null || from === null) { this.notify("A pane is not a tab: only a chat pane's sessions can join a strip."); return; }
+    if (from === col) return;
+    const sids = this.sessionsOf(pane, from);
+    if (!sids.length) { this.notify("This pane holds no session to move."); return; }
+    for (const sid of sids) { try { if (typeof w.__rompMoveTab === "function") w.__rompMoveTab(sid, col); } catch { /* the shipped mutation says why */ } }
+    this.reconcile();
+  }
+  /** The sessions a chat pane holds: a later column's from the shipped membership sets; the first column's from its
+   *  page's own tabs (it lists nothing and holds the rest). */
+  private sessionsOf(pane: PaneId, col: number): string[] {
+    const w = window as any;
+    if (col !== 1) {
+      const sets = (typeof w.__rompChatSets === "function" ? w.__rompChatSets() : null) as Record<string, string[]> | null;
+      return sets && Array.isArray(sets[String(col)]) ? sets[String(col)].slice() : [];
+    }
+    const f = frameOfPane(pane);
+    try {
+      const d = f && f.contentDocument;
+      return d ? Array.from(d.querySelectorAll("#tabs .tab[data-id]")).map((t) => String(t.getAttribute("data-id") || "")).filter(Boolean) : [];
+    } catch { return []; }
   }
 
   // ── the dividers ─────────────────────────────────────────────────────────────────────────────────────

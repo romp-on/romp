@@ -206,6 +206,44 @@ export function reconcileShown(cur: Layout, sh: Shown): Layout {
   return parked.length === lay.parked.length ? lay : { ...lay, parked };
 }
 
+/** The chat column number a pane id names: the first chat pane is column 1, `chat-pane-<n>` is column n, any other
+ *  pane none. The shipped split script keys its membership store (romp-chat-cols) and __rompMoveTab by these. */
+export function colNumberOf(pane: PaneId): number | null {
+  if (pane === CHAT) return 1;
+  const m = /^chat-pane-(\d+)$/.exec(pane);
+  return m ? Number(m[1]) : null;
+}
+
+/** The column holding a session, from the shipped membership sets ({"2": [sids], ...}; the first column lists nothing
+ *  and holds the rest): the entry's number, else 1. */
+export function ownerColumn(sets: Record<string, string[]> | null | undefined, sid: string): number {
+  for (const [k, ids] of Object.entries(sets || {})) if (Array.isArray(ids) && ids.includes(sid)) return Number(k) || 1;
+  return 1;
+}
+
+/** What a TAB dropped in a zone does (plans/pane-docking.md section 4: a tab on a pane edge opens a new chat leaf there;
+ *  a tab on another chat leaf's strip joins that group). Pure over the zone, the session and the membership sets:
+ *  - `join`: the strip of a chat pane: the session moves into that column (the shipped mutation, __rompMoveTab(sid, col)).
+ *  - `moveColumn`: the session is ALONE in a later column, so a new column would twin it and close it: the column's own
+ *    pane moves to the target edge instead (a tab dropped in a zone is a pane there, with nothing minted).
+ *  - `newColumn`: a new column opens with the session (__rompMoveTab(sid, "new")) and its leaf moves to the target edge.
+ *  - `refuse`: the strip of a non-chat pane, or a lone column dropped on its own edge. */
+export type TabDrop = { kind: "join"; col: number } | { kind: "moveColumn"; pane: PaneId } | { kind: "newColumn" } | { kind: "refuse"; why: string };
+export function planTabDrop(zone: Zone, sid: string, sets: Record<string, string[]> | null | undefined): TabDrop {
+  if (zone.strip) {
+    const col = colNumberOf(zone.target);
+    return col === null ? { kind: "refuse", why: "a session joins a chat pane's strip, not this pane" } : { kind: "join", col };
+  }
+  const owner = ownerColumn(sets, sid);
+  const alone = owner !== 1 && Array.isArray(sets && sets[String(owner)]) && sets![String(owner)].length === 1;
+  if (alone) {
+    const pane = "chat-pane-" + owner;
+    if (pane === zone.target) return { kind: "refuse", why: "this session is already alone in this pane" };
+    return { kind: "moveColumn", pane };
+  }
+  return { kind: "newColumn" };
+}
+
 /** The `--tl` band height in px from the shell's `.col` style value (`"312px"`), else the default. */
 export function bandPxOf(tlValue: string | null | undefined): number {
   const n = parseFloat(String(tlValue || ""));
