@@ -6494,13 +6494,28 @@ function makePlaceholderTab(id: string): HTMLElement {
     tab.style.setProperty("--chip-fg", meta.color.fg);
     tab.classList.add("colored");
   }
-  const swirl = el("img", "tab-ph-swirl") as HTMLImageElement;
-  swirl.src = mediaSrc("romp-swirl-glyph.svg"); swirl.alt = ""; swirl.onerror = () => swirl.remove();
-  tab.appendChild(swirl);
+  // The LOADED tab's structure from the first paint (plans/tab-placeholder-width.md, the user 2026-09-19): the strip used to
+  // jump as tabs settled, because a placeholder was a 12 px swirl and a label while a loaded tab is the dot slot, the label,
+  // the after-widgets and the ✕ glyph's width. The chip drawn through the ONE shared helper with an unknown status gives the
+  // dot widget's slot (the same 7 px box a loaded tab reserves); the swirl rides INSIDE that slot, centred and absolutely
+  // positioned, so it paints over it and costs no width. With the dot widget off there is no slot on either tab and no swirl.
+  applyTabStatus(tab, { id, status: {} });
+  const slot = tab.querySelector<HTMLElement>(".tab-dot");
+  if (slot) {
+    slot.classList.add("loading"); slot.title = "loading…";
+    const swirl = el("img", "tab-ph-swirl") as HTMLImageElement;
+    swirl.src = mediaSrc("romp-swirl-glyph.svg"); swirl.alt = ""; swirl.onerror = () => swirl.remove();
+    slot.appendChild(swirl);
+  }
   const label = el("span", "tab-label");
   if (meta?.name) label.replaceChildren(...hostNameNodes(meta.name, id));
   else label.textContent = "…";
   tab.appendChild(label);
+  appendTabAfterWidgets(tab, { id, status: {} });   // the hot-key keycap when one is assigned; the context gauge draws nothing without a fill
+  // the end spacer: the ✕ glyph's metrics with its visibility hidden, so the loaded tab's ✕ lands on the same width; never a
+  // control (a loading tab has no session to end and no drag: selection is its only power, tabs-first.test.ts)
+  const end = el("span", "tab-ph-end"); end.textContent = "×"; end.setAttribute("aria-hidden", "true");
+  tab.appendChild(end);
   return tab;
 }
 

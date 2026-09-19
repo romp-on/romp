@@ -677,6 +677,13 @@ body.theme-light .tab-widgets-gear:hover { color: var(--fg); background: rgba(0,
 .tab-ph-swirl { width: 12px; height: 12px; border-radius: 2px; flex: none;
   animation: tab-ph-swirl-spin 7s linear infinite; }   /* .tab is flex with its own gap, so no margin needed */
 @keyframes tab-ph-swirl-spin { to { transform: rotate(-360deg); } }
+/* the swirl rides the status dot's SLOT while a tab loads (plans/tab-placeholder-width.md, the user 2026-09-19): the slot
+   keeps the dot's 7 px box, the swirl paints over it centred at its 12 px, absolutely positioned, so the loading tab is as
+   wide as the loaded one; the slot's own grey ring hides under the swirl. One glyph in both themes. */
+.tab-dot.loading { position: relative; background: transparent; box-shadow: none; overflow: visible; }
+.tab-dot.loading .tab-ph-swirl { position: absolute; left: 50%; top: 50%; margin: -6px 0 0 -6px; }
+/* the loading tab's end spacer: the close glyph's metrics (.tab-close: 1.1em, 0 2px), invisible, never a control */
+.tab-ph-end { visibility: hidden; font-size: 1.1em; line-height: 1; padding: 0 2px; }
 /* the host-down foot's swirl, after "Reconnecting": present only while a dial to the host is in flight as of
    the last /tunnels poll (render.ts syncHostOfflineFoot), so the spin follows the state; the same motif as the
    placeholder tab's. A flex item of the head right after the gist (the postal delivery icon's convention), so an
