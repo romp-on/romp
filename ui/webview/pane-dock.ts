@@ -14,8 +14,10 @@ import {
 /** The gap between sibling panes, the shipped gutter's 7 px. */
 export const GUTTER = 7;
 /** The grab RING inside every pane's rectangle (px): the pane's own padding, the iframe inset by this much,
- *  so a press on the ring is a press on the pane element itself, a grab surface without chrome. */
-export const RING = 3;
+ *  so a press on the ring is a press on the pane element itself, a grab surface without chrome. Six px since
+ *  2026-09-19: the user's first press on a 3 px ring showed the hand but landed nothing at a normal pointer speed;
+ *  six is a target a pointer lands on without aiming, and still reads as the pane's margin, not as chrome. */
+export const RING = 6;
 /** A press becomes a drag after this much travel (px); under it a press is a click, a text selection, a scroll. */
 export const SLOP = 4;
 /** The band's height when nothing has set `--tl` yet (the stylesheet's `var(--tl,200px)`). */

@@ -89,7 +89,9 @@ const SHELL_CSS = [
   // the dividers: the shipped gutter dress (a 1 px line in a 7 px strip), col-resize between columns, row-resize between rows
   `body.${PANE_DOCKING_CLASS} .pd-div{position:absolute;z-index:7;background:linear-gradient(90deg,transparent 3px,#333 3px,#333 4px,transparent 4px);cursor:col-resize}`,
   `body.${PANE_DOCKING_CLASS} .pd-div[data-dir=col]{background:linear-gradient(180deg,transparent 3px,#333 3px,#333 4px,transparent 4px);cursor:row-resize}`,
-  // the closed hand while a pane is held; the iframes go pointer-transparent so the shell hears every move
+  // the closed hand from the PRESS on (:active, before any travel: the press registered, the pane is yours), and while
+  // a pane is held; the iframes go pointer-transparent so the shell hears every move
+  `body.${PANE_DOCKING_CLASS} .pane:active{cursor:grabbing}`,
   `body.${PANE_DOCKING_CLASS}.${DRAG_CLASS},body.${PANE_DOCKING_CLASS}.${DRAG_CLASS} .pane,body.${PANE_DOCKING_CLASS}.${DRAG_CLASS} .pd-div{cursor:grabbing}`,
   `body.${PANE_DOCKING_CLASS}.${DRAG_CLASS} iframe,body.${PANE_DOCKING_CLASS}.${RESIZE_CLASS} iframe{pointer-events:none}`,
   `body.${PANE_DOCKING_CLASS}.${ALT_CLASS} .pane,body.${PANE_DOCKING_CLASS}.${ALT_CLASS} iframe{cursor:grab}`,

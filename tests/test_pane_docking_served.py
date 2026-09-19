@@ -38,6 +38,7 @@ EXT = os.path.join(ROOT, "vscode-extension")
 sys.path.insert(0, HERE)
 import test_ship_reship_served as _lab   # noqa: E402  the lab kernel's environment
 
+RING = 6   # the grab ring's px (pane-dock.ts RING): every iframe is its pane inset by this much
 SID_WEB = "11111111-2222-4333-8444-0000000000d1"
 SID_API = "11111111-2222-4333-8444-0000000000d2"
 
@@ -136,7 +137,8 @@ async function drag(page, x0, y0, waypoints, { release = true, escape = false } 
   await page.mouse.move(x0, y0);
   await page.mouse.down();
   await frame(page);
-  rec.pressed = await page.evaluate(() => ({ dragging: window.__rompPaneDock.dragging(), bodyCursor: getComputedStyle(document.body).cursor, cls: document.body.className }));
+  rec.pressed = await page.evaluate(() => ({ dragging: window.__rompPaneDock.dragging(), bodyCursor: getComputedStyle(document.body).cursor, cls: document.body.className,
+    pressedPaneCursor: (() => { const p = document.querySelector(".pane:active"); return p ? getComputedStyle(p).cursor : null; })() }));
   await page.mouse.move(x0 + 3, y0 + 3);   // under the slop: nothing lifts
   await frame(page);
   rec.underSlop = await page.evaluate(() => window.__rompPaneDock.dragging());
@@ -507,10 +509,10 @@ class ServedPaneDocking(unittest.TestCase):
         for pane, r in rects.items():
             f = r.get("frame")
             self.assertIsNotNone(f, "%s has an iframe (%s): %r" % (pane, when, r))
-            self._near(f["x"], r["x"] + 3, 1.5, "%s iframe left (%s)" % (pane, when))
-            self._near(f["y"], r["y"] + 3, 1.5, "%s iframe top (%s)" % (pane, when))
-            self._near(f["w"], r["w"] - 6, 1.5, "%s iframe width fills the pane less the ring (%s)" % (pane, when))
-            self._near(f["h"], r["h"] - 6, 1.5, "%s iframe height fills the pane less the ring (%s)" % (pane, when))
+            self._near(f["x"], r["x"] + RING, 1.5, "%s iframe left (%s)" % (pane, when))
+            self._near(f["y"], r["y"] + RING, 1.5, "%s iframe top (%s)" % (pane, when))
+            self._near(f["w"], r["w"] - 2 * RING, 1.5, "%s iframe width fills the pane less the ring (%s)" % (pane, when))
+            self._near(f["h"], r["h"] - 2 * RING, 1.5, "%s iframe height fills the pane less the ring (%s)" % (pane, when))
 
     # ── the ON page ──────────────────────────────────────────────────────────────────────────────────
     def test_1_the_engine_is_on_and_positions_every_pane_with_the_band_at_a_fixed_height(self):
@@ -606,6 +608,10 @@ class ServedPaneDocking(unittest.TestCase):
 
     def test_5_escape_cancels_a_lifted_drag_and_a_press_under_the_slop_is_a_click(self):
         o = self._on()
+        # the press itself is answered: the closed hand on the pressed pane before any travel (the user's first press on
+        # the ring showed the open hand and then nothing; now the hand closes the moment the press lands)
+        self.assertEqual(o["drag1"]["pressed"]["pressedPaneCursor"], "grabbing", "the pressed pane wears the closed hand before the slop: %r" % o["drag1"]["pressed"])
+        self.assertFalse(o["drag1"]["pressed"]["dragging"], "...while nothing has lifted yet")
         e = o["esc"]
         self.assertTrue(e["armed"]["dragging"], "lifted before Escape")
         self.assertFalse(e["afterEscape"]["dragging"], "Escape drops the pane where it was")

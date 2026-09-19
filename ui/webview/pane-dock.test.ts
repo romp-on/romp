@@ -65,7 +65,7 @@ test("grabbable: primary button, not a control; the ring, a top-row run, or Opti
   assert.equal(grabbable({ ...base, alt: true, onControl: true }), false, "a control yields to itself even with Option");
   assert.equal(grabbable({ ...base, onRing: true, button: 2 }), false, "the primary button only");
   assert.equal(crossedSlop(SLOP - 1, 0), false); assert.equal(crossedSlop(SLOP, 0), true); assert.equal(crossedSlop(0, -SLOP), true);
-  assert.equal(RING, 3);
+  assert.equal(RING, 6, "the grab ring: six px since the user's first press on a three px ring landed nothing (2026-09-19)");
 });
 
 test("growKey: the shipped store keys, chat<n> for a column", () => {
