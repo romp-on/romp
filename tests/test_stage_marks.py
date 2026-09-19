@@ -120,6 +120,8 @@ CALLBACK_ALLOW = {
     ("CodexBackend", "poke", "_wake_kernel"): "sets the kernel's wake event",
     ("CodexBackend", "push", "_pusher_wake.set"): "sets the pusher's wake event",
     ("CodexBackend", "log", "<lambda>"): "a stderr line",
+    ("CodexBackend", "postal", "_codex_postal_call"): "loopback HTTP to the bus and a working-note file write; no session parse, "
+                                                       "build or hydrate",
     # handed by ATTRIBUTE assignment on the constructed backend (kernel.py, after the SDK constructor): the same rows
     ("SdkBackend", "login_ok", "<lambda>"): "reads the credential store's account state",
     ("SdkBackend", "postal_restore", "_bus_restore_mail"): "a POST to the local postal bus",
@@ -327,8 +329,9 @@ def callback_census(text):
     (`_sdk_backend.login_ok = ...`, keyed by the attribute), when the value IS a callable the census can read: a
     `_stage_marked(<name>)(<fn>)` or `_stage_default(<name>)(<fn>)` wrapper ("marked"), a name bound to a module-level def,
     a bound method (an attribute spelled in lower case; an upper-case attribute is a constant, `jd.STATE`), or a lambda; a
-    value (a constant, a call's result, a module attribute in upper case) is no row. An unwrapped callable is "allowed" only
-    on CALLBACK_ALLOW with its reason, else unmarked."""
+    value (a constant, a call's result, a module attribute in upper case) is no row. A callable handed under a condition
+    (an IfExp) is a row per branch, nested conditionals descended, a None branch no row. An unwrapped callable is
+    "allowed" only on CALLBACK_ALLOW with its reason, else unmarked."""
     tree = _parse(text)
     module_defs = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     bound = {}                                                   # name -> ctor: `_sdk_backend = sbmod.SdkBackend(...)`
@@ -347,8 +350,17 @@ def callback_census(text):
         elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Attribute) \
                 and isinstance(node.targets[0].value, ast.Name) and node.targets[0].value.id in bound:
             handed_all.append((bound[node.targets[0].value.id], node.targets[0].attr, node.value))
+    def branches(value):
+        # a callable handed under a condition (`_codex_postal_call if _codex_postal_tools_on() else None`, the postal
+        # hand-off of 2026-09-19) is a row per branch, nested conditionals descended, a None constant no row: read as
+        # a value, the IfExp yielded no row, and the callable passed the marked-or-listed test unseen
+        if isinstance(value, ast.IfExp):
+            return branches(value.body) + branches(value.orelse)
+        if isinstance(value, ast.Constant) and value.value is None:
+            return []
+        return [value]
     rows = []
-    for ctor, param, value in handed_all:
+    for ctor, param, value in ((c, prm, v) for c, prm, val in handed_all for v in branches(val)):
         if _wrapped_at_site(value):
             rows.append((value.lineno, ctor, param, ast.get_source_segment(text, value), "marked")); continue
         if isinstance(value, ast.Name) and value.id in module_defs:
@@ -556,6 +568,28 @@ def _wire():
     _sdk_backend.state_dir = jd.STATE
     other.postal_restore = _restore
 '''
+
+    SNIPPET_IFEXP_HANDOFF = SNIPPET_HANDOFF + '''
+def _postal_call(tool, sid, name, args): pass
+def _on(): return True
+def _cx():
+    c = cxmod.CodexBackend(jd.STATE, postal=(_postal_call if _on() else None), log=(None if _on() else _wake),
+                           poke=(_wake if _on() else (_send if _on() else None)))
+'''
+
+    def test_a_callable_handed_under_a_condition_is_a_row_for_each_branch_and_a_none_is_no_row(self):
+        """The postal hand-off (2026-09-19) passes `_codex_postal_call if <setting on> else None`: the census read the IfExp as a
+        value and yielded no row, so a kernel callable the backend runs inline on the SDK's reader thread passed the
+        marked-or-listed test unseen. Both branches are read, nested ones too, and a None constant is no row."""
+        rows = {(ctor, param, src): v for _, ctor, param, src, v in callback_census(self.SNIPPET_IFEXP_HANDOFF)}
+        self.assertEqual(rows[("CodexBackend", "postal", "_postal_call")][:8], "unmarked", "the callable branch is a row")
+        self.assertEqual(rows[("CodexBackend", "log", "_wake")][:8], "unmarked", "the orelse branch is read too")
+        self.assertEqual(rows[("CodexBackend", "poke", "_wake")][:8], "unmarked")
+        self.assertEqual(rows[("CodexBackend", "poke", "_send")][:8], "unmarked", "a nested conditional is descended")
+        self.assertEqual([k for k in rows if k[0] == "CodexBackend" and k[1] in ("postal", "log", "poke")],
+                         [("CodexBackend", "postal", "_postal_call"), ("CodexBackend", "log", "_wake"),
+                          ("CodexBackend", "poke", "_wake"), ("CodexBackend", "poke", "_send")],
+                         "the None branches are no rows, and no row is keyed by the conditional itself")
 
     def test_a_callable_assigned_on_the_constructed_backend_is_a_row_keyed_by_its_attribute(self):
         rows = {(ctor, param, src): v for _, ctor, param, src, v in callback_census(self.SNIPPET_ATTR_HANDOFF)}

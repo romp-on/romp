@@ -133,6 +133,7 @@ machinery on such boxes without it.
 | `item/completed` commandExecution | user `tool_result` (aggregatedOutput, exit code) + raw item under `toolUseResult` |
 | `item/*` fileChange | per change: `tool_use` (add→`Write`, else `Edit`, input {file_path}) + `tool_result` carrying the diff |
 | `item/*` mcpToolCall | `tool_use` named `mcp__<server>__<tool>` + `tool_result` (result or error) |
+| `item/*` dynamicToolCall | the postal tools the kernel services (below): `tool_use` named `mcp__romp-postal-service__<tool>` (the item's `namespace` when set) + `tool_result` from its `inputText` content, `is_error` when `success` is false or status failed |
 | `item/*` webSearch | `tool_use` `WebSearch` {query} + result |
 | `item/completed` contextCompaction | `system`/`compact_boundary`, uuid = the item id, `logicalParentUuid` = the pre-compaction leaf (the stitch the FileAdapter follows), `compactMetadata.trigger` `"auto"` (every compaction inside a turn romp started is automatic). The item completes only after the runtime replaced the history, so a failed compaction writes nothing; `item/started` writes nothing (no content yet). The read side's replay window arms on the summary record, never on this boundary (the event-model change this row depends on), so the prompt that directly follows a pre-turn boundary survives even when it repeats earlier text. `thread/compacted` (deprecated on Codex 0.153.3 and never sent; turn-scoped in the pinned client, so it could only ever arrive on a registered turn's queue, never the global pump) → the same record when no item wrote it for that turn: boundaries per turn = max(items, notifications) |
 | turn failed / terminal `error` | assistant record flagged `isApiErrorMessage` (the error-card tag) |
@@ -162,14 +163,46 @@ approval→ask-picker bridge is phase 2), `set_auth` False (Codex auth is machin
 `codex login`), `stop_task`/`rewind_files` False, `mcp_status` explains Codex
 MCP servers live in `~/.codex/config.toml`, `on_ask`/`current_ask` None.
 
+## Postal mail from a Codex session (2026-09-19)
+
+Every thread registers the six postal tools as Codex **dynamic tools** on
+`thread/start` (and again on `thread/resume`; the registration persists in the
+rollout's `session_meta`), with the bus's instructions as the thread's
+`developerInstructions`. The app-server routes each call back as the
+`item/tool/call` server request; `_handle_approval` answers it first, binding
+the call to the session by its `threadId` only, forwarding only the arguments
+the tool's schema declares, and calling the kernel's `postal(tool, sid, name,
+args)` with no backend lock held (the bus resolves recipients through the
+kernel's `GET /sessions`, which calls `live_sessions`); the kernel dials the bus
+over loopback with the serve token AS that session, bounded at 3 s (the handler
+runs on the SDK's single reader thread). No credential enters the sandbox,
+Sandboxed and Auto behave alike, and the model cannot pick its sender. The
+specs are a KEEP-IN-SYNC copy of the bus's `MCP_TOOLS` (`POSTAL_TOOL_SPECS`),
+pinned equal by a test that loads the bus by path: the bus is its own process
+and neither side imports the other. Live-probed on runtime 0.153.3 through the
+pinned 0.144.4 client: `dynamicTools` is accepted at `thread/start` (a spec
+without `description` is refused), ignored on `turn/start`, the reply shape
+`{success, contentItems}` accepted, no approval or reviewer step in either
+mode; `developerInstructions` is honored at `thread/start` and persists as
+the thread's first developer message, while a value passed at `thread/resume`
+is accepted and ignored, so an existing thread's instructions cannot be
+revised through resume. `tests/smoke_codex_live.py` re-runs the wire-shape
+half. The bare value file `STATE/codex-postal-tools` (`off`; default on) turns
+the registration off at the next kernel start. The plan's earlier idea, a postal MCP server registered in
+`~/.codex/config.toml`, is retired: one global MCP process cannot tell which
+thread it serves (Codex hands no thread id to MCP children), so it could not
+sign mail as the right session.
+
 ## Phase 2 (explicitly out)
 
 Approval server-requests → the `permission` chip + ask picker; plan items →
 the card checklist; `subAgentActivity`/collab → subagent pills; rate-limit
 gating from `account/rateLimits/updated`; `usage` stamping for the cost view;
 unified-diff → `structuredPatch` rows; per-backend model catalogs in `/models`;
-postal MCP auto-registration into `~/.codex/config.toml`; the new-session
-picker's agent choice UI polish.
+the new-session picker's agent choice UI polish. (Postal mail from Codex
+sessions landed 2026-09-19 as kernel-serviced dynamic tools, above; the
+config.toml MCP registration once listed here is retired for the identity
+reason given there.)
 
 ## Risks / open questions
 

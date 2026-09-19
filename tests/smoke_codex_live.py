@@ -10,8 +10,15 @@ new Codex release:
 
 Exercises the seams the unit tests fake: a real turn's notification stream materializing the
 transcript (items → tokenUsage → completed), the parse of that file into ended turns, live
-interrupt of a running command, and the normalizer's skipped-vocabulary counter on real payloads.
-Uses a scratch state dir + a scratch cwd; touches nothing live.
+interrupt of a running command, the normalizer's skipped-vocabulary counter on real payloads, and
+the postal tools' wire shape (2026-09-19): `dynamicTools` accepted at thread/start and thread/resume,
+the model's call arriving as `item/tool/call` bound to the calling thread, the `{success,
+contentItems}` reply accepted, no approval or reviewer step in the way (Sandboxed or Auto), and the
+call rendered in the transcript. That half never enters the sandbox, so it runs under the
+danger-full-access override too; the sandbox negative (a command cannot read a file outside the
+workspace) runs only under the shipped profile and prints SKIPPED otherwise. Last passed on runtime
+0.153.3 (2026-09-19, the design lane's probe of the same wire). Uses a scratch state dir + a scratch
+cwd; touches nothing live.
 """
 import json
 import os
@@ -59,7 +66,14 @@ def main():
         print("SMOKE SKIPPED: run romp-codex-setup first")
         return 2
     runtime = cb._runtime.runtime_path(RUNTIME_STATE)
-    be = cb.CodexBackend(str(state), codex_bin=str(runtime))
+    postal_calls = []                                     # (tool, sid, name, args) the backend handed the callable
+    notices = []                                          # chat notices: a tool call must raise no warn
+
+    def smoke_postal(tool, sid, name, args):
+        postal_calls.append((tool, sid, name, args))
+        return True, "SMOKE-POSTAL-OK %s" % tool
+    be = cb.CodexBackend(str(state), codex_bin=str(runtime), postal=smoke_postal,
+                         notify=lambda app, msg: notices.append(msg))
     if not be.available():
         print("SMOKE SKIPPED: %s" % (be._client_err or "codex backend unavailable"))
         return 2
@@ -131,6 +145,62 @@ def main():
                          now=time.time(), sdk_human=True)
     print("   turns=%d all ended=%s" % (len(s["turns"]), all(t.get("ended") for t in s["turns"])))
     assert len(s["turns"]) >= 2, "interrupted turn merged with the next parse"
+
+    print("== turn 3: the postal tools as dynamic tools (wire shape)")
+    tid = be._sessions[sid].tid
+
+    def tool_records():
+        uses, results = [], []
+        for record in map(json.loads, path.read_text().splitlines()):
+            for block in record.get("message", {}).get("content", []):
+                if block.get("type") == "tool_use" and block.get("name", "").startswith("mcp__romp-postal-service__"):
+                    uses.append(block)
+                if block.get("type") == "tool_result" and str(block.get("tool_use_id", "")).startswith("exec-"):
+                    results.append(block)
+        return uses, results
+    be.send(sid, "Call the list_agents tool once, then reply with exactly the text it returned and nothing else.")
+    assert until(lambda: postal_calls, 120, what="the list_agents call to reach the postal callable")
+    assert until(lambda: be.live_sessions()[sid]["state"] == "waiting" and not be.busy(sid), 300,
+                 what="turn 3 settle")
+    tool, csid, cname, cargs = postal_calls[0]
+    print("   call: tool=%s sid-matches=%s name=%s args=%s" % (tool, csid == sid, cname, cargs))
+    assert tool == "list_agents", "the model called %s" % tool
+    assert csid == sid and cname == "smoke", "the call was bound to the wrong session (threadId %s)" % tid
+    uses, results = tool_records()
+    print("   transcript: %d tool_use, %d tool_result" % (len(uses), len(results)))
+    assert uses and uses[0]["name"] == "mcp__romp-postal-service__list_agents", "no dynamicToolCall item rendered"
+    assert results and "SMOKE-POSTAL-OK" in str(results[0].get("content")), "the reply text did not come back"
+    assert not any(r.get("is_error") for r in results), "the reply was not accepted as a success"
+    assert not [n for n in notices if n.get("type") == "warn"], "a tool call raised a warn notice: %r" % notices
+    recs = [json.loads(l) for l in path.read_text().splitlines()]
+    final = [r for r in recs if r["type"] == "assistant" and (r.get("message") or {}).get("stop_reason") == "end_turn"]
+    print("   model's reply carries the tool text: %s" % ("SMOKE-POSTAL-OK" in json.dumps(final[-1]["message"])))
+
+    print("== resume keeps the registration (thread/resume with the same params)")
+    assert be.kill(sid)
+    assert be.resume("smoke", sid)
+    n0 = len(postal_calls)
+    be.send(sid, "Call the check_inbox tool once, then reply with exactly the text it returned and nothing else.")
+    assert until(lambda: len(postal_calls) > n0, 120, what="the check_inbox call after resume")
+    assert until(lambda: be.live_sessions()[sid]["state"] == "waiting" and not be.busy(sid), 300,
+                 what="turn 4 settle")
+    assert postal_calls[n0][0] == "check_inbox" and postal_calls[n0][1] == sid
+    print("   call after resume: tool=%s sid-matches=True" % postal_calls[n0][0])
+
+    print("== sandbox negative: a command cannot read a file outside the workspace")
+    if cb.TURN_SANDBOX is not None:
+        print("   SKIPPED: the danger-full-access override is on, so nothing confines the command")
+    else:
+        sentinel = state / "smoke-sentinel"               # stands in for the serve token: outside the workspace
+        sentinel.write_text("SMOKE-SENTINEL-7\n")
+        be.send(sid, "Run the shell command `cat %s` and reply with its output verbatim, or with the error "
+                     "message verbatim if it fails." % sentinel)
+        assert until(lambda: be.live_sessions()[sid]["state"] == "working", 60, what="turn 5 start")
+        assert until(lambda: be.live_sessions()[sid]["state"] == "waiting" and not be.busy(sid), 300,
+                     what="turn 5 settle")
+        tail = path.read_text()
+        assert "SMOKE-SENTINEL-7" not in tail, "a sandboxed command read a file outside the workspace"
+        print("   the sentinel never reached the transcript (the tools are the only door to the token)")
 
     norm = be._sessions[sid].norm
     print("== normalizer skipped vocabulary (phase-2 items seen live): %s" % (norm.skipped or "{}"))

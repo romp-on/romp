@@ -4092,6 +4092,330 @@ class _BusHeld(set):
     held = frozenset()
 
 
+# ── the postal tools a Codex thread carries, serviced here (2026-09-19) ──────────────────────────────────────────
+# A Codex session's six postal tools are Codex DYNAMIC TOOLS (codex_backend.POSTAL_TOOL_SPECS); the app-server routes
+# each call back to the backend, which binds it to the calling thread's session and hands it here as
+# postal(tool, sid, name, args). This side dials the bus over loopback with the serve token, AS that session, so no
+# credential enters the sandbox and the model can neither pick its sender nor read another inbox: the same six
+# operations a Claude session's postal MCP has, bounded by the same bus rules (isolation, live-only addressing).
+CODEX_POSTAL_TIMEOUT_S = 3.0   # the reader-thread budget: the backend answers the call inline on the pinned SDK's single
+#                                reader thread, so every Codex session's notifications and interrupt replies wait behind
+#                                this; the bus's own kernel round trip (its GET /sessions, 6 s cap) sits inside it, and a
+#                                bus that is slower than this is answered as unknown, never waited for
+_CODEX_POSTAL_KINDS = ("delegate", "coordinate", "question")
+# the reply hint a Codex session reads at the end of its inbox: the TOOL, never `romp mail send`, which its sandbox
+# refuses by design (the bus's REPLY_HINT names the shell for the CLI and the Claude MCP)
+_CODEX_REPLY_HINT = ("To reply (only if you have something substantive to add, not just to acknowledge): the "
+                     "send_message tool, with a kind — put the whole point in your first sentence.")
+# the bus's REFUSAL_WHYS (bin/romp-postal-service), a KEEP-IN-SYNC copy: a bounce whose reason starts with one of these
+# is a REFUSAL (nothing left this machine, no return note is coming) and the receipt says so; pinned equal to the bus's
+# renderer by tests/test_codex_postal_tools.py (2026-09-19)
+_CODEX_REFUSAL_WHYS = ("not published: ", "not parked:", "outbox record unreadable, moved aside",
+                       "inbox file unreadable, moved aside")
+
+
+def _codex_postal_tools_on():
+    """Whether Codex threads carry the six postal tools: the bare value file STATE/codex-postal-tools, `off` to
+    disable, absent or anything else on (the judge-tier store shape, jd._state_str; default on, the refuter's
+    amendment 9 of 2026-09-19). Read once, where the backend is built (_codex): the callable is a constructor
+    argument, so a change applies at the next kernel start, and the backend logs the off decision once itself."""
+    return jd._state_str("codex-postal-tools", "").strip().lower() != "off"
+
+
+_CODEX_POSTAL_SAID = set()       # the Codex postal tools' bus faults said once per cause per fault spell ("unreachable",
+#                                  "no-answer"): the next answer of any status clears the set
+
+
+def _codex_postal_log(tool, sid, cause, once=None):
+    """The kernel log's one line for a Codex postal tool call that failed, naming the tool, the session and the cause
+    (the review of 2026-09-19: _codex_postal_call never raises, so the backend's raise-only log line never fired, and
+    a refused bus, a hung bus and a store raise each reached the session as a failed result with an empty kernel
+    log, the one cross-session surface). The two bus faults are said once per fault spell PER CAUSE (`once` names
+    the cause, "unreachable" or "no-answer"), after _INTR_MARKS_WRITE_SAID: every Codex session's every call fails
+    the same way until the bus answers again, and _codex_postal_http clears the set on its next answer. One boolean
+    for both causes (the second review of 2026-09-19) let a bus that refused and then hung, with no answer between,
+    log only the refusal, so the log read "could not be reached" while requests were being written and left
+    unanswered. The suffix names that grain too (the third review, 2026-09-19): saying "once per fault spell" while
+    the latch was per cause made a refuse-then-hang spell's two lines each claim to be the spell's one. A store raise
+    is no spell and is said every time. The write is wrapped: a stderr that cannot be written (ENOSPC) must not turn
+    the per-fault sentence the session gets into the generic one."""
+    if once:
+        if once in _CODEX_POSTAL_SAID:
+            return
+        _CODEX_POSTAL_SAID.add(once)
+    try:
+        sys.stderr.write("codex postal tool %s for session %s: %s%s\n"
+                         % (tool or "?", sid or "?", cause,
+                            " (said once per cause per fault spell; re-armed when the mail service answers again)"
+                            if once else ""))
+    except Exception:
+        pass
+
+
+def _codex_postal_http(method, path, payload=None, tool="", sid=""):
+    """One loopback call to the bus for a Codex postal tool: (status, body, written). status 0 when the bus could not
+    be reached (nothing was written: a plain failure), -1 when the request was WRITTEN and no answer came inside
+    CODEX_POSTAL_TIMEOUT_S (written True: the bus may have acted, and the caller's sentence says so, the distinction
+    _bus_send_relay draws as `unknown`), else the bus's status with its JSON body (a dict, {} when unparsable).
+    `tool` and `sid` name the call in the kernel log's line for either fault (_codex_postal_log, once per fault
+    spell per cause); an answer of any status ends the spell."""
+    conn = http.client.HTTPConnection("127.0.0.1", _bus_port(), timeout=CODEX_POSTAL_TIMEOUT_S)
+    try:
+        try:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+            headers = {"X-Romp-Token": TOKEN}
+            if data is not None:
+                headers["Content-Type"] = "application/json; charset=utf-8"
+            conn.request(method, path, data, headers)
+        except Exception as e:
+            _codex_postal_log(tool, sid, "the mail service could not be reached, nothing written (%s: %s)"
+                              % (type(e).__name__, str(e)[:120]), once="unreachable")
+            return 0, {"error": "The mail service could not be reached just now (%s)." % e.__class__.__name__}, False
+        try:
+            resp = conn.getresponse()
+            raw = resp.read()
+        except Exception as e:
+            _codex_postal_log(tool, sid, "the request was written and no answer came within %.0f s (%s: %s)"
+                              % (CODEX_POSTAL_TIMEOUT_S, type(e).__name__, str(e)[:120]), once="no-answer")
+            return -1, {"error": "No answer from the mail service within %.0f s (%s)."
+                        % (CODEX_POSTAL_TIMEOUT_S, e.__class__.__name__)}, True
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _CODEX_POSTAL_SAID.clear()                    # an answer, whatever its status, ends the fault spell for both causes: the latch re-arms
+    try:
+        body = json.loads(raw.decode("utf-8", "replace") or "{}")
+    except Exception:
+        body = {}
+    return resp.status, (body if isinstance(body, dict) else {}), True
+
+
+def _codex_postal_fault(status, body, tool):
+    """The failed result's text for a bus answer that is not a 200: the bus's own error text verbatim (bus errors
+    never carry the token), else the status."""
+    err = body.get("error") if isinstance(body, dict) else None
+    if isinstance(err, str) and err:
+        return err
+    return "The mail service answered %s to %s." % (status, tool)
+
+
+def _codex_postal_call(tool, sid, name, args):
+    """postal(tool, sid, name, args) -> (ok, text) for the CodexBackend: the six postal tools onto the bus's routes, AS
+    session `sid` named `name`. The client-side checks are the bus's own MCP tool's (_mcp_call in
+    bin/romp-postal-service: to and body required, a kind outside the three refused rather than downgraded to
+    undeclared, tracked a JSON boolean and a delegate's only), and the delivered sentences are copied from it, pinned
+    equal by tests/test_codex_postal_tools.py. set_working writes the kernel's own store directly (the bus's tool
+    posts to this kernel for it). Never raises: the backend answers the call on the SDK's reader thread, and it
+    logs only a raise, so every fault here is one kernel log line of its own (_codex_postal_log)."""
+    try:
+        args = args if isinstance(args, dict) else {}
+        if tool == "send_message":
+            return _codex_postal_send(sid, name, args)
+        if tool == "check_inbox":
+            status, body, written = _codex_postal_http("GET", "/inbox?id=%s" % quote(sid), tool=tool, sid=sid)
+            if status == 200:
+                return True, (_codex_inbox_text(body.get("messages") or [], sid) or "No new messages.")
+            if status == 503 and body.get("unreadable"):
+                return False, "Your inbox cannot be read right now; your mail waits unread and the next check retries."
+            if status == -1:
+                return False, ("No answer from the mail service within %.0f s. If it had mail for you, that mail may "
+                               "now count as read without having been shown: say so to the person you work for."
+                               % CODEX_POSTAL_TIMEOUT_S)
+            if status == 0:
+                return False, "The mail service could not be reached just now; your mail waits and the next check retries."
+            return False, _codex_postal_fault(status, body, tool)
+        if tool == "list_agents":
+            status, body, written = _codex_postal_http("GET", "/agents?me=%s" % quote(name or ""), tool=tool, sid=sid)
+            if status != 200:
+                return False, _codex_postal_fault(status, body, tool)
+            return True, _codex_agents_text(body.get("agents") or [], sid)
+        if tool == "set_working":
+            if "text" not in args or args.get("text") is None:
+                # a MISSING param is never a clear command (the bus's rule): nothing changes
+                return False, ("set_working needs its `text` argument — nothing was changed. "
+                               "Pass text='' if you mean to clear your published note.")
+            text = str(args.get("text") or "")
+            _set_working_note(sid, text)
+            return True, ("Cleared your 'working on' note." if not text.strip()
+                          else "Published — others see: working on '%s'." % text)
+        if tool == "check_sent":
+            status, body, written = _codex_postal_http("GET", "/sent?id=%s" % quote(sid), tool=tool, sid=sid)
+            if status != 200:
+                return False, _codex_postal_fault(status, body, tool)
+            return True, _codex_receipts_text(body.get("sent") or [])
+        if tool == "recall_message":
+            to, rid = str(args.get("to") or ""), str(args.get("id") or "")
+            if not to and not rid:
+                return False, "Give 'to' (the recipient) and/or 'id' to recall."
+            status, body, written = _codex_postal_http("POST", "/recall", {"from_id": sid, "to": to, "id": rid},
+                                                       tool=tool, sid=sid)
+            if status != 200:
+                return False, _codex_postal_fault(status, body, tool)
+            return True, _codex_recall_text(body.get("removed") or [], body.get("kept") or [])
+        return False, "Unknown tool: %s" % tool
+    except Exception as e:
+        # a raise below the bus call (the working-note store, a renderer): no spell, so every one is said
+        _codex_postal_log(tool, sid, "the call raised (%s: %s)" % (type(e).__name__, str(e)[:200]))
+        return False, "The %s call failed: %s" % (tool, str(e) or e.__class__.__name__)
+
+
+def _codex_postal_send(sid, name, args):
+    to, body = str(args.get("to") or ""), str(args.get("body") or "")
+    kind = str(args.get("kind") or "").strip().lower()
+    if not to or not body:
+        return False, "Need both 'to' and 'body'."
+    if kind not in _CODEX_POSTAL_KINDS:
+        return False, ("Need 'kind': one of delegate (the recipient owns the work now), "
+                       "coordinate (aligning/heads-up), or question (you need an answer).")
+    tracked, terr = _as_bool(args.get("tracked"), "tracked")
+    if terr:
+        return False, "Cannot send: %s. Pass a JSON boolean (tracked: true), not a string." % terr
+    tracked = tracked and kind == "delegate"
+    payload = {"to": to, "from": name or "unknown", "from_id": sid, "body": body, "kind": kind}
+    if tracked:
+        payload["tracked"] = True
+    status, resp, written = _codex_postal_http("POST", "/send", payload, tool="send_message", sid=sid)
+    if status == -1:
+        # WRITTEN, no answer: the bus may have delivered, and a resend would send a delegate twice
+        return False, ("No answer from the mail service within %.0f s: the message may still have gone through. "
+                       "Check check_sent before resending." % CODEX_POSTAL_TIMEOUT_S)
+    if status != 200:
+        return False, _codex_postal_fault(status, resp, "send_message")
+    note = resp.get("note")
+    if note:
+        return True, "Message to '%s': %s" % (to, note)
+    if kind == "question":
+        return True, ("Delivered to '%s' as a question — you are now recorded as waiting on their "
+                      "reply until they answer. If you don't actually need a reply, recall this "
+                      "message and resend it as coordinate." % to)
+    if kind == "delegate" and tracked:
+        return True, ("Delivered to '%s' as a tracked handoff — they do the work, and it stays "
+                      "tracked under you as the one view with their live progress. You are NOT "
+                      "recorded as waiting; their completion checks it off." % to)
+    if kind == "delegate":
+        return True, ("Delivered to '%s' as a handoff — they own it now; you are NOT recorded as "
+                      "waiting (the user 2026-08-15: ownership transferred is not a dependency). "
+                      "If you genuinely need their report before you can proceed, send a question "
+                      "instead." % to)
+    return True, "Delivered to '%s'." % to
+
+
+def _codex_sender_disp(m):
+    """The sender name an inbox line shows; never a literal unknown a broken sender minted."""
+    nm = str(m.get("from") or "").strip()
+    return nm if nm and nm.lower() != "unknown" and nm != "?" else "an unidentified session"
+
+
+def _codex_inbox_text(msgs, me_id):
+    """A Codex session's check_inbox result: the bus's inbox shape (sender, date, the parked and own-message notes,
+    the message-id and kind markers the timeline joins on), with the reply hint naming the tool."""
+    if not msgs:
+        return ""
+    out = ["\U0001F4EC New message(s) from your romp peers:"]
+    for m in msgs:
+        d = " (%s)" % m["date"] if m.get("date") else ""
+        pk = "  ⏸ parked while you were offline — may be stale" if m.get("park") else ""
+        if me_id and m.get("from_id") == me_id:
+            pk += "  (this is YOUR OWN message, arrived back in your inbox: not a reply)"
+        mid = ("\n<!-- romp-msg-id: %s -->" % m["id"]) if m.get("id") else ""
+        if m.get("kind"):
+            mid += "\n<!-- romp-msg-kind: %s -->" % m["kind"]
+        out.append("\n— from %s%s%s:\n%s%s" % (_codex_sender_disp(m), d, pk, m.get("body", ""), mid))
+    out.append("\n" + _CODEX_REPLY_HINT)
+    return "\n".join(out)
+
+
+def _codex_agents_text(agents, me_id):
+    """A Codex session's list_agents result: one line per live session, yours marked by id, a comment thread named
+    by its parent, a remote row by host, the short stable id, the branch, and the working-note with the stale flag
+    when its session is not working now (a claim from a finished turn is read, never asked about)."""
+    if not agents:
+        return "(no live romp sessions)"
+    lines = []
+    for a in agents:
+        rid = str(a.get("id") or "")
+        nm = str(a.get("name") or "?")
+        mine = bool(me_id) and rid == me_id
+        tag = " (you)" if mine else (" [remote]" if a.get("remote") else "")
+        if a.get("thread") and not mine:
+            pn = next((x.get("name") for x in agents if x.get("id") == a.get("parent")), "")
+            tag = " (thread of %s)" % (pn or "a session here")
+        host = rid.split(":", 1)[0] if (a.get("remote") and ":" in rid) else ""
+        disp = ("%s:%s" % (host, nm)) if (host and not nm.startswith(host + ":")) else nm
+        short = (rid.rsplit(":", 1)[-1] if ":" in rid else rid)[:8]
+        br = ("  [%s]" % a["branch"]) if a.get("branch") else ""
+        wk = ""
+        if a.get("working"):
+            st = a.get("state", "")
+            stale = "  (idle now — claim may be stale)" if st and st != "working" else ""
+            wk = "  — %s%s" % (a["working"], stale)
+        lines.append("  %s%s%s%s%s" % (disp, tag, (" · %s" % short) if short else "", br, wk))
+    return "\n".join(lines)
+
+
+def _codex_hhmm(t):
+    try:
+        return datetime.fromtimestamp(int(t)).strftime("%H:%M")
+    except Exception:
+        return "?"
+
+
+def _codex_receipts_text(recs):
+    """A Codex session's check_sent result: the bus's receipt states in the kernel's words (read, recalled, bounced,
+    left for a host and awaiting its confirmation, queued or parked for one, delivered there but unread, pending)."""
+    if not recs:
+        return "No messages sent yet."
+    out = ["Your recent sent messages:"]
+    for r in recs[-15:]:
+        rid = r.get("id", "?")
+        if r.get("exec"):
+            st = "read %s" % _codex_hhmm(r["exec"])
+        elif r.get("recalled"):
+            st = "recalled %s" % _codex_hhmm(r["recalled"])
+        elif r.get("bounced"):
+            why = str(r.get("bouncedWhy") or "")
+            if why.startswith(_CODEX_REFUSAL_WHYS):
+                # a REFUSAL: nothing left this machine and no return note exists, so the refusal is the whole story
+                st = "bounced %s — refused — %s" % (_codex_hhmm(r["bounced"]), why)
+            else:
+                st = "bounced %s — undeliverable, returned to you" % _codex_hhmm(r["bounced"])
+        elif r.get("parked"):
+            if r.get("carried"):
+                st = "left for %s %s — awaiting delivery confirmation · id %s" % (r["parked"], _codex_hhmm(r["carried"]), rid)
+            elif r.get("parkedUp"):
+                st = "queued for relay to %s · id %s" % (r["parked"], rid)
+            elif "parkedUp" in r:
+                st = "parked for %s (unreachable) — delivers on reconnect · id %s" % (r["parked"], rid)
+            else:
+                st = "parked for %s · id %s" % (r["parked"], rid)
+        elif r.get("relayed"):
+            st = "delivered %s (not read yet) · id %s" % (_codex_hhmm(r["relayed"]), rid)
+        else:
+            st = "pending (not read yet) · id %s" % rid
+        out.append("  → %-18s sent %s · %s%s" % (r.get("to", "?"), _codex_hhmm(r.get("sent")), st,
+                                                  " · sent on your behalf" if r.get("onBehalf") else ""))
+    return "\n".join(out)
+
+
+def _codex_recall_text(removed, kept):
+    if not removed and not kept:
+        return ("Nothing to recall — no unread message from you matched "
+                "(it was already read or delivered, or nothing's queued there).")
+    lines = []
+    if removed:
+        lines.append("Recalled %d message(s) before they were read:" % len(removed))
+        for r in removed:
+            lines.append("  ✕ to %s: %s" % (r.get("to", "?"), r.get("body", "")))
+    for k in kept:
+        why = k.get("why") or ("already left for %s and can no longer be withdrawn" % k.get("host", "?"))
+        tail = "; they may already have read it" if k.get("carried") else ""
+        lines.append('  ✗ NOT recalled — to %s (id %s): it %s%s. "%s"'
+                     % (k.get("to", "?"), k.get("id", "?"), why, tail, k.get("body", "")))
+    return "\n".join(lines)
+
+
 ROMP_VOICE_WORDS = ("romp", "card", "board", "goal", "cleared", "dismissal", "status check", "nudge")
 #   the vocabulary an injected body must never speak to a session (CLAUDE.md, "Messages we inject into a session");
 #   tests/test_injected_voice.py's list of the same words, with the why of each, is pinned to this one
@@ -18593,7 +18917,11 @@ def _codex():
                     # switch: an opt-in override of the managed runtime, not the ambient PATH accident #929 closed
                     # (review find, 2026-09-07). Unset → None → the backend picks the managed runtime.
                     codex_bin=os.environ.get("ROMP_CODEX_BIN") or None,
-                    log=lambda m: sys.stderr.write("codex-backend: %s\n" % m))
+                    log=lambda m: sys.stderr.write("codex-backend: %s\n" % m),
+                    # the six postal tools every Codex thread carries as dynamic tools, serviced here over loopback
+                    # AS the calling session (2026-09-19): the kernel holds the token and knows the sid; the model
+                    # sees a tool, never a credential. None when STATE/codex-postal-tools says off (default on)
+                    postal=(_codex_postal_call if _codex_postal_tools_on() else None))
             except Exception:
                 sys.stderr.write("codex-backend unavailable: %s\n" % traceback.format_exc())
                 _codex_backend = False
@@ -20923,13 +21251,20 @@ def _bus_token_mark():
 
 def _bus_port_census(port, source):
     """One boot census line, and one more per change: the bus port the kernel dials, whether the record or the environment
-    named it, and the mismatch with the environment when there is one (the operator's pointer at the pair)."""
+    named it, and the mismatch with the environment when there is one (the operator's pointer at the pair). The write is
+    wrapped the way _codex_postal_log's is (the second review of 2026-09-19): the dial runs on every loopback call, outside
+    the Codex postal request's try, so a stderr that could not be written (ENOSPC) raised out of a first dial into
+    _codex_postal_call's catch-all, the session got the generic sentence instead of the per-fault one, and the bus was
+    never dialed. Said or not, the census stands as said: the memory is set before the write."""
     cur = (int(port), source)
     if _BUS_PORT_SAID[0] == cur:
         return
     _BUS_PORT_SAID[0] = cur
     note = "" if int(port) == BUS_PORT else " (ROMP_POSTAL_PORT says %d: the environment and the bus disagree; the record wins)" % BUS_PORT
-    sys.stderr.write("romp-kernel: postal bus dialed on 127.0.0.1:%d from the %s%s\n" % (int(port), source, note))
+    try:
+        sys.stderr.write("romp-kernel: postal bus dialed on 127.0.0.1:%d from the %s%s\n" % (int(port), source, note))
+    except Exception:
+        pass
 SSH_BIN = os.environ.get("ROMP_SSH_BIN", "ssh")                  # overridable for tests
 SSH_CONFIG = Path(os.environ.get("ROMP_SSH_CONFIG") or (Path.home() / ".ssh" / "config"))
 _REMOTE_KERNEL_PORT = int(os.environ.get("ROMP_REMOTE_KERNEL_PORT", str(PORT)))   # remote kernels default to our port

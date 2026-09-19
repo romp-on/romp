@@ -20,11 +20,16 @@ Shape of the machine:
 - Auth is machine-global (`codex login`): a missing login is surfaced PER SESSION via launch_error,
   loudly, the moment a session tries to run (the 2026-07-28 rule: never a silent non-start).
 
+- Mail: every thread carries the six postal tools as Codex DYNAMIC TOOLS (POSTAL_TOOL_SPECS); the app-server's
+  `item/tool/call` lands in _handle_approval and the kernel's `postal` callable posts to the bus AS the session,
+  so no credential enters the sandbox and Sandboxed and Auto mail alike (2026-09-19).
+
 Everything Claude-only returns its documented empty value and the kernel stays loud about it:
 set_fast/set_auth/stop_task/rewind_files → False, on_ask → False, current_ask → None.
 """
 from __future__ import annotations
 
+import copy
 import errno
 import fcntl
 import json
@@ -55,6 +60,10 @@ echo_text_key = (sys.modules.get("romp_session_backend")
                  or load_source("romp_session_backend_keys", HERE / "session_backend.py")).echo_text_key
 
 SDK_PIN = "openai-codex==0.144.4"     # bin/romp-codex-setup installs exactly this into codexvenv
+# The postal tools ride fields this SDK's generated params do not describe (`dynamicTools`; `developerInstructions`
+# it does) and its _params_dict passes a plain dict through unchanged. Live-probed 2026-09-19 on runtime 0.153.3
+# through this client (tests/smoke_codex_live.py re-runs the wire-shape half): a bump that validates dicts against
+# ThreadStartParams would drop the key silently, and the unit tests' fake accepts any dict, so re-run the smoke.
 SETUP_HINT = ("Session not created: the Codex backend isn't installed. "
               "Run romp-codex-setup, then try again.")
 LOGIN_HINT = "Codex isn't logged in on this machine — run: codex login"
@@ -94,6 +103,105 @@ def _approval_params(mode="sandboxed"):
         raise ValueError("Unsupported Codex mode: %s" % mode)
     # Reset the reviewer as well: thread/resume otherwise inherits a previous Auto selection.
     return {"approvalPolicy": APPROVAL_POLICY, "approvalsReviewer": "user"}
+
+# ── the postal tools a Codex thread carries (2026-09-19) ─────────────────────────────────────────────────────
+# A Codex session mails through TOOL CALLS the kernel performs on its behalf, never through a shell command. The bus
+# and the kernel accept one credential, the kernel's serve token, and the sandbox profile above leaves the state
+# directory that holds it unmounted on purpose (docs/codex.md, Sandboxing): `romp mail` inside the sandbox fails on
+# credential, identity and reachability alike, and the one way it ever worked was an out-of-sandbox escalation that
+# Codex's own reviewer allowed on some threads and refused on others. So the six postal tools are registered as Codex
+# DYNAMIC TOOLS on thread/start (and again on thread/resume, harmless: the registration persists in the rollout's
+# session_meta; probed live 2026-09-19 on runtime 0.153.3 through the pinned 0.144.4 client, whose _params_dict passes
+# a plain dict through unchanged, its ThreadStartParams knowing no such field). Each call comes back as the
+# `item/tool/call` server request, which _handle_approval routes to _postal_tool_call, and the kernel's callable
+# (`postal`, kernel.py _codex_postal_call) posts to the bus over loopback AS the session: no credential enters the
+# sandbox, the sender is the thread's own sid by construction, and Sandboxed and Auto behave the same (no approval or
+# reviewer step touches a dynamic tool call in either mode: probed).
+#
+# POSTAL_TOOL_SPECS is a KEEP-IN-SYNC copy of the bus's MCP_TOOLS (bin/romp-postal-service) as function specs
+# (`type`, `name`, `description`, `inputSchema`; a spec without a description refuses the whole thread/start), and
+# POSTAL_INSTRUCTIONS of its MCP_INSTRUCTIONS minus the paragraph about Claude Code's own messaging (a Codex model has
+# no such thing to be steered away from). A copy, not an import, on purpose: the bus is its own process behind the
+# kernel's _restart_class boundary and imports nothing from kernel/, the kernel imports nothing from postal/, and the
+# two already carry one text each way under that rule (_serve_token_read_or_mint, the same function in both).
+# tests/test_codex_postal_tools.py loads the bus by path and pins the two equal, name for name and schema for schema.
+POSTAL_TOOL_SPECS = [
+    {"type": "function", "name": "send_message",
+     "description": "Message a live romp session by name; it arrives at the end of the recipient's current turn. They share none of your context, so put the whole point in your first sentence. Live-only (see list_agents).",
+     "inputSchema": {"type": "object",
+                     "properties": {"to": {"type": "string", "description": "recipient romp session name"},
+                                    "body": {"type": "string", "description": "message text"},
+                                    "kind": {"type": "string", "enum": ["delegate", "coordinate", "question"],
+                                             "description": "what this message does: delegate = the recipient owns the work now; coordinate = aligning or a heads-up, reply optional; question = you need an answer"},
+                                    "tracked": {"type": "boolean",
+                                                "description": "delegate only: a report-back handoff — the work stays tracked under YOU as the one view, with the recipient's live progress; their copy files as its satellite. Omit for a plain handoff the recipient owns outright."}},
+                     "required": ["to", "body", "kind"]}},
+    {"type": "function", "name": "check_inbox",
+     "description": "Read and clear any messages other romp sessions have sent you. Messages are also delivered automatically at the end of each turn, so you rarely need to call this.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"type": "function", "name": "list_agents",
+     "description": "List live romp sessions you can message (yours marked), each with its git branch and working-note. Check before editing shared files to avoid collisions; discount a note flagged '(idle now, claim may be stale)' and never wake an idle peer to ask if it still owns a file.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"type": "function", "name": "set_working",
+     "description": "Publish what you're working on (files/surface) so peers steer clear; your branch shows automatically. Empty text clears it (romp also auto-clears once your work is done and the session idles).",
+     "inputSchema": {"type": "object",
+                     "properties": {"text": {"type": "string", "description": "short note, e.g. 'editing postal/postal_service.py + the drain hook'"}}}},
+    {"type": "function", "name": "check_sent",
+     "description": "See your recently sent messages and whether each was read/acted on by the recipient yet, or is still pending — instead of asking 'did you get it?'.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"type": "function", "name": "recall_message",
+     "description": "Withdraw a message that is still here when the ask went moot: unread mail to a session on this machine, or mail to another machine that has not left for it yet (check_sent shows which). Give 'to' to withdraw your message(s) to them, or add 'id' (from check_sent) for one. Only your own; anything already read, or already on its way to another machine, is gone.",
+     "inputSchema": {"type": "object",
+                     "properties": {"to": {"type": "string", "description": "recipient session name (or UUID) whose queued message(s) from you to cancel"},
+                                    "id": {"type": "string", "description": "optional specific message id (from check_sent) to recall just that one"}}}},
+]
+# the arguments each tool declares: the only ones _postal_tool_call forwards (a forged from_id or id is dropped)
+_POSTAL_TOOL_ARGS = {t["name"]: frozenset((t["inputSchema"].get("properties") or {}).keys()) for t in POSTAL_TOOL_SPECS}
+
+POSTAL_INSTRUCTIONS = """\
+Messaging peer romp sessions. A peer shares none of your context, only the bytes you send.
+
+Message a peer only for something substantive: a question, information they need, or a result worth sharing. A message wakes the recipient and costs it a turn, so never send just to acknowledge, and stop once the exchange is done.
+
+Write so the recipient can act from your first line:
+- Declare the message kind via the required `kind` parameter: delegate (the recipient owns this now), coordinate (aligning/heads-up, reply optional), or question (reply required).
+- First sentence is the whole point (the ask or conclusion), not how you got there.
+- Name things exactly: files by path, sessions by name. Mark verified vs. suspected, and whose ask it is.
+- End with the reply you need, or that none is. One point per message.
+
+Before editing a shared repo, run list_agents and read peers' branches + working-notes (overlap only collides on the SAME branch), and publish yours with set_working. Resolve ownership by reading that state, never by messaging "do you still own this?": an idle peer's note may be stale, and a peer with no note holds nothing. Declare what you own in your first line. Never wake an idle session just to coordinate.
+
+Addressing is live-only: you can message only currently-live sessions (list_agents). Dead names error, with no parked mail or reviving. A session's stable id (the uuid in list_agents) also works as the recipient — rename-proof, unique by construction.
+
+A name is not guaranteed unique. When more than one live session answers to it the send is refused and the candidates are listed as `host:name`: pick one and resend rather than assuming the first. Your OWN name is refused outright, because a message there lands in your own inbox looking exactly like a reply from someone else. Your row in list_agents is the one marked `(you)`.
+
+An isolation refusal is FINAL. A mailbox toggled off is a boundary the user drew: if send_message refuses for isolation, do NOT reroute the content through any other door (the kernel's /send route, shared files, another peer as relay). Report the refusal to the user and stop — only they lift the isolation.
+"""
+
+
+def _postal_tools(postal):
+    """The thread/start and thread/resume params that register the postal tools: the six dynamic tools, and the
+    bus's instructions as the thread's developer instructions (a dynamic tool carries no instructions block of its
+    own, so the kind semantics and the isolation rule would otherwise never reach the model; the pinned
+    ThreadStartParams and ThreadResumeParams both know `developerInstructions`). {} when the backend was handed no
+    `postal` callable: then no tool is registered, rather than a tool that answers nothing. dynamicTools on
+    turn/start is accepted and IGNORED by the runtime (probed 2026-09-19), so turn params carry none.
+
+    What each call site's copy does (probed 2026-09-19 on 0.153.3): at thread/START both fields count, and both
+    persist with the thread (the tools in the rollout's session_meta, the instructions as the thread's first
+    developer message, replayed on every resume and across kernel restarts). At thread/RESUME the tools are
+    accepted and harmless (the persisted registration stands) and the instructions are accepted and IGNORED, so
+    a resume cannot revise an existing thread's instructions: a changed text reaches only threads started after
+    it. Nor can a resume ADD a registration (read against openai/codex at rust-v0.153.3 for the review of
+    2026-09-19: ThreadResumeParams has no dynamic_tools field, resume_thread_with_history builds its
+    StartThreadOptions with dynamic_tools empty, and the session falls back to the rollout's persisted
+    session_meta), so a thread started without the tools stays without them for its life; the smoke's resume leg
+    shows persistence, not addition. The same dict rides both calls anyway: the resume's copy is harmless, and one
+    shape is one test."""
+    if postal is None:
+        return {}
+    return {"dynamicTools": copy.deepcopy(POSTAL_TOOL_SPECS), "developerInstructions": POSTAL_INSTRUCTIONS}
+
 
 SEED_TAIL = 200   # records whose uuids seed the normalizer's dedup on re-attach (replay guard)
 CLIENT_RETRY_MIN = 0.25
@@ -326,7 +434,7 @@ class _Session:
 
 class CodexBackend:
     def __init__(self, state_dir, notify=None, poke=None, push=None, push_session=None,
-                 codex_bin=None, log=None, client_factory=None):
+                 codex_bin=None, log=None, client_factory=None, postal=None):
         self.state = Path(state_dir)
         self.root = self.state / "codex"
         self.projects = self.root / "projects"
@@ -336,6 +444,10 @@ class CodexBackend:
         self.push = push or (lambda: None)
         self.push_session = push_session or (lambda sid: None)
         self.codex_bin = codex_bin
+        # postal(tool, sid, name, args) -> (ok, text): the kernel's loopback call to the bus AS the session, behind the
+        # six dynamic tools every thread registers (_postal_tools); None registers no tool, said once (_postal_params)
+        self.postal = postal
+        self._postal_unset_said = False
         raw_log = log or (lambda m: sys.stderr.write("codex-backend: %s\n" % m))
 
         def _log(m):
@@ -821,6 +933,11 @@ class CodexBackend:
         here would stall responses and notifications for every session, including interrupts.
         Decline supported requests immediately and make the limitation visible.
         """
+        if method == "item/tool/call":
+            # a dynamic tool call is not a request for a human (2026-09-19): the postal tools are the kernel's to
+            # answer, and this branch comes BEFORE the declined-request log line and the chat warn below, which
+            # would otherwise toast on every send
+            return self._postal_tool_call(params)
         text = ("Codex requested input or manual approval that romp cannot handle yet. "
                 "The request was declined; no permission was granted.")
         self.log("manual Codex request declined: %s" % method)
@@ -843,6 +960,69 @@ class CodexBackend:
         # request, so nothing is granted and the transport stays up. Loud on the log and the session.
         self.log("unknown Codex server request %s declined with an empty answer; no permission granted" % method)
         return {}
+
+    def _postal_params(self):
+        """_postal_tools for this backend's callable, merged into every thread/start and thread/resume. A backend
+        built without one says so ONCE, at the first thread it starts, so a Codex session with no mail is a logged
+        decision and never a quiet absence (2026-09-19)."""
+        extra = _postal_tools(self.postal)
+        if not extra and not self._postal_unset_said:
+            self._postal_unset_said = True
+            self.log("postal tools not registered on Codex threads: this backend was built without a postal "
+                     "callable, so its sessions cannot mail peers")
+        return extra
+
+    def _postal_tool_call(self, params):
+        """Answer one `item/tool/call` server request (a postal tool the thread carries, _postal_tools) in the shape the
+        app-server accepts: {"success", "contentItems": [{"type": "inputText", "text"}]} (2026-09-19).
+
+        Runs inline on the pinned SDK's single reader thread, the constraint the #930 find recorded in
+        _handle_approval, so it NEVER raises, whatever the request carries: a fault is a failed result carrying the
+        exception's text, and a log line. And it holds NO backend lock while the kernel's callable runs: the bus's
+        /send resolves its recipient through the kernel's GET /sessions, which calls live_sessions() here and takes
+        _sessions_lock and every s.lock, so a lock held across the call would make every Codex send wait out the
+        bus's kernel timeout and then this side's bus timeout, silently. The sid and name are copied out under the
+        locks, which are released before the call; the callable itself is bounded (the kernel's: 3 s on loopback).
+
+        The session is bound by the request's threadId ONLY. The backend minted the sid and started the thread, so
+        the sender is exact by construction; a threadId no live session holds is refused with a retry sentence and
+        never resolved by name or by the only live session. No turnId fallback: the worker stores s.turn_id after
+        turn_start returns, the call arrives on the reader thread, and an early call would miss. Only the arguments
+        the tool's schema declares are forwarded, so a `from_id` or `id` a model puts into send_message's arguments
+        is dropped here and the bus never sees a claimed sender. A call can arrive with no callable installed (the
+        registration persists in the rollout across kernels): refused, never a tool that pretends."""
+        def answer(ok, text):
+            return {"success": bool(ok), "contentItems": [{"type": "inputText", "text": str(text)}]}
+        tool = None
+        try:
+            p = params if isinstance(params, dict) else {}
+            tool = p.get("tool")
+            allowed = _POSTAL_TOOL_ARGS.get(tool) if isinstance(tool, str) else None
+            if allowed is None:
+                self.log("codex tool call refused: unknown tool %r" % (tool,))
+                return answer(False, "Unknown tool: %s" % tool)
+            if self.postal is None:
+                self.log("codex tool call refused: %s called but no postal callable is installed" % tool)
+                return answer(False, "Mail is not available in this session: the %s tool is not connected." % tool)
+            tid = p.get("threadId")
+            sid = name = None
+            if isinstance(tid, str) and tid:
+                for _sid, s in self._session_items():
+                    with s.lock:
+                        if s.tid == tid and not s.dead:
+                            sid, name = s.sid, s.name
+                            break
+            if sid is None:
+                self.log("codex tool call refused: %s from thread %r, which no live session holds" % (tool, tid))
+                return answer(False, "This session is not matched to its thread yet; try %s again in a moment."
+                              % tool)
+            raw = p.get("arguments")
+            args = {k: v for k, v in raw.items() if k in allowed} if isinstance(raw, dict) else {}
+            ok, text = self.postal(tool, sid, name, args)      # no backend lock held here (see above)
+            return answer(ok, text)
+        except BaseException as e:
+            self.log("codex tool call %s failed: %s" % (tool, traceback.format_exc()))
+            return answer(False, "The %s call failed: %s" % (tool or "tool", str(e) or e.__class__.__name__))
 
     def _check_auth(self, client):
         """A missing `codex login` must surface as text on the session, not as a hung turn."""
@@ -1345,7 +1525,7 @@ class CodexBackend:
             return sid
         try:
             resp = c.thread_start({"cwd": cwd, **_approval_params(),
-                                   **_execution_permissions(cwd, thread_start=True)})
+                                   **_execution_permissions(cwd, thread_start=True), **self._postal_params()})
             tid = resp.thread.id
             model = getattr(resp, "model", "") or ""
         except Exception as e:
@@ -1520,7 +1700,7 @@ class CodexBackend:
             create = tid.startswith("pending-") or tid.startswith("failed-")
         if create:
             params = {"cwd": cwd, **_approval_params(s.mode),
-                      **_execution_permissions(cwd, thread_start=True)}
+                      **_execution_permissions(cwd, thread_start=True), **self._postal_params()}
             if model:
                 params["model"] = model    # picked while the row was a placeholder: born on it
             resp = c.thread_start(params)
@@ -1575,7 +1755,7 @@ class CodexBackend:
             self.push()
             return True
         c.thread_resume(tid, {"cwd": cwd, **_approval_params(s.mode),
-                              **_execution_permissions(cwd, thread_start=True)})
+                              **_execution_permissions(cwd, thread_start=True), **self._postal_params()})
         loaded_client_generation = self._client_generation_for(c)
         with s.lock:
             if s.dead:

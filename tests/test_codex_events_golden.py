@@ -248,6 +248,56 @@ class Chain(unittest.TestCase):
         self.assertEqual(use["input"], {"to": "web"})
         self.assertTrue(recs[2]["message"]["content"][0]["is_error"])
 
+    def test_a_dynamic_tool_call_renders_as_the_postal_tool_pair(self):
+        # a Codex DYNAMIC tool call (the kernel-serviced postal tools, 2026-09-19) lands as the tool_use/tool_result
+        # pair an mcpToolCall does, named mcp__romp-postal-service__<tool>: exact parity with a Claude session's
+        # postal send in chat, the timeline and the judges' view. The item has no server or error field (the SDK
+        # model: arguments, contentItems, durationMs, id, namespace, status, success, tool); its text is the
+        # inputText content items. test_phase2_vocabulary_counted_not_silent stays green: it pins plan and
+        # subAgentActivity only, and a dynamic tool call is no longer counted as skipped.
+        args = {"to": "web", "body": "the tests are green", "kind": "coordinate"}
+        n = norm()
+        recs = feed(n,
+                    item_started({"type": "dynamicToolCall", "id": "exec-1", "namespace": None,
+                                  "tool": "send_message", "arguments": args, "status": "inProgress",
+                                  "contentItems": None, "success": None, "durationMs": None}),
+                    item_completed({"type": "dynamicToolCall", "id": "exec-1", "namespace": None,
+                                    "tool": "send_message", "arguments": args, "status": "completed",
+                                    "contentItems": [{"type": "inputText", "text": "Delivered to 'web'."}],
+                                    "success": True, "durationMs": 3}))
+        self.assertEqual([r["type"] for r in recs], ["assistant", "user"])
+        use = recs[0]["message"]["content"][0]
+        self.assertEqual((use["type"], use["id"], use["name"], use["input"]),
+                         ("tool_use", "exec-1", "mcp__romp-postal-service__send_message", args))
+        res = recs[1]["message"]["content"][0]
+        self.assertEqual((res["type"], res["tool_use_id"], res["content"]),
+                         ("tool_result", "exec-1", "Delivered to 'web'."))
+        self.assertNotIn("is_error", res)
+        self.assertEqual(n.skipped, {})
+        assert_chain(self, recs)
+
+    def test_a_failed_or_namespaced_dynamic_tool_call(self):
+        n = norm()
+        # attached at completed only (a resume mid-turn): the invocation is written first; a namespace names the
+        # server; success False is the error signal
+        recs = feed(n, item_completed({"type": "dynamicToolCall", "id": "exec-2", "namespace": "notes",
+                                       "tool": "check_inbox", "arguments": {}, "status": "failed",
+                                       "contentItems": [{"type": "inputText", "text": "Unknown tool: check_inbox"}],
+                                       "success": False, "durationMs": 1}))
+        self.assertEqual([r["type"] for r in recs], ["assistant", "user"])
+        self.assertEqual(recs[0]["message"]["content"][0]["name"], "mcp__notes__check_inbox")
+        res = recs[1]["message"]["content"][0]
+        self.assertTrue(res["is_error"])
+        self.assertEqual(res["content"], "Unknown tool: check_inbox")
+        # status failed with no content and success unknown: still an error, with a placeholder the reader can see
+        recs = feed(n, item_completed({"type": "dynamicToolCall", "id": "exec-3", "namespace": None,
+                                       "tool": "set_working", "arguments": {"text": "x"}, "status": "failed",
+                                       "contentItems": None, "success": None, "durationMs": None}))
+        res = recs[1]["message"]["content"][0]
+        self.assertTrue(res["is_error"])
+        self.assertEqual(res["content"], "[tool call failed]")
+        self.assertEqual(n.skipped, {})
+
     def test_user_message_dedup(self):
         n = norm()
         recs = feed(n,

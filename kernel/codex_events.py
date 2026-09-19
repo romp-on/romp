@@ -73,6 +73,35 @@ def _user_input_texts(content):
     return [p.strip() for p in parts if p and p.strip()]
 
 
+# The name a Codex DYNAMIC tool call renders under: mcp__romp-postal-service__<tool>, exactly the name a Claude
+# session's postal MCP call carries, so chat, the timeline and the judges see one shape for a postal send from
+# either backend (2026-09-19; the item's own `namespace` wins when a spec sets one). The only dynamic tools a romp
+# thread carries are the six postal tools the kernel services (codex_backend.POSTAL_TOOL_SPECS).
+POSTAL_TOOL_SERVER = "romp-postal-service"
+
+
+def _tool_args(args):
+    """A tool call's arguments as the tool_use input dict: a dict as is, anything else wrapped, None empty."""
+    return args if isinstance(args, dict) else ({"arguments": args} if args is not None else {})
+
+
+def _dynamic_tool_name(item):
+    return "mcp__%s__%s" % (item.get("namespace") or POSTAL_TOOL_SERVER, item.get("tool") or "?")
+
+
+def _dynamic_text(item):
+    """One text blob for a dynamicToolCall's outcome: its inputText content items joined (other kinds summarized
+    by type). The item has no error field (the SDK model: arguments, contentItems, durationMs, id, namespace,
+    status, success, tool): failure is `success` False or status failed, read by the caller."""
+    parts = []
+    for b in item.get("contentItems") or []:
+        if isinstance(b, dict) and b.get("type") == "inputText" and b.get("text"):
+            parts.append(b["text"])
+        elif isinstance(b, dict) and b.get("type"):
+            parts.append("[%s]" % b["type"])
+    return "\n".join(parts)
+
+
 def _mcp_text(item):
     """One text blob for an mcpToolCall's outcome: the error message when it failed, else the
     result's MCP content blocks (text kept, the rest summarized by type)."""
@@ -307,10 +336,12 @@ class ThreadNormalizer:
                                                        {"query": item.get("query") or ""})]
             if t == "mcpToolCall":
                 name = "mcp__%s__%s" % (item.get("server") or "?", item.get("tool") or "?")
-                args = item.get("arguments")
-                return self._flush() + [self._tool_use(iid, ts_ms, name,
-                                                       args if isinstance(args, dict) else
-                                                       ({"arguments": args} if args is not None else {}))]
+                return self._flush() + [self._tool_use(iid, ts_ms, name, _tool_args(item.get("arguments")))]
+            if t == "dynamicToolCall":
+                # a postal tool call the kernel services (2026-09-19): the invocation shows the moment it starts,
+                # like an mcpToolCall's, so a send in flight is visible while the bus answers
+                return self._flush() + [self._tool_use(iid, ts_ms, _dynamic_tool_name(item),
+                                                       _tool_args(item.get("arguments")))]
             if t == "contextCompaction":
                 # nothing to write at started (2026-09-19): the item carries no content, and the
                 # boundary is true only at completed, which the runtime emits only after it replaced
@@ -368,12 +399,23 @@ class ThreadNormalizer:
             out = self._flush()
             if iid not in self._tool_open:
                 name = "mcp__%s__%s" % (item.get("server") or "?", item.get("tool") or "?")
-                args = item.get("arguments")
-                out.append(self._tool_use(iid, ts_ms, name,
-                                          args if isinstance(args, dict) else
-                                          ({"arguments": args} if args is not None else {})))
+                out.append(self._tool_use(iid, ts_ms, name, _tool_args(item.get("arguments"))))
             out.append(self._tool_result(iid, ts_ms, _cap(_mcp_text(item)),
                                          is_error=bool(item.get("error"))))
+            return out
+        if t == "dynamicToolCall":
+            # the mcpToolCall shape for a kernel-serviced postal tool (2026-09-19): without this mapping a Codex
+            # session's send never reached chat or the judges, a silent drop of exactly the coordination the
+            # user watches for. Failure is `success` False or status failed (no error field on the item); a
+            # failed call with no content still reads as failed, never as a clean empty result.
+            out = self._flush()
+            if iid not in self._tool_open:
+                out.append(self._tool_use(iid, ts_ms, _dynamic_tool_name(item), _tool_args(item.get("arguments"))))
+            failed = item.get("success") is False or item.get("status") == "failed"
+            text = _dynamic_text(item)
+            if not text and failed:
+                text = "[tool call failed]"
+            out.append(self._tool_result(iid, ts_ms, _cap(text), is_error=failed))
             return out
         if t == "webSearch":
             out = self._flush()

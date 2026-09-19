@@ -243,10 +243,10 @@ class FakeClient:
         return n
 
 
-def build(tmp=None, factory=None):
+def build(tmp=None, factory=None, **kw):
     tmp = tmp or tempfile.mkdtemp()
     fake = FakeClient()
-    be = cb.CodexBackend(tmp, client_factory=(factory or (lambda: fake)))
+    be = cb.CodexBackend(tmp, client_factory=(factory or (lambda: fake)), **kw)   # kw: postal=, log= (2026-09-19)
     return be, fake, tmp
 
 
@@ -661,6 +661,182 @@ class ExplicitBinFailures(unittest.TestCase):
         # errno line as the shape _client_failure_text frames — the managed path is left exactly alone
         err = OSError(2, "No such file or directory", "codex")
         self.assertEqual(self._probe(None, err), str(err))
+
+
+class PostalTools(unittest.TestCase):
+    """The six postal tools ride every Codex thread as Codex DYNAMIC TOOLS, and the kernel services the calls
+    (2026-09-19). thread/start and thread/resume carry `dynamicTools` (the bus's six specs, a KEEP-IN-SYNC copy in the
+    backend) and the bus's instructions as the thread's `developerInstructions`; the app-server's `item/tool/call`
+    server request reaches _handle_approval FIRST (before the declined-request warn), is bound to the session by its
+    threadId ONLY, forwards only the arguments the tool's schema declares, runs the kernel's callable with NO backend
+    lock held, and never raises out of the SDK's single reader thread. The FakeClient mints thread ids T-1, T-2, ...
+    in spawn order. Synthetic fixtures only (web/api, /TESTDIR, placeholder uuids); the fake postal takes no token."""
+    TOOLS = ["check_inbox", "check_sent", "list_agents", "recall_message", "send_message", "set_working"]
+
+    @staticmethod
+    def _call(tid, tool, args, turn="t-1", call="exec-1"):
+        # the request's params, as the probe recorded them on the wire (namespace null for a plain function spec)
+        return {"threadId": tid, "turnId": turn, "callId": call, "namespace": None, "tool": tool, "arguments": args}
+
+    def test_thread_start_and_resume_register_the_postal_tools_as_dynamic_tools(self):
+        be, fake, _ = build(postal=lambda *a: (True, ""))
+        sid = be.spawn("web", "/TESTDIR")
+        params = fake.called("thread_start")[0][1]
+        tools = params["dynamicTools"]
+        self.assertEqual(sorted(t["name"] for t in tools), self.TOOLS)
+        for t in tools:
+            self.assertEqual(t["type"], "function")
+            self.assertIsInstance(t["inputSchema"], dict)
+            self.assertTrue(t["description"],
+                            "a spec without a description refuses the whole thread/start (probed 2026-09-19)")
+        send = next(t for t in tools if t["name"] == "send_message")
+        self.assertIn("kind", send["inputSchema"]["required"])
+        self.assertEqual(params["developerInstructions"], cb.POSTAL_INSTRUCTIONS)
+        # the same on thread/resume: the registration persists server-side and passing it again is harmless
+        # (probed 2026-09-19). It ADDS nothing: ThreadResumeParams has no dynamic_tools at rust-v0.153.3, so a
+        # thread started without the tools stays without them for its life (the review of 2026-09-19)
+        self.assertTrue(be.kill(sid))
+        self.assertTrue(be.resume("web", sid))
+        self.assertTrue(be.send(sid, "again"))
+        self.assertTrue(until(lambda: len(fake.called("thread_resume")) == 1))
+        resume_params = fake.called("thread_resume")[0][2]
+        self.assertEqual(resume_params["dynamicTools"], tools)
+        self.assertEqual(resume_params["developerInstructions"], cb.POSTAL_INSTRUCTIONS)
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
+
+    def test_a_pending_row_turned_real_by_prepare_thread_registers_the_tools_too(self):
+        # the create branch of _prepare_thread (a pending- or failed- row: a spawn whose thread/start failed,
+        # turned real on its first turn) is the third site that merges _postal_params into thread params; the
+        # registration test above drives spawn's and the resume's, and this one stayed unpinned until the review
+        # (2026-09-19). A failed- row takes the same branch, so one pending- case covers both.
+        be, fake, _ = build(postal=lambda *a: (True, ""))
+        sid = be.spawn("web", "/TESTDIR")
+        spawned = fake.called("thread_start")[0][1]["dynamicTools"]
+        s = be._session(sid)
+        s.tid = "pending-%s" % sid[:8]         # force the create path
+        s.loaded = False
+        self.assertTrue(be._prepare_thread(s, fake))
+        params = fake.called("thread_start")[-1][1]
+        self.assertEqual(params.get("dynamicTools"), spawned, "the spawn's own list, not a literal")
+        self.assertEqual(params.get("developerInstructions"), cb.POSTAL_INSTRUCTIONS)
+        self.assertFalse(s.tid.startswith("pending-"))
+
+    def test_a_postal_tool_call_mails_as_the_calling_thread_and_only_that_thread(self):
+        # the callable is ASSIGNED after construction in the four handler tests (a plain attribute write, which the
+        # stock backend accepts), so each goes red on its own assertion rather than on the constructor refusing the
+        # keyword; only the registration test above needs the keyword
+        seen = []
+
+        def postal(tool, sid, name, args):
+            seen.append((tool, sid, name, args))
+            return True, "Delivered to 'web'."
+        logs = []
+        be, fake, _ = build(log=logs.append)
+        be.postal = postal
+        be.spawn("web", "/TESTDIR")                      # T-1
+        api = be.spawn("api", "/TESTDIR")                # T-2
+        notices = []
+        be.notify = lambda app, msg: notices.append(msg)
+        out = be._handle_approval("item/tool/call", self._call("T-2", "send_message", {
+            "to": "web", "body": "the tests are green", "kind": "coordinate",
+            "from_id": "11111111-2222-3333-4444-555555555555",   # a forged sender: dropped, never forwarded
+            "id": "m-forged"}))                                    # not in send_message's schema: dropped too
+        self.assertEqual(seen, [("send_message", api, "api",
+                                 {"to": "web", "body": "the tests are green", "kind": "coordinate"})])
+        self.assertEqual(out, {"success": True, "contentItems": [{"type": "inputText", "text": "Delivered to 'web'."}]})
+        # a tool call is not a request for a human: no warn toast and no "declined" line (every send would
+        # otherwise toast a warning, the refuter's amendment 4)
+        self.assertEqual(notices, [])
+        self.assertFalse(any("declined" in line for line in logs), logs)
+
+    def test_the_postal_callable_runs_with_no_backend_lock_held(self):
+        # the bus's /send resolves its recipient through the kernel's GET /sessions, which calls live_sessions()
+        # here and takes _sessions_lock and every s.lock: a lock held across the call would make every send
+        # wait out the bus's kernel timeout and this side's bus timeout, silently (2026-09-19). Probed from
+        # ANOTHER thread on purpose: both locks are re-entrant, so a same-thread call passes under a held lock.
+        holder = {}
+        probe = {}
+
+        def postal(tool, sid, name, args):
+            be = holder["be"]
+
+            def other_thread():
+                probe["rows"] = be.live_sessions()
+                probe["sessions_lock"] = be._sessions_lock.acquire(timeout=2)
+                if probe["sessions_lock"]:
+                    be._sessions_lock.release()
+            t = threading.Thread(target=other_thread, daemon=True)
+            t.start()
+            t.join(3)
+            probe["finished"] = not t.is_alive()
+            return True, "ok"
+        be, fake, _ = build()
+        be.postal = postal
+        holder["be"] = be
+        sid = be.spawn("web", "/TESTDIR")
+        out = be._handle_approval("item/tool/call", self._call("T-1", "list_agents", {}))
+        self.assertIn("success", out, "the tool call is answered in the tool-result shape, not the SDK's {}")
+        self.assertTrue(out["success"])
+        self.assertTrue(probe.get("finished"), "live_sessions() from another thread blocked during the call")
+        self.assertTrue(probe.get("sessions_lock"), "_sessions_lock was held during the call")
+        self.assertIn(sid, probe["rows"])
+
+    def test_a_postal_fault_never_raises_out_of_the_reader_thread(self):
+        # the sibling of test_a_dead_stderr_never_raises_out_of_the_approval_handler: the handler runs inline on the
+        # SDK's single reader thread, and a raise there ends the transport for every Codex session; the raising
+        # logger goes in through the constructor (the wrap happens once, there)
+        def postal(tool, sid, name, args):
+            raise RuntimeError("bus down")
+
+        def dead_stderr(m):
+            raise OSError(28, "No space left on device")
+        be = cb.CodexBackend(tempfile.mkdtemp(), client_factory=FakeClient, log=dead_stderr)
+        be.postal = postal
+        be.spawn("web", "/TESTDIR")
+        out = be._handle_approval("item/tool/call", self._call("T-1", "check_inbox", {}))
+        self.assertIn("success", out, "answered in the tool-result shape, the fault inside it")
+        self.assertFalse(out["success"])
+        self.assertIn("bus down", out["contentItems"][0]["text"])
+        # a request with no params at all, or arguments that are not an object, is answered too
+        self.assertFalse(be._handle_approval("item/tool/call", None)["success"])
+        self.assertFalse(be._handle_approval("item/tool/call", self._call("T-1", "check_inbox", "nope"))["success"])
+        # a callable answering the wrong shape is a failed result, not a raise
+        be.postal = lambda *a: None
+        self.assertFalse(be._handle_approval("item/tool/call", self._call("T-1", "check_inbox", {}))["success"])
+
+    def test_without_a_postal_hook_no_tools_are_registered_and_a_call_is_refused(self):
+        logs = []
+        be, fake, _ = build(log=logs.append)
+        be.spawn("web", "/TESTDIR")
+        be.spawn("api", "/TESTDIR")
+        for call in fake.called("thread_start"):
+            self.assertNotIn("dynamicTools", call[1])
+            self.assertNotIn("developerInstructions", call[1])
+        self.assertEqual(sum("not registered" in line for line in logs), 1, "said once, not per spawn: %r" % logs)
+        # a registration persisted in an older rollout can still produce a call: refused, never a fake tool
+        out = be._handle_approval("item/tool/call", self._call("T-1", "send_message",
+                                                                 {"to": "api", "body": "hi", "kind": "coordinate"}))
+        self.assertFalse(out["success"])
+
+    def test_an_unknown_tool_or_an_unmatched_thread_is_refused_without_a_call(self):
+        seen = []
+        be, fake, _ = build()
+        be.postal = lambda *a: seen.append(a) or (True, "ok")
+        sid = be.spawn("web", "/TESTDIR")
+        out = be._handle_approval("item/tool/call", self._call("T-1", "read_secrets", {"path": "/etc/passwd"}))
+        self.assertEqual(set(out), {"success", "contentItems"}, "a refusal is a failed tool result, never the SDK's {}")
+        self.assertFalse(out["success"])
+        self.assertIn("read_secrets", out["contentItems"][0]["text"])
+        # a threadId no live session holds: refused with a retry sentence, even though exactly one session is
+        # live (never resolved by name or by the only live session, the refuter's amendment 2)
+        out = be._handle_approval("item/tool/call", self._call("T-9", "check_inbox", {}))
+        self.assertFalse(out["success"])
+        self.assertIn("again", out["contentItems"][0]["text"])
+        # a dead session's thread is no sender either
+        self.assertTrue(be.kill(sid))
+        out = be._handle_approval("item/tool/call", self._call("T-1", "check_inbox", {}))
+        self.assertFalse(out["success"])
+        self.assertEqual(seen, [])
 
 
 class Lifecycle(unittest.TestCase):
@@ -1797,6 +1973,14 @@ for i in range(20):
             self.assertNotIn('"%s"' % metadata, profile)
         self.assertIn("network = { enabled = true }", profile)
         self.assertEqual(overrides[1], 'default_permissions="romp_workspace"')
+        # the postal tools never widen the profile (2026-09-19): the serve token and the Codex registry stay
+        # unmounted; a Codex session mails through kernel-serviced tool calls, not through a credential inside
+        for secret in ("serve-token", "registry.json"):
+            self.assertNotIn(secret, profile)
+        # dynamic tools ride the app-server's experimental API, which the pinned SDK's CodexConfig enables by
+        # default (experimental_api True, sent as capabilities.experimentalApi): the config must keep not
+        # overriding it, or every thread/start would be refused rather than fail here
+        self.assertNotIn("experimental_api", captured[0])
 
     def test_model_catalog_from_app_server(self):
         be, fake, _ = build()
