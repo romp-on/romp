@@ -5262,7 +5262,8 @@ class SdkSession:
         # own feed — a nudge, a follow-up, a restart notice, relayed mail — or a turn the CLI opened by
         # itself: a background task's notification, a scheduled prompt, a peer's channel message, told by
         # the streamed record's origin stamp). None until an open is seen. Set at the two places a turn can
-        # open (the feeder's pop; _forward's stamped user atom while idle — see _note_turn_opener), stamped
+        # open (the feeder's pop; _forward's stamped user atom while nothing romp fed is in flight, see
+        # _note_turn_opener), stamped
         # beside lastStopAt by the Stop hook as lastTurnOpener, and read by the kernel's turn-finished push,
         # which buzzes the phone for the human's turns only (the user 2026-09-10: ten buzzes in fifty minutes
         # from one session reacting, turn after turn, to its own background subagents' completions).
@@ -5523,6 +5524,20 @@ class SdkSession:
         #                              queue so no message can share its pre-turn window (the CLI batches
         #                              everything pre-start into ONE record — the 2026-08-25 fold); cleared
         #                              by the turn's first streamed message, an exact event, or a reconnect
+        # THE FED TEXT THE CLI HAS NOT YET TAKEN, the ping's rule generalised to every send: the CLI drains
+        # EVERY queued prompt it holds into ONE user message when it next reads its queue, at a turn's start
+        # (the pre-turn window above) or when a running turn ends, so two texts fed into it before that drain
+        # reach the agent fused: one message, the first text then the second, which the chat showed as one
+        # bubble wearing both (2026-09-08: a composer message and a reply sent during one open turn).
+        # inputs() therefore feeds ONE text and holds the rest until the CLI demonstrably TOOK it (the exact
+        # events are _untaken_taken's), so every queued text lands as its own record, in queue order.
+        # RUNTIME-ONLY: a reconnect defers while a hold is live (the CLI still owes the drain;
+        # _do_request_reconnect), the loop top hands any hold that reached it to the stranded reconcile, and
+        # a restart re-delivers the persisted queue. None, or {"text", "item" (the queue entry itself),
+        # "fresh" (fed from idle), "settled" (the turn it was fed into has since ended), "fault" (the landing
+        # scan raised: logged once, the hold escapes on the next turn frame), "t", "off", "fsid" (the
+        # transcript mark the landing scan starts at, _transcript_mark), plus the scan's own cursor keys}.
+        self._untaken = None
         # A RESTORED /compact must light the compacting bracket too (the user 2026-07-22). send() sets
         # _compacting when it enqueues a compact command, but a persisted queue lands here INSTEAD of
         # going through send() — any /compact still queued when the kernel died arrives this way. Without
@@ -5541,6 +5556,7 @@ class SdkSession:
         #   overwrite the first's future (a hang) or share it (one click answering both — a silently wrong
         #   permission). Each ask site holds this from present to resolve (PR #875 review, 2026-09-02).
         self._lock = threading.Lock()
+        self._persist_lock = threading.Lock()   # one queue-mirror snapshot and write at a time (_persist_queue)
         self._ready = threading.Event()
         # Boot-stagger hook (see BOOT_RESUME_CONCURRENCY): fired exactly once when this session's CLI
         # is demonstrably past its spawn+catch-up burst (first init message) or its thread dies —
@@ -5731,6 +5747,39 @@ class SdkSession:
         with self._lock:
             return list(self._inflight_texts)
 
+    def _busy_under_lock(self) -> bool:
+        """SdkBackend.busy's reading, for a caller already holding self._lock: a turn in flight, a text
+        queued and about to run, or a fed text the CLI still holds (_untaken). move() reads it in the
+        same hold as its arm, so no text can be popped between an idle reading and the arm the feeder
+        then holds on. Reads attributes only, never another method: busy() is duck-typed and the doubles
+        it is handed carry inflight, _pending and _lock alone."""
+        return self.inflight > 0 or bool(self._pending) or getattr(self, "_untaken", None) is not None
+
+    def _disarm_move_settle(self) -> None:
+        """Lower the move arm (_move_settle_expected) and wake the feeder, from either thread. A
+        standing arm HOLDS the queue (inputs()), and the feeder sleeps on _input_wake, so every site that
+        lowers the arm must wake it or the head stays held until some unrelated event does: move() lowers
+        it from the kernel thread (a refusal, a control error, a same-folder answer, an uncertain outcome),
+        _consume_move_settle from the session's own thread (the move's turn-less result, or a real result
+        proving the arm stale). The loop top clears the flag bare: the new client's inputs() is created
+        after it and reads the flag on its first pass.
+        The session's thread may have ended: asyncio.run closed its loop and self.loop is never nulled,
+        and move() lowers the arm from the kernel thread after a claim the CLI's exit can outrun. There is
+        no feeder left to wake then, and a raise here would leave move()'s exit half done (a RuntimeError
+        in place of the SDK's named error, cwdPending kept). Lowering the arm is the point: wake only an
+        open loop, and never raise."""
+        self._move_settle_expected = False
+        loop, wake = getattr(self, "loop", None), getattr(self, "_input_wake", None)
+        if loop is None or wake is None:
+            return
+        closed = getattr(loop, "is_closed", None)
+        if callable(closed) and closed():
+            return
+        try:
+            loop.call_soon_threadsafe(wake.set)
+        except RuntimeError:     # closed between the check and the call
+            pass
+
     def unqueue(self, idx: int, expect: str | None = None, qid: str | None = None) -> str | None:
         """Remove the queued turn at position `idx` (the chat's queued list is this same _pending order)
         and return its raw text, or None if it's gone. Lets the user CANCEL a message they queued
@@ -5774,16 +5823,22 @@ class SdkSession:
         seed re-delivers it. Called on every mutation (enqueue / unqueue / the input generator's
         pop), from the kernel thread AND the loop thread — _update_reg serializes the writes. A
         turn already FED to the SDK is out of the persisted queue by design: it reaches the
-        transcript as a user atom, which is the cut-turn resume's territory, not replay's."""
-        with self._lock:
-            snap = list(self._pending)
-            metas = list(self._pending_meta)
-        qmeta = [{"text": t, "qid": m["qid"], "qts": m.get("qts"), **({"paths": m["paths"]} if m.get("paths") else {})} if isinstance(m, dict) and m.get("qid") else {"text": t}
-                 for t, m in zip(snap, metas)]        # every position, so the restore aligns the run as a block
-        try:
-            self.backend._update_reg(self.sid, queue=snap, queueMeta=qmeta)
-        except Exception:
-            self.backend._log("persist queue (%s): %s" % (self.name, traceback.format_exc()))
+        transcript as a user atom, which is the cut-turn resume's territory, not replay's.
+        The snapshot and its write are ONE step (_persist_lock): the feeder's post-pop persist on the loop
+        thread and an enqueue's persist on the kernel thread each snapshot under _lock and write under
+        _update_reg's own lock, so the pair could interleave as snapshot-A (empty, after the pop), snapshot-B
+        (the new entry), write-B, write-A: a lost update that left the mirror without an entry _pending held
+        until the next mutation. Serializing whole persists keeps the last write the latest snapshot."""
+        with self._persist_lock:
+            with self._lock:
+                snap = list(self._pending)
+                metas = list(self._pending_meta)
+            qmeta = [{"text": t, "qid": m["qid"], "qts": m.get("qts"), **({"paths": m["paths"]} if m.get("paths") else {})} if isinstance(m, dict) and m.get("qid") else {"text": t}
+                     for t, m in zip(snap, metas)]        # every position, so the restore aligns the run as a block
+            try:
+                self.backend._update_reg(self.sid, queue=snap, queueMeta=qmeta)
+            except Exception:
+                self.backend._log("persist queue (%s): %s" % (self.name, traceback.format_exc()))
 
     def interrupt(self):
         """Escalating stop (the user 2026-07-10, terminal parity). The old body was `if self.loop and
@@ -5923,7 +5978,18 @@ class SdkSession:
         # a rewind-HELD queue must not defer the reconnect: those turns can't start until the
         # reconnect arms them (the input gate) — deferring on their account would deadlock the rewind
         held = bool(self._rewind_to and not self._rewind_armed)
-        if self.inflight == 0 and (held or not self._pending):
+        # A fed text the CLI has not yet TAKEN (_untaken) is in flight for this decision too: after a mid-turn
+        # feed's result the counters read idle while the text still sits in the CLI's queue, about to be
+        # drained into a turn, and a teardown then ended the CLI with it: the message reached no one romp
+        # could see, and nothing flagged it. A teardown is an EOF plus a grace, not a kill: the SDK transport's
+        # close() closes the CLI's stdin first and waits several seconds for it to exit on its own before it
+        # terminates and then kills the process, so a CLI that has already drained the text into a turn
+        # finishes that turn when it fits in the grace, and the text's record then exists in a transcript no
+        # frame reported; a turn that does not fit is cut with the process. Do not design against a kill here.
+        # The hold's release (the drained turn's first frame, _on_message) counts that turn, so the deferred
+        # arm fires at its result.
+        quiet = self.inflight == 0 and self._untaken is None
+        if quiet and (held or not self._pending):
             if not defer:
                 with self._sub_lock:             # the loop-side re-check the immediate form relies on: live work
                     busy_work = bool(self._subagents or self._bg_tasks)   # that registered since the caller looked
@@ -5952,6 +6018,71 @@ class SdkSession:
         if why and not getattr(self, "_switch_wanted", ""):
             self._switch_wanted = why
 
+    def _release_hold_at_exit(self):
+        """THE CLI'S EXIT is the one event on which the CLI loses its prompt queue, and so the one event
+        besides a teardown (the loop top, above _reconcile_stranded) that must release a feed hold
+        (_untaken) itself: a hold whose text left the CLI's queue with no drain turn and no landed record
+        has no releasing frame, and it would park every later text for good, with the reconnect deferred
+        behind it. Verified on the installed CLI over stream-json against a logging stand-in Messages
+        endpoint (2026-09-08):
+          * the INTERRUPT control request is NOT a loss event: a text queued mid-turn survived it; the
+            interrupted turn's result (error_during_execution) was followed milliseconds later by a new init
+            and the queued text's own turn. The CLI's schema says the same (queued commands survive an
+            interrupt without `cancel_queued`, which the SDK's interrupt() never sends), so the settle marks
+            the hold settled as for any result and the drain's first frame releases it;
+          * a SIGINT (the stop ladder's second rung) made the CLI emit the interrupted result and EXIT
+            WITHOUT running the queued text; a kill emits nothing at all; a crash is a kill. In every case
+            the stream ends and this thread ends with it, which is where this runs (_run's finally, before
+            _on_session_gone reads the counters).
+        With the process gone the transcript is final, so its verdict is proof, the rule _mark_dropped_echoes
+        applies to a dead spawn: a scan that finds no record of the held text means the text reached no
+        turn, and it goes back to the HEAD of _pending with its id (ahead of what queued behind it, as it
+        was), persisted to the reg mirror, so the next client (the next send, the crash heal's respawn, the
+        boot reconcile) feeds it first and the chat shows it queued, with its cancel, meanwhile; a record
+        found means the CLI took it (its echo prunes on that record); a scan that cannot read the transcript
+        takes the flag path on a RESUMABLE conversation, never a re-feed on doubt, and re-heads when no
+        conversation ever materialised (resume_sid None: no init streamed, so the next client starts fresh
+        and a re-feed cannot duplicate; _reconcile_stranded's distinction). Never a silent block, never a
+        timer. The counters are left as they are: an unsettled hold's turn was running (inflight > 0) and
+        _on_session_gone reads that as the cut it is; a settled hold's CLI was between turns, and an idle
+        death settles 'waiting' as before, its message owed and visible instead of lost until the next
+        spawn's scan."""
+        u = getattr(self, "_untaken", None)
+        if u is None:
+            return
+        self._untaken = None
+        item = u.get("item", u["text"])
+        try:
+            seen = self.backend._text_landed(self.sid, u["text"], u.get("t"), u.get("off"), u.get("fsid"),
+                                             cursor=u)
+        except Exception:
+            seen = None
+        if seen is False or (seen is None and not self.resume_sid):
+            with self._lock:
+                self._q_prepend([item], self._unfeed_locked([item]))   # back at the head under its own id
+            self._persist_queue()
+            if seen is False:
+                self.backend._log("sdk %s: the CLI exited while it still held a fed text (never landed): back "
+                                  "at the head of the queue for the next client" % self.sid[:8])
+            else:
+                # _reconcile_stranded's distinction: no init ever streamed, so no conversation materialised
+                # and the next client starts one fresh; a transcript the scan cannot read (typically: the
+                # CLI died before writing its first record, so the file does not exist) is no reason to
+                # flag the user's first message as never delivered when re-feeding it cannot duplicate
+                # anything the user can see.
+                self.backend._log("sdk %s: the CLI exited before any conversation materialised, holding a fed "
+                                  "text whose transcript could not be read (%s): back at the head of the "
+                                  "queue for the next client, which starts the conversation fresh"
+                                  % (self.sid[:8], u.get("scan_error") or "unreadable"))
+        elif seen:
+            self.backend._log("sdk %s: the CLI exited after taking the last fed text; nothing to re-feed"
+                              % self.sid[:8])
+        else:
+            self.backend._log("sdk %s: the CLI exited while it held a fed text and the transcript could not "
+                              "be read (%s): the text's echo is flagged, not re-fed on doubt"
+                              % (self.sid[:8], u.get("scan_error") or "unreadable"), problem=True)
+            self.backend._mark_dropped_echoes(self.sid, self.pending_meta() or self.pending(), refeed=False)
+
     def _reconcile_stranded(self):
         """RECONCILE ACROSS A RECONNECT, at the loop's top where no client is connected so nothing can
         legitimately be in flight (the user 2026-07-01, who switched the model on a new session and it
@@ -5963,7 +6094,10 @@ class SdkSession:
         ran); this stays as the backstop for anything that still strands a turn here: settle the
         counters to idle. A not-yet-STARTED _pending turn survives as
         before (never fed to the dead client; the new inputs() re-feeds it). No-op on the first connect
-        and on a clean reconnect. Event-based on the reconnect itself, not a time/age heuristic.
+        and on a clean reconnect. Event-based on the reconnect itself, not a time/age heuristic. A SETTLED
+        feed hold that reaches the loop top (a text fed mid-turn whose turn ended, the CLI still holding it
+        for the drain: _untaken) is put back into `_inflight_texts` there, with inflight raised, so its text
+        takes the two branches below like any stranded turn.
 
         And the FED turn itself must not vanish with the client it was fed to (2026-08-16: a spawn's -m
         kickoff, fed just as an effort-pin's teardown fired, landed nowhere — not in _pending, not in the
@@ -6802,6 +6936,11 @@ class SdkSession:
         finally:
             self._fire_boot_settled()   # a dead thread must free its boot-stagger slot (first, so
             #                             a raising _on_session_gone can never leak the slot)
+            try:
+                self._release_hold_at_exit()   # the CLI's queue died with it: a held text goes back to the queue
+            except Exception as e:             # never in the way of _on_session_gone, which reaps the session
+                self.backend._log("sdk %s: the exit release of the feed hold failed: %s: %s"
+                                  % (self.sid[:8], type(e).__name__, _mask_ids(e)), problem=True)
             self.backend._on_session_gone(self)
 
     async def _amain(self):
@@ -6843,6 +6982,23 @@ class SdkSession:
                     # would land it on the un-rewound branch (the exact wrong-branch delivery this guards)
                     blocked = blocked or bool(self._rewind_to and not self._rewind_armed)
                     blocked = blocked or self._ping_feeding   # the ping's record must not share its window
+                    # ONE FED TEXT AT A TIME: the last fed text is still in the CLI's queue, and the CLI drains
+                    # every queued prompt into one message when it next reads that queue, so a second feed now
+                    # would reach the agent fused with the first (2026-09-08). Hold until the CLI demonstrably
+                    # took it (_untaken_taken); mid-turn forwards still flow, one per take, so a message sent
+                    # mid-turn still reaches the running turn at its next step.
+                    blocked = blocked or self._untaken is not None
+                    # a MOVE is in flight: move() armed _move_settle_expected under this lock and the CLI is
+                    # relocating for its set_cwd. The CLI relocates FIRST and replies after, then emits an init
+                    # and a turn-less result; a text fed into that window could run a whole turn before the
+                    # move's own result arrived, and that turn's result would read the arm as stale and drop it
+                    # (_consume_move_settle), leaving the late turn-less result to settle as a turn end. Hold
+                    # the head until the arm is down: the move's result consumed, a real result dropping a
+                    # stale arm, move() lowering it at a refusal or an uncertain outcome (each wakes this
+                    # feeder, _disarm_move_settle), or the loop top's clear (a new inputs() follows it). The
+                    # move's own request rides the control channel, not this generator, so the hold never
+                    # delays it.
+                    blocked = blocked or self._move_settle_expected
                     # a reconnect is ARMED (_reconnect: the waker is about to tear this client down) →
                     # hold the head for the NEXT client. The settle wakes this feeder and arms a deferred
                     # reconnect in the same finally, both wakeups queued FIFO on the loop, so without
@@ -6860,16 +7016,29 @@ class SdkSession:
                     blocked = blocked or (self.inflight == 0 and self.backend.drain_holding())
                     fi = 0 if (self._pending and not blocked) else -1
                     item, _meta = self._pop_for_feed_locked(fi) if fi >= 0 else (None, None)
-                    fresh = item is not None and self.inflight == 0     # starting from idle, not mid-turn
+                    # starting from idle, not mid-turn. inflight counts the CLI's own turns too (a turn frame
+                    # at inflight 0 raises it, _on_message), so a text fed while the CLI runs a turn romp did
+                    # not feed (the drain of a mid-turn text, a notification-started turn) is mid-turn here
+                    # and its hold waits for a real take, not the running turn's next frame
+                    fresh = item is not None and self.inflight == 0
                     if item is not None:
                         # under the SAME lock as the pop: busy() reads inflight>0 or _pending, and the kernel's
                         # parked-op drain re-runs right after a delivery (2026-09-03) — a gap between the pop
                         # and this increment read as idle and could feed the op behind into this very turn
                         self.inflight += 1
                         self._inflight_texts.append(item)   # the fed-turn twin — see its init comment
+                        # the hold, armed under the same lock as the pop: nothing else feeds until the CLI has
+                        # taken this text (_untaken_taken clears it). The transcript mark is taken below,
+                        # before the yield: the CLI has not seen the text yet, so its record can only begin
+                        # at or after the file's size now (_transcript_mark's argument).
+                        self._untaken = {"text": str(item), "item": item, "fresh": fresh, "settled": False,
+                                         "t": int(time.time()), "off": None, "fsid": None}
                 if item is None:
                     await self._input_wake.wait()   # idle, or holding behind a wedged turn → wait for a change
                     continue
+                off, fsid = self.backend._transcript_mark(self.sid)
+                if self._untaken is not None:
+                    self._untaken["off"], self._untaken["fsid"] = off, fsid
                 self._persist_queue()               # the fed turn leaves the persisted queue (it lands in the transcript)
                 if fresh:
                     self.since = int(time.time())    # a new turn starts now (mid-turn forwards keep the turn's clock)
@@ -6907,6 +7076,24 @@ class SdkSession:
             self._reconnect = False
             self._reconnect_switch_why = ""
             self._ping_feeding = False   # a reconnect restarts the feed — a stale hold must not wedge it
+            # a move's turn-less result was owed by the client this iteration replaces; the new one will
+            # never emit it, and a standing arm keeps _on_message from counting the CLI's own turns and
+            # holds the queue (inputs()). _consume_move_settle drops it at a real result too.
+            self._move_settle_expected = False
+            # same: a feed hold never outlives its client. Its text is the reconcile's: already in the
+            # fed-turn twin while its turn runs; put back there when the hold was SETTLED (the turn ended,
+            # the CLI still held the text for the drain, the settle zeroed both counters), so the reconcile
+            # re-heads or flags it like any stranded turn instead of the text vanishing with the client.
+            # The reconnect arms defer while a hold is live, so this is the backstop for a teardown that
+            # armed some other way. On a resumable conversation that flag can be a false 'never delivered':
+            # the teardown closes stdin and gives the CLI a grace to exit on its own (_do_request_reconnect),
+            # long enough to finish the drained turn, and when it did the next build finds the record and
+            # prunes the flag (_mark_dropped_echoes is self-correcting).
+            u, self._untaken = self._untaken, None
+            if u is not None and u.get("settled"):
+                with self._lock:
+                    self._inflight_texts.append(u.get("item", u["text"]))
+                    self.inflight = max(self.inflight, 1)
             # the abandoned client's live subagents and background tasks died with it — retire them on
             # the teardown event itself (and tell the session what it lost, as a CLI death does)
             self._drop_live_work("reconnect")
@@ -7865,7 +8052,101 @@ class SdkSession:
             if _lg:
                 _lg("api-health: give-up ingest failed: %s" % e)
 
+    @staticmethod
+    def _turn_frame(msg, AssistantMessage, ResultMessage, SystemMessage) -> bool:
+        """Is `msg` a frame that proves the CLI read its prompt queue and is running a turn: the init
+        SystemMessage (one per turn), an assistant message, the CLI's own user record, a result. Every
+        other system subtype streams independently of the queue: the background-task machinery's
+        task_started / task_progress / task_updated / task_notification / background_tasks_changed,
+        hook_started / hook_response, status, commands_changed, compact_boundary; and a rate-limit or
+        tool-progress event is not a system frame at all; none proves anything about the queue, and one
+        arriving in the gap between a feed and the CLI's dequeue must not stand in for the dequeue.
+        Nor is a SUBAGENT's frame (an assistant or user message tagged parent_tool_use_id: a Task's own
+        turns, streamed on the parent's connection, msg_to_atom's sidechain rule): a backgrounded Task
+        keeps streaming after the main turn's result, and its frames say nothing about the main
+        conversation's prompt queue. Counted, they read an idle session as running a turn nothing would
+        settle until some later result, and one arriving between a feed from idle and the fed turn's
+        init would release the hold with the text still in the CLI's queue."""
+        if getattr(msg, "parent_tool_use_id", None):
+            return False
+        if isinstance(msg, (AssistantMessage, ResultMessage)):
+            return True
+        if isinstance(msg, SystemMessage):
+            return getattr(msg, "subtype", None) == "init"
+        return type(msg).__name__.lstrip("_") == "UserMessage"
+
+    def _untaken_taken(self, msg, AssistantMessage, ResultMessage, SystemMessage) -> bool:
+        """Has the CLI TAKEN the last fed text (self._untaken), so the next queued text may be fed
+        without the two fusing into one message? `msg` is the frame just streamed. Three exact events,
+        each proving the text left the CLI's queue:
+          * fed from IDLE (`fresh`): any turn frame after the feed. The only prompt the CLI held was
+            this one, so the turn now streaming is its turn, the rename ping's rule (_ping_feeding).
+            `fresh` means inflight was 0 at the feed, and inflight counts the CLI's own turns too
+            (_on_message raises it on a turn frame at 0), so a text fed while the CLI runs a turn romp
+            did not feed is NOT fresh: it takes the mid-turn rules below.
+          * fed MID-turn, and the turn it went into has since ENDED (`settled`, set at that turn's
+            ResultMessage): any turn frame after that. The CLI drains its queue when a turn ends, so the
+            next turn's first frame, its init or its first assistant message, says the drain happened
+            and the text went with it; a feed between the result and this frame is the fuse.
+          * fed MID-turn, the turn still running: the text's record LANDED, the queued_command
+            attachment a mid-turn splice leaves at a tool boundary (the same record _text_landed reads
+            for the re-delivery guard), scanned from the feed-time mark forward. This is the accelerator:
+            the next text can follow it into the same turn instead of waiting for the turn to end.
+        Only turn frames count (_turn_frame: the init, assistant messages, the CLI's own user records,
+        results); a task, hook, rate-limit or progress frame proves nothing about the queue. The scan is
+        bounded: it resumes at the last complete line it read and skips a file that has not grown.
+        A scan that RAISES (None: the transcript or the registry unreadable) is a fault, not a miss:
+        it is logged once per hold, to the problem ring, and the hold escapes on the next turn frame,
+        at once when this frame is the result, since after a result nothing later is guaranteed to
+        stream if the text was consumed mid-turn, and a hold with no releasing event would park every
+        later text for good."""
+        u = self._untaken
+        if u is None or not self._turn_frame(msg, AssistantMessage, ResultMessage, SystemMessage):
+            return False
+        if u.get("fresh") or u.get("settled") or u.get("fault"):
+            return True
+        seen = self.backend._text_landed(self.sid, u["text"], u.get("t"), u.get("off"), u.get("fsid"),
+                                         cursor=u)
+        if seen is None:
+            u["fault"] = True
+            self.backend._log("feed hold (%s): the landing scan for the last fed text failed (%s); the next "
+                              "queued text goes in at the next turn frame instead of waiting for the "
+                              "record" % (self.name, u.get("scan_error") or "transcript unreadable"),
+                              problem=True, key=("feed-hold-scan", self.sid))
+            return isinstance(msg, ResultMessage)
+        return seen is True
+
     def _on_message(self, msg, AssistantMessage, ResultMessage, SystemMessage):
+        if getattr(self, "inflight", None) == 0 and getattr(self, "_lock", None) is not None \
+                and not getattr(self, "_move_settle_expected", False) \
+                and self._turn_frame(msg, AssistantMessage, ResultMessage, SystemMessage):
+            # A turn frame while nothing romp fed is in flight: the CLI opened a turn on its own (it
+            # drained a text fed mid-turn once the last turn ended, or a subagent's or task's
+            # notification woke it), and inflight counted none of it: a text fed into such a turn read
+            # `fresh`, its hold cleared on the turn's very next frame with the text still in the CLI's
+            # queue, and the text behind it was fed to fuse with it. Count the turn NOW, before the hold
+            # below is read: the feeder's next pop then computes fresh False, busy() reads the turn, a
+            # reconnect defers to its result, and the settle zeroes it as it does every turn. When a
+            # settled hold is what this frame releases, its text is what the CLI drained: it rejoins the
+            # fed-turn twin so a teardown mid-turn still reconciles it. The turn's clock starts at this
+            # frame, as a fresh feed's starts at its pop (inputs()): snapshot() reads `since` for a turn in
+            # flight, and left alone it would show the previous fed turn's start for this one; the
+            # interrupt flag and its escalation level are cleared the same way, so a stale stop reading
+            # cannot make the new turn read 'waiting' while it streams.
+            # NOT while an accepted live move's settle is expected: the CLI answers a set_cwd with an
+            # init and a turn-less result, no query sent (_consume_move_settle), and counting that init
+            # would leave an idle session busy (a reconnect deferred, a drive op parked) until its next
+            # real turn; should a count slip through anyway, the move's result zeroes it.
+            with self._lock:
+                if self.inflight == 0:
+                    self.inflight = 1
+                    self.since = int(time.time())
+                    self._interrupted = False
+                    self._intr_level = 0
+                    self._first_out_t = None
+                    u = getattr(self, "_untaken", None)
+                    if u is not None and u.get("settled") and getattr(self, "_inflight_texts", None) is not None:
+                        self._inflight_texts.append(u.get("item", u["text"]))
         if getattr(self, "_ping_feeding", False):   # getattr: __new__-built test doubles skip __init__
             # the ping's turn is streaming — the CLI demonstrably started it, so a message fed from
             # here on lands MID-TURN as its own record (the CLI's designed forward behavior); the
@@ -7879,6 +8160,14 @@ class SdkSession:
             # zero-cost result (a /clear's own), a turn-less result the move settle consumes, or a handler failure
             # left its tag at the head and every later result read the PREVIOUS record's tag for the transport's life
             self._result_tag = self._spend_result_tag()
+        if getattr(self, "_untaken", None) is not None \
+                and self._untaken_taken(msg, AssistantMessage, ResultMessage, SystemMessage):
+            # the CLI took the last fed text (an exact event: _untaken_taken): the next queued text can go
+            # in as its own message now. Checked BEFORE the result settle below marks the turn ended, so a
+            # result frame is read against the state the text was fed into.
+            self._untaken = None
+            if self._input_wake is not None:
+                self._input_wake.set()
         if isinstance(msg, SystemMessage) and msg.subtype == "init":
             self._fire_boot_settled()   # the CLI is up and streaming — its transcript catch-up burst
             #                             is over, so the boot-stagger slot (if any) frees NOW
@@ -8357,6 +8646,14 @@ class SdkSession:
                 # the CLI, its next streamed atom re-asserts 'working' via _forward — the stream is the truth.
                 self.inflight = 0
                 self._inflight_texts.clear()           # the CLI processed everything fed — same settle semantics
+                if getattr(self, "_untaken", None) is not None:
+                    # a text fed MID-turn is still in the CLI's queue at this result: the CLI drains it
+                    # into the NEXT turn, whose first frame is the take (_untaken_taken). Not cleared
+                    # here: a feed right after this result would land in the same drain (the fuse).
+                    # An INTERRUPTED turn's result is no exception: the CLI keeps its queue across the
+                    # interrupt control request and drains it the same way (verified on the installed
+                    # CLI, 2026-09-08; _release_hold_at_exit names the one event that does lose it).
+                    self._untaken["settled"] = True
                 self._swap_cards = []                  # T279: a capacity card learned this turn is claimable only by
                 #                                        this turn's refusal notice — the settle is the deciding event
                 # A /compact that found NOTHING to compact emits no boundary — the turn just settles here. Clear
@@ -8381,7 +8678,12 @@ class SdkSession:
                     self.backend._deliver_rename_ping(self)
                 except Exception as e:
                     failed.append(("the rename ping's delivery", e))
-                if self._reconnect_when_idle and not self.ended:   # an effort change waited for this turn to end
+                # an effort change waited for this turn to end. NOT while a hold is settled: the CLI still
+                # holds a text fed mid-turn and drains it into a turn right after this result; tearing it
+                # down now ended the CLI with the text in a turn romp never saw (the teardown is an EOF plus
+                # a grace, not a kill: _do_request_reconnect). The arm stays set; the drained turn's first
+                # frame counts that turn (_on_message) and its result fires this.
+                if self._reconnect_when_idle and not self.ended and getattr(self, "_untaken", None) is None:
                     self._reconnect_when_idle = False
                     self._reconnect = True     # inputs() holds the queue from here: the wake above cannot feed
                     self._wake_set()           #   the head to THIS client — the new one takes it (see inputs)
@@ -8425,12 +8727,33 @@ class SdkSession:
         real turn, even an interrupted one, reports its API round trips. Spent on the match, so the
         NEXT zero-turn result (there is none in normal traffic) settles as before. Without this guard
         the settle path ran on a turn that never was: a false _turn_completed, a redundant 'waiting'
-        write, the rename ping fired as its own turn, and a parked effort reconnect consumed early."""
+        write, the rename ping fired as its own turn, and a parked effort reconnect consumed early.
+        A REAL turn's result while the arm stands proves the arm stale and drops it (the body says why);
+        every drop goes through _disarm_move_settle, since a standing arm holds the queue (inputs())."""
         if not getattr(self, "_move_settle_expected", False):   # getattr: __new__-built test doubles
             return False
         if getattr(msg, "num_turns", None) != 0:
+            # A REAL turn's result while the arm stands means the move's turn-less result never came (the
+            # CLI accepted the set_cwd and emitted no result, or its reply was lost and the arm kept on
+            # purpose, move()): had it come, it would have preceded this one, since move() refuses while
+            # busy and an accepted set_cwd answers within milliseconds. The arm is stale, and a standing
+            # arm switches off the CLI-owned-turn count (_on_message) and holds the queue (inputs()), so
+            # left alone it would uncount every drain for the session's life and re-open the fuse the
+            # count closes. Drop it here (the loop top drops it too); the drop wakes the feeder.
+            self._disarm_move_settle()
+            self.backend._log("sdk %s: a real turn's result arrived while a move's turn-less result was still "
+                              "expected; the stale arm is dropped" % self.sid[:8])
             return False
-        self._move_settle_expected = False
+        self._disarm_move_settle()   # spent, and the queue it held resumes
+        # The move's init counts no CLI-owned turn (_on_message skips the count while the arm stands);
+        # should a count have fired anyway, this turn-less result is the last frame the move emits, so
+        # the count must not outlive it: nothing was fed (an empty fed-turn twin), and an idle session
+        # stays idle: busy() False, a requested reconnect fires at once.
+        lock = getattr(self, "_lock", None)
+        if lock is not None:
+            with lock:
+                if self.inflight and not getattr(self, "_inflight_texts", None):
+                    self.inflight = 0
         self.backend._log("sdk %s: the move's turn-less result arrived — not a turn end" % self.sid[:8])
         return True
 
@@ -9611,7 +9934,7 @@ def _path_bearing(text: str) -> bool:
     return bool(_IMG_PATH_RE.search(text or ""))
 
 
-def _records_from_mark(state_dir, sid: str, off, fsid, literals):
+def _records_from_mark(state_dir, sid: str, off, fsid, literals, cursor=None):
     """The sid's transcript records from an echo's send-time mark to EOF, parsed, for the boot scans
     (SdkBackend._text_landed, _input_landed_after): the file is the registry's current transcript (lastSid), the
     start is the mark when it was measured on that file and fits it (else the file's start), lines are
@@ -9619,25 +9942,43 @@ def _records_from_mark(state_dir, sid: str, off, fsid, literals):
     escaping can split — and a line that does not parse (a fragment the mark cut) is skipped. Raises
     when the transcript cannot be read; each caller turns that into its None. Module functions over the
     backend's state dir, not methods: the boot marker is bound onto bare stubs in tests, and a helper a stub
-    lacks would read as an unreadable transcript."""
+    lacks would read as an unreadable transcript.
+    `cursor`, a dict the caller keeps across calls, makes a REPEATED scan resumable (the feed hold's take
+    check, SdkSession._untaken_taken, runs once per streamed frame): the scan starts at the cursor's
+    `scan_off` when it was recorded on this file (`scan_fsid`) and fits it, else at the mark; a line still
+    being written (no trailing newline) is not consumed, so a record the CLI was mid-write on is read whole
+    next time; once the records are exhausted the cursor records where the scan stopped, after the last
+    complete line; a file that has not grown is not reopened. A caller that returns early (a match) leaves
+    the cursor where it was, so the next call re-reads from there."""
     reg = read_reg(state_dir, sid) or {}
     cur = str(reg.get("lastSid") or sid)
     path = transcript_path(reg.get("cwd") or "", cur)
+    size = os.path.getsize(path)
     start = 0
-    if (isinstance(off, int) and not isinstance(off, bool) and fsid is not None
-            and str(fsid) == cur and 0 <= off <= os.path.getsize(path)):
+    so = cursor.get("scan_off") if isinstance(cursor, dict) else None
+    if isinstance(so, int) and not isinstance(so, bool) and cursor.get("scan_fsid") == cur and 0 <= so <= size:
+        start = so
+    elif (isinstance(off, int) and not isinstance(off, bool) and fsid is not None
+            and str(fsid) == cur and 0 <= off <= size):
         start = off
-    with open(path, "rb") as f:
-        f.seek(start)
-        for raw in f:
-            if not any(lit in raw for lit in literals):
-                continue
-            try:
-                rec = json.loads(raw.decode(errors="replace"))
-            except ValueError:
-                continue
-            if isinstance(rec, dict):
-                yield rec
+    pos = start
+    if start < size:
+        with open(path, "rb") as f:
+            f.seek(start)
+            for raw in f:
+                if cursor is not None and not raw.endswith(b"\n"):
+                    break                          # a line still being written: read it whole next time
+                pos += len(raw)
+                if not any(lit in raw for lit in literals):
+                    continue
+                try:
+                    rec = json.loads(raw.decode(errors="replace"))
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    yield rec
+    if isinstance(cursor, dict):
+        cursor["scan_off"], cursor["scan_fsid"] = pos, cur
 
 def _input_landed_after(state_dir, sid: str, t, off=None, fsid=None):
     """Did a GENUINE HUMAN input land in the sid's transcript STRICTLY AFTER the send stamped `t`? The
@@ -13363,6 +13704,8 @@ class SdkBackend:
         True when the queue is genuinely romp-held — the interrupt hold, the rewind hold, the rename
         ping's feed-hold (while the ping's turn is in flight the drain releases nothing) — or when no
         turn is in flight (idle/connecting: entries sit in _pending until the client drains them).
+        The hold behind a fed text the CLI has not yet taken (_untaken) is romp-held too: the pencil and
+        the cancel can still win there.
         The kernel reads this to decide whether the queued bubble gets its ✕ at all; the loud
         unqueue-miss toast covers the races this gate can't (a click on a just-stale push)."""
         with self._lock:
@@ -13374,6 +13717,7 @@ class SdkBackend:
                 return True
             return bool(s._interrupted
                         or getattr(s, "_ping_feeding", False)   # getattr: test doubles skip __init__
+                        or getattr(s, "_untaken", None) is not None   # held behind a fed text the CLI has not taken
                         or (s._rewind_to and not getattr(s, "_rewind_armed", False)))
 
     def send(self, sid: str, text: str, qid: str | None = None, user: bool = False, paths: list | None = None) -> bool:
@@ -13822,7 +14166,7 @@ class SdkBackend:
             self._wake_push()
         return len(hit)
 
-    def _text_landed(self, sid: str, text: str, t: int | None = None, off=None, fsid=None):
+    def _text_landed(self, sid: str, text: str, t: int | None = None, off=None, fsid=None, cursor=None):
         """Did `text` land in the sid's transcript? The re-delivery guard: the echo prune is lazy (a landed
         echo may still be un-pruned at boot), so a queue re-add without this scan would duplicate a
         delivered message. Three answers, because the caller acts on each differently:
@@ -13855,13 +14199,17 @@ class SdkBackend:
         pre-filtered on the two record types' literals only, never on the text: JSON escapes newlines
         and quotes, so a raw-line prefix test skipped every multi-line send (a quote chip's reply, for
         one) as never landed. A mark taken while the CLI was mid-write leaves a line fragment first; it
-        fails to parse and is skipped like any other non-record line."""
+        fails to parse and is skipped like any other non-record line. `cursor`, a dict the caller keeps
+        across calls, makes a repeated scan resumable (_records_from_mark: the scan starts where the last
+        call stopped and skips a file that has not grown); a scan that raises records the fault's text in
+        it as `scan_error`, for the caller's one log line, and still answers None."""
         try:
             # the plain key and, for a slash send, its words (echo_keys): the send's own record is the
             # CLI's wrapper, which _landed_texts reads as "/name args" the way the kernel's prune does
             want = set(echo_keys(text))
             floor = int(t or 0)
-            for rec in _records_from_mark(self.state_dir, sid, off, fsid, (b'"user"', b'"queued_command"')):
+            for rec in _records_from_mark(self.state_dir, sid, off, fsid, (b'"user"', b'"queued_command"'),
+                                          cursor=cursor if isinstance(cursor, dict) else None):
                 if not (want & _landed_texts(rec)):
                     continue
                 ts = _record_epoch(rec.get("timestamp"))
@@ -13869,7 +14217,9 @@ class SdkBackend:
                     continue                           # an earlier record wearing the same words
                 return True
             return False
-        except Exception:
+        except Exception as e:
+            if isinstance(cursor, dict):       # the caller's one log line names the fault (_untaken_taken)
+                cursor["scan_error"] = "%s: %s" % (type(e).__name__, _mask_ids(e))
             return None
 
     def dismiss_echo(self, sid: str, uuid: str | None = None, t: int | None = None) -> str | None:
@@ -14126,9 +14476,10 @@ class SdkBackend:
 
     def forwards_sends(self) -> bool:
         """True (see SessionBackend.forwards_sends): the SDK holds queued turns in _pending and its inputs()
-        generator forwards them at the next tool boundary, folds several into one turn, and holds them across
-        an interrupt. So the kernel hands composer sends straight to send() even mid-turn instead of parking
-        them; the reconciliation renders the still-waiting message as a queued bubble until it forwards."""
+        generator forwards them at the next tool boundary, hands several to the CLI one message each, in order
+        (the next waits until the CLI has taken the last: _untaken), and holds them across an interrupt. So the
+        kernel hands composer sends straight to send() even mid-turn instead of parking them; the reconciliation
+        renders the still-waiting message as a queued bubble until it forwards."""
         return True
 
     def model_switches_live(self) -> bool:
@@ -14152,13 +14503,21 @@ class SdkBackend:
 
     def busy(self, sid: str) -> "bool | None":
         """Authoritative in-flight signal (see SessionBackend.busy): a turn is running (inflight>0) OR one is
-        queued and about to run (_pending). Either means a drive op pressed now must PARK to hold press-order,
-        with no wait for the transcript to catch up. None when we don't run this sid (→ cached-parse fallback)."""
+        queued and about to run (_pending) OR the CLI still holds a fed text (_untaken: fed mid-turn, its turn
+        ended, and the CLI drains it into a turn right after the result). Any of the three means a drive op
+        pressed now must PARK to hold press-order, with no wait for the transcript to catch up. The hold is
+        read here as the reconnect gate reads it (_do_request_reconnect): in the settled gap the counters
+        said idle, so a parked /compact drained and a typed slash command bypassed the park, and the feeder
+        held both behind the text and fed them into the drained turn mid-turn, where the CLI answers a
+        command as text. None when we don't run this sid (→ cached-parse fallback)."""
         s = self.sessions.get(sid)
         if not s:
             return None
         with s._lock:
-            return s.inflight > 0 or bool(s._pending)
+            # called as a plain function on the session, not as its method: busy() is duck-typed (the
+            # delete-while-busy tests hand it a double carrying inflight, _pending and _lock only, no
+            # SdkSession methods), and the helper reads nothing but those attributes
+            return SdkSession._busy_under_lock(s)
 
     def compacting(self, sid: str) -> "bool | None":
         """Authoritative 'is a /compact in progress' (see SessionBackend.compacting): set when /compact is
@@ -14513,19 +14872,30 @@ class SdkBackend:
         claim = self._claim_cwd_pending(sid, target)
         if claim:
             return claim
-        s._move_settle_expected = True   # armed BEFORE the request — see _consume_move_settle
+        # The busy reading and the arm are ONE step under the session lock: the feeder pops under that
+        # lock and holds the head while the arm stands (inputs()), so a text enqueued between the idle
+        # reading above and the arm cannot reach the CLI ahead of the request and run its turn inside the
+        # relocation window. After the claim, so a second asker refused there lowers no arm of ours; a busy
+        # reading here (the race) returns the claim.
+        with s._lock:
+            busy = s._busy_under_lock()
+            if not busy:
+                s._move_settle_expected = True   # armed BEFORE the request: see _consume_move_settle
+        if busy:
+            self._update_reg_dropping(sid, ("cwdPending",))
+            return "busy"
         r, err = self._set_cwd_request(s, target)
         if not err and isinstance(r, dict) and r.get("status") == "needs_trust":
             r, err = self._set_cwd_request(s, target, trust=str(r.get("directory") or target))
         ok = not err and isinstance(r, dict) and r.get("status") == "ok"
         if not ok:
+            # The exits that leave the session where it was stand the move down: the arm lowered, THEN the
+            # claim dropped (_stand_down_move has the order and why).
             if err == _NO_CONTROL_SENDER:
-                s._move_settle_expected = False                 # nothing was sent
-                self._update_reg_dropping(sid, ("cwdPending",))
+                self._stand_down_move(s, sid)                   # nothing was sent
                 return err
             if isinstance(r, dict) and r.get("status") == "rejected":
-                s._move_settle_expected = False                 # the CLI answered: it did nothing
-                self._update_reg_dropping(sid, ("cwdPending",))
+                self._stand_down_move(s, sid)                   # the CLI answered: it did nothing
                 if r.get("reason") == "busy":
                     return "busy"
                 return str(r.get("message") or r.get("reason") or "the CLI rejected the move")
@@ -14535,26 +14905,57 @@ class SdkBackend:
             # under the new one (a blind feed, and the next --resume writes to the wrong place). The
             # transcript's location decides, exactly as the boot heal decides a kernel death mid-move.
             why = err or ("unexpected reply to set_cwd: %r" % (r,))
-            self._heal_cwd_pending(read_reg(self.state_dir, sid) or {"sid": sid, "cwdPending": target, "cwd": old})
-            after = read_reg(self.state_dir, sid) or {}
-            if after.get("cwd") == target and not after.get("cwdPending"):
-                # it moved (and the CLI's turn-less result is still expected — the arm stands)
-                self._log("sdk %s: set_cwd's reply was lost (%s) but the transcript is under %s — the move stands"
-                          % (sid[:8], why, target))
+            # The heal releases the claim itself when it finds the move never happened, so it is handed
+            # _stand_down_move as its release: the arm this move raised is lowered before the claim goes,
+            # as at every other standing-down exit. Its answer is the heal's own outcome, not a re-read of
+            # the reg: once the claim is released the reg may already carry a second mover's claim, which a
+            # re-read would take for this move's flag still standing.
+            outcome = self._heal_cwd_pending(read_reg(self.state_dir, sid) or {"sid": sid, "cwdPending": target, "cwd": old},
+                                             release=lambda: self._stand_down_move(s, sid))
+            if outcome == "moved":
+                # It moved, and the CLI's turn-less result is still expected: the arm stands, and with it
+                # the feeder's hold on the queue (inputs()). A hold that outlives move()'s return is
+                # announced on the problem ring: a CLI that relocated and then hung leaves every queued
+                # send waiting with nothing else saying why. The hold ends on the exact events that lower
+                # the arm (the CLI's result, or its exit and the loop-top clear at the reconnect); no
+                # timer, since nothing short of those proves the result will never come.
+                self._log("sdk %s (%s): set_cwd's reply was lost (%s) but the transcript is under %s: the move "
+                          "stands, and queued sends wait for the CLI's result of it; they go on when it arrives "
+                          "or at the session's next reconnect" % (sid[:8], s.name, why, target), problem=True)
                 return ""
-            s._move_settle_expected = False
-            if after.get("cwdPending"):
+            if outcome == "kept":
+                # the claim stays, and refuses a second mover at the claim, so the arm standing is this move's
+                s._disarm_move_settle()
                 return ("the move's outcome is uncertain: %s — the transcript was not found under exactly one of "
                         "%s and %s, so nothing was changed; the next kernel start re-checks (see the kernel log)"
                         % (why, old or "its folder", target))
+            if outcome != "released":     # nothing was pending: not a state move() reaches after its own claim
+                s._disarm_move_settle()
             return "the move failed: %s — the session stays in %s" % (why, old or "its folder")
         new = r.get("cwd") if isinstance(r.get("cwd"), str) and r.get("cwd") else target
         if r.get("changed") is False or new == old:
-            s._move_settle_expected = False                     # no relocation → no turn-less result is coming
-            self._update_reg_dropping(sid, ("cwdPending",))     # already there — nothing to record
+            # already there: nothing to record, and with no relocation no turn-less result is coming
+            self._stand_down_move(s, sid)
             return ""
         self._finish_move(s, sid, old, new)
         return ""
+
+    def _stand_down_move(self, s, sid: str) -> None:
+        """A move() exit that leaves the session where it was: lower the arm (_disarm_move_settle), THEN
+        drop the claim (cwdPending), in that order. The claim is what keeps a second move() of this sid out
+        (_claim_cwd_pending refuses while it stands), and the moment it is released a second mover claims
+        and raises the same arm for its own request; so the arm is settled before the claim that guards it
+        goes. With the drop first, the second mover could claim and arm in the gap and this exit would then
+        lower ITS arm, leaving its relocation with the queue unheld. The disarm never raises, and the
+        finally keeps the guarantee regardless: whatever the disarm does, the claim is dropped (a kept claim
+        would refuse every later move until a kernel boot healed it). The uncertain-outcome exit reaches
+        this through _heal_cwd_pending's release hook, when the heal finds the move never happened; when
+        the heal keeps the claim, no second mover can arm, and when it finishes the move the arm stands for
+        the CLI's turn-less result."""
+        try:
+            s._disarm_move_settle()
+        finally:
+            self._update_reg_dropping(sid, ("cwdPending",))
 
     def _claim_cwd_pending(self, sid: str, target: str) -> str:
         """Set the two-phase flag ONLY when no move is pending. Two concurrent move() calls for one sid (a
@@ -14628,27 +15029,36 @@ class SdkBackend:
             reg.update(fields)
             write_reg(self.state_dir, sid, reg)
 
-    def _heal_cwd_pending(self, reg: dict) -> None:
+    def _heal_cwd_pending(self, reg: dict, release=None) -> str:
         """Settle a reg the previous kernel left mid-move (cwdPending set: the request went out, the reg
         never learned the answer). The transcript's location is the fact that decides it — exactly ONE
         of the two project slugs should hold `<lastSid>.jsonl`: under the pending cwd the CLI said `ok`
         and only romp's half is missing (finish it); still under the old cwd the move never happened
         (drop the flag). Neither or both is a state this code must not guess at: say so loudly and
-        leave the flag for a person."""
+        leave the flag for a person.
+
+        `release` is how the flag is dropped when the move never happened: the boot path's plain drop by
+        default; move() passes _stand_down_move so the arm it raised is lowered before the claim goes.
+        Returns the outcome, for move() to answer from: "moved" (romp's half finished; the arm stands),
+        "released" (the flag dropped through `release`), "kept" (the flag left for a person), "" (nothing
+        was pending)."""
         sid = str(reg.get("sid") or "")
         pend = str(reg.get("cwdPending") or "")
         cur = str(reg.get("cwd") or "")
         fsid = str(reg.get("lastSid") or sid)
         if not sid or not pend:
-            return
+            return ""
+        if release is None:
+            def release():
+                self._update_reg_dropping(sid, ("cwdPending",))
         if pend == cur:
             # a move to the folder the session was already in, cut mid-flight (a reg from before move()
             # short-circuited that case): nothing moved and nothing can be learned from the location
             # test below — both slugs are ONE slug, so it would read "under BOTH" and file a problem
             # on every boot for as long as the flag lived
             self._log("boot reconcile: %s had a move to its own folder pending — nothing to settle; cleared" % sid[:8])
-            self._update_reg_dropping(sid, ("cwdPending",))
-            return
+            release()
+            return "released"
         def _at(slug):
             """True, False, or None when the slug's transcript cannot be stat'ed for a reason other than ENOENT (an unsearchable
             folder): os.path.exists answered False there on every interpreter, and an unsearchable pending slug with the transcript
@@ -14665,20 +15075,23 @@ class SdkBackend:
         if at_new is None or at_old is None:
             self._log("boot reconcile: %s has a move to %s pending and a folder that cannot be read (new %r, old %r): left pending"
                       % (sid[:8], pend, at_new, at_old))
-            return
+            return "kept"
         if at_new and not at_old:
             self._log("boot reconcile: %s was mid-move to %s — the transcript is there; finishing romp's half"
                       % (sid[:8], pend))
             self._finish_move(self.sessions.get(sid), sid, cur, pend)
+            return "moved"
         elif at_old and not at_new:
             self._log("boot reconcile: %s had a move to %s pending that never happened — cleared" % (sid[:8], pend))
-            self._update_reg_dropping(sid, ("cwdPending",))
+            release()
+            return "released"
         else:
             self._log("boot reconcile: %s has cwdPending=%s but its transcript %s is %s — leaving the flag; "
                       "check %s and %s by hand"
                       % (sid[:8], pend, fsid, "under BOTH slugs" if at_new else "under NEITHER slug",
                          transcript_path(cur, fsid) if cur else "(no cwd)", transcript_path(pend, fsid)),
                       problem=True)
+            return "kept"
 
     def set_model(self, sid: str, value: str) -> bool:
         """Change the session's model. Persisted in the registry (so a reconnect keeps it) and applied
@@ -15833,16 +16246,20 @@ class SdkBackend:
             self._touch_live(sess.sid)
         if vanished:
             self._note_live_tail_race("_evict_live_overflow")
-        # A user atom the CLI streams WHILE IDLE, wearing an injected provenance stamp, is a turn the CLI
-        # opened by itself — a background task's notification, a scheduled prompt, a peer's channel
-        # message — never the composer's words: a fed text is not replayed on the stream
+        # A user atom the CLI streams while NOTHING ROMP FED is in flight, wearing an injected provenance
+        # stamp, is a turn the CLI opened by itself (a background task's notification, a scheduled prompt,
+        # a peer's channel message), never the composer's words: a fed text is not replayed on the stream
         # (replay-user-messages stays off, see _options), so its opener was noted at the feeder's pop.
         # Only the CLI's own stamp says so (atom["origin"], msg_to_atom); a stamp-less user atom (a tool
-        # result) or a "human" stamp says nothing. Judged BEFORE the working re-assert below, and only
-        # while nothing is in flight: the same stamp arriving mid-turn is a splice into the running turn,
-        # which keeps its opener (see SdkSession._note_turn_opener).
+        # result) or a "human" stamp says nothing. Judged BEFORE the working re-assert below, and against
+        # the fed-turn twin (_inflight_texts), not the turn count: _on_message counts the CLI's own turn
+        # from its first frame, ahead of this call, so `inflight` is already 1 when the stamped atom is
+        # judged and a count-based test never fired (the phone then buzzed for every notification turn).
+        # The twin holds what romp fed into the turn in flight: the same stamp arriving with a fed text in
+        # the twin is a splice into that turn, which keeps its opener (see SdkSession._note_turn_opener),
+        # and a drained mid-turn text rejoins the twin at the count, so its turn stays the human's.
         okind = (atom.get("origin") or {}).get("kind") if atom.get("type") == "user" else None
-        if okind and okind != "human" and not getattr(sess, "inflight", 0) and not sess._cli_working:
+        if okind and okind != "human" and not getattr(sess, "_inflight_texts", None) and not sess._cli_working:
             sess._note_turn_opener("injected", True)
         # The stream is the AUTHORITATIVE busy signal: a genuine WORK atom (streamed assistant/tool
         # output — not an input echo, not a /model-style command line) means the CLI is producing RIGHT

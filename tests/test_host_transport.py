@@ -185,11 +185,16 @@ class LeaseClassification(unittest.TestCase):
 
 # ── the transport against a fake host ──────────────────────────────────────────────────────────
 class FakeHost:
-    """An asyncio Unix server speaking the host's frames from a scripted journal."""
+    """An asyncio Unix server speaking the host's frames from a scripted journal. `echo_turns`: the CLI behind it runs
+    a one-step turn per fed user text (its own user record back, then the turn's result), the frames the backend's
+    one-fed-text-at-a-time hold (SdkSession._untaken) releases on; a host that echoes nothing holds every text after
+    the first for good."""
 
-    def __init__(self, path, records, busy=False, exit_after=None, answer_init=None):
+    def __init__(self, path, records, busy=False, exit_after=None, answer_init=None, echo_turns=False):
         self.path, self.records, self.busy, self.exit_after = path, records, busy, exit_after
         self.answer_init = answer_init      # None: every control request answered; else answer_init(attach_no) -> bool
+        self.echo_turns = echo_turns
+        self.next_offset = len(records)     # the journal position of the next record this host writes (echo_turns)
         self.attaches = 0
         self.got = []
         self.server = None
@@ -227,6 +232,14 @@ class FakeHost:
                         if obj.get("type") == "control_request" and answering:
                             writer.write(sh.encode_frame({"t": "out", "offset": len(self.records), "data": {
                                 "type": "control_response", "response": {"subtype": "success", "request_id": obj["request_id"], "response": {}}}}))
+                            await writer.drain()
+                        elif obj.get("type") == "user" and self.echo_turns:
+                            # the CLI took the text and ran its turn: its user record back, then the result (the SDK
+                            # parser's required fields, nothing spent), each at its own journal offset
+                            for rec in (obj, {"type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1,
+                                              "is_error": False, "num_turns": 1, "session_id": SID}):
+                                writer.write(sh.encode_frame({"t": "out", "offset": self.next_offset, "data": rec}))
+                                self.next_offset += 1
                             await writer.drain()
                     elif f["t"] == "ping":
                         writer.write(sh.encode_frame({"t": "pong"})); await writer.drain()
@@ -1360,7 +1373,10 @@ class AttachStandDown(unittest.TestCase):
         return [json.loads(l).get("state") for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
 
     def test_four_unanswered_attaches_stand_the_session_down_once_until_a_send(self):
-        self._serve(answer_init=lambda n: False)
+        # echo_turns: the backend feeds one text at a time and waits for the CLI to take it (SdkSession._untaken), so
+        # the three texts asserted below reach this host only if it answers each with a turn; a host that echoes
+        # nothing would hold the second and third for good
+        self._serve(answer_init=lambda n: False, echo_turns=True)
         self.assertTrue(self.be.send(self.sid, "hello"))
         self._wait(lambda: "host.attach-failed" in self._kinds(), timeout=40, what="the stand-down row")
         self._wait(lambda: not (self.be.sessions.get(self.sid) and self.be.sessions[self.sid].thread.is_alive()), what="the thread's exit")

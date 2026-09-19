@@ -138,6 +138,11 @@ async def main():
     check("ask_cleared", be.current_ask(SID) is None)
     # (d) the control: nothing parked, the feeder's pop marks working
     sess.inflight = 0; sess._mark("waiting"); fed_n = len(FED)
+    # the feeder feeds ONE text at a time: inputs() holds every further feed while sess._untaken (the last fed text the
+    # CLI has not yet taken) is set, and only _on_message clears it on a streamed turn frame (_untaken_taken). This drive
+    # pushes its stream through be._forward and never reaches _on_message, so the take is stood in for by hand before
+    # each later enqueue
+    sess._untaken = None
     sess.enqueue("a second message, nothing parked")
     await asyncio.sleep(0.6)
     check("control_pop_marks_working", _states(be)[-1] == "working" and len(FED) == fed_n + 1, (_states(be)[-2:], len(FED) - fed_n))
@@ -147,6 +152,7 @@ async def main():
                                                                    "options": [{"label": "left"}, {"label": "right"}], "multiSelect": False}]}))
     await asyncio.wait_for(parked.wait(), 10)
     before = list(_states(be)); fed_n = len(FED)
+    sess._untaken = None                                 # the take of leg (d)'s text, stood in for as above
     sess.enqueue("a message while the picker stands")
     await asyncio.sleep(0.6)
     check("picker_text_fed_state_stands", len(FED) == fed_n + 1 and _states(be) == before and before[-1] == "picker", (before[-1], _states(be)[-1]))

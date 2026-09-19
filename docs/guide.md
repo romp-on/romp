@@ -80,7 +80,10 @@ dashed bubble under an hourglass until the session takes it — while it compact
 turn runs, or in the beat before the kernel confirms the send. Until then it is still
 yours: the **✎** in its corner takes it out of the queue and puts it back into the message
 box — the words, the quote chips it was written against and its attachments — so you can
-change it and send it again, or clear the box to drop it. A queued slash command, and a
+change it and send it again, or clear the box to drop it. Several messages sent during one
+turn reach the session one at a time, in the order you sent them: the next waits, shown as
+queued, until the session has taken the one before it, so two messages are never joined
+into one. A queued slash command, and a
 notice romp itself queued, carry a **✕** instead: there is nothing to reword, so they just
 cancel. If the session took the message before you pressed, the bubble says so and the
 box is left as it was, so nothing is sent twice. One case to know about: a chat page

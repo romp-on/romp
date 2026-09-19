@@ -379,7 +379,7 @@ class LiveTail(unittest.TestCase):
     def test_forwards_sends_is_true_for_the_sdk(self):
         be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
         self.assertTrue(be.forwards_sends(),
-                        "the SDK forwards its own sends (mid-turn + fold + interrupt-hold) — the kernel hands "
+                        "the SDK forwards its own sends (mid-turn + one message each + interrupt-hold): the kernel hands "
                         "composer sends straight over instead of parking them (the user 2026-07-17)")
 
     def test_queued_turns_survive_an_interrupt_and_release_when_the_turn_settles(self):
@@ -4482,10 +4482,14 @@ class ReconnectReconcilesInflight(unittest.TestCase):
             async def get_context_usage(self): return {"percentage": 2, "model": "claude-x"}
 
             async def receive_messages(self):
-                yield _sdk.SystemMessage("init", {"session_id": self.options.session_id or "fsid"})
+                # the CLI's init opens a TURN (one per turn, none on a turn-less connect: _on_message's init
+                # branch says so), so the fake streams it with the first dequeued turn. Streamed at connect, the
+                # SECOND client's init read as a turn the CLI started (a turn frame at inflight 0 counts as one,
+                # the CLI-owned-turn count) and held inflight at 1 for the stall's whole life.
                 while True:
                     turn = await self._turnq.get()
                     StallClient.received.append(turn["message"]["content"][0]["text"])
+                    yield _sdk.SystemMessage("init", {"session_id": self.options.session_id or "fsid"})
                     await _aio.sleep(3600)           # stall this turn forever (never a ResultMessage)
 
         _sdk.ClaudeSDKClient = StallClient

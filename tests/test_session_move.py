@@ -251,6 +251,24 @@ class MoveRefusals(MoveBase):
         self.assertEqual(s.client._query.requests, [])
         self._unchanged(s)
 
+    def test_a_text_queued_after_the_idle_reading_is_busy_before_any_request(self):
+        # the busy reading and the arm are one step under the session lock (the feeder pops under that
+        # lock and holds the head while the arm stands), so a text queued between move()'s first idle
+        # reading and the arm is caught by the locked re-read: no request goes out, nothing is armed, and
+        # the claim is returned
+        s = self._wire([_ok(self.new)])
+        real = self.be._claim_cwd_pending
+
+        def claim_then_a_send_lands(*a):
+            out = real(*a)
+            s.enqueue("sent while the claim was being written")
+            return out
+        self.be._claim_cwd_pending = claim_then_a_send_lands
+        self.assertEqual(self.be.move(SID, self.new), "busy")
+        self.assertEqual(s.client._query.requests, [], "no set_cwd went out with a text in the queue")
+        self.assertEqual(s.pending(), ["sent while the claim was being written"], "the text is untouched")
+        self._unchanged(s)
+
     def test_rejected_carries_the_clis_own_words(self):
         s = self._wire([{"status": "rejected", "reason": "not_found",
                          "message": "Couldn't find a directory at /srv/notes-api/web."}])
@@ -324,7 +342,8 @@ class LostReply(MoveBase):
         self.assertEqual(s.cwd, self.new)
         self.assertTrue(s._move_settle_expected, "the CLI's turn-less result is still coming — the arm stands")
         self.assertTrue(os.path.exists(sb.transcript_path(self.new, EPISODE_FSID)), "prior episodes follow")
-        self.assertTrue(any("reply was lost" in m for m, p in self.logs))
+        self.assertTrue(any("reply was lost" in m and p for m, p in self.logs),
+                        "on the problem ring: the arm outlives move() and holds the queue")
 
     def test_a_lost_reply_with_the_transcript_nowhere_is_uncertain_and_keeps_the_flag(self):
         s = self._wire([RuntimeError("control request timed out")])
@@ -468,14 +487,21 @@ class SpuriousSettle(unittest.TestCase):
         self.assertFalse(s._move_settle_expected, "spent on the match")
 
     def test_the_guard_only_fires_on_an_armed_zero_turn_result(self):
-        be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
+        # A real turn's result while the arm stands proves the arm stale (the move's result would have
+        # preceded it) and DROPS it, logged, so a zero-turn result after that goes to the ordinary settle.
+        logs = []
+        be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None, log=lambda m: logs.append(str(m)))
         s = self._session(be, armed=False)
-        self.assertFalse(s._consume_move_settle(FakeResultMessage(0)), "unarmed: a real result settles as before")
+        self.assertFalse(s._consume_move_settle(FakeResultMessage(0)), "unarmed: a zero-turn result settles as before")
         s._move_settle_expected = True
         self.assertFalse(s._consume_move_settle(FakeResultMessage(1)), "a real turn reports its round trips")
-        self.assertTrue(s._move_settle_expected, "…and leaves the arm for the move's own result")
-        self.assertTrue(s._consume_move_settle(FakeResultMessage(0)))
-        self.assertFalse(s._move_settle_expected)
+        self.assertFalse(s._move_settle_expected, "and drops the arm: the move's own result would have come first")
+        self.assertTrue(any("stale arm is dropped" in m for m in logs), logs)
+        self.assertFalse(s._consume_move_settle(FakeResultMessage(0)),
+                         "after the drop a zero-turn result is nobody's move: the ordinary settle takes it")
+        s._move_settle_expected = True
+        self.assertTrue(s._consume_move_settle(FakeResultMessage(0)), "armed and zero turns: the move's own result")
+        self.assertFalse(s._move_settle_expected, "spent on the match")
 
     def test_the_guard_precedes_the_settle_branch(self):
         src = open(os.path.join(BIN, "romp_sdk_backend.py"), encoding="utf-8").read()

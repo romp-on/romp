@@ -169,10 +169,13 @@ class SessionBackend(ABC):
 
     def forwards_sends(self) -> bool:
         """True if this backend accepts a plain composer send at ANY time — even mid-turn — and manages its
-        own delivery: forwarding the message to the model at the next tool boundary, folding several queued
-        sends into one turn, and holding them across an interrupt until the turn settles (SdkSession._pending
-        + its inputs() generator). The kernel then hands composer sends straight to send() the instant they
-        arrive (the user 2026-07-17, who wanted them in as soon as possible), instead of parking them itself.
+        own delivery: forwarding the message to the model at the next tool boundary, handing queued sends to
+        the CLI one message each, in order (SdkSession._pending + its inputs() generator, which holds the
+        next text until the CLI has taken the last, since 2026-09-08, when two texts sent during one turn
+        reached the agent as one fused message; that change supersedes the 2026-07-17 merge of several queued
+        sends into one turn for SDK sessions), and holding them across an interrupt until the turn settles.
+        The kernel then hands composer sends straight to send() the instant they arrive (the user 2026-07-17,
+        who wanted them in as soon as possible), instead of parking them itself.
         False (default) means the backend has no such queue, so the kernel holds sends while a turn runs and
         merges them into one message at turn end (the tmux backend's regime, until its removal 2026-09-11).
         Slash-command drive ops (/compact, /effort, …) still

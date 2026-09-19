@@ -119,7 +119,9 @@ class WiringPins(unittest.TestCase):
     def test_reconnect_never_defers_on_rewind_held_turns(self):
         # rewind-held turns can't start until the reconnect arms them — deferring would deadlock
         self.assertIn("held = bool(self._rewind_to and not self._rewind_armed)", BACKEND_SRC)
-        self.assertIn("if self.inflight == 0 and (held or not self._pending):", BACKEND_SRC)
+        # the quiet reading counts a fed text the CLI has not taken (_untaken) as in flight
+        self.assertIn("quiet = self.inflight == 0 and self._untaken is None", BACKEND_SRC)
+        self.assertIn("if quiet and (held or not self._pending):", BACKEND_SRC)
 
     def test_result_message_consumes_the_flag(self):
         self.assertIn("# the rewind turn settled — the flag is CONSUMED", BACKEND_SRC)
@@ -405,6 +407,16 @@ class DeleteWhileBusy(unittest.TestCase):
         self.be._complete_rewind_wait(self.s)
         self.assertEqual(self.s.reconnects, 1)
         self.assertEqual(self.resolved, [], "no failure — nothing resolved until the branch takes")
+
+    def test_busy_answers_for_the_double_with_its_three_attributes(self):
+        # busy() reads inflight, _pending and _untaken under _lock and calls no SdkSession method, so this
+        # double (recorders only) answers; a method call on the session would break every test here that
+        # reaches busy()
+        self.assertTrue(self.be.busy(self.sid), "a running turn (inflight 1)")
+        self.s.inflight = 0
+        self.assertFalse(self.be.busy(self.sid))
+        self.s._pending.append("queued behind the turn")
+        self.assertTrue(self.be.busy(self.sid), "a queued text")
 
     def test_arm_time_revalidation_failure_restores_loudly(self):
         # a mid-window auto-compaction moved the boundary past the target: the closure refuses

@@ -249,8 +249,10 @@ class _FakeForwardBackend:
 
 class SdkForwardsAndBatch(unittest.TestCase):
     """The user 2026-07-17: get typed messages in AS SOON AS POSSIBLE (no interrupt), and when a pile is
-    queued, send them ALL AT ONCE — the SDK folds them into one turn; a backend with no fold (Codex) gets
-    them merged into one message. A backend that
+    queued, send them ALL AT ONCE: the kernel drains the pile in one pass. The SDK enqueues each and its
+    inputs() hands them to the CLI one message each, in order (2026-09-08, when two texts sent during one
+    turn reached the agent as one fused message; that superseded the one-turn merge for SDK sessions); a
+    backend with no such queue (Codex) gets them merged into one message. A backend that
     forwards its own sends (forwards_sends) takes a composer send even MID-TURN, instead of the kernel
     parking it until the turn ends; slash-command drive ops still park in press order — except a model
     pick on a backend that declares model_switches_live, which fires and keeps order by going first
@@ -281,7 +283,7 @@ class SdkForwardsAndBatch(unittest.TestCase):
         for t in ("one", "two", "three"):
             km._send_or_park(self.fbe, SID, t, echo="human")
         self.assertEqual(self.fbe.calls, [("send", "one"), ("send", "two"), ("send", "three")],
-                         "all three reach the SDK queue → its inputs() folds them into one turn")
+                         "all three reach the SDK queue → its inputs() hands them to the CLI one message each, in order")
         self.assertNotIn(SID, km._pending_ops)
 
     def test_a_send_after_a_live_model_pick_still_reaches_the_model_second(self):
@@ -318,12 +320,12 @@ class SdkForwardsAndBatch(unittest.TestCase):
                          "a backend with no fold (Codex) → the run merges into a single blank-line-separated message")
         self.assertNotIn(SID, km._pending_ops, "the whole run delivered at once")
 
-    def test_sdk_delivers_a_run_as_separate_sends_to_fold(self):
+    def test_sdk_delivers_a_run_as_separate_sends_one_message_each(self):
         km.Sessions.backend_for = lambda sid: self.fbe
         km._pending_ops[SID] = [("send", "a", None), ("send", "b", None), ("send", "c", None)]
         km._apply_pending_ops()
         self.assertEqual(self.fbe.calls, [("send", "a"), ("send", "b"), ("send", "c")],
-                         "the SDK enqueues each — its inputs() folds them into one turn, no merge")
+                         "the SDK enqueues each: its inputs() hands them to the CLI one message each, in order; no merge")
         self.assertNotIn(SID, km._pending_ops)
 
     def test_a_drive_op_then_a_run_applies_the_op_then_batches_the_sends(self):
