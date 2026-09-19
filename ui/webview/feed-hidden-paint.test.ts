@@ -180,7 +180,7 @@ test("the follow-move backstop yields to a prediction a payload already retired;
   const ack = body("ackFollowMove");
   const guard = ack.indexOf('if (!pendingFollowMove.has(itemId)) return;\n    clearFollowMove(itemId, "backstop-noconfirm"); render();');
   assert.ok(guard > 0, "the backstop checks the prediction still stands before it reverts");
-  assert.match(body("reconcileFollowMove"), /if \(!a \|\| a\.column === "working" \|\| pendingMoveKind\.get\(id\) === "answer"\) \{\n\s*clearFollowMove\(/);
+  assert.match(body("reconcileFollowMove"), /if \(!a \|\| askColumn\(a\) === "asks" \|\| pendingMoveKind\.get\(id\) === "answer"\) \{\n\s*clearFollowMove\(/);   // Working through askColumn (the boards' phase two)
 });
 
 test("a bell jump settles the owed paint on the shell's word before it looks for the card", () => {

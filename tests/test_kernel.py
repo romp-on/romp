@@ -8428,10 +8428,26 @@ class PostalPeerTunnels(unittest.TestCase):
         # bus was down for a restart); restored after, whatever the outcome
         env_saved = {k: os.environ.get(k) for k in ("ROMP_POSTAL_CLIENT_ONLY", "ROMP_POSTAL_PEERS", "ROMP_POSTAL_PORT")}
         os.environ.update(ROMP_POSTAL_CLIENT_ONLY="1", ROMP_POSTAL_PEERS="0", ROMP_POSTAL_PORT="1")
+        # the revive runs on a DAEMON THREAD: restoring the environment as soon as the assertion returns raced it, and the
+        # thread's ensure then ran with the RESTORED environment and started a real bus detached from the test (2026-09-18: two
+        # such buses stood on the shared box for hours, and the record one wrote under the shared state root redirected a
+        # later module's dial). Every spawn is recorded, the revive is waited out BEFORE the restore, and the ensure must
+        # never have run at all here: a client-only kernel owns no bus to revive.
+        runs = []
+        real_run = km.subprocess.run
+        km.subprocess.run = lambda *a, **kw: (runs.append((a, dict(os.environ))), real_run(*a, **kw))[1]
         try:
             self.assertFalse(km._notify_bus_peer("TESTHOST", 50002, True),
                              "postal down → False, never an exception (the supervisor must survive)")
+            for _ in range(200):                      # the revive thread finishes (or never started) before the environment goes back
+                if not km._bus_reviving[0]:
+                    break
+                time.sleep(0.01)
+            self.assertFalse(km._bus_reviving[0], "the revive finished before the environment was restored")
+            self.assertEqual([a[0][:2] for a, _ in runs if a and "romp-postal-service" in " ".join(map(str, a[0]))], [],
+                             "a client-only kernel never runs the bus ensure: nothing to spawn, nothing to leak")
         finally:
+            km.subprocess.run = real_run
             km.BUS_PORT = saved
             for k, v in env_saved.items():
                 if v is None:

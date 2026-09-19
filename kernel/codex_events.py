@@ -41,8 +41,8 @@ def _cap(text):
 
 def _iso(ms, clock):
     """Record timestamps, Claude transcript format (…T…S.mmmZ). Codex stamps item lifecycles with
-    epoch millis (startedAtMs/completedAtMs); events with no wire time (thread/compacted) take the
-    injected clock, so the goldens run on a fixed one."""
+    epoch millis (startedAtMs/completedAtMs); events with no wire time (a settle, a thread/compacted
+    notification) take the injected clock, so the goldens run on a fixed one."""
     if ms is None:
         ms = int(clock() * 1000)
     dt = datetime.fromtimestamp(ms / 1000, timezone.utc)
@@ -137,6 +137,13 @@ class ThreadNormalizer:
         self._tool_open = set(self._minted)     # item ids whose tool_use record is already on disk
         self._seen_user = set(self._minted)     # userMessage ids already written (started+completed)
         self._error_settled = set()   # turn ids whose failure card is already written (error → turn/completed dedup)
+        # In-turn compaction bookkeeping (2026-09-19). _cb_seen: contextCompaction item ids already
+        # accounted for, the boundary written or paired with a thread/compacted; seeded from the file
+        # like _seen_user, so a re-delivered item is refused on every path. The two counters pair the
+        # item and the notification per turn: boundaries written for a turn = max(items, notifications).
+        self._cb_seen = set(self._minted)
+        self._cb_items = {}           # turn id -> contextCompaction item/completed count
+        self._cb_notes = {}           # turn id -> thread/compacted notification count
         self._seq = 0                 # uniquifier for synthesized/colliding uuids
         self._last_ms = 0             # newest timestamp emitted — the floor for clock-stamped records
 
@@ -241,9 +248,11 @@ class ThreadNormalizer:
             self.turn_open = True
             return []
         if method == "item/started":
-            return self._item(p.get("item") or {}, p.get("startedAtMs"), started=True)
+            return self._item(p.get("item") or {}, p.get("startedAtMs"), started=True,
+                              turn_id=p.get("turnId"))
         if method == "item/completed":
-            return self._item(p.get("item") or {}, p.get("completedAtMs"), started=False)
+            return self._item(p.get("item") or {}, p.get("completedAtMs"), started=False,
+                              turn_id=p.get("turnId"))
         if method == "turn/completed":
             self.turn_open = False
             return self._turn_completed(p.get("turn") or {})
@@ -272,7 +281,7 @@ class ThreadNormalizer:
             return self._error(p)
         return []
 
-    def _item(self, item, ts_ms, started):
+    def _item(self, item, ts_ms, started, turn_id=None):
         t = item.get("type")
         iid = item.get("id") or ""
         if t == "userMessage":
@@ -302,6 +311,12 @@ class ThreadNormalizer:
                 return self._flush() + [self._tool_use(iid, ts_ms, name,
                                                        args if isinstance(args, dict) else
                                                        ({"arguments": args} if args is not None else {}))]
+            if t == "contextCompaction":
+                # nothing to write at started (2026-09-19): the item carries no content, and the
+                # boundary is true only at completed, which the runtime emits only after it replaced
+                # the history (a compaction that fails never completes its item); the completed arm
+                # below writes it
+                return []
             return []   # everything else is written at completed, when its content is final
         # ── item/completed ──
         if t == "agentMessage":
@@ -367,7 +382,30 @@ class ThreadNormalizer:
             out.append(self._tool_result(iid, ts_ms, "done"))
             return out
         if t == "contextCompaction":
-            return []   # thread/compacted writes the boundary; two writers would double it
+            # The boundary writer (2026-09-19). Codex 0.153.3 emits every compaction inside a running
+            # turn (pre-turn on a context limit, mid-turn when a follow-up call is due) as a
+            # contextCompaction item on THAT turn, completed only after the history was replaced, and
+            # has deprecated thread/compacted (its app-server never constructs the notification), so
+            # this item is the one exact signal; _compacted stays as a dedup for a runtime that sends
+            # both. Trigger "auto" is exact: a registered turn is one romp opened with turn/start, and
+            # every compaction inside one is automatic (the manual compaction runs as its own turn,
+            # which romp never registers). The uuid is the wire item id, stable across a re-delivery,
+            # which is what the replay guard needs. In the pre-turn shape the boundary is followed
+            # directly by the turn's prompt, with no summary record between (Codex exposes none); the
+            # read side's replay window arms on the summary record, never on this boundary (the
+            # event-model change this one is stacked on, 2026-09-19), so that prompt survives even
+            # when it repeats earlier text; the repeated-prompt parse golden pins that order. The
+            # counters count a turn they have never seen instead of raising: the backend's turn worker
+            # treats a raise from handle as a dead turn (interrupts it and writes the abandoned card).
+            tid = turn_id or self.turn_id or "0"
+            if iid and iid in self._cb_seen:
+                return []   # re-delivered across a reconnect/restart: written, or paired, already
+            if iid:
+                self._cb_seen.add(iid)
+            self._cb_items[tid] = self._cb_items.get(tid, 0) + 1
+            if self._cb_items[tid] <= self._cb_notes.get(tid, 0):
+                return []   # a thread/compacted for this turn already wrote this compaction's boundary
+            return self._boundary(iid or "cb-%s" % tid, ts_ms, "auto")
         # phase-2 vocabulary (plan, subAgentActivity, collabAgentToolCall, imageView, …) — counted
         if t:
             self.skipped[t] = self.skipped.get(t, 0) + 1
@@ -400,20 +438,45 @@ class ThreadNormalizer:
         usage, self._usage = self._usage, None
         return self._flush(stop="end_turn", usage=usage)
 
-    def _compacted(self, p):
-        # the held reply is PRE-compaction content — it must land before the boundary so the stitch
-        # points at the true leaf and file order stays chronological (review finding #4)
+    def _boundary(self, uuid, ts_ms, trigger):
+        """The one compact_boundary writer (2026-09-19), shared by the contextCompaction item arm and
+        the thread/compacted arm so the shape the read side follows (the FileAdapter walks
+        logicalParentUuid, segment_turns opens the boundary's own turn, build_session emits a compact
+        event with the trigger) cannot drift between the two. The held reply is PRE-compaction
+        content: it lands before the boundary so the stitch points at the true leaf and file order
+        stays chronological (review finding #4). compactMetadata carries the trigger and nothing
+        else: Codex exposes no summary text and no token counts for a compaction, the client draws
+        the token line only when preTokens is present, and the last tokenUsage frame during a
+        compaction is the compaction call's own input, so a derived count would be a guess (absent,
+        not faked). No isCompactSummary record follows, so the card's "what compaction kept" stays
+        absent for Codex sessions."""
         out = self._flush()
-        uuid = self._mint("cb-%s" % (p.get("turnId") or self.turn_id or "0"))
+        uuid = self._mint(uuid)
         rec = {"type": "system", "subtype": "compact_boundary", "uuid": uuid, "parentUuid": None,
-               "logicalParentUuid": self.last_uuid, "timestamp": _iso(self._stamp(None), self.clock),
+               "logicalParentUuid": self.last_uuid, "timestamp": _iso(self._stamp(ts_ms), self.clock),
                "sessionId": self.thread_id, "cwd": self.cwd, "version": self.version,
-               "isMeta": False, "compactMetadata": {"trigger": "auto"}}
-        # Codex exposes no compaction summary text — no isCompactSummary record follows, and the
-        # card's "what compaction kept" stays absent for Codex sessions (absent, not faked).
+               "isMeta": False, "compactMetadata": {"trigger": trigger}}
         self.last_uuid = uuid
         out.append(rec)
         return out
+
+    def _compacted(self, p):
+        # thread/compacted (2026-09-19): deprecated on Codex 0.153.3 and never sent; the
+        # contextCompaction arm of _item is the writer. This arm stays for a runtime that sends both
+        # signals, as a dedup: boundaries written for a turn = max(items seen, notifications seen), so
+        # whichever signal arrives first writes and the other is a pairing, once per compaction. The
+        # pairing keys on the notification's OWN turnId, never on the self.turn_id fallback: a call
+        # with no turnId (a synthesized one for a standalone compaction) must always write, and
+        # self.turn_id is the LAST romp turn's id, so a fallback-keyed pairing would swallow it
+        # whenever that turn carried an in-turn compaction. A wire thread/compacted always carries
+        # turnId. The trigger passes through when the caller names one.
+        wire_tid = p.get("turnId")
+        if wire_tid:
+            self._cb_notes[wire_tid] = self._cb_notes.get(wire_tid, 0) + 1
+            if self._cb_notes[wire_tid] <= self._cb_items.get(wire_tid, 0):
+                return []   # the item already wrote this compaction's boundary
+        return self._boundary("cb-%s" % (wire_tid or self.turn_id or "0"), None,
+                              p.get("trigger") or "auto")
 
     def _error(self, p):
         if p.get("willRetry"):

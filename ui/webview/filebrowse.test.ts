@@ -168,7 +168,7 @@ test("a lost reply recovers on the socket's own events, and a federation drop fa
   assert.match(BROWSE, /window\.addEventListener\("romp:wsdown", \(\) => \{/);
   assert.match(BROWSE, /window\.addEventListener\("romp:wsup", \(\) => \{/);
   assert.match(BROWSE, /needResync = true;/);
-  assert.match(BROWSE, /m\.type === "warn" && inflight && document\.getElementById\("romp-filebrowse"\)/);
+  assert.match(BROWSE, /m\.type === "warn" && typeof m\.sid !== "string" && inflight && document\.getElementById\("romp-filebrowse"\)/, "only a warn naming NO session ends the listing: one that names a session answers a send into that session (a Codex slash refusal broadcast to every chat pane, 2026-09-19), never this listing");
 });
 
 test("Escape peels the TOPMOST layer: row menu, then viewer, then browser", () => {

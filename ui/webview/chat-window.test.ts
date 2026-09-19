@@ -79,7 +79,9 @@ test("render.ts asks for older history only on an upward move, marks each window
   // a second full ask while one is in flight is dropped before it can overwrite the pending reason (kept for the reconnect's diagnostics:
   // every full frame merges into the held runs since T386 stage 2, so no reason decides a merge or a replace any more)
   const full = RENDER.slice(RENDER.indexOf("function requestFullSession(id: string, why: NeedFullWhy): void {"), RENDER.indexOf("\n}\n", RENDER.indexOf("function requestFullSession(id: string, why: NeedFullWhy): void {")));
-  assert.ok(full.indexOf("if (!id || awaitingFull.has(id)) return;") < full.indexOf("pendingFullWhy.set(id, why);"), "a second full ask while one is in flight is dropped before it can overwrite the pending reason");
+  for (const line of ["if (!id) return;", "if (awaitingFull.has(id)) {", "pendingFullWhy.set(id, why);"]) assert.ok(full.includes(line), line + " is in requestFullSession (an absent line would make the order below vacuous)");
+  assert.ok(full.indexOf("if (!id) return;") < full.indexOf("if (awaitingFull.has(id)) {") && full.indexOf("if (awaitingFull.has(id)) {") < full.indexOf("pendingFullWhy.set(id, why);"),
+    "a second full ask while one is in flight is refused (the empty-id guard, then the latched branch, 2026-09-19) before it can overwrite the pending reason");
 });
 
 test("a window ask carries the navigation's time and kind to its reply; the three direct landings (a notch, a reply chip, a comment tick) arm neither (T366)", () => {

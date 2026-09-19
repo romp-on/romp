@@ -2,9 +2,11 @@
 side). A real child interpreter over a pipe, a synthetic transcript under a temp Claude root, a fake `claude -p` that
 answers a fixed result envelope, and a temp state root: one `pass` through the child writes the stores an in-process pass
 over the same fixture writes in a fresh interpreter, and the protocol's roads (ready, done, tracking off, malformed,
-unknown op, busy, a raising tier, quit, end of input) each answer as the protocol says; the pass body is the one the
-kernel's producer runs (judge.py run_pass), pinned by the call on both sides, never a mirror. No real prompt or transcript text:
-every string here is invented."""
+unknown op, busy, a raising tier, a pass that dies short of its done, quit, end of input) each answer as the protocol says;
+the pass body is the one the kernel's producer runs (judge.py run_pass), pinned by the call on both sides, never a mirror.
+The gate cases run the loop in this process over pipes, with a stand-in pass body whose thread outlives its done line, ends
+without one, or is held short of it while more requests arrive. No real prompt or transcript text: every string here is
+invented."""
 import json
 import os
 import queue
@@ -246,6 +248,26 @@ class OnePass(Harness):
         self.assertEqual(_tree(root).keys() - {"names/" + SID}, set(), "no store written")
         c.send({"op": "quit"}); c.proc.wait(timeout=60); self.assertEqual(c.proc.returncode, 0)
 
+    def test_a_request_without_a_clock_runs_the_tiers_on_their_own_clock_the_kernels_default(self):
+        """The request's `now` is optional (2026-09-18): absent or null, the tiers read their own clock during the pass, the
+        in-process producer's behaviour and the kernel side's default; a number is the explicit variant, handed to both tiers
+        truncated to the second. Green at the base too (the child never required the field), said as such: this pins the
+        contract the kernel's default now relies on, and the source that passes the clock through only when it is a number."""
+        root = self.state_root("noclock"); c = self.child(root)
+        self.assertEqual(c.line()["op"], "ready")
+        c.send({"op": "pass", "seq": 1, "mayStart": True})                                # no clock at all
+        done = c.line()
+        self.assertEqual((done["op"], done["seq"], done["tierStarts"], done["failures"]), ("done", 1, 2, None), done)
+        self.assertGreaterEqual(sum(v["ran"] for k, v in done["tierGate"].items() if k != "stamps"), 1, "the tiers ran their stages on their own clock")
+        c.send({"op": "pass", "seq": 2, "mayStart": True, "now": None})                   # an explicit null: the same
+        done2 = c.line()
+        self.assertEqual((done2["op"], done2["seq"], done2["tierStarts"]), ("done", 2, 2), done2)
+        c.send({"op": "quit"}); c.proc.wait(timeout=60); self.assertEqual(c.proc.returncode, 0)
+        import inspect
+        src = inspect.getsource(jd._serve_pass)
+        self.assertIn('now = int(now) if isinstance(now, (int, float)) and not isinstance(now, bool) else None', src, "a number is the explicit clock variant; anything else is the tiers' own clock")
+        self.assertIn("run_pass(may_start, now=now, before_tier=_serve_fault)", src)
+
     def test_the_done_lines_counter_blocks_are_per_pass_deltas(self):
         """Round two (the kernel head's read): the blocks rode as cumulative process snapshots, which the kernel could not
         feed into its per-pass counters; the child keeps the previous snapshot and emits the difference, so a pass that
@@ -268,8 +290,15 @@ class OnePass(Harness):
                     yield from numbers(v, path + k + ".")
                 elif isinstance(v, (int, float)) and not isinstance(v, bool):
                     yield path + k, v
-        gauges = {"recordCache": ("entries", "bytes", "budgetBytes", "countCap"), "asmCheckpoint": ("asmDocMemo",)}
-        for name in ("recordCache", "asmCheckpoint", "parses", "goalIo"):                 # the two blocks the base carried first,
+        gauges = {"recordCache": ("entries", "bytes", "budgetBytes", "countCap"), "asmCheckpoint": ("asmDocMemo",), "tierGate": ("stamps",)}
+        # the tiers' gate counters ride the line too (2026-09-18: a flip's call count per pass had no gate figure to explain it): per tier,
+        # ran/skipped/stamped/bypassed/incomplete/due_clock as deltas, the working first pass with runs, the idle second with none
+        STAGES = ["close", "consolidate", "distill", "group", "plan", "unblock"]
+        self.assertEqual(sorted(first.get("tierGate") or {}), sorted(STAGES + ["stamps"]), "the gate block, per stage, plus the stamps gauge (the base carried no tierGate)")
+        for stage in STAGES:
+            self.assertEqual(sorted(first["tierGate"][stage]), ["bypassed", "due_clock", "incomplete", "ran", "skipped", "stamped"], stage)
+        self.assertGreaterEqual(sum(first["tierGate"][st]["ran"] for st in STAGES), 1, "the working pass ran stages under the gate: %r" % first["tierGate"])
+        for name in ("recordCache", "asmCheckpoint", "parses", "goalIo", "tierGate"):     # the two blocks the base carried first,
             nonzero = [(k, v) for k, v in numbers(second.get(name) or {}) if v and k.split(".")[0] not in gauges.get(name, ())]
             self.assertEqual(nonzero, [], "%s: an idle pass reports a zero delta for every counter (the base reported the process totals)" % name)
         for name, keys in gauges.items():                                               # round three: the gauges ride as current
@@ -280,6 +309,8 @@ class OnePass(Harness):
         self.assertGreater(second["asmCheckpoint"]["asmDocMemo"]["capBytes"], 0, "a cap never reads zero on the second pass")
         for key in ("budgetBytes", "countCap"):                                          # the caps hold across a working pass too
             self.assertEqual(third["recordCache"][key], first["recordCache"][key])
+        self.assertEqual(third["tierGate"]["stamps"], second["tierGate"]["stamps"], "the stamps held is a gauge: the same count on the idle and the warm pass")
+        self.assertGreaterEqual(sum(third["tierGate"][st]["ran"] for st in STAGES), 1, "the warm third pass ran stages under the gate")
         self.assertEqual(third["asmCheckpoint"]["asmDocMemo"]["capBytes"], first["asmCheckpoint"]["asmDocMemo"]["capBytes"])
         first_restore = first["asmCheckpoint"]["restoreMs"].get("total", 0.0)
         self.assertGreater(first_restore, 0.0, "the first pass restored the fixture's document")
@@ -413,6 +444,154 @@ class Roads(Harness):
         self.assertEqual((third["op"], third["seq"]), ("done", 3), "nothing was queued: no done for seq 2, the next pass answers")
         c.send({"op": "quit"}); c.proc.wait(timeout=60); self.assertEqual(c.proc.returncode, 0)
 
+    def _serve_in_process(self, pass_body):
+        """jd.serve on a thread of this process over two pipes, with `pass_body` in _serve_pass's place for the loop's life: the
+        harness of the gate cases, which need a pass whose thread outlives its done line, one that ends without a done line,
+        or one held short of it until the case releases it, and none of those shapes can be asked of the real pass body
+        through a child process. A pump thread puts each answer line on a queue; the ready line is consumed here. Returns (send,
+        answer, loop): send(obj) writes one request line, answer() parses the next answer line and fails the case when none
+        arrives in 30 s, loop is the serve thread, which the case joins after its quit.
+        The cleanups run in this order: the request pipe's write end closes and the loop is joined (the end of input ends a
+        loop that a failed step left waiting); the loop's swaps of sys.stdout, sys.stderr and the event model's two stage
+        providers are undone, the loop's pipe ends closed and the pump joined (the closed write end is its end of input);
+        the patch is lifted; the fault knob, when the environment carried one, goes back. The knob is out of the environment
+        for the run, so a runner's knob cannot reach the loop."""
+        from unittest import mock
+        r_in, w_in = os.pipe()
+        r_out, w_out = os.pipe()
+        inp, req_w = os.fdopen(r_in, "r"), os.fdopen(w_in, "w", buffering=1)
+        out, ans_r = os.fdopen(w_out, "w", buffering=1), os.fdopen(r_out, "r")
+        saved = (sys.stdout, sys.stderr, jd.em._SET_STAGE_FN[0], jd.em._READ_STAGE_FN[0])
+        lines = queue.Queue()
+        loop = threading.Thread(target=jd.serve, args=(inp, out), name="serve-under-test", daemon=True)
+        pump = threading.Thread(target=_Child._pump, args=(ans_r, lines.put), daemon=True)
+
+        def end_input():
+            req_w.close()
+            if loop.ident is not None:
+                loop.join(30.0)
+
+        def restore():
+            sys.stdout, sys.stderr = saved[0], saved[1]
+            jd.em.set_stage_provider(saved[2]); jd.em.set_read_stage_provider(saved[3])
+            inp.close(); out.close()
+            if pump.ident is not None:
+                pump.join(30.0)
+            ans_r.close()
+
+        fault = os.environ.pop("ROMP_JUDGE_SERVE_FAULT", None)
+        if fault is not None:
+            self.addCleanup(os.environ.__setitem__, "ROMP_JUDGE_SERVE_FAULT", fault)   # registered first: it runs last
+        patch = mock.patch.object(jd, "_serve_pass", pass_body); patch.start()
+        self.addCleanup(patch.stop)                            # cleanups run last to first: end_input, restore, the patch, the knob
+        self.addCleanup(restore)
+        self.addCleanup(end_input)
+        pump.start(); loop.start()
+
+        def send(obj):
+            req_w.write(json.dumps(obj) + "\n")
+
+        def answer():
+            try:
+                return json.loads(lines.get(timeout=30))
+            except queue.Empty:
+                self.fail("the loop wrote no answer line within 30 s")
+        self.assertEqual(answer()["op"], "ready")
+        return send, answer, loop
+
+    def test_a_pass_sent_on_its_predecessors_done_line_is_never_refused_busy_while_that_thread_exits(self):
+        """The one-pass-at-a-time gate keys on the DONE LINE, the protocol's own end of a pass, never on the pass thread's
+        exit. A thread is alive through its teardown after its last statement, and on a free-threaded interpreter, where no
+        GIL holds the loop's thread behind the exiting one, that teardown outlives the done line by more than a request's
+        round trip: the request that followed a done line read busy, and the kernel kills a child that answers anything but
+        the pass's done. In process, with a pass body that lingers AFTER its done line, every interpreter shows the window,
+        so a gate on the thread's liveness fails this case on a GIL build too."""
+        def lingering_pass(req, emit):
+            emit({"op": "done", "seq": req.get("seq"), "tierStarts": 0})
+            time.sleep(0.5)                                    # the thread outlives its own done line, as a teardown does
+
+        send, answer, loop = self._serve_in_process(lingering_pass)
+        for seq in (1, 2, 3):                                  # each request follows its predecessor's done line at once
+            send({"op": "pass", "seq": seq, "now": NOW, "mayStart": False})
+            self.assertEqual(answer(), {"op": "done", "seq": seq, "tierStarts": 0},
+                             "the pass that follows a done line answers with its own done (a gate on the thread's liveness "
+                             "reads the exiting thread as busy)")
+        send({"op": "quit"})
+        loop.join(30.0)
+        self.assertFalse(loop.is_alive(), "the loop ended on quit")
+
+    def test_a_pass_that_dies_short_of_its_done_line_frees_the_child_for_the_next_pass(self):
+        """The gate's second clause, the pass thread's liveness, covers the one case the done line cannot: a pass whose thread
+        ended WITHOUT a done line (an exception out of _serve_pass) leaves the in-flight flag set, and its dead thread is what
+        frees the child, so the next pass runs. With that clause dropped, the flag alone as the gate, the child reads busy for
+        the rest of its life and the kernel kills it on the next answer. The wait is on the thread's exit itself, never a
+        sleep: threading.excepthook, swapped for the run and restored after it, records the pass thread's exception and sets
+        an Event, then that thread is joined; the exception is recorded, not printed, so the run stays quiet. The swap is
+        process-wide, so an exception on any other thread in the window goes to the hook that was installed: it neither
+        redirects the wait onto that thread nor fails this case."""
+        from unittest import mock
+        exited, seen, installed_hook = threading.Event(), [], threading.excepthook
+
+        def record(args):                                      # runs on the dying thread, after its last statement
+            if args.thread is None or args.thread.name != "serve-pass":
+                installed_hook(args)                           # not the pass thread's: the runner's hook reports it
+                return
+            seen.append(args); exited.set()
+
+        def dies_then_answers(req, emit):
+            if req.get("seq") == 1:
+                raise RuntimeError("the pass died short of its done line (invented)")
+            emit({"op": "done", "seq": req.get("seq"), "tierStarts": 0})
+
+        with mock.patch.object(threading, "excepthook", record):
+            send, answer, loop = self._serve_in_process(dies_then_answers)
+            send({"op": "pass", "seq": 1, "now": NOW, "mayStart": False})
+            self.assertTrue(exited.wait(30.0), "the raising pass reached the unhandled-exception hook")
+            seen[0].thread.join(30.0)
+            self.assertFalse(seen[0].thread.is_alive(), "the pass thread exited: the liveness the clause reads")
+            send({"op": "pass", "seq": 2, "now": NOW, "mayStart": False})
+            self.assertEqual(answer(), {"op": "done", "seq": 2, "tierStarts": 0},
+                             "the pass after one that died short of its done line answers with its own done (with the liveness "
+                             "clause dropped it reads busy, and the child is latched busy for its life)")
+            send({"op": "quit"})
+            loop.join(30.0)
+        self.assertFalse(loop.is_alive(), "the loop ended on quit")
+        self.assertEqual([(a.exc_type, a.thread.name) for a in seen], [(RuntimeError, "serve-pass")],
+                         "the one unhandled exception was the raising pass's, on the pass thread")
+
+    def test_only_a_done_line_clears_the_gate_so_a_pass_refused_busy_leaves_the_running_one_alone(self):
+        """The gate's other half: a pass is in flight from its request to its DONE line, and no other line ends it. The loop
+        writes error lines while a pass runs (a second pass is answered busy, a bad request malformed or unknownOp), and a
+        gate that any written line cleared would admit the request after the busy answer beside the running pass, two
+        passes in one child. The pass body here is held short of its done line on an Event until the case releases it: the
+        two passes sent meanwhile are both refused, the release answers the held pass, and the pass sent on that done line
+        runs. Under a gate that every line clears, the third pass is admitted and answers nothing, so its assertion fails
+        on the 30 s wait; the Event is set at cleanup, so no pass thread stays parked on it after a failed step."""
+        gate, entered = threading.Event(), []
+
+        def held_pass(req, emit):
+            entered.append(req.get("seq"))
+            gate.wait(60.0)                                    # released by the case, at the latest in its cleanup; the bound
+                                                               #  ends a wait no cleanup reached
+            emit({"op": "done", "seq": req.get("seq"), "tierStarts": 0})
+
+        send, answer, loop = self._serve_in_process(held_pass)
+        self.addCleanup(gate.set)
+        send({"op": "pass", "seq": 1, "now": NOW, "mayStart": False})
+        for seq in (2, 3):                                     # both arrive while pass 1 is short of its done line
+            send({"op": "pass", "seq": seq, "now": NOW, "mayStart": False})
+            self.assertEqual(answer(), {"op": "error", "seq": seq, "reason": "busy"},
+                             "a pass sent while another is short of its done line is refused, a busy line already written or "
+                             "not (a gate that any written line cleared admits this one beside the running pass)")
+        gate.set()
+        self.assertEqual(answer(), {"op": "done", "seq": 1, "tierStarts": 0}, "the release answers the held pass")
+        send({"op": "pass", "seq": 4, "now": NOW, "mayStart": False})
+        self.assertEqual(answer(), {"op": "done", "seq": 4, "tierStarts": 0}, "the pass sent on the done line runs")
+        send({"op": "quit"})
+        loop.join(30.0)
+        self.assertFalse(loop.is_alive(), "the loop ended on quit")
+        self.assertEqual(entered, [1, 4], "the refused passes never reached the pass body")
+
     def test_a_tier_that_raises_is_counted_and_the_pass_still_answers(self):
         root = self.state_root("raise"); c = self.child(root, ROMP_JUDGE_SERVE_FAULT="raise:triage")
         self.assertEqual(c.line()["op"], "ready")
@@ -421,7 +600,9 @@ class Roads(Harness):
         self.assertEqual((done["op"], done["seq"], done["tierStarts"]), ("done", 1, 2))
         self.assertEqual(done["failures"]["count"], 1); self.assertIn("RuntimeError", done["failures"]["first"])
         c.send({"op": "pass", "seq": 2, "now": NOW, "mayStart": False})
-        self.assertEqual(c.line()["seq"], 2, "the child is alive after a tier crash")
+        second = c.line()
+        self.assertEqual((second["op"], second["seq"]), ("done", 2),
+                         "the child is alive after a tier crash and takes the next pass (a busy line carries seq 2 too)")
         c.send({"op": "quit"}); c.proc.wait(timeout=60); self.assertEqual(c.proc.returncode, 0)
         joined = "".join(c.err)
         self.assertIn("romp-judge: judge tier triage:", joined)
@@ -494,7 +675,7 @@ class Deltas(unittest.TestCase):
                          "restoreMs accumulates since boot (the read saw 10.088, 20.183, 30.277 over three restores): a counter, differenced; "
                          "asmDocMemo a gauge, current (round four: listed as a gauge, restoreMs read the boot-to-now sum)")
         self.assertNotIn("restoreMs", (gauges or {}).get("asmCheckpoint", ()), "no cumulative counter in the gauge list")
-        self.assertEqual(set(jd._SERVE_GAUGES), {"recordCache", "asmCheckpoint", "parses", "goalIo"}, "one gauge list per block")
+        self.assertEqual(set(jd._SERVE_GAUGES), {"recordCache", "asmCheckpoint", "parses", "goalIo", "tierGate"}, "one gauge list per block")
 
     def test_the_fault_knob_names_the_shape_before_the_tier(self):
         self.assertEqual(jd._serve_fault_parse("garbage")[1][:44], "not raise:<tier>, sleep:<tier>:<seconds> or ")

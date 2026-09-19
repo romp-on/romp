@@ -43,9 +43,11 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
   border-radius: 10px; padding: 16px 20px; font: 13px/1.6 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; color: var(--fg, #ccc); box-shadow: var(--shadow-modal, 0 12px 36px #000000aa); }
 #rsettings .rs-h { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--text-bright, #e8eaed); }
 #rsver { white-space: pre-line; }
-/* subsection headers (Chat / Feed / Sessions / Debug) so the settings group by surface */
-#rsettings .rs-sec { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
-  color: #6f747c; margin: 15px 0 5px; border-top: 1px solid #333; padding-top: 11px; }
+/* subsection headers (Chat / Feed / Sessions / Debug) so the settings group by surface. Sentence case in the accent blue,
+   no uppercase and no letter-spacing (the user 2026-09-18: the all-caps dress read as shouting; a delineator is told apart
+   from a heading by its size and colour, never by capitals): 11px/600 against the 14px/600 card title and the 12px rows. */
+#rsettings .rs-sec { font-size: 11px; font-weight: 600; color: var(--accent, #9cd2ff);
+  margin: 15px 0 5px; border-top: 1px solid #333; padding-top: 11px; }
 #rsettings .rs-sec-first { border-top: 0; margin-top: 7px; padding-top: 0; }
 #rsettings .rs-row { display: flex; align-items: flex-start; gap: 8px; padding: 2px 0 6px; cursor: pointer; position: relative; }
 #rsettings .rs-row input { margin: 3px 0 0; flex: 0 0 auto; cursor: pointer; }
@@ -307,10 +309,10 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 #rsettings .rs-widget.rs-dragging { opacity: 0.7; outline: 1px solid var(--accent); outline-offset: -1px; border-radius: 6px; }
 #rsettings .rs-widget.rs-dragging .rs-grip { cursor: grabbing; }
 #rsettings .rs-grip-none { width: 18px; height: 22px; }   /* a section that does not reorder (the rings, 2026-09-14): the grip's cell, empty, keeps the grid's columns */
-#rsettings .rs-divider { display: flex; align-items: center; gap: 8px; grid-column: 1 / -1; padding: 6px 0; border-bottom: 0; color: var(--text-muted); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+#rsettings .rs-divider { display: flex; align-items: center; gap: 8px; grid-column: 1 / -1; padding: 6px 0; border-bottom: 0; color: var(--accent, #9cd2ff); font-size: 11px; font-weight: 600; }
 #rsettings .rs-divider::before, #rsettings .rs-divider::after { content: ""; flex: 1 1 auto; height: 2px; background: var(--hairline); border-radius: 1px; }
 /* the caption is a TITLE above the box (T415 part two): the word Preview never sits inside the previewed thing */
-#rsettings .rs-preview-title { margin-top: 10px; color: var(--text-muted); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+#rsettings .rs-preview-title { margin-top: 10px; color: var(--accent, #9cd2ff); font-size: 11px; font-weight: 600; }   /* the section-label dress (.rs-sec) */
 #rsettings .rs-preview { margin-top: 4px; padding: 8px; border: 1px solid var(--menu-border); border-radius: 6px; background: var(--bg); display: flex; align-items: center; gap: 12px; }
 #rsettings .rs-preview-body { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
 #rsettings .rs-preview .tab { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; font-size: 12px; color: var(--fg); position: relative; border: 1px solid var(--menu-border); border-radius: 6px; }

@@ -12,7 +12,9 @@ test("askColumn maps it.column directly — no crafty it.blocked re-route (the u
   // the client just maps snake_case. The old `if (it.blocked && state !== "apiError") return "needsInput"`
   // override is GONE — it existed only because the kernel used to report a picker-blocked card as "working".
   assert.doesNotMatch(FEED, /it\.blocked && it\.blocked\.state !== "apiError"/, "the it.blocked override is gone");
-  assert.match(FEED, /return it\.column === "needs_input" \? "needsInput" : it\.column === "completed" \? "completed" : "asks";/);
+  // the mapping is the feed board definition's table since phase one of plans/card-boards.md (board-def.ts FEED_LOCAL_KEY:
+  // working → asks, needs_input → needsInput, completed → completed; board-def.test.ts executes it)
+  assert.match(FEED, /return columnOf\(FEED_BOARD, it\.category \?\? it\.column\);/, "the category since phase two, the column from an older kernel's frame");
   // an apiError card keeps column=working from the kernel → lands in "asks" (Working), no special-casing needed.
 });
 

@@ -43,6 +43,9 @@
   --accent-fg: #0c1a2e;  /* dark text ON the accent (CLAUDE.md) — for the reverse-highlight on a selected toggle */
   --accent-wash: rgba(156, 210, 255, 0.12);  /* THE faint accent wash — mirrors styles.css; one alpha
                        behind every selected/hovered accent chrome */
+  --accent-tint: rgba(156, 210, 255, 0.04);  /* the very faint accent TINT (the user 2026-09-18): a region's ground,
+                       a third of the wash, so a section set apart from the rest of the feed reads as one region
+                       without competing with the cards' own washes; today the focused-session section's */
   --radius-menu: 6px;  /* the menu vocabulary (CLAUDE.md) — mirrors styles.css */
   --shadow-menu: 0 4px 12px rgba(0, 0, 0, 0.35);
   --menu-bg: var(--vscode-menu-background, #252526);   /* the menu SKIN tokens (T226) — mirror styles.css */
@@ -159,6 +162,7 @@ body.theme-light {
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
+  --accent-tint: rgba(194, 65, 12, 0.04);
   --cmt-hl: #FFDF70;
   --fast: #D45500;
   --warn: #9A6A00;
@@ -421,7 +425,12 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    sticky heads (a miniature is short), the block furniture the board has not got — an always-on fold caret,
    a resize gutter, a focusable chip for the arrow keys — and the rule (T410). Both themes read through the
    variables. */
-#feed-focus { display: flex; flex-direction: column; gap: 8px; }
+/* the WHOLE region the focused session lives in, the head row and its columns together, on the very faint accent tint
+   (the user 2026-09-18): one region set apart from the rest of the feed, a small radius, and padding so the tint has a
+   margin around the cards; the head and the fold caret are as they were. Round two (the user 2026-09-19): the tint runs
+   all the way across the box (the column heads inside paint no ground, below) and the divider sits UNDER the box, a
+   sibling after it (feed.ts), so the rounded bottom edge closes above the rule; the padding is even top and bottom. */
+#feed-focus { display: flex; flex-direction: column; gap: 8px; background: var(--accent-tint); border-radius: 8px; padding: 6px 8px; }
 /* the LABEL (T410b): "Current session: <name>", the section's fold control. The board's column heads' size
    (0.72em — no new size) at the session headers' weight (600); the label text dim like the column heads, the
    name bold in its identity colour (set inline, as the session headers do); the whole row folds on click, so
@@ -445,7 +454,10 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 .feed-focus-head:hover .feed-focus-caret { color: var(--fg); }
 .feed-focus-cols { align-items: stretch; }   /* the blocks share the row's height, so a gutter spans the row */
 .feed-focus-cols .feed-col { position: relative; }   /* the gutter's positioned ancestor */
-.feed-focus-cols .feed-col-head { position: static; }
+/* the board's heads paint the page ground because they are sticky (cards scroll under them); inside the box they are not,
+   and that ground sat on the tint as a darker band across the row (the user 2026-09-19), so here they paint none and the
+   tint reads through the whole box; only the cards keep their own ground */
+.feed-focus-cols .feed-col-head { position: static; background: transparent; }
 /* the section's chips DRAG, as the board's do (the user 2026-09-14: no grip; the heads above and below the divider read
    the same), and take keyboard focus for the arrow keys: the board's focus ring vocabulary */
 .feed-focus-cols .fcol-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -468,9 +480,10 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   background: var(--menu-border); transition: background 0.12s ease; }
 .focus-gutter:hover::before, .focus-gutter.active::before { background: var(--dim); }
 .focus-gutter[hidden] { display: none; }
-/* the rule under the section (T410): a 2px line in --rule-strong, a step up from the menus' hairline, with more
-   air above it than below. The margin shorthand zeroes the <hr>'s auto inline margins, which would otherwise
-   keep a flex item from stretching. */
+/* the rule under the BOX (T410; outside it since the user 2026-09-19): a 2px line in --rule-strong, a step up from the
+   menus' hairline, with more air above it than below, the section's next sibling in #feed-list so it separates the
+   tinted box from the rest of the feed. The margin shorthand zeroes the <hr>'s auto inline margins, which would
+   otherwise keep a flex item from stretching. */
 .feed-focus-divider { border: 0; border-top: 2px solid var(--rule-strong); margin: 8px 0 4px; }
 /* "No session is focused in the chat" / "<name> has no cards" — one quiet line, the menus' sub-line size */
 .feed-focus-empty { color: var(--dim); font-size: 0.82em; }
@@ -505,6 +518,11 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    2026-07-13): it wears the base size + weight the CARD TITLES render at, so the two read as one rank. */
 .feed-sess-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 9px 3px 0; font-weight: 600; }
 .feed-sess-head .fname { font-size: inherit; }   /* not .fname's 0.92em — the header matches the card titles exactly */
+.feed-sess-head .fname-plain { font-size: inherit; font-weight: 600; cursor: default; text-decoration: none; }
+.feed-modal-agent.fname-plain { cursor: default; text-decoration: none; }          /* an owner-less card's modal header: a name, not a session link (round four of PR 1831) */
+.feed-modal-notice { display: flex; flex-direction: column; gap: 6px; }                /* a notice card's modal body: its face in place of the goal tree */
+.feed-modal-notice .fask-nprod { margin-left: 0; white-space: normal; }
+.feed-modal-notice .fask-nbody { opacity: 1; }                                       /* the card's 0.86em, full ink: the modal is where the words are read */   /* the owner-less run's header (Notes): plain text in the header's weight, no link cursor, no hover underline, no session behind it (round two of PR 1831) */
 .feed-sess-head:first-child { margin-top: 2px; }
 /* the FOLD caret, right of the name (the user 2026-07-31). Bare glyph, no chip box: it sits on EVERY
    header, so the .fask-secbtn outline the service chip wears would draw a border down the whole column.

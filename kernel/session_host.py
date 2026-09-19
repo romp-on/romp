@@ -52,7 +52,9 @@ JOURNAL_SEGMENT_BYTES = 64 * 1024 * 1024
 READER_BEHIND_RECORDS = 5000     # records read but not yet on disk before the host says so
 ACK_NONE = -1
 EXIT_FLUSH_S = 2.0               # how long the exiting host waits for an attached kernel to take its last frames
+REEXEC_DRAIN_S = 5.0        # the handover waits this long for an attached kernel to drain its socket backlog, else defers
 GAP_TYPE = "romp-journal-gap"     # a record the journal could not write: a marker keeps the numbering, readers skip it
+UNREADABLE = (None, 0)    # an index entry whose segment is gone (acknowledged and deleted): read_from skips it
 END_SENTINEL = object()          # on the stdin pump: close the CLI's stdin after everything queued before it
 
 # The neutral answer the host gives a parked hook callback when no kernel returned in time, PER EVENT
@@ -158,6 +160,52 @@ class Journal:
         self._pos = 0
         self._open_segment(0)
 
+    @classmethod
+    def reopen(cls, directory, segment_bytes=JOURNAL_SEGMENT_BYTES):
+        """The journal of a host that re-executed itself (the re-exec road): the index rebuilt from the segment files on
+        disk, the next offset from the last record, gaps from gaps.json, and the LAST segment opened for append at its
+        end. Nothing is written; a directory with no segments is an empty journal at offset 0. The rebuilt index equals
+        the live one entry for entry (tests/test_session_host.py pins the equality against the live journal): a gap is
+        one zero-length entry at the position of the record after it, in the segment that holds that record, wherever
+        the gap fell (round two of the re-exec review: a gap at a segment's head was counted at the previous segment's
+        tail AND the next one's head, so every offset past it read the record before); an offset whose segment is gone
+        (acknowledged and deleted) is UNREADABLE, as the live journal marks it at the deletion."""
+        j = cls.__new__(cls)
+        j.dir = Path(directory)
+        j.dir.mkdir(parents=True, exist_ok=True)
+        j.segment_bytes = int(segment_bytes)
+        j.acked = ACK_NONE
+        j._index = []
+        j._seg_last = {}
+        j._fh = None
+        j._pos = 0
+        try:
+            j.gaps = set(json.loads((j.dir / "gaps.json").read_text()))
+        except Exception:
+            j.gaps = set()
+        segs = sorted((f, p) for p in j.dir.glob("journal-*.jsonl") for f in [_segment_first(p.name)] if f is not None)
+        n = 0
+        pos = 0
+        for first, p in segs:
+            while n < first:                                    # offsets before this segment that no file holds: deleted segments
+                j._index.append(UNREADABLE); n += 1
+            pos = 0
+            with open(p, "rb") as fh:
+                for line in fh:
+                    while n in j.gaps:                          # gaps before this record: zero-length entries at its position
+                        j._index.append((first, pos)); j._seg_last[first] = n; n += 1
+                    j._index.append((first, pos))
+                    j._seg_last[first] = n
+                    pos += len(line)
+                    n += 1
+        if segs:
+            while n in j.gaps:                                  # gaps after the last record, at the end of the last segment
+                j._index.append((segs[-1][0], pos)); j._seg_last[segs[-1][0]] = n; n += 1
+        j.next_offset = n
+        j._seg = segs[-1][0] if segs else 0
+        j._open_segment(j._seg)
+        return j
+
     def _path(self, seg: int) -> Path:
         return self.dir / ("journal-%d.jsonl" % seg)
 
@@ -245,6 +293,8 @@ class Journal:
                     os.unlink(self._path(seg))
                 except OSError:
                     pass
+                for off in range(seg, self._seg_last[seg] + 1):     # the entries of a deleted segment: unreadable, as a reopen rebuilds them
+                    self._index[off] = UNREADABLE
                 self._seg_last.pop(seg, None)
 
     def ack(self, offset: int) -> None:
@@ -269,6 +319,9 @@ class Journal:
                     offset += 1
                     continue
                 seg, pos = self._index[offset]
+                if seg is None:                                 # the segment is gone (acknowledged and deleted)
+                    offset += 1
+                    continue
                 if seg != cur_seg:
                     if fh is not None:
                         fh.close()
@@ -297,6 +350,19 @@ class Journal:
         if self._fh is not None:
             self._fh.close()
             self._fh = None
+
+
+def _opens_turn(obj: dict) -> bool:
+    """Whether a `user` line fed to the CLI opens a turn the CLI will answer with a result: a message whose content
+    carries text (a string, or a text block). A user line carrying only tool results or nothing is bookkeeping the CLI
+    absorbs into the running turn, never a turn of its own, so counting it left the open-turn count high for good."""
+    msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+    content = msg.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(isinstance(c, dict) and c.get("type") == "text" and str(c.get("text") or "").strip() for c in content)
+    return False
 
 
 def read_journal_dir(directory, offset: int = 0):
@@ -504,6 +570,103 @@ class PipeCliTransport:
         return self.proc.returncode if self.proc else None
 
 
+class _AdoptedProcess:
+    """A CLI this host did not spawn but inherited across its own execve (the re-exec road): the pid, the pipe
+    descriptors as asyncio streams, and a returncode learned from waitpid on a thread (the CLI is still this
+    process's child, since exec keeps the pid). Same surface PipeCliTransport reads: pid, stdin, stdout, stderr,
+    returncode, wait(), kill()."""
+    def __init__(self, pid: int, stdin, stdout, stderr):
+        self.pid = int(pid)
+        self.stdin, self.stdout, self.stderr = stdin, stdout, stderr
+        self.returncode = None
+        self.exited = False           # gone, exit unknown (reaped elsewhere): returncode stays None, the exit frame's word for unknown
+        self._waiter = None
+
+    async def wait(self):
+        if self.returncode is None:
+            if self._waiter is None:
+                loop = asyncio.get_running_loop()
+                self._waiter = loop.run_in_executor(None, self._waitpid)
+            await self._waiter
+        return self.returncode
+
+    def _waitpid(self):
+        try:
+            _pid, status = os.waitpid(self.pid, 0)
+        except ChildProcessError:
+            self.exited = True                             # reaped elsewhere: gone, exit unknown (round two: a zero here read as a clean exit)
+            return
+        self.returncode = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else (status >> 8)
+        self.exited = True
+
+    def kill(self):
+        if self.exited:
+            return                                          # the pid may be another process's by now
+        os.kill(self.pid, signal.SIGKILL)
+
+
+class AdoptedCliTransport(PipeCliTransport):
+    """PipeCliTransport over a CLI inherited across the host's execve: the same read, write, end and close roads, the
+    process an _AdoptedProcess built on the handoff's descriptors. `connect` adopts instead of spawning."""
+    def __init__(self, spec: dict, stderr_cb, handoff: dict):
+        super().__init__(spec, stderr_cb)
+        self.handoff = handoff
+
+    async def connect(self) -> None:
+        loop = asyncio.get_running_loop()
+        fds = self.handoff["fds"]
+        if not _pipe_fds_match_cli(self.handoff["cli_pid"], fds):     # the handoff is trusted only once the CLI's own table agrees
+            raise RuntimeError("the handoff's descriptors are not the CLI's pipes")
+        limit = int(self.spec.get("max_buffer_size") or 100 * 1024 * 1024)
+        stdout_reader = asyncio.StreamReader(limit=limit)
+        await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(stdout_reader), os.fdopen(int(fds["stdout"]), "rb", buffering=0))
+        stderr_reader = asyncio.StreamReader(limit=limit)
+        await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(stderr_reader), os.fdopen(int(fds["stderr"]), "rb", buffering=0))
+        w_transport, w_protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin, os.fdopen(int(fds["stdin"]), "wb", buffering=0))
+        stdin_writer = asyncio.StreamWriter(w_transport, w_protocol, None, loop)
+        self.proc = _AdoptedProcess(int(self.handoff["cli_pid"]), stdin_writer, stdout_reader, stderr_reader)
+        self._stderr_task = asyncio.ensure_future(self._relay_stderr())
+
+
+def _pipe_fds_match_cli(pid, fds: dict) -> bool:
+    """On Linux, whether the three descriptors are the CLI's own pipes: each compared by inode with the CLI's
+    /proc/<pid>/fd/0, 1 and 2. Elsewhere True (no table to read). Read by the old process before it hands over and by
+    the new one before it trusts the handoff (round two of the re-exec review: the docs promised the second read)."""
+    if not sys.platform.startswith("linux"):
+        return True
+    for name, n in (("stdin", 0), ("stdout", 1), ("stderr", 2)):
+        try:
+            if os.stat("/proc/%d/fd/%d" % (int(pid), n)).st_ino != os.fstat(int(fds[name])).st_ino:
+                return False
+        except (OSError, KeyError, TypeError, ValueError):
+            return False
+    return True
+
+
+def cli_pipe_fds(transport) -> dict | None:
+    """The CLI's three pipe descriptors as this host holds them: stdin's write end, stdout's and stderr's read ends,
+    from the transport's asyncio pipe transports (the SDK's anyio Process wraps an asyncio Process; the pipe fallback
+    holds one directly). None when any is missing. On Linux each is confirmed against the CLI's own descriptor table
+    (/proc/<pid>/fd/0,1,2 by pipe inode), so a wrong descriptor is a refusal, never a CLI fed from the wrong end."""
+    proc = getattr(transport, "_process", None) or getattr(transport, "proc", None)
+    aproc = getattr(proc, "_process", None) or proc                # anyio.Process -> asyncio.subprocess.Process
+    ptrans = getattr(aproc, "_transport", None)
+    if ptrans is None:
+        return None
+    out = {}
+    for name, n in (("stdin", 0), ("stdout", 1), ("stderr", 2)):
+        pt = ptrans.get_pipe_transport(n) if hasattr(ptrans, "get_pipe_transport") else None
+        pipe = pt.get_extra_info("pipe") if pt is not None else None
+        try:
+            out[name] = int(pipe.fileno())
+        except Exception:
+            return None
+    pid = getattr(aproc, "pid", None)
+    if pid and not _pipe_fds_match_cli(pid, out):
+        return None
+    return out
+
+
 def sdk_importable() -> bool:
     import importlib.util
     return importlib.util.find_spec("claude_agent_sdk") is not None
@@ -521,17 +684,25 @@ class SessionHost:
     """One host process: see the module docstring. Constructed from the spec path; `run()` is the
     whole life."""
 
-    def __init__(self, spec_path, lease_api=None, now=None):
+    def __init__(self, spec_path, lease_api=None, now=None, reexec_path=None):
         self.spec_path = Path(spec_path)
         with open(self.spec_path) as f:
             self.spec = json.load(f)
+        self.reexec = None                     # the handoff this process was re-executed with (the re-exec road), else None
+        if reexec_path:
+            with open(reexec_path) as f:
+                self.reexec = json.load(f)
+        self._reexec_pending = None            # (python, launcher) once a kernel asked and a turn was open: run at its result
+        self._reexec_running = False           # a handover is being decided or done: a second request is refused meanwhile
+        self._reader_hold = None               # an Event the stdout reader waits on between records; cleared for the handover
+        self._journal_skip: set = set()        # offsets the handover wrote itself; the writer passes them by
         self.sid = str(self.spec["sid"])
         self.name = str(self.spec.get("name") or self.sid[:8])
         self.state_dir = Path(self.spec["state_dir"])
         self.dir = self.spec_path.parent
         self.sock_path = self.state_dir / "hosts" / (self.sid[:8] + ".sock")
         self.log_path = self.dir / "host.log"
-        self.journal = Journal(self.dir)
+        self.journal = Journal.reopen(self.dir) if self.reexec else Journal(self.dir)
         self.parked = Parked(float(self.spec.get("hook_self_answer_s") or HOOK_SELF_ANSWER_S))
         self.grace_s = float(self.spec.get("unattached_grace_s") or UNATTACHED_GRACE_DEFAULT_S)
         self.reader_behind_records = int(self.spec.get("reader_behind_records") or READER_BEHIND_RECORDS)
@@ -546,7 +717,9 @@ class SessionHost:
         self.fsid = str(self.spec.get("resume") or self.spec.get("session_id") or "")
         self.attached = None            # the attached kernel's writer, or None
         self.kernel = None
-        self.inflight = 0               # user messages fed minus results seen (the idle judgement)
+        self.inflight = 0               # open turns: a text-bearing user line fed opens one; a result closes ALL of them (the CLI folds
+        #                                 queued lines into the running turn and answers with one result); an output row after the result
+        #                                 (an assistant or user row: the CLI running a queued line as its own turn) re-opens one
         self.idle_since = self.now()
         self.exit_info = None
         self.ending = None              # (deadline, cause) once `end` was requested
@@ -562,6 +735,19 @@ class SessionHost:
         self._journal_faults = 0
         self._reader_behind_noted = False
         self._stdin_q: asyncio.Queue | None = None   # the kernel's `in` lines, written by their own task
+        if self.reexec:                                # the state the previous code of this same process handed over
+            h = self.reexec
+            self.cli_pid = int(h["cli_pid"]); self.cli_start = h.get("cli_start"); self.cli_spawned_at = h.get("cli_spawned_at")
+            self.fsid = str(h.get("fsid") or self.fsid)
+            self._read_count = int(h.get("read_count") or self.journal.next_offset)
+            self.inflight = int(h.get("inflight") or 0)
+            self.journal.acked = int(h.get("acked", ACK_NONE))
+            for rec in h.get("parked") or []:
+                try:
+                    self.parked.park(rec["record"], int(rec["offset"]), float(rec.get("t") or self.now()), attached=False)
+                except Exception:
+                    pass
+            self.parked.answered.update(str(x) for x in (h.get("answered") or []))
 
     # ── host.log: never a spec field, never an environment value ──
     def log(self, kind: str, **fields) -> None:
@@ -625,12 +811,172 @@ class SessionHost:
         self.cli_spawned_at = int(self.now())
         self._write_lease()
 
+    async def _adopt(self) -> None:
+        """The re-exec road's spawn: the CLI this process already holds, over the descriptors the handoff names (confirmed
+        against the CLI's own table first); the handoff file goes. The lease with THIS code's version is written by run()
+        once the socket is served, so a kernel that reads the new version finds a listener (round two of the review: the
+        lease came first, and a kernel could pass its wait and connect to a path nobody served yet)."""
+        self.transport = AdoptedCliTransport(self.spec, self._on_stderr, self.reexec)
+        await self.transport.connect()
+        if self.cli_start is None:
+            self.cli_start = self.lease_api["proc_start"](self.cli_pid)
+        try:
+            os.unlink(str(self.dir / "reexec.json"))
+        except OSError:
+            pass
+
+    def _reexec_check(self, frame: dict):
+        """(python, launcher) for a kernel's re-exec request, or a refusal reason: both paths must exist, and the CLI's
+        descriptors must be found (and, on Linux, confirmed against the CLI's own table)."""
+        python, launcher = str(frame.get("python") or ""), str(frame.get("launcher") or "")
+        if not python or not os.path.isfile(python) or not os.access(python, os.X_OK):
+            return None, "no such interpreter"
+        if not launcher or not os.path.isfile(launcher):
+            return None, "no such launcher"
+        if self.transport is None or self.cli_pid is None or self.exit_info is not None:
+            return None, "no CLI to hand over"
+        if self._reexec_running:
+            return None, "a re-exec is in progress"
+        if cli_pipe_fds(self.transport) is None:
+            return None, "the CLI's descriptors could not be confirmed"
+        return (python, launcher), None
+
+    async def _reexec_now(self, python: str, launcher: str) -> None:
+        """The handover. Hold the stdout reader (no further record is taken off the CLI; bytes not yet read stay in the
+        pipe, which survives the exec), drain what is queued for the CLI and for the disk, drain the attached kernel's
+        socket backlog (bounded), and then, with NO await from here to the exec, decide: the CLI is quiet (no turn
+        re-opened, the reader's stream buffer holds no bytes) or the exec is deferred to the next result, the event, the
+        reader released meanwhile. A kernel that does not drain within the bound defers it too. Quiet: any record the
+        reader took meanwhile (its read was already in flight) written synchronously so the handoff's count and the
+        journal agree; the handoff file; the descriptors marked inheritable; `reexec-now` written to the kernel, whose
+        backlog is empty, so the frame goes to the socket at once; the socket closed; the exec of this same process into
+        the kernel's code. A failure before the exec is a `reexec-failed` line, a fault to the kernel, and the host goes
+        on as it was. Round two of the review: the reader ran on through the handover, so records read after the flush
+        were counted in the handoff and lost with the process; round three: the quiet check preceded the drain's await,
+        so output arriving while a slow kernel drained entered the stream buffer after the check and was lost."""
+        self._reexec_pending = None
+        self._reexec_running = True
+        told = False
+        limits_set = False
+        written: list = []
+        w = self.attached
+        try:
+            self._reader_hold.clear()
+            flushed = asyncio.Event()
+            self._stdin_q.put_nowait(("flush", flushed)); await asyncio.wait_for(flushed.wait(), 30)
+            landed = asyncio.Event()
+            self._journal_q.put_nowait(("flush", landed)); await asyncio.wait_for(landed.wait(), 30)
+            fds = cli_pipe_fds(self.transport)
+            if fds is None:
+                raise RuntimeError("descriptors")
+            if w is not None:
+                # the kernel's backlog first, to empty (the buffer limits at zero, so drain waits for the last byte): the
+                # frame written after the check then reaches the socket at once, and nothing is decided under an await
+                try:
+                    w.transport.set_write_buffer_limits(0, 0); limits_set = True
+                    await asyncio.wait_for(w.drain(), REEXEC_DRAIN_S)
+                except asyncio.TimeoutError:
+                    self._defer(python, launcher, "kernel-behind")
+                    return
+                except Exception:
+                    pass                                    # a closed or failed writer: nothing to drain; the frame goes nowhere
+            pending = self._stdout_pending_bytes()          # no await from here to the exec
+            if self.inflight > 0 or pending:
+                self._defer(python, launcher, "output-arriving", pendingBytes=pending)
+                return
+            for off in sorted(self._unwritten):
+                if off == self.journal.next_offset:
+                    self.journal.append(self._unwritten[off])
+                    written.append(off)
+            if self._read_count != self.journal.next_offset:
+                raise RuntimeError("count")
+            handoff = {"cli_pid": int(self.cli_pid), "cli_start": self.cli_start, "cli_spawned_at": self.cli_spawned_at, "fsid": self.fsid,
+                       "fds": fds, "read_count": self._read_count, "inflight": self.inflight, "acked": self.journal.acked,
+                       "parked": [{"offset": v["offset"], "t": v["t"], "record": v["record"]} for v in self.parked.open.values()],
+                       "answered": sorted(self.parked.answered), "version_from": self.version, "t": self.now()}
+            hpath = self.dir / "reexec.json"
+            fd = os.open(str(hpath), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(handoff, f)
+            for fdn in fds.values():
+                os.set_inheritable(int(fdn), True)
+            buffered = None
+            if w is not None and self.attached is w:
+                told = True
+                self._send(w, {"t": "reexec-now"})
+                try:
+                    buffered = w.transport.get_write_buffer_size()   # 0: the frame is in the socket; else the kernel's socket is full
+                except Exception:
+                    buffered = None
+            self.log("reexec", python=python, launcher=launcher, journalNext=self.journal.next_offset, frameBuffered=buffered)
+            self.journal.close()
+            self._server.close()
+            argv = [python, launcher, str(self.spec_path), "--reexec", str(hpath)]
+            os.execv(python, argv)                          # the same pid, the same children, the descriptors marked above
+        except Exception as e:
+            self.log("reexec-failed", error=type(e).__name__, at=self._where(e))
+            self._journal_skip.update(written)
+            try:
+                os.unlink(str(self.dir / "reexec.json"))
+            except OSError:
+                pass
+            try:                                            # the exec did not happen: the journal reopens and the socket serves again
+                if self.journal._fh is None:
+                    self.journal = Journal.reopen(self.dir)
+                if self._server is not None and self._server.is_serving() is False:
+                    self._server = await asyncio.start_unix_server(self._on_client, path=str(self.sock_path))
+                    os.chmod(self.sock_path, 0o600)
+            except Exception as e2:
+                self.log("reexec-recover-failed", error=type(e2).__name__)
+            if self.attached is not None:
+                self._send(self.attached, {"t": "fault", "kind": "reexec-failed", "text": type(e).__name__})
+                if told:                                    # the kernel plans a reconnect: give it the stream's end it waits for
+                    w2 = self.attached
+                    self._detach(w2)
+                    try:
+                        w2.close()
+                    except Exception:
+                        pass
+        finally:
+            self._reexec_running = False
+            if limits_set and w is not None and not w.is_closing():
+                try:
+                    w.transport.set_write_buffer_limits()
+                except Exception:
+                    pass
+            if self._reader_hold is not None:
+                self._reader_hold.set()
+
+    def _defer(self, python: str, launcher: str, reason: str, **fields) -> None:
+        """The handover waits for the next result (the event) and the reader runs on meanwhile: output arriving (a turn
+        re-opened, bytes of a record not yet parsed) or a kernel that did not drain its socket within the bound."""
+        self._reexec_pending = (python, launcher)
+        self._reader_hold.set()
+        self.log("reexec-deferred", reason=reason, inflight=self.inflight, **fields)
+
+    def _stdout_pending_bytes(self):
+        """Bytes read off the CLI's stdout pipe and not yet parsed into a record, as far as the transport shows them (the
+        asyncio stream's buffer, under both transports); None when there is no such buffer to read. Bytes still in the
+        pipe survive an exec; these would not, so the handover waits while there are any. Not visible here: a partial
+        line the SDK's own framer holds between chunks, which only a record the CLI is mid-write on can leave."""
+        proc = getattr(self.transport, "_process", None) or getattr(self.transport, "proc", None)
+        aproc = getattr(proc, "_process", None) or proc
+        buf = getattr(getattr(aproc, "stdout", None), "_buffer", None)
+        return len(buf) if buf is not None else None
+
     async def _read_cli(self) -> None:
         """The stdout reader: never pauses for the disk (the writer task journals), never dies on one
         record's handling (a fault is a host.log row, the reading goes on). The stream's end is the CLI's
         exit; nothing else is."""
         try:
-            async for msg in self.transport.read_messages():
+            stream = self.transport.read_messages().__aiter__()
+            while True:
+                if self._reader_hold is not None and not self._reader_hold.is_set():
+                    await self._reader_hold.wait()      # the handover's hold: no record taken off the CLI while it is decided
+                try:
+                    msg = await stream.__anext__()
+                except StopAsyncIteration:
+                    break
                 off = self._read_count
                 self._read_count = off + 1
                 try:
@@ -673,7 +1019,14 @@ class SessionHost:
             item = await self._journal_q.get()
             if item is None:
                 return
+            if isinstance(item, tuple) and item and item[0] == "flush":   # the re-exec's drain: everything ahead is on disk
+                item[1].set()
+                continue
             off, msg = item
+            if off in self._journal_skip:                   # written by a handover that then failed: on disk already
+                self._journal_skip.discard(off)
+                self._unwritten.pop(off, None)
+                continue
             if delay:
                 await asyncio.sleep(delay)
             try:
@@ -709,9 +1062,21 @@ class SessionHost:
                 self.fsid = str(msg["session_id"])
                 self._write_lease()
         elif mt == "result":
-            self.inflight = max(0, self.inflight - 1)
-            if self.inflight == 0:
-                self.idle_since = self.now()
+            # ONE result closes everything fed: the CLI folds messages queued while it works into the running turn
+            # and answers them with a single result, so a fed-minus-resulted count stays above zero forever after a
+            # fold (the kernel's own settle learned this on 2026-07-09; the host re-created it, and every attach then
+            # adopted the stale count from the hello: a session that read Ready yet swallowed every send, 2026-09-18).
+            # A line the CLI runs as a SEPARATE turn instead re-opens the count from the output side below: its first
+            # assistant or user row after this result (its own user line was counted before the result, so nothing on
+            # the input side can tell a fold from a queue; the output can).
+            self.inflight = 0
+            self.idle_since = self.now()
+            if self._reexec_pending is not None:                  # a kernel asked mid-turn: the turn's end is the event
+                python, launcher = self._reexec_pending
+                asyncio.ensure_future(self._reexec_now(python, launcher))
+        elif mt in ("assistant", "user") and self.inflight == 0:
+            self.inflight = 1                              # output arriving with no turn counted: a queued line running as its own turn
+            self.log("turn-reopened", offset=off)
         elif mt == "control_request":
             self.parked.park(msg, off, self.now(), attached=self.attached is not None)
             self.log("request-open", requestId=str(msg.get("request_id") or ""),
@@ -805,6 +1170,22 @@ class SessionHost:
                         await self._attach(writer, frame)
                     elif t == "ping":
                         self._send(writer, {"t": "pong"})
+                    elif t == "reexec":
+                        target, why = self._reexec_check(frame)
+                        if target is None:
+                            self.log("reexec-refused", reason=why)
+                            self._send(writer, {"t": "reexec", "ok": False, "reason": why})
+                        elif self.inflight > 0:
+                            self._reexec_pending = target
+                            self.log("reexec-deferred", inflight=self.inflight)
+                            self._send(writer, {"t": "reexec", "ok": True, "when": "at-turn-end"})
+                        else:
+                            self._send(writer, {"t": "reexec", "ok": True, "when": "now"})
+                            try:
+                                await writer.drain()
+                            except Exception:
+                                pass
+                            asyncio.ensure_future(self._reexec_now(*target))
                     elif not attached_here:
                         self._send(writer, {"t": "fault", "kind": "not-attached", "text": "attach first"})
                     elif t == "in":
@@ -913,7 +1294,7 @@ class SessionHost:
             self._send(writer, self.exit_info)
         await writer.drain()
 
-    def _queue_in(self, data: str) -> None:
+    def _queue_in(self, data: str) -> None:   # (the turn-opening test is _opens_turn, module level, so the kernel's tests can pin it)
         """One line from the kernel for the CLI's stdin: bookkeeping now, the write on the stdin pump. A user
         message opens a turn; a control_response for a request already answered is dropped."""
         try:
@@ -921,7 +1302,7 @@ class SessionHost:
         except ValueError:
             obj = None
         if isinstance(obj, dict):
-            if obj.get("type") == "user":
+            if obj.get("type") == "user" and _opens_turn(obj):
                 self.inflight += 1
             elif obj.get("type") == "control_response":
                 rid = str(((obj.get("response") or {}).get("request_id")) or "")
@@ -938,6 +1319,9 @@ class SessionHost:
             data = await self._stdin_q.get()
             if data is None:
                 return
+            if isinstance(data, tuple) and data and data[0] == "flush":   # the re-exec's drain: everything ahead reached the CLI
+                data[1].set()
+                continue
             if data is END_SENTINEL:
                 try:
                     await self.transport.end_input()
@@ -964,9 +1348,12 @@ class SessionHost:
         # the CLI first, the socket second: a kernel that finds the socket finds a CLI behind it (an attach
         # before the spawn would report no CLI pid and fail its first write)
         try:
-            await self._spawn()
+            if self.reexec:
+                await self._adopt()
+            else:
+                await self._spawn()
         except Exception as e:
-            self.log("cli-spawn-failed", error=type(e).__name__)
+            self.log("cli-adopt-failed" if self.reexec else "cli-spawn-failed", error=type(e).__name__, at=self._where(e))
             self.exit_info = {"t": "exit", "code": None, "signal": None, "cause": "spawn-failed", "error": type(e).__name__}
             return 1
         self.sock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -977,6 +1364,11 @@ class SessionHost:
         self._server = await asyncio.start_unix_server(self._on_client, path=str(self.sock_path))
         os.chmod(self.sock_path, 0o600)
         self.log("socket-ready", sock=str(self.sock_path.name))
+        if self.reexec:                                 # the new version's lease AFTER the socket: a reader of the lease finds a listener
+            self._write_lease()
+            self.log("reexeced", cliPid=self.cli_pid, version=self.version, journalNext=self.journal.next_offset, readCount=self._read_count)
+        self._reader_hold = asyncio.Event()
+        self._reader_hold.set()
         tasks = [asyncio.ensure_future(self._journal_writer()), asyncio.ensure_future(self._read_cli()),
                  asyncio.ensure_future(self._beat()), asyncio.ensure_future(self._self_answer_loop()),
                  asyncio.ensure_future(self._grace_loop()), asyncio.ensure_future(self._stdin_pump())]
@@ -1025,10 +1417,13 @@ def _lease_api() -> dict:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) != 1:
-        sys.stderr.write("usage: romp-session-host <spawn.json>\n")
+    if len(argv) == 3 and argv[1] == "--reexec":
+        host = SessionHost(argv[0], reexec_path=argv[2])
+    elif len(argv) == 1:
+        host = SessionHost(argv[0])
+    else:
+        sys.stderr.write("usage: romp-session-host <spawn.json> [--reexec <reexec.json>]\n")
         return 2
-    host = SessionHost(argv[0])
     try:
         return asyncio.run(host.run())
     except Exception:

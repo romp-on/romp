@@ -668,7 +668,10 @@ class UnownedSendRefuses(_Root):
 
 class MetaCommandRefused(_Root):
     """A /model, /effort or /fast to a sid no backend owns is refused before any stamp or park (review find):
-    the meta-command arm runs ahead of the send refusal on both routes."""
+    the meta-command arm runs ahead of the send refusal on both routes. The client hears the refusal on the
+    settingRefused frame (gesture command, the sid, the command head's word as the flag), never a bare warn:
+    the timeline page renders no warn, and the chat reads one arriving during a create as that create's
+    verdict."""
 
     def setUp(self):
         super().setUp()
@@ -690,12 +693,15 @@ class MetaCommandRefused(_Root):
         client = {"send": lambda s: sent.append(json.loads(s)), "wid": "", "cid": "c1"}
         with contextlib.redirect_stderr(self.err):
             km._drive(msg, client)
-        return [m for m in sent if m.get("type") == "warn"]
+        self.assertEqual([m for m in sent if m.get("type") == "warn"], [], "no bare warn: the frame has its own type")
+        return [m for m in sent if m.get("type") == "settingRefused"]
 
     def test_the_ws_send_op_refuses_each_meta_command_without_a_stamp_or_a_park(self):
         for text in ("/model opus", "/effort high", "/fast on"):
-            warns = self._drive({"type": "sendMessage", "id": SID, "text": text})
-            self.assertTrue(warns and "not delivered" in warns[0]["text"], (text, warns))
+            refusals = self._drive({"type": "sendMessage", "id": SID, "text": text})
+            self.assertEqual([(m["gesture"], m["sid"], m["flag"]) for m in refusals],
+                             [("command", SID, text.split()[0][1:])], (text, refusals))
+            self.assertIn("not delivered", refusals[0]["text"])
         self.assertEqual(km._pending_ops, {}, "nothing parked")
         self.assertNotIn(SID, km._model_switch_pending, "no switching dots on a dead lane")
 
@@ -703,10 +709,11 @@ class MetaCommandRefused(_Root):
         saved = km._sid_of
         km._sid_of = lambda who: SID if who == "web" else who      # the lane menu keys its ops by session NAME
         try:
-            warns = self._drive({"type": "sendCommand", "name": "web", "cmd": "/effort high"})
+            refusals = self._drive({"type": "sendCommand", "name": "web", "cmd": "/effort high"})
         finally:
             km._sid_of = saved
-        self.assertTrue(warns and "not delivered" in warns[0]["text"], warns)
+        self.assertEqual([(m["gesture"], m["sid"], m["flag"]) for m in refusals], [("command", SID, "effort")], refusals)
+        self.assertIn("not delivered", refusals[0]["text"])
         self.assertEqual(km._pending_ops, {})
 
 

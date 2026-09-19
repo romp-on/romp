@@ -489,6 +489,34 @@ test("…but never drops an EMPTY merged feed onto a page still waiting for its 
   }
 });
 
+test("a page that renders no pushed channel pends nothing and tells the shell nothing: settings and files (2026-09-18)", async () => {
+  // the /settings page and the file browser load this module (the gear's fan-out, the host routing) but receive no pushed
+  // view, so no frame of theirs could retire a host: the settings frame's manager posted every attached host as pending
+  // for good and the network panel read every connected remote as "loading sessions…" from the first gear open
+  for (const app of ["settings", "files"]) {
+    await withManager((fm, _e, _d, posted) => {
+      fm.app = app;
+      fm.openRemote("TESTHOST", true);
+      assert.deepEqual(fm.pendingFor(), [], app + ": no channel to be heard on, nothing pending");
+      fm.inbound("", localFeed);
+      fm.inbound("", { type: "data", data: { sessions: [], turns: {}, messages: [], judging: [], now: 1000 } });
+      assert.equal(posted.filter((m) => m && m.romp === "hostsPending").length, 0, app + ": never posts hostsPending");
+      fm.conns.get("TESTHOST").closed = true;
+    });
+  }
+});
+
+test("a pane's FIRST publish posts even an empty list, so a reloaded pane replaces the list its predecessor left (2026-09-18)", async () => {
+  await withManager((fm, _e, _d, posted) => {
+    fm.app = "feed";
+    fm.inbound("", localFeed);   // no remote attached: the fresh instance still declares its (empty) list once
+    assert.deepEqual(posted.filter((m) => m && m.romp === "hostsPending").pop(), { romp: "hostsPending", app: "feed", hosts: [] },
+      "the first publish is never gated by the empty signature");
+    fm.inbound("", { ...localFeed, buildId: 2 });
+    assert.equal(posted.filter((m) => m && m.romp === "hostsPending").length, 1, "…and posts again only on a change");
+  });
+});
+
 test("the CHAT pane pends on the TAB LIST channel — the set its pin prune reads as __rompFed.pending (render.ts reachableHosts): an attached host pends from openRemote until its own tabOrder lands here, whatever else arrives; a detach retires it", async () => {
   await withManager((fm) => {
     fm.app = "chat";

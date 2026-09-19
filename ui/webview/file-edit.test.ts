@@ -92,7 +92,7 @@ test("keystrokes typed DURING a save survive the ack", () => {
 test("a lost save reply cannot wedge 'Saving…' forever", () => {
   // a federation drop answers with a warn; a socket drop mid-save loses the ack outright — both
   // re-arm Save with honest wording (a save that DID land refuses the retry as changed-on-disk)
-  assert.match(VIEW, /m\.type === "warn" && editHooks/);
+  assert.match(VIEW, /m\.type === "warn" && typeof m\.sid !== "string" && editHooks/, "only a warn naming NO session fails the save: one that names a session answers a send into that session (a Codex slash refusal broadcast to every chat pane, 2026-09-19), never this save");
   assert.match(VIEW, /window\.addEventListener\("romp:wsdown", \(\) => \{\n    if \(!editHooks\) return;/);
   assert.match(VIEW, /it may or may not have landed/);
 });

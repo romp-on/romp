@@ -15,7 +15,7 @@ const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", 
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.css"), "utf8");
 
 test("single-ask modal: the top-level goal is the tree root, not a separate header title", () => {
-  assert.match(FEED, /ttlEl\.style\.display = "none"/);            // no header title for a single ask
+  assert.match(FEED, /ttlEl\.style\.display = nt \? "" : "none";/);            // no header title for a single GOAL ask; a NOTICE card's modal shows its title (round four of PR 1831)
   assert.match(FEED, /renderTreeBody\(body, it, false\)/);          // root goal IS the first list line
   assert.doesNotMatch(FEED, /renderTreeBody\(body, it, true\)/, "the single-ask body no longer skips the root");
 });

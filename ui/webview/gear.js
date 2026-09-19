@@ -271,6 +271,22 @@ var GEAR_HTML =
   '<span class=rs-line>When a session has sat idle for an hour with a lot of context built up, suggest one /compact at a natural point, once per fill-up, on every connected machine.</span>' +
   '<span class=rs-note id=rs-suggestcompact-tt hidden>Task tracking off changes nothing here: the suggestion reads the context size, not the judges.</span>' +
   '</span></label>' +
+  // MODEL (the user 2026-09-17; under Automation by the maintainer's decision, 2026-09-17): two switches about which
+  // model a session runs on and how. Both are kernel policies applied to every session on the kernel's own initiative,
+  // like the Nudges above, which is why they sit in Automation and not in Chat. Kernel-side, like the judges' Fast mode
+  // boxes: stored on/off, stamped, propagated to every linked kernel; the SDK backend reads them at connect, on a model
+  // change and from its retry tick. Off by default. The rows take the tab's own shape (T408): a permanent one-sentence
+  // line (rs-line) under the label in place of a hover popover, since a popup under the pane's last rows runs past the
+  // card and scrolls it; the fuller account of each switch is docs/reference.md's.
+  "<div class='rs-sec'>Model</div>" +
+  "<label class='rs-row'><input type=checkbox id=rs-alwaysfast>" +
+  '<span><b>Always fast</b><span class=rs-mixed hidden></span>' +
+  "<span class=rs-line>Every Opus session runs Claude Code's fast mode, billed at a premium; a session you set to Slow stays slow.</span>" +
+  '</span></label>' +
+  "<label class='rs-row'><input type=checkbox id=rs-retryupgrade>" +
+  '<span><b>Retry upgrades after downgrades</b><span class=rs-mixed hidden></span>' +
+  '<span class=rs-line>A session whose model fell back without a pick asks for its picked model again every ten minutes, once quiet, until it is back.</span>' +
+  '</span></label>' +
   '</div>' +
   '<div class=rs-pane data-pane=tasks hidden>' +
   // TASK TRACKING (T404, the user 2026-09-13): the master switch first, then the judges alone; the nudges went to Automation,
@@ -385,6 +401,7 @@ function initGear(post, opts) {
     pn = { timeline: document.getElementById('rs-pane-timeline'), fleet: document.getElementById('rs-pane-fleet'), feed: document.getElementById('rs-pane-feed') },
     ths = document.getElementById('rs-thinksum'),
     wcf = document.getElementById('rs-wholechat'),
+    afb = document.getElementById('rs-alwaysfast'), rub = document.getElementById('rs-retryupgrade'),   // the Automation pane's model switches (2026-09-17)
     tk = document.getElementById('rs-tasktrack'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
   // No default for tabWidgets (round one, HIGH): an injected empty object won over a pre-widgets store's tabCtx, so the
@@ -759,7 +776,7 @@ function initGear(post, opts) {
     function announce(list, id) {
       var g = cfg.group ? cfg.group(id) : null;
       var ids = list.filter(function (x) { return !(cfg.divider && x === cfg.divider.id) && (!cfg.group || cfg.group(x) === g); }), n = ids.indexOf(id) + 1;
-      var side = cfg.divider ? (list.indexOf(id) < list.indexOf(cfg.divider.id) ? ', before the ' + cfg.divider.label : ', after the ' + cfg.divider.label) : '';
+      var side = cfg.divider ? (list.indexOf(id) < list.indexOf(cfg.divider.id) ? ', before the ' + cfg.divider.label.toLowerCase() : ', after the ' + cfg.divider.label.toLowerCase()) : '';   // mid-sentence, the label lowercased
       var where = cfg.group ? ' in the ' + cfg.groupLabel(g) : '';
       liveRegion().textContent = labelOf(id) + ' moved to position ' + n + ' of ' + ids.length + side + where;
     }
@@ -901,7 +918,7 @@ function initGear(post, opts) {
   function demoLabel() { var label = document.createElement('span'); label.className = 'tab-label'; label.textContent = SW.DEMO_RECORD.name; return label; }
   var tabSection = widgetSection({
     host: document.getElementById('rs-widgets'), list: TW.titleWidgets, prefs: widgetPrefs, pickPrefix: 'wopt-',   // the widgets that render INTO the title; the rings have their own rows below
-    order: TW.tabListOrder, divider: { id: TW.NAME_DIVIDER, label: 'session name' }, group: null, groupLabel: null,
+    order: TW.tabListOrder, divider: { id: TW.NAME_DIVIDER, label: 'Session name' }, group: null, groupLabel: null,   // sentence case, as every section label (the user 2026-09-18)
     save: function (prefs) { var s = load(); s.tabWidgets = prefs; s.tabCtx = TW.tabCtxOfPrefs(prefs); save(s); paintWidgets(); },
     on: TW.widgetOn, opts: TW.widgetOpts,
     preview: function (prefs) {   // a tab as the strip would draw it: the enabled widgets on each side of the name, in order
@@ -1384,6 +1401,11 @@ function initGear(post, opts) {
   if (jf) jf.addEventListener('change', function () { post({ type: 'setJudgeFast', enabled: jf.checked, gt: gclock.stamp('judge-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
   if (df) df.addEventListener('change', function () { post({ type: 'setDistillFast', enabled: df.checked, gt: gclock.stamp('distill-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
   if (xf) xf.addEventListener('change', function () { post({ type: 'setIndexFast', enabled: xf.checked, gt: gclock.stamp('index-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
+  // the Automation pane's model switches (the user 2026-09-17): kernel settings like the judge boxes (stamped, propagated); the
+  // SDK backend reads Always fast at connect and on a model change, Retry upgrades from its tick — no gate: the kernel
+  // decides per session whether the model can run fast, and the switch is a standing wish, not a per-model verdict
+  if (afb) afb.addEventListener('change', function () { post({ type: 'setAlwaysFast', enabled: afb.checked, gt: gclock.stamp('always-fast') }); });
+  if (rub) rub.addEventListener('change', function () { post({ type: 'setRetryUpgrade', enabled: rub.checked, gt: gclock.stamp('retry-upgrade') }); });
   // Fast mode is an Opus-only research preview (render.ts fastAvailable and cmtFastGate above, the same rule),
   // and the judges' opt-in rides only a call whose model is Opus: with no tier on Opus the box is inert, so it
   // greys and its hint says why (a review finding on the setting's first cut: with the default tiers the box
@@ -1482,6 +1504,7 @@ function initGear(post, opts) {
     'comment-model': 'Comment model', 'comment-effort': 'Comment effort',
     'comment-fast': 'Fast comment threads',
     'judge-fast': 'Fast mode (triage judges)', 'distill-fast': 'Fast mode (distilling judges)', 'index-fast': 'Fast mode (indexing judges)',
+    'always-fast': 'Always fast', 'retry-upgrade': 'Retry upgrades after downgrades',
     'thinking-summaries': 'Thinking summaries', 'whole-chat-frames': 'Always load whole chats' };
   // store name → the message type that sets it: the whitelist for the toast's Apply anyway (a frame
   // may re-issue the one setting it names, nothing else) and the completeness pin's map
@@ -1493,7 +1516,8 @@ function initGear(post, opts) {
     'index-model': 'setIndexModel', 'index-effort': 'setIndexEffort', 'judge-concurrency': 'setJudgeConcurrency',
     'distill-model': 'setDistillModel', 'distill-effort': 'setDistillEffort',
     'comment-model': 'setCommentModel', 'comment-effort': 'setCommentEffort', 'comment-fast': 'setCommentFast',
-    'judge-fast': 'setJudgeFast', 'distill-fast': 'setDistillFast', 'index-fast': 'setIndexFast' };
+    'judge-fast': 'setJudgeFast', 'distill-fast': 'setDistillFast', 'index-fast': 'setIndexFast',
+    'always-fast': 'setAlwaysFast', 'retry-upgrade': 'setRetryUpgrade' };
   // store name → the words its select shows for the sentinel options whose value is not the word. The
   // effort selects' Default is the EMPTY value (no effort flag), which read as no value at all, so a
   // refused Default pick drew the value-less copy and a plain Apply anyway — in the frozen-tab case, the
@@ -1768,7 +1792,8 @@ function initGear(post, opts) {
      ['indexEffort', ie], ['judgeConcurrency', jc], ['distillModel', dm], ['distillEffort', de], ['fileEditing', fe],
      ['compactSuggest', csg], ['taskTracking', tk],
      ['commentModel', cmm], ['commentEffort', cme], ['commentFast', cmf],
-     ['judgeFast', jf], ['distillFast', df], ['indexFast', xf]].forEach(function (pair) {
+     ['judgeFast', jf], ['distillFast', df], ['indexFast', xf],
+     ['alwaysFast', afb], ['retryUpgrade', rub]].forEach(function (pair) {
       var key = pair[0], el = pair[1];
       if (!el) return;
       // the mark nearest the control: a checkbox's own <label> (the fast-mode box shares the Triage model
@@ -1821,6 +1846,8 @@ function initGear(post, opts) {
     if (jf && typeof v.judgeFast === 'string') jf.checked = v.judgeFast === 'on';   // RAW on/off: the kernel's persisted answer
     if (df && typeof v.distillFast === 'string') df.checked = v.distillFast === 'on';
     if (xf && typeof v.indexFast === 'string') xf.checked = v.indexFast === 'on';
+    if (afb && typeof v.alwaysFast === 'string') afb.checked = v.alwaysFast === 'on';   // RAW on/off: the kernel's persisted answer (2026-09-17)
+    if (rub && typeof v.retryUpgrade === 'string') rub.checked = v.retryUpgrade === 'on';
     fastRefused = (v.fastRefused && typeof v.fastRefused === 'object') ? v.fastRefused : {};
     cmtFastGate(false);
     judgeFastGate();   // the tiers are set above; the boxes follow them

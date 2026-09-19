@@ -53,6 +53,20 @@ SIZES = {S2: 3000, S1: 2000, S3: 1000}        # transcript bytes; S4 has none
 REDIAL_TRAIL = r"\[reveal\] %s sid=\S+ wid=W1: parked[\s\S]*\[reveal\] sid=\S+ wid=W1: consumed \S+ the pane's redial"
 
 
+def _owners(src, token):
+    """The defs whose bodies mention `token` (their own def line excluded): test_11's census, for the asked mark too
+    (2026-09-19). Module-level lines count against the preceding def, comments and docstrings included."""
+    cur, found = None, set()
+    for ln in src.splitlines():
+        m = re.match(r"^\s*def (\w+)\(", ln)
+        if m:
+            cur = m.group(1)
+            continue
+        if token in ln:
+            found.add(cur)
+    return found
+
+
 def _sess(sid, n, state):
     """A synthetic build_session payload: n events (well under WIRE_TAIL, so a full send is the whole thing)."""
     return {"type": "session", "id": sid, "name": NAMES[sid],
@@ -152,6 +166,13 @@ class SkeletonReconnect(unittest.TestCase):
 
     def _tab_orders(self, c):
         return self._frames(c, "tabOrder")
+
+    def _diag_rows(self, what):
+        """The client-diag rows of one `what` in this test's state root; none when no row was ever filed."""
+        fp = km.jd.STATE / "client-diag.jsonl"
+        if not fp.exists():
+            return []
+        return [r for r in (json.loads(ln) for ln in fp.read_text().splitlines() if ln.strip()) if r.get("what") == what]
 
     # ── §4.1 item 1 ──
     def test_00a_a_sid_already_held_whole_is_never_listed_when_the_set_resolves(self):
@@ -277,6 +298,190 @@ class SkeletonReconnect(unittest.TestCase):
         to = self._tab_orders(c)
         self.assertEqual(len(to), 1, "the strip changed (no set) → re-sent")
         self.assertEqual(to[0].get("skeleton"), [], "an empty set is SAID as [] once a set has existed: the federated merge keeps a host's last list on an absent key")
+        # the control for test_04b (2026-09-19): in the pusher-first order the ask marks the sid asked-whole too, and the
+        # full that answers it consumes the mark all the same
+        self.assertNotIn(S3, c.get("askedFull") or (), "the full that answered the ask consumed its mark")
+
+    def test_04b_a_needfull_that_is_the_redials_first_strip_sender_is_answered_with_a_full(self):
+        # THE ASK AS THE REDIAL'S FIRST STRIP SENDER (2026-09-19). A redial's fresh client: `reconnect` armed at the
+        # handshake, no pusher cycle has resolved its set yet, and the page's gap ask for ANOTHER tab lands first (the dead
+        # socket's frames draining from the shim's FIFO after the open, or the idle prefetch over the old socket's
+        # still-held skeleton set). The needFull arm's reset released nothing (no set exists yet), and its own repair push
+        # ran _resolve_reconnect, which built the set from the active hint and an empty echat: the asked sid qualified as
+        # a skeleton, the strip named it, and the ask was answered with a STATUS frame, which never clears the page's
+        # one-shot latch (render.ts awaitingFull). The tab stayed a skeleton until clicked, and the idle prefetch chain
+        # (skeleton-tabs.ts nextPrefetch, null while any skeleton sid is in flight) was dead for the socket's life; the
+        # kernel filed no row. Reproduced deterministically here; plausible live, where the window is one pusher cycle
+        # wide. Now the ask marks the sid asked-whole for this client, every set decision honors the mark as it honors
+        # echat, and the full that answers the ask consumes it.
+        # `c` is deliberately NOT in km._clients, as test_04's is: appended, _push's cold-tab gate would read it through
+        # _all_chat and S2 (never built since the boot, held as a skeleton by the only client) would take the light-status
+        # path instead of _send_chat_or_status; the assertions would then hold only because the live map is {} here.
+        # test_04d runs the gate on purpose, with a live row.
+        c = self._client(active=S1, reconnect=True)
+        h = type("H", (), {"_push_one": km.Handler._push_one})()   # the REAL _push_one body: it reads module globals alone
+        km.Handler._dispatch_ws(h, {"type": "needFull", "id": S3, "why": "gap"}, c)
+        self.assertEqual(sorted(self._sessions(c)), sorted([S1, S3, S4]), "the active, the asked, the transcript-less")
+        self.assertEqual([s for s, _ in self._statuses(c)], [S2], "one status: the tab nobody asked for")
+        self.assertEqual(self._tab_orders(c)[0]["skeleton"], [S2], "the strip never names the asked sid")
+        self.assertEqual(c["skeleton"], {S2})
+        self.assertEqual(sorted(c["echat"]), sorted([S1, S3, S4]),
+                         "the three fulls and nothing else: the mark's doing, not a full that won a race")
+        self.assertNotIn(S3, c.get("askedFull") or (), "the full consumed the mark")
+        types = [f["type"] for f in c["_frames"]]
+        self.assertLess(types.index("tabOrder"), types.index("session"), "the strip is ahead of every full: the set's invariant")
+        self.assertEqual(self._diag_rows("needFullStatus"), [], "the tripwire never fires on the designed path")
+
+    def test_04b_relay_a_needfull_with_no_active_is_answered_with_a_full_on_the_relay_too(self):
+        # The federated face of the same defect (2026-09-19): ui/webview/federation.ts holds a needFull per sid while the
+        # relay is down and flushes it at the relay's open BEFORE romp:hostRelayUp fires, and render.ts clears awaitingFull
+        # only on the LOCAL socket's open, so a status answer on the relay latched the remote tab for the page's life. The
+        # remote dial carries no active unless the watched tab is that host's, and skeleton=1 from the page's own terms, so
+        # the ask lands in _resolve_reconnect's no-active relay branch: the second set-building comprehension, which
+        # test_04b never reaches.
+        c = self._client(kind="relay", reconnect=True, dietSkeleton=True)   # no active
+        h = type("H", (), {"_push_one": km.Handler._push_one})()
+        km.Handler._dispatch_ws(h, {"type": "needFull", "id": S3, "why": "gap"}, c)
+        self.assertEqual(sorted(self._sessions(c)), sorted([S3, S4]),
+                         "the asked and the transcript-less (build order ranks the transcript-less first)")
+        self.assertEqual(sorted(s for s, _ in self._statuses(c)), sorted([S1, S2]), "a status per other transcript-bearing tab")
+        self.assertEqual(self._tab_orders(c)[0]["skeleton"], [S1, S2], "cheapest first, never the asked")
+        self.assertEqual(c["skeleton"], {S1, S2})
+        self.assertEqual(sorted(c["echat"]), sorted([S3, S4]))
+        self.assertNotIn(S3, c.get("askedFull") or ())
+        types = [f["type"] for f in c["_frames"]]
+        self.assertLess(types.index("tabOrder"), types.index("session"))
+
+    def test_04b_proto2_the_live_redials_wire_answers_the_ask_with_a_full_and_consumes_the_mark(self):
+        # The wire a live redial declares (2026-09-19): the shim's redial term carries &proto=<readyProto> (test_10), so the
+        # handshake registers proto 2 and _send_chat_locked hands every full to _send_chat_proto2, whose discard beside the
+        # {first, last} base write is the one a live client's consumption rests on. test_04b drives the index wire alone,
+        # so without this twin a later edit that returned before that discard on this wire kept the module green (test_04e
+        # pins the two tokens' order, not that the line is reached) while every live redial's mark lingered; a stale mark
+        # only widens the gate's build and never re-lists the sid, so the harm is bounded, and the live path is shown.
+        c = self._client(active=S1, reconnect=True, proto=2)
+        h = type("H", (), {"_push_one": km.Handler._push_one})()
+        km.Handler._dispatch_ws(h, {"type": "needFull", "id": S3, "why": "gap"}, c)
+        self.assertEqual(sorted(self._sessions(c)), sorted([S1, S3, S4]), "the active, the asked, the transcript-less")
+        asked = [f for f in self._frames(c, "session") if f["id"] == S3]
+        self.assertEqual([f.get("proto") for f in asked], [2], "the asked full went once, on the uuid-anchored wire")
+        self.assertEqual((asked[0].get("firstUuid"), asked[0].get("lastUuid")), ("u0", "u2"), "anchored on its own events")
+        self.assertEqual([s for s, _ in self._statuses(c)], [S2], "one status: the tab nobody asked for")
+        self.assertEqual(self._tab_orders(c)[0]["skeleton"], [S2], "the strip never names the asked sid")
+        self.assertEqual(sorted(c["echat"]), sorted([S1, S3, S4]))
+        self.assertTrue(all(isinstance(b, dict) for b in c["echat"].values()), "proto-2 bases: {first, last} dicts, never index tuples")
+        self.assertNotIn(S3, c.get("askedFull") or (), "the proto-2 full consumed the mark")
+        self.assertEqual(self._diag_rows("needFullStatus"), [], "the tripwire never fires on the designed path")
+
+    def test_04c_a_status_for_an_asked_sid_is_said_on_the_record_and_answered_with_the_full(self):
+        # The tripwire (2026-09-19), forced by hand: the set has ONE writer (_resolve_reconnect), which excludes an asked
+        # sid, and every other touch shrinks it, so a set naming an asked sid is unreachable by construction (test_04b
+        # runs the designed path and finds no row). If a future writer breaches it, the status branch files one
+        # client-diag row (the _note_history_reply shape) naming the client and the sid, and falls through to the full:
+        # the ask is answered, never frozen. The client models a socket past its handshake (no handshake key, so
+        # _send_chat_locked serves it on the index wire).
+        c = self._client(active=S1, skeleton={S3}, skeletonOrder=[S3], askedFull={S3})
+        self.assertFalse(km._held_as_skeleton_by_all(S3, [c]), "an asked sid is never held as a skeleton, even when a set names it")
+        self.assertTrue(km._held_as_skeleton_by_all(S3, [self._client(active=S1, skeleton={S3}, skeletonOrder=[S3])]),
+                        "…while the unasked twin is: the mark alone makes the difference")
+        km._send_chat_or_status(c, json.loads(json.dumps(self.SESS[S3])), None, 3, False)
+        self.assertEqual(self._sessions(c), [S3], "the full, not the status")
+        self.assertEqual(self._statuses(c), [])
+        self.assertEqual(c["skeleton"], set(), "the full's release")
+        self.assertEqual(c["askedFull"], set(), "…consumed the mark")
+        self.assertIn(S3, c["echat"])
+        rows = self._diag_rows("needFullStatus")
+        self.assertEqual(len(rows), 1, "one row for the breach")
+        self.assertEqual(set(rows[0]), {"t", "wid", "surface", "what", "data"}, "the _note_history_reply shape")
+        self.assertEqual((rows[0]["surface"], rows[0]["what"], rows[0]["data"]["sid"]), ("kernel", "needFullStatus", S3))
+        self.assertEqual(set(rows[0]["data"]), {"sid", "cid", "kind"})
+        last = (km.jd.STATE / "client-diag.jsonl").read_text().splitlines()[-1]
+        self.assertEqual(json.loads(last)["what"], "needFullStatus", "the row is the file's last line")
+        # the fall-through is not a guaranteed full: with `reconnect` armed the guard below the branch withholds the
+        # session frame for the strip sender's push, as it withholds every session frame; the row is filed all the same
+        d = self._client(active=S1, reconnect=True, skeleton={S3}, skeletonOrder=[S3], askedFull={S3})
+        km._send_chat_or_status(d, json.loads(json.dumps(self.SESS[S3])), None, 3, False)
+        self.assertEqual(d["_frames"], [], "withheld by the guard: no status, no full")
+        self.assertEqual(len(self._diag_rows("needFullStatus")), 2, "…and said on the record all the same")
+        self.assertEqual(d["skeleton"], {S3}, "nothing released here: the strip sender's push answers")
+        # the helper joins no owner set: none of the set's tokens anywhere in its body (test_11's census is exact)
+        src = inspect.getsource(km._note_needfull_status)
+        for tok in ('"skeleton"', '"skeletonOrder"', "_release_skeleton_locked(", "_tab_order_frame(", "_send_chat_locked("):
+            self.assertNotIn(tok, src, tok)
+
+    def test_04c_proto2_the_tripwires_fall_through_consumes_the_mark_on_the_live_wire_too(self):
+        # test_04c's forced breach on the wire a live redial declares (2026-09-19): the fall-through's full goes through
+        # _send_chat_proto2, so the mark's consumption shown here is the one live clients rest on
+        c = self._client(active=S1, skeleton={S3}, skeletonOrder=[S3], askedFull={S3}, proto=2)
+        km._send_chat_or_status(c, json.loads(json.dumps(self.SESS[S3])), None, 3, False)
+        self.assertEqual([(f["id"], f.get("proto")) for f in self._frames(c, "session")], [(S3, 2)], "the full, on the uuid-anchored wire")
+        self.assertEqual(self._statuses(c), [], "not the status")
+        self.assertEqual(c["skeleton"], set(), "the full's release")
+        self.assertEqual(c["askedFull"], set(), "consumed beside the {first, last} base write")
+        self.assertIsInstance(c["echat"][S3], dict)
+        self.assertEqual(len(self._diag_rows("needFullStatus")), 1, "one row for the breach, as on the index wire")
+
+    def test_04d_the_cold_tab_gate_never_holds_an_asked_sid(self):
+        # _held_as_skeleton_by_all reads the asked mark as it reads echat, in both its reads (2026-09-19). The UNRESOLVED
+        # prediction is the reachable one: between the handler thread's mark and its own push's resolve, another push's
+        # gate (the pusher's cycle over every connected client) reads this client with `reconnect` still armed, and
+        # predicted the asked tab held as a skeleton, so a cold asked tab was not built by that push (cost only); the
+        # prediction now matches what the resolve will do with the mark. The RESOLVED read's guard is test_04c's forced state.
+        c = self._client(active=S1, reconnect=True)
+        km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": S3, "why": "gap"}, c)   # a bare _Self: the mark stands, no push yet
+        self.assertEqual(c.get("askedFull"), {S3}, "the ask marked the sid on the client")
+        self.assertIs(c.get("reconnect"), True, "…and resolved nothing: no strip sender has run")
+        self.assertFalse(km._held_as_skeleton_by_all(S3, [c]), "the asked tab is not predicted held")
+        self.assertTrue(km._held_as_skeleton_by_all(S2, [c]), "…while the unasked one still is")
+        # …and the ask-first flow WITH the gate in play (the client in _clients; the asked tab cold, with a live row the
+        # gate could state a status from): the asked tab is built and sent whole, and no status frame goes for it
+        km._clients.append(c)
+        km._live_map = lambda: {S3: {"state": "waiting", "since": 1781100000, "model": "", "effort": "", "mode": "", "backend": "sdk"}}
+        self.assertFalse(km._built_chat, "cold: nothing built since the boot")
+        h = type("H", (), {"_push_one": km.Handler._push_one})()
+        h._push_one(c)
+        self.assertIn(S3, self.built, "the asked tab was built: the gate did not hold it")
+        self.assertEqual(sorted(self._sessions(c)), sorted([S1, S3, S4]))
+        self.assertEqual([s for s, _ in self._statuses(c)], [S2], "one status, the tab nobody asked for")
+        self.assertEqual(c["skeleton"], {S2})
+        self.assertNotIn(S3, c.get("askedFull") or ())
+
+    def test_04e_source_pins_the_asked_mark_has_one_writer_and_every_reader_holds_the_lock(self):
+        # the exactness guarantee for a set with one writer (2026-09-19): both set-building comprehensions in
+        # _resolve_reconnect exclude an asked sid; the mark is read under the client's lock; written in
+        # _client_reset_chat_sid after the release and before the def's end; consumed where each full branch writes its
+        # echat entry, never inside _release_skeleton_locked (a click must not settle an ask no full has answered); dropped
+        # whole by the ready arm's reset beside the set; and touched nowhere else
+        rr = inspect.getsource(km._resolve_reconnect)
+        self.assertEqual(rr.count("sid not in asked"), 2, "the relay no-active branch and the active branch")
+        self.assertLess(rr.index("with _client_lock(c):"), rr.index('asked = c.get("askedFull") or ()'))
+        rs = inspect.getsource(km._client_reset_chat_sid)
+        self.assertLess(rs.index("with _client_lock(client):"), rs.index("_release_skeleton_locked(client, sid)"))
+        self.assertLess(rs.index("_release_skeleton_locked(client, sid)"), rs.index('client.setdefault("askedFull", set()).add(sid)'))
+        hs = inspect.getsource(km._held_as_skeleton_by_all)
+        self.assertEqual(hs.count("sid not in asked"), 2, "the resolved read and the unresolved prediction")
+        self.assertLess(hs.index("with _client_lock(c):"), hs.index('asked = c.get("askedFull") or ()'))
+        for fn in (km._send_chat_proto2, km._send_chat_locked):
+            s = inspect.getsource(fn)
+            self.assertLess(s.index("_release_skeleton_locked(c, sid)"), s.index('(c.get("askedFull") or set()).discard(sid)'), fn.__name__)
+        self.assertNotIn("askedFull", inspect.getsource(km._release_skeleton_locked), "a click's release settles no ask")
+        rb = inspect.getsource(km._client_reset_chat_base)
+        self.assertLess(rb.index("with _client_lock(client):"), rb.index('client.pop("askedFull", None)'))
+        self.assertLess(rb.index('client.pop("askedFull", None)'), rb.index('if client.pop("skeletonOnReady", False):'),
+                        "beside the set's pops, not inside the re-arm block")
+        so = inspect.getsource(km._send_chat_or_status)
+        self.assertLess(so.index('if sid in (c.get("skeleton") or ()):'), so.index('if sid in (c.get("askedFull") or ()):'))
+        self.assertLess(so.index('if sid in (c.get("askedFull") or ()):'), so.index('if c.get("skeletonOnReady") or c.get("reconnect"):'),
+                        "nested in the status branch, ahead of the guard the fall-through still meets")
+        self.assertEqual(_owners(inspect.getsource(km), '"askedFull"'),
+                         {"_client_reset_chat_sid", "_client_reset_chat_base", "_resolve_reconnect", "_held_as_skeleton_by_all",
+                          "_send_chat_or_status", "_send_chat_proto2", "_send_chat_locked"},
+                         "the mark is touched only in these, each under the client's slot lock")
+        # the byte windows tests/test_chat_delta_resync.py and ui/webview/chat-delta-resync.test.ts read still hold their pins
+        src = inspect.getsource(km)
+        j = src.find("def _client_reset_chat_sid(client, sid):")
+        for tok in ('"echat"', ".pop(sid, None)", '("chat", sid)'):
+            self.assertIn(tok, src[j:j + 1200], tok + " within the 1200-character window from the def")
 
     # ── item 5 ──
     def test_05_a_push_session_now_full_releases(self):
@@ -318,10 +523,12 @@ class SkeletonReconnect(unittest.TestCase):
         self.assertEqual(c["skeleton"], {S2, S3})
         c["_frames"].clear()
         c["reconnect"] = True                          # whatever the flag's state, the reset pops it before its push
+        km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": S3, "why": "gap"}, c)   # an ask no push answered (a bare
+        self.assertEqual(c.get("askedFull"), {S3})   #  _Self runs no push_one): its mark stands into the ready (2026-09-19)
         h = _Self(lambda cl: km._push([cl], connect=True))   # the real _push_one body
         km.Handler._dispatch_ws(h, {"type": "ready"}, c)
-        for k in ("skeleton", "skeletonOrder", "reconnect"):
-            self.assertNotIn(k, c, k)
+        for k in ("skeleton", "skeletonOrder", "reconnect", "askedFull"):
+            self.assertNotIn(k, c, k)                  # a renderer that just evaluated holds nothing and asked nothing
         self.assertFalse([k for k in c["sent"] if k[0] == "status"], "every status slot went with the set")
         self.assertEqual(h.calls, [c])
         self.assertEqual(sorted(self._sessions(c)), sorted(TAB_ORDER), "the following push sends every full")

@@ -455,10 +455,14 @@ export function initFileBrowse(poster: (m: Record<string, unknown>) => void, hos
       openFileBrowse(m.path || ".", typeof m.sid === "string" ? m.sid : null);
     } else if (m.type === "dirListing") {
       onListing(m as DirListing);
-    } else if (m.type === "warn" && inflight && document.getElementById("romp-filebrowse")) {
+    } else if (m.type === "warn" && typeof m.sid !== "string" && inflight && document.getElementById("romp-filebrowse")) {
       // A federation drop (the remote host's tunnel is down) answers with a warn INSTEAD of a
       // dirListing — the feed page renders no toasts, so without this branch the ask would hang on
       // a reply that was never sent. Loud, in place, crumbs intact (fail loudly, never a spinner).
+      // A warn carrying a session id answers a send INTO that session (the kernel's refusal of a slash command a
+      // Codex session cannot take, broadcast to every chat pane when no socket carried it; 2026-09-19), never this
+      // listing: with a slow listing in flight it read as the listing's failure and replaced the crumbs with the
+      // refusal's sentence. A listing's own failure names no session.
       inflight = false;
       queued = null;
       renderError(String(m.text || "the session's host is not answering"));

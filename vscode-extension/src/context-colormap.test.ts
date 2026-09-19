@@ -14,13 +14,13 @@ const TL = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "romp-timelin
 test("the chat battery applies the server ctxColor, falling back to the traffic-light", () => {
   assert.match(RENDER, /ctxColor\?: number\[\];/);   // on the Status interface
   assert.match(MODULE, /export function setCtxBar\(bar: HTMLElement, ctxStr: string \| undefined, compacting = false, ctxColor\?: number\[\] \| null, ctxOver = false, sweep\?: \(scan: HTMLElement, fresh: boolean\) => void\): void \{/);
-  assert.match(RENDER, /^function setCtxBar\(bar: HTMLElement, ctxStr: string \| undefined, compacting = false, ctxColor\?: number\[\], ctxOver = false\): void \{/m, "the chat's wrapper keeps the signature its callers use");
+  assert.match(RENDER, /^function setCtxBar\(bar: HTMLElement, ctxStr: string \| undefined, compacting = false, ctxColor\?: number\[\], ctxOver = false, st\?: Status\): void \{/m, "the chat's wrapper keeps the signature its callers use, plus the status that marks a Codex bar inert before the fill (2026-09-19)");
   assert.match(MODULE, /\(ctxColor && ctxColor\.length === 3\) \? `rgb\(\$\{ctxColor\.join\(","\)\}\)`/);   // the fill wears the tone as-is (readableRgb is for TEXT — 2026-08-31)
   assert.match(MODULE, /: ctxFallbackColor\(pct\)/);  // fallback intact, via the ONE shared pair (ctx-color.ts)
 });
 
 test("every setCtxBar caller threads s.status.ctxColor (statusline, tick, tab tooltip)", () => {
-  const calls = RENDER.match(/setCtxBar\(bar, s\.status\.ctx, s\.status\.state === "compacting", pickTone\(s\.status\.ctxColor, s\.status\.ctxTone\), s\.status\.ctxOver\)/g) || [];   // dual palette (PR #763): every caller picks by theme; ctxOver = the clamped 100 is really 100+ (2026-09-02)
+  const calls = RENDER.match(/setCtxBar\(bar, s\.status\.ctx, s\.status\.state === "compacting", pickTone\(s\.status\.ctxColor, s\.status\.ctxTone\), s\.status\.ctxOver, s\.status\)/g) || [];   // dual palette (PR #763): every caller picks by theme; ctxOver = the clamped 100 is really 100+ (2026-09-02); the status marks a Codex bar inert (2026-09-19)
   assert.equal(calls.length, 3, "all three callers pass the color through");
 });
 

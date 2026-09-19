@@ -1005,6 +1005,8 @@ class WsFlagsMustBeBooleans(unittest.TestCase):
             ("setJudgeFast", "enabled", {}, lambda: km.jd._state_str("judge-fast", "off") == "on", warn),   # Fast mode, the triage tier's box
             ("setDistillFast", "enabled", {}, lambda: km.jd._state_str("distill-fast", "off") == "on", warn),   # T300: a box per tier
             ("setIndexFast", "enabled", {}, lambda: km.jd._state_str("index-fast", "off") == "on", warn),
+            ("setAlwaysFast", "enabled", {}, lambda: km.jd._state_str("always-fast", "off") == "on", warn),   # the model switches (Settings, Automation, Model; 2026-09-17)
+            ("setRetryUpgrade", "enabled", {}, lambda: km.jd._state_str("retry-upgrade", "off") == "on", warn),
             ("setGlobalRetryPaused", "value", {}, km._retry_paused_on, warn),
             ("setSessionFlag", "value", {"id": self.SID, "flag": "hideFromFeed"},
              lambda: km._session_flag(self.SID, "hideFromFeed"), lane),

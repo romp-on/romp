@@ -34,7 +34,8 @@ test("(4) the Preview caption is a title ABOVE the box, in both sections, never 
   assert.match(SECTION, /cfg\.host\.parentNode\.insertBefore\(title, cfg\.host\.nextSibling\);\s*\n\s*cfg\.host\.parentNode\.insertBefore\(box, title\.nextSibling\);/, "the title right under the rows, the box under the title");
   assert.doesNotMatch(SECTION, /rs-preview-label|box\.appendChild\(cap\)/, "no caption inside the box");
   assert.doesNotMatch(GEAR, /rs-preview-label/, "the old class is gone from the card");
-  assert.match(GEAR_CSS, /#rsettings \.rs-preview-title \{[^}]*text-transform: uppercase;/, "the title keeps the caption's small uppercase dress");
+  assert.match(GEAR_CSS, /#rsettings \.rs-preview-title \{[^}]*color: var\(--accent, #9cd2ff\); font-size: 11px; font-weight: 600;/, "the title wears the section-label dress: sentence case, the accent, never uppercase (the user 2026-09-18)");
+  assert.doesNotMatch(GEAR_CSS, /\.rs-preview-title \{[^}]*(uppercase|letter-spacing)/);
   assert.doesNotMatch(GEAR_CSS, /rs-preview-label/, "…and the old rule is gone from the sheet");
   assert.match(GEAR_CSS, /#rsettings \.rs-preview \{ margin-top: 4px;/, "the box closes up under its title");
 });
@@ -77,7 +78,7 @@ test("(5) the renderer is one module: render.ts imports it and keeps only the ch
   assert.match(RENDER, /^function metaButton\(kind: MetaKind, text: string, forSid\?: string \| null\): HTMLElement \{ return buildMetaButton\(kind, text, forSid, META_HOOKS\); \}/m);
   assert.match(RENDER, /^function syncMetaControls\(meta: HTMLElement, st: Status, forSid\?: string \| null\): void \{ syncMetaControlsWith\(meta, st, forSid, META_HOOKS\); \}/m);
   assert.match(RENDER, /^function ctxBar\(\): HTMLElement \{ const bar = buildCtxBar\(compactActiveSession\); bar\.id = "ctx-bar"; return bar; \}/m, "the chat's battery keeps its id (the in-place refresh finds it) and its /compact click");
-  assert.match(RENDER, /^function setCtxBar\(bar: HTMLElement, ctxStr: string \| undefined, compacting = false, ctxColor\?: number\[\], ctxOver = false\): void \{\s*\n\s*setCtxBarWith\(bar, ctxStr, compacting, ctxColor, ctxOver, \(scan, fresh\) => applyCompactSweep\(scan, 3200, fresh\)\);\s*\n\}/m, "the compaction sweep stays the chat's (it reads the chat's colormap setting)");
+  assert.match(RENDER, /^function setCtxBar\(bar: HTMLElement, ctxStr: string \| undefined, compacting = false, ctxColor\?: number\[\], ctxOver = false, st\?: Status\): void \{\s*\n\s*if \(st\) markCtxBarFor\(bar, st\);\s*\n\s*setCtxBarWith\(bar, ctxStr, compacting, ctxColor, ctxOver, \(scan, fresh\) => applyCompactSweep\(scan, 3200, fresh\)\);\s*\n\}/m, "the compaction sweep stays the chat's (applyCompactSweep) and rides the hook; the status the chat hands in marks a Codex bar inert before the fill (2026-09-19)");
   assert.match(RENDER, /^function ramp\(v: number\): \[number, number, number\] \{ return rampOn\(v, selectedStops\(\)\); \}/m, "one ramp arithmetic");
 });
 

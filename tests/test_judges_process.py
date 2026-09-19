@@ -180,7 +180,7 @@ class ChildRoad(_Child):
         self.assertEqual((reqs[0]["op"], reqs[0]["seq"], reqs[0].get("mayStart")), ("pass", 1, True), "the gate's verdict rides the request as mayStart")
         self.assertNotIn("tracking", reqs[0], "one word on the wire: mayStart alone")
         self.assertEqual(sorted(reqs[0]), ["mayStart", "now", "op", "seq"])
-        self.assertAlmostEqual(reqs[0]["now"], time.time(), delta=30)
+        self.assertIn("now", reqs[0]); self.assertIsNone(reqs[0]["now"], "the request carries a null now by default: the child's tiers read their own clock")
         self.assertEqual(called, [], "no in-process tier ran")
         self.assertEqual(order[:3], ["begin", "pass", "end"], "the goals snapshot opens before the request and closes after it: %r" % order)
         self.assertEqual(km._judge_gen[0], gen0 + 1, "the generation bumped once: the child's store write, seen after its done")
@@ -201,6 +201,35 @@ class ChildRoad(_Child):
         self.assertEqual(km._judge_gen[0], gen0, "nothing moved: the views keep their signature")
         self.assertEqual(len(self._requests()), 2, "and the one child served both passes")
         self.assertEqual(self._judge()["childRestarts"], 0)
+
+    def test_the_request_carries_a_null_now_by_default_and_the_wakes_time_only_when_the_clock_file_says_request(self):
+        """The comparison's clock knob (2026-09-18): the child used to receive the request's second-truncated `now` for both
+        tiers where the in-process tiers read their own clock, the one behavioural difference in the shared pass body and a
+        candidate for the child's higher gate admittance. The default is now the in-process behaviour, `now: null` (the
+        child reads a null as its own clock); STATE/judges-process-clock reading `request` sends the wake's time, the explicit
+        measurement variant; any other word is the default."""
+        km = self.km
+        self._on()
+        clock = self.jd.STATE / getattr(km, "JUDGES_PROCESS_CLOCK_FILE", "judges-process-clock")
+        try:
+            self._pass()
+            reqs = self._requests()
+            self.assertEqual(len(reqs), 1)
+            self.assertIn("now", reqs[0]); self.assertIsNone(reqs[0]["now"], "absent knob: a null now, the tiers' own clock (the base always sent the time)")
+            clock.write_text("request\n")
+            self._pass()
+            reqs = self._requests()
+            self.assertEqual(len(reqs), 2)
+            self.assertIsInstance(reqs[1].get("now"), float, "the knob reading request: the wake's time, the explicit variant")
+            self.assertEqual(self._judge().get("passes"), 2, "both passes answered")
+            clock.write_text("own\n")
+            self._pass()
+            self.assertIsNone(self._requests()[2].get("now"), "any other word: the default again")
+        finally:
+            try:
+                clock.unlink()
+            except OSError:
+                pass
 
     def test_the_default_runs_the_tiers_in_process_and_starts_no_child(self):
         km = self.km

@@ -383,6 +383,68 @@ class HealOlderStores(_Feed):
         self.assertEqual(err, "", "nothing nested: nothing counted")
 
 
+class HostsCurrentAtTheMint(_Feed):
+    """The heal nests a machine-rooted top only under a host that was CURRENT when the top was minted (2026-09-18, the user's
+    card): a store whose human-anchored hosts were all minted in one day had the oldest-host fallback sweep two completed
+    roots from days before into the oldest host's tree (the first request of that day), where the card's button counted them as sub-goals and its fold
+    listed them as reviewed earlier. Two roots, one older than every host: the host's payload never holds the other root's
+    nodes, and the three counts the card derives from the payload (the button's direct non-handoff children, the fold's
+    reviewed-earlier children, the rows the fold shows) agree with the store's own children."""
+
+    def _two_roots(self):
+        host, h1, h2, h3, h4 = (SID + ":g%d" % i for i in range(10, 15))
+        old, o1 = SID + ":g20", SID + ":g21"
+        done_at = T0 + 5500
+        done = {"nodeComplete": True, "log": [{"kind": "done", "ev_t": done_at}], "mt": done_at}
+        self._store({
+            # the user's request, minted AFTER the old root; its boundary (a settle the user reviewed through) lies past its
+            # kids' done events, so every done kid is reviewed earlier
+            host: self._node(host, "Add retries to the notes-api client", t=T0 + 5000, promptUuid="u1", askAnchor="human",
+                             deltaSince=T0 + 6000, **done),
+            h1: self._node(h1, "Write the retry loop", parent=host, t=T0 + 5100, **done),
+            h2: self._node(h2, "Cover the retry loop with tests", parent=host, t=T0 + 5200, **done),
+            h3: self._node(h3, "Assert the back-off schedule", parent=h2, t=T0 + 5300, **done),
+            h4: self._node(h4, "\u21aa delegated to api: review the retry diff", parent=host, t=T0 + 5400,
+                           handoff={"peer": "aaaaaaaa-1111-2222-3333-888888888888", "msgId": "m-1"}, **done),
+            # a machine-rooted root minted DAYS before the request, with a done step of its own: the older store's shape
+            old: self._node(old, "Tidy the colour names", t=T0, promptUuid="a9", askAnchor="machine", nodeComplete=True,
+                            log=[{"kind": "done", "ev_t": T0 + 100}], mt=T0 + 100),
+            o1: self._node(o1, "Rename the grey tokens", parent=old, t=T0 + 50, nodeComplete=True,
+                           log=[{"kind": "done", "ev_t": T0 + 90}], mt=T0 + 90)},
+            status={host: "completed", old: "completed"})
+        return host, (h1, h2, h3, h4), old, o1
+
+    def test_a_root_older_than_every_host_is_not_nested_under_a_host_minted_after_it(self):
+        host, kids, old, o1 = self._two_roots()
+        nodes = json.loads((jd.GOALDIR / (SID + ".json")).read_text())["nodes"]
+        h = km._heal_session_tops(str(self.tpath), nodes, {})
+        self.assertEqual(set(h), {old}, "the old root is the one candidate")
+        self.assertIsNone(h[old][0], "no host was current at its mint: not nested (the oldest-host fallback nested it under the request)")
+        self.assertIn("rooted in the session's own record", h[old][1]["why"])
+
+    def test_one_roots_fold_never_shows_the_other_roots_nodes_and_the_counts_agree(self):
+        host, (h1, h2, h3, h4), old, o1 = self._two_roots()
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {host, old}, "two roots, two cards: the old root keeps its own")
+        self.assertEqual(asks[old]["sessionStarted"]["parent"], None, "…wearing the face with no request to name")
+        rows = {r["id"]: r for r in asks[host]["tree"]}
+        self.assertEqual(set(rows), {host, h1, h2, h3, h4}, "the request's payload holds its own subtree and nothing of the other root")
+        self.assertEqual(set(r["id"] for r in asks[old]["tree"]), {old, o1})
+        # the counts the card derives from the payload, computed the client's way (feed.ts applySections / renderTree): the
+        # handoff child is out of every count, since the walk never renders it (a reviewed handoff counted in the fold's label
+        # made "3 reviewed earlier" open to two rows, the 2026-09-18 read)
+        direct = rows[host]["children"]
+        button = [c for c in direct if rows[c]["kind"] != "handoff"]                    # "N sub-goals"
+        fold = [c for c in button if rows[c].get("reviewedEarlier")]                    # "N reviewed earlier"
+        shown = fold                                                                    # the rows the open fold walks
+        self.assertEqual(sorted(direct), sorted([h1, h2, h4]), "the direct children are the store's, by parentId")
+        self.assertEqual((len(button), len(fold), len(shown)), (2, 2, 2), "button 2, fold 2, rows 2: one count per row that renders")
+        self.assertEqual(rows[h4]["kind"], "handoff")
+        self.assertTrue(all(rows[c].get("reviewedEarlier") for c in (h1, h2, h4)), "every done kid predates the boundary")
+        self.assertEqual(err, "", "nothing nested: nothing counted")
+
+
 class AwaitingPanel(unittest.TestCase):
     def test_workflow_and_agent_rows_are_agents_for_the_awaiting_panel_never_cards(self):
         self.assertTrue(km._bg_is_agent("local_workflow"))

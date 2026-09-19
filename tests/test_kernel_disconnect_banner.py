@@ -163,7 +163,11 @@ process.stdout.write(JSON.stringify({
         # "-quiet" raise rides the redial.)
         self.assertIn('if(openSock===this){armFresh();try{send({type:"clientDiag",surface:"pane-shim",what:"wsclose",data:{app:APP,code:ev?ev.code:-1,'
                       'reason:(ev&&ev.reason)||"",wasClean:!!(ev&&ev.wasClean),'
-                      'sinceOpenMs:openT?Date.now()-openT:-1,quietMs:lastRecv?Date.now()-lastRecv:-1,everConnected:everConnected}', js)
+                      'sinceOpenMs:openT?Date.now()-openT:-1,quietMs:lastRecv?Date.now()-lastRecv:-1,everConnected:everConnected,'
+                      'bundleReady:bundleReady,readyAcked:readyAcked,readyQueued:readyQueued}', js,
+                      "the row carries the dial term's inputs at the close (everConnected is true on every such row, so alone it "
+                      "told a declared redial from nothing); with the kernel's per-row stamp of what the redial then dialed, "
+                      "the log names the redial's kind (tests/test_client_diag_reconnect_stamp.py runs the shapes)")
         # …for a socket that OPENED. A handshake that never opened fires onclose too — every redial of an
         # outage, ~19k in 8 h — and those are counted and reported as ONE row on the next open, never queued
         # one by one; queued breadcrumbs are capped besides. pane-shim-stale.test.ts runs both.

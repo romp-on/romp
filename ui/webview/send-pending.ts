@@ -553,6 +553,13 @@ export function dropPending(list: PendingSend[], text: string, ts?: number, qid?
   return i >= 0 ? list.splice(i, 1)[0] : undefined;
 }
 
+/** The words a refused send puts back in the composer (2026-09-19): the dropped entry's text when the box is empty (the
+ *  press cleared it and nothing was typed since), else null: a draft in progress is never overwritten, and a refusal whose
+ *  entry a push already retired restores nothing. */
+export function refusedRestoreText(dropped: PendingSend | undefined, box: string): string | null {
+  return dropped && box.trim() === "" ? dropped.text : null;
+}
+
 
 /** Which copy of `text` in a kernel queued group the caller hides for a send drawn at its own slot: the NEWEST
  *  copy not already hidden (the group lists the queue in order; ours is the latest press with that text), or -1

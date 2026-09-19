@@ -128,5 +128,45 @@ class OrphanSweepTerminalRow(_Base):
             pm.STATE, pm.MAILROOT, pm.TLDIR, pm.local_agents = self._saved_pm
 
 
+
+class RelayedRowNamesTheRecipient(_Base):
+    """A relayed send's row addresses the relay ("peer:<host>") and, since 2026-09-08, carries the recipient's stable id
+    (to_sid) and display name (toName, "<host>:<name>"). The connector ends at the RECIPIENT, named with its host, so mail
+    to a remote twin of a local session reads "web → TESTHOST:web" and the merged board stitches it onto that host's lane
+    instead of hanging a stub off the sender for a lane nobody has; the relay address keeps only the pending flag's
+    cross-host leg (the user 2026-09-18). A row older than the fields keeps the relay address."""
+    REMOTE = "33333333-3333-3333-3333-333333333333"
+
+    def _relayed(self):
+        row = self._sent(to="peer:TESTHOST")
+        row.update({"to_sid": self.REMOTE, "toName": "TESTHOST:web"})
+        return row
+
+    def test_the_far_end_is_the_recipient_named_with_its_host_and_pending_stays_honest_on_the_relay(self):
+        self._log([self._relayed()])
+        r = self._row(live=(SENDER,), to=self.REMOTE)
+        self.assertIsNotNone(r, "the row draws: its sender is a local lane")
+        self.assertEqual((r["toId"], r["to"]), (self.REMOTE, "TESTHOST:web"),
+                         "the far end is the recipient's stable id, its name carrying the host, never the relay address")
+        self.assertTrue(r["pending"], "the recipient is no local lane and its liveness is not knowable here: pending until the receipt")
+        self._log([self._relayed(), {"t": NOW - 46 * 3600, "ev": "exec", "id": "m1", "dmid": "m1-landed"}])
+        r = self._row(live=(SENDER,), to=self.REMOTE)
+        self.assertEqual((r["pending"], r["hasExec"], r.get("dmid")), (False, True, "m1-landed"), "the far receipt ends it")
+
+    def test_a_delivered_copy_carries_the_senders_id(self):
+        # the recipient's bus writes the delivered copy under its own mid with originMid = the sender's; the row hands it
+        # to the merged board, which folds the two kernels' rows for one message into one connector on it
+        self._log([{"t": NOW - 47 * 3600, "ev": "sent", "id": "m1-landed", "from": "web", "from_id": self.REMOTE,
+                    "to_id": RECIP, "body": "hello from afar", "from_host": "TESTHOST", "originMid": "m1"}])
+        r = self._row(live=(RECIP,), to=RECIP)
+        self.assertIsNotNone(r)
+        self.assertEqual((r["fromId"], r["toId"], r.get("originMid")), (self.REMOTE, RECIP, "m1"))
+
+    def test_a_row_without_the_recipient_fields_keeps_the_relay_address(self):
+        # a guard, green before the change too: the bus wrote to_sid and toName from 2026-09-08; an older row has neither
+        self._log([self._sent(to="peer:TESTHOST")])
+        r = self._row(live=(SENDER,), to="peer:TESTHOST")
+        self.assertEqual((r["toId"], r["to"], r["pending"]), ("peer:TESTHOST", "", True))
+
 if __name__ == "__main__":
     unittest.main()

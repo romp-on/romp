@@ -103,6 +103,12 @@ def agent_item(text, iid="a1"):
     return {"type": "agentMessage", "id": iid, "text": text}
 
 
+def compaction_item(iid):
+    # the wire shape of a contextCompaction item on Codex 0.153.3: id and type, nothing else (the
+    # runtime exposes no summary text and no token counts for a compaction)
+    return {"type": "contextCompaction", "id": iid}
+
+
 def feed(n, *events):
     out = []
     for method, params in events:
@@ -281,6 +287,9 @@ class Chain(unittest.TestCase):
         self.assertEqual(feed(n, item_completed(user_item("  ", "u4"))), [], "every input blank: no record")
 
     def test_compaction_stitch(self):
+        """Deprecated-runtime path (2026-09-19): the thread/compacted notification, which Codex
+        0.153.3 never sends (it emits the contextCompaction item instead), still writes the boundary
+        when no item did."""
         n = norm()
         recs = feed(n,
                     item_completed(user_item("start", "u1")),
@@ -340,9 +349,16 @@ class Chain(unittest.TestCase):
 
 
 class ReviewRegressions(unittest.TestCase):
-    """Record-level pins for the 2026-08-13 adversarial-review findings."""
+    """Record-level pins for the 2026-08-13 adversarial-review findings, and (2026-09-19) for the
+    in-turn compaction record. The thread/compacted goldens here and in Chain and ParseIntegration
+    pin the DEPRECATED-RUNTIME notification path: Codex 0.153.3 never sends that notification (its
+    app-server emits a contextCompaction item on the running turn instead, the tests below), but a
+    runtime that does still writes the same boundary through it, once per compaction."""
 
     def test_double_compaction_unique_boundaries(self):
+        """Deprecated-runtime path (2026-09-19): the thread/compacted notification, which Codex
+        0.153.3 never sends (it emits the contextCompaction item instead), still writes the boundary
+        when no item did."""
         n = norm()
         recs = feed(n,
                     turn_started("t1"),
@@ -359,6 +375,9 @@ class ReviewRegressions(unittest.TestCase):
         assert_chain(self, recs)
 
     def test_compaction_flushes_held_reply_first(self):
+        """Deprecated-runtime path (2026-09-19): the thread/compacted notification, which Codex
+        0.153.3 never sends (it emits the contextCompaction item instead), still writes the boundary
+        when no item did."""
         n = norm()
         recs = feed(n,
                     item_completed(user_item("go", "u1")),
@@ -447,6 +466,163 @@ class ReviewRegressions(unittest.TestCase):
         self.assertIsNone(recs[0]["message"]["stop_reason"])   # the turn genuinely didn't settle
         self.assertEqual(n.drain(), [])
 
+    def test_in_turn_auto_compaction_item_writes_one_boundary(self):
+        """THE DEFECT (2026-09-19): Codex 0.153.3 compacts inside a running turn by emitting a
+        contextCompaction item on that turn and never sends thread/compacted (deprecated), so a
+        session that overflowed mid-turn got no compact_boundary record at all: no divider in the
+        chat, an unbroken window for every boundary reader. The item's completed is the exact signal
+        (it fires only after the runtime replaced the history) and writes the boundary. Red on stock
+        at the count: 0 != 1."""
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(agent_item("chunk one", "a1"), MS + 1000),
+                    item_started(compaction_item("cc1"), MS + 5000),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    item_completed(agent_item("chunk two", "a2"), MS + 12000),
+                    turn_completed("t1"))
+        cbs = [r for r in recs if r.get("subtype") == "compact_boundary"]
+        self.assertEqual(len(cbs), 1, "one compaction, one boundary")
+        cb = cbs[0]
+        self.assertEqual(cb["uuid"], "cc1", "keyed by the wire item id")
+        self.assertIsNone(cb["parentUuid"])
+        self.assertEqual(cb["logicalParentUuid"], recs[1]["uuid"],
+                         "the held reply flushed first; the stitch points at it")
+        self.assertEqual(recs[3]["parentUuid"], "cc1", "the continuation chains off the boundary")
+        self.assertEqual(cb["compactMetadata"], {"trigger": "auto"})
+        self.assertEqual(cb["timestamp"], cx._iso(MS + 9000, lambda: NOW),
+                         "the wire's completedAtMs, not the clock")
+        self.assertEqual([r["type"] for r in recs], ["user", "assistant", "system", "assistant"])
+        self.assertEqual(recs[-1]["message"]["stop_reason"], "end_turn")
+        self.assertNotIn("contextCompaction", n.skipped, "written, not counted as skipped vocabulary")
+        assert_chain(self, recs)
+
+    def test_in_turn_compaction_item_then_notification_one_boundary(self):
+        """A runtime that sends BOTH signals for one compaction (the item, then thread/compacted for
+        the same turn) gets one boundary, written by whichever arrives first: boundaries per turn =
+        max(items seen, notifications seen). Red on stock at the uuid ('cb-t1' != 'cc1'): the
+        notification wrote it because the item wrote nothing. The notification-first order is green
+        on stock and pins the mirror."""
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(agent_item("chunk one", "a1"), MS + 1000),
+                    item_started(compaction_item("cc1"), MS + 5000),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    ("thread/compacted", {"threadId": TID, "turnId": "t1"}),
+                    item_completed(agent_item("chunk two", "a2"), MS + 12000),
+                    turn_completed("t1"))
+        cbs = [r for r in recs if r.get("subtype") == "compact_boundary"]
+        self.assertEqual(len(cbs), 1)
+        self.assertEqual(cbs[0]["uuid"], "cc1")
+        assert_chain(self, recs)
+        # the mirror: notification first, then the item; one boundary, the notification's
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(agent_item("chunk one", "a1"), MS + 1000),
+                    ("thread/compacted", {"threadId": TID, "turnId": "t1"}),
+                    item_started(compaction_item("cc1"), MS + 5000),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    item_completed(agent_item("chunk two", "a2"), MS + 12000),
+                    turn_completed("t1"))
+        cbs = [r for r in recs if r.get("subtype") == "compact_boundary"]
+        self.assertEqual(len(cbs), 1)
+        self.assertEqual(cbs[0]["uuid"], "cb-t1")
+        assert_chain(self, recs)
+
+    def test_two_in_turn_compactions_two_boundaries(self):
+        """Two compactions in one turn, each as an item followed by a notification, write exactly
+        two boundaries named by the item ids (distinct, so the chain never collides). Red on stock
+        at the uuid set: the notifications wrote 'cb-t1' and 'cb-t1~1'."""
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(agent_item("chunk one", "a1"), MS + 1000),
+                    item_started(compaction_item("cc1"), MS + 5000),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    ("thread/compacted", {"threadId": TID, "turnId": "t1"}),
+                    item_completed(agent_item("chunk two", "a2"), MS + 12000),
+                    item_started(compaction_item("cc2"), MS + 15000),
+                    item_completed(compaction_item("cc2"), MS + 19000),
+                    ("thread/compacted", {"threadId": TID, "turnId": "t1"}),
+                    item_completed(agent_item("done", "a3"), MS + 20000),
+                    turn_completed("t1"))
+        cbs = [r["uuid"] for r in recs if r.get("subtype") == "compact_boundary"]
+        self.assertEqual(len(cbs), 2)
+        self.assertEqual(set(cbs), {"cc1", "cc2"})
+        assert_chain(self, recs)
+
+    def test_replayed_compaction_item_writes_no_second_boundary(self):
+        """A contextCompaction item re-delivered across a reconnect or restart writes nothing more.
+        Three faces: the first delivery wrote the boundary (red on stock at the count, 0 != 1, since
+        no item writes there); the file already carries it, a normalizer seeded from the file (green
+        on stock); a thread/compacted had already paired it, so the first delivery was skipped (green
+        on stock, and the guard the skip path needs: counting alone would let the re-delivery
+        outnumber the notification and write a second boundary)."""
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    item_completed(agent_item("chunk two", "a2"), MS + 12000),
+                    turn_completed("t1"))
+        cbs = [r for r in recs if r.get("subtype") == "compact_boundary"]
+        self.assertEqual(len(cbs), 1)
+        assert_chain(self, recs)
+        n = norm(seen_uuids={"cc1"}, last_uuid="a0")
+        self.assertEqual(feed(n, item_completed(compaction_item("cc1"), MS + 9000)), [])
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    ("thread/compacted", {"threadId": TID, "turnId": "t1"}),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    item_completed(agent_item("chunk two", "a2"), MS + 12000),
+                    turn_completed("t1"))
+        cbs = [r["uuid"] for r in recs if r.get("subtype") == "compact_boundary"]
+        self.assertEqual(cbs, ["cb-t1"])
+        assert_chain(self, recs)
+
+    def test_notification_without_turn_id_always_writes(self):
+        """A thread/compacted with NO turnId (the shape a standalone compaction's writer would
+        synthesize; every wire notification carries one) is never paired against a turn's items, so
+        it always writes, with its own trigger: the dedup keys on the notification's own turnId,
+        never on the normalizer's last-turn fallback, which would swallow this boundary whenever that
+        turn had carried an in-turn compaction. Red on stock at the COUNT (1 != 2): the item wrote
+        nothing, so only the notification's boundary exists."""
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    item_completed(agent_item("chunk two", "a2"), MS + 12000),
+                    turn_completed("t1"),
+                    ("thread/compacted", {"threadId": TID, "trigger": "manual"}))
+        cbs = [r for r in recs if r.get("subtype") == "compact_boundary"]
+        self.assertEqual(len(cbs), 2)
+        self.assertEqual(cbs[0]["uuid"], "cc1")
+        self.assertEqual(cbs[1]["compactMetadata"], {"trigger": "manual"})
+        assert_chain(self, recs)
+
+    def test_compaction_counters_never_raise_on_an_unseen_turn(self):
+        """The per-turn compaction counters count a turn they have never seen instead of raising: a
+        raise inside handle aborts the live turn (the backend's worker interrupts it and writes the
+        abandoned card). The item arm with no turn/started before it and a notification for another
+        unseen turn each write one boundary. Red on stock at the item half's count (0 != 1)."""
+        n = norm()
+        recs = feed(n, item_completed(compaction_item("cc7"), MS + 9000, turn="t7"))
+        self.assertEqual(len([r for r in recs if r.get("subtype") == "compact_boundary"]), 1)
+        more = feed(n, ("thread/compacted", {"threadId": TID, "turnId": "t8"}))
+        self.assertEqual(len([r for r in more if r.get("subtype") == "compact_boundary"]), 1)
+        assert_chain(self, recs + more)
+
 
 class ParseIntegration(unittest.TestCase):
     """The design's load-bearing property: the materialized file parses like a Claude transcript."""
@@ -489,6 +665,9 @@ class ParseIntegration(unittest.TestCase):
         self.assertEqual(t2["atoms"][-1]["message"]["stop_reason"], "end_turn")
 
     def test_compaction_survives_parse(self):
+        """Deprecated-runtime path (2026-09-19): the thread/compacted notification, which Codex
+        0.153.3 never sends (it emits the contextCompaction item instead), still writes the boundary
+        when no item did."""
         n = norm()
         recs = feed(n,
                     item_completed(user_item("long refactor", "u1"), MS),
@@ -534,6 +713,9 @@ class ParseIntegration(unittest.TestCase):
         self.assertTrue(s["turns"][0]["ended"] and s["turns"][1]["ended"])
 
     def test_double_compaction_keeps_early_history(self):
+        """Deprecated-runtime path (2026-09-19): the thread/compacted notification, which Codex
+        0.153.3 never sends (it emits the contextCompaction item instead), still writes the boundary
+        when no item did."""
         n = norm()
         recs = feed(n,
                     turn_started("t1"),
@@ -550,6 +732,100 @@ class ParseIntegration(unittest.TestCase):
         # colliding boundary uuids used to orphan everything before the first compaction
         self.assertTrue(any("start the refactor" in x for x in texts))
         self.assertTrue(any("done" in x for x in texts))
+
+    def test_in_turn_compaction_survives_parse(self):
+        """An in-turn compaction (the contextCompaction item on the running turn) parses like a
+        Claude one: the boundary is an atom, both sides of it stay on the active path, and the
+        boundary opens its own turn that carries the continuation and reads ended. Only the
+        boundary's turn is asserted ended: the pre-boundary reply flushed with stop null, so its
+        turn reads open, as a Claude pre-boundary segment does. Red on stock: no boundary atom."""
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(agent_item("chunk one done", "a1"), MS + 1000),
+                    item_started(compaction_item("cc1"), MS + 5000),
+                    item_completed(compaction_item("cc1"), MS + 9000),
+                    item_completed(agent_item("chunk two done", "a2"), MS + 12000),
+                    turn_completed("t1"))
+        s = self._parse(recs)
+        atoms = [a for t in s["turns"] for a in t["atoms"]]
+        self.assertTrue(any(a.get("subtype") == "compact_boundary" for a in atoms),
+                        "the boundary is an atom")
+        texts = [em._text_of(a["message"]["content"]) for a in atoms if a.get("message")]
+        self.assertTrue(any("start the refactor" in x for x in texts))
+        self.assertTrue(any("chunk two done" in x for x in texts))
+        bt = next(t for t in s["turns"] if t["atoms"][0].get("subtype") == "compact_boundary")
+        self.assertTrue(any("chunk two done" in em._text_of(a["message"]["content"])
+                            for a in bt["atoms"] if a.get("message")),
+                        "the continuation lands in the boundary's own turn")
+        self.assertTrue(bt["ended"], "the continuation's end_turn ends that turn")
+
+    def test_pre_turn_compaction_keeps_the_prompt_as_trigger(self):
+        """The common Codex shape: a turn that ended over the limit compacts at the START of the
+        next one, so the contextCompaction item completes BEFORE that turn's userMessage is recorded.
+        The parse yields a boundary-only turn and then the prompt's own turn with the prompt as its
+        trigger. The prompt repeats no earlier text, so this golden holds with or without the read
+        side's replay-window change; the repeated-prompt case is the next golden's. Red on stock: no
+        boundary turn precedes the prompt's."""
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(agent_item("chunk one done", "a1"), MS + 1000),
+                    turn_completed("t1"),
+                    turn_started("t2"),
+                    item_started(compaction_item("cc2"), MS + 5000, turn="t2"),
+                    item_completed(compaction_item("cc2"), MS + 9000, turn="t2"),
+                    item_completed(user_item("now write the tests", "u2"), MS + 9500, turn="t2"),
+                    item_completed(agent_item("tests written", "a2"), MS + 12000, turn="t2"),
+                    turn_completed("t2"))
+        s = self._parse(recs)
+        trig = [(t["trigger"] or {}).get("uuid") for t in s["turns"]]
+        self.assertIn("u2", trig, "the prompt after a pre-turn compaction is still a trigger")
+        i = trig.index("u2")
+        self.assertTrue(i > 0 and s["turns"][i - 1]["atoms"][0].get("subtype") == "compact_boundary",
+                        "a boundary-only turn precedes the prompt's")
+        self.assertEqual(len(s["turns"]), 3)
+        self.assertTrue(all(t["ended"] for t in s["turns"]))
+
+    def test_pre_turn_compaction_repeated_prompt_stays_the_trigger(self):
+        """The same pre-turn shape with the second prompt repeating the first VERBATIM (the live
+        case: a canned follow-up sent more than once, "continue" twice). The parser's post-compaction
+        replay guard once armed at every attached boundary and dropped the next user record whose
+        text it had already seen, a guard built for the Claude CLI's boundary, summary, replayed-tail
+        shape; a Codex boundary is followed directly by the person's next prompt, with no summary
+        record between, so that prompt vanished from the chat and the turns and its reply filed
+        triggerless under the boundary's turn. This golden pins the landing order (2026-09-19): it
+        is red on a tree that writes the Codex boundary without the event-model change that arms the
+        guard on the summary record, and green stacked on it, so a wrong merge order fails here
+        instead of dropping prompts. It also cross-pins the boundary shape the normalizer writes
+        against the parser, which that change's own test hand-builds."""
+        n = norm()
+        recs = feed(n,
+                    turn_started("t1"),
+                    item_completed(user_item("start the refactor", "u1"), MS),
+                    item_completed(agent_item("chunk one done", "a1"), MS + 1000),
+                    turn_completed("t1"),
+                    turn_started("t2"),
+                    item_started(compaction_item("cc2"), MS + 5000, turn="t2"),
+                    item_completed(compaction_item("cc2"), MS + 9000, turn="t2"),
+                    item_completed(user_item("start the refactor", "u2"), MS + 9500, turn="t2"),
+                    item_completed(agent_item("chunk two done", "a2"), MS + 12000, turn="t2"),
+                    turn_completed("t2"))
+        s = self._parse(recs)
+        atoms = [a["uuid"] for t in s["turns"] for a in t["atoms"]]
+        self.assertIn("u2", atoms, "the repeated prompt is an atom, not a dropped replay")
+        trig = [(t["trigger"] or {}).get("uuid") for t in s["turns"]]
+        self.assertIn("u2", trig, "the repeated prompt triggers its own turn")
+        i = trig.index("u2")
+        self.assertTrue(i > 0 and s["turns"][i - 1]["atoms"][0].get("subtype") == "compact_boundary",
+                        "a boundary-only turn precedes the prompt's")
+        self.assertTrue(any("chunk two done" in em._text_of(a["message"]["content"])
+                            for a in s["turns"][i]["atoms"] if a.get("message")),
+                        "the reply lands in the repeated prompt's own turn, not the boundary's")
+        self.assertEqual(len(s["turns"]), 3)
+        self.assertTrue(all(t["ended"] for t in s["turns"]))
 
 
 if __name__ == "__main__":

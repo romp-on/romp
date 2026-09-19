@@ -373,7 +373,7 @@ class QuarantineApproveHonesty(_RelayBase):
 
     def test_kernel_client_cap_matches_the_pair(self):
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
-        self.assertIn('HTTPConnection("127.0.0.1", BUS_PORT, timeout=20)', src,
+        self.assertIn('HTTPConnection("127.0.0.1", _bus_port(), timeout=20)', src,   # the dial reads the bus's port record (2026-09-18)
                       "the client half of the approve budget pair — the halves move together")
 
 

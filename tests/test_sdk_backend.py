@@ -579,7 +579,7 @@ class LiveTail(unittest.TestCase):
         # the per-connection unlock is snapshotted from fast_opt exactly where _connect_once builds
         # the options that carry the flag, so the two can never disagree
         import inspect
-        self.assertIn("self._fast_unlocked = self.fast_opt", inspect.getsource(sb.SdkSession._amain))
+        self.assertIn("self._fast_unlocked = self.fast_effective()", inspect.getsource(sb.SdkSession._amain))   # the same expression _options reads (2026-09-17)
 
     def test_set_fast_refuses_bad_values_and_unknown_sids(self):
         d = tempfile.mkdtemp()
@@ -3904,10 +3904,41 @@ class OptionsAssembly(unittest.TestCase):
                          "no cap → the flag changes only the display; nothing to announce")
 
 
+# One retry storm as the CLI's api_retry frames report it, field for field (the values are invented):
+# attempt / max_retries / retry_delay_ms / error_status / error, where `error` is a category string from the
+# CLI's own classifier and error_status is null for a connection error that got no HTTP response. First a
+# 529, then a connection error on the next attempt.
+WIRE_RETRY_FRAMES = (
+    {"attempt": 4, "max_retries": 10, "retry_delay_ms": 2000, "error_status": 529, "error": "overloaded",
+     "uuid": "11111111-2222-3333-4444-0000000000a4", "session_id": "11111111-2222-3333-4444-555555555555"},
+    {"attempt": 5, "max_retries": 10, "retry_delay_ms": 4000, "error_status": None, "error": "unknown",
+     "uuid": "11111111-2222-3333-4444-0000000000a5", "session_id": "11111111-2222-3333-4444-555555555555"},
+)
+
+
 @unittest.skipUnless(_HAVE_SDK, "claude_agent_sdk not installed")
 class ApiRetryState(unittest.TestCase):
     """An api_retry storm (API rate-limit/overload) must surface as a distinct 'retrying' state, not a
     silent 'working', so a stall reads as an API issue (the user 2026-06-23). Cleared on real output."""
+
+    def setUp(self):
+        # A turn-end ResultMessage takes the real settle branch, which schedules the context refresh with
+        # asyncio.ensure_future on the CURRENT event loop (the session's own loop in production). This
+        # thread gets one to schedule onto; it is never run, so the refresh never executes and _on_message
+        # can be driven synchronously. Without it, once any earlier asyncio.run in the process has marked
+        # the policy, get_event_loop raises "no current event loop" on the main thread and the bare-payload
+        # case below is red whenever this class runs.
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
+    def tearDown(self):
+        pending = asyncio.all_tasks(self._loop)
+        for t in pending:
+            t.cancel()   # never stepped, so the refresh coroutine does not run
+        if pending:
+            self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        asyncio.set_event_loop(None)
+        self._loop.close()
 
     def test_api_retry_shows_retrying_then_clears(self):
         d = tempfile.mkdtemp()
@@ -3965,6 +3996,68 @@ class ApiRetryState(unittest.TestCase):
         sess._on_message(_sdk.ResultMessage("success", 1, 1, False, 1, "fsid"),
                          _sdk.AssistantMessage, _sdk.ResultMessage, _sdk.SystemMessage)
         self.assertIsNone(sess.snapshot()["retryInfo"])
+
+    def test_the_installed_clis_wire_frame_fills_the_attempt_and_the_error(self):
+        # The frame the CLI emits for a retry attempt, field for field (WIRE_RETRY_FRAMES). The detail read
+        # neither `attempt` (the local per-frame tally stood in for it) nor the string `error` (the reason
+        # stayed blank), while the API-health ring (_ah_note_retry) read error_status and the string `error`
+        # from the same frame all along.
+        d = tempfile.mkdtemp()
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        sess = sb.SdkSession(be, {"sid": "r4", "name": "n", "cwd": d, "mode": "acceptEdits"})
+        sess.inflight = 1
+        overloaded, connection = WIRE_RETRY_FRAMES
+        sess._on_message(_sdk.SystemMessage("api_retry", dict(overloaded)),
+                         _sdk.AssistantMessage, _sdk.ResultMessage, _sdk.SystemMessage)
+        info = sess.snapshot()["retryInfo"]
+        self.assertEqual(info["attempt"], 4, "the CLI's attempt number, not the local tally (1 here)")
+        self.assertEqual((info["max"], info["status"]), (10, 529))
+        self.assertEqual(info["error"], "overloaded", "the wire's category string is the reason shown")
+        sess._on_message(_sdk.SystemMessage("api_retry", dict(connection)),
+                         _sdk.AssistantMessage, _sdk.ResultMessage, _sdk.SystemMessage)
+        info = sess.snapshot()["retryInfo"]
+        self.assertEqual(info["attempt"], 5)
+        self.assertIsNone(info["status"], "a connection error has no HTTP status: null on the wire, None here")
+        self.assertEqual(info["error"], "unknown")
+
+
+class ApiRetryWireFrame(unittest.TestCase):
+    """The same frames through the same handler as ApiRetryState's wire-frame case, with a duck-typed frame
+    class in place of the SDK's SystemMessage (the handler matches on the classes it is handed), so the read
+    is checked where claude_agent_sdk is absent too, CI included."""
+
+    class _Sys:
+        def __init__(self, subtype, data): self.subtype, self.data = subtype, data
+
+    def _session(self, sid):
+        d = tempfile.mkdtemp()
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        sess = sb.SdkSession(be, {"sid": sid, "name": "n", "cwd": d, "mode": "acceptEdits"})
+        sess.inflight = 1
+        return sess
+
+    def _feed(self, sess, frame):
+        sess._on_message(self._Sys("api_retry", dict(frame)), _AssistantMessage, _ResultMessage, self._Sys)
+        return sess.snapshot()["retryInfo"]
+
+    def test_the_wire_frame_fills_the_attempt_and_the_error_without_the_sdk(self):
+        sess = self._session("r5")
+        for frame in WIRE_RETRY_FRAMES:
+            info = self._feed(sess, frame)
+            self.assertEqual(info["attempt"], frame["attempt"], "the CLI's attempt number, not the local tally")
+            self.assertEqual(info["max"], frame["max_retries"])
+            self.assertEqual(info["status"], frame["error_status"])
+            self.assertEqual(info["error"], frame["error"], "the wire's category string is the reason shown")
+
+    def test_the_wires_name_wins_over_the_other_spellings_of_the_same_field(self):
+        # Each read accepts three spellings of its field (the wire's, the transcript twin's, an old guess) and
+        # takes the first present. No frame the CLI sends carries two of them, so a frame built to carry them
+        # all with different values pins the precedence the reads promise: the wire's name leads.
+        mixed = dict(WIRE_RETRY_FRAMES[0], retry_attempt=7, retryAttempt=8, number=9,
+                     display_message="529 Overloaded", message="raw envelope")
+        info = self._feed(self._session("r6"), mixed)
+        self.assertEqual(info["attempt"], 4, "`attempt` before retry_attempt / retryAttempt / number")
+        self.assertEqual(info["error"], "overloaded", "the string `error` before display_message / message")
 
 
 @unittest.skipUnless(_HAVE_SDK, "claude_agent_sdk not installed")

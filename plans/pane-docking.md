@@ -70,8 +70,10 @@ iframe stays where it is in the DOM. This is why chat columns can join a general
 tab groups.** A node is either
 
 - a `split`: `{ dir: "row" | "col", kids: Node[], ratios: number[] }` (ratios sum to 1, one per kid), or
-- a `leaf`: `{ pane: PaneId }` for a singleton surface, or `{ group: SessionId[], active: SessionId }`
-  for a chat tab group (today's column).
+- a `leaf`: `{ pane: PaneId, group?: PaneId[], active?: PaneId }`. Every leaf names a `pane`; a chat leaf
+  (today's column) also carries `group`, the ids of the sessions it holds, and `active`, the shown one.
+  The module never reads the group's contents, only whether it is non-empty (a chat leaf holding sessions
+  is never closed, only emptied), so it types the ids as opaque strings; there is no group-only leaf.
 
 `row` lays kids left to right, `col` top to bottom, to ANY depth. This SUPERSEDES three shipped
 limits, each a hard-coded refusal the kit relaxes: the two-rows-deep cap (`moveTab('down')` refuses a
@@ -116,8 +118,9 @@ the tree; the engine never moves an iframe in the DOM.** Chosen over the two alt
   problem. Rejected.
 
 Absolute positioning keeps every pane iframe a FLAT child of one `#pane-layer`; the engine is a pure
-function `layout(tree, {w, h}) -> Map<PaneId, Rect>` and a writer that sets each iframe's
-`transform`/`top`/`left`/`width`/`height` (percentages, so a container resize is one recompute). An
+function `layout(node, box: Rect, gutter) -> Array<{ pane, rect }>` (each leaf's rectangle, the gutter
+thickness subtracted between siblings) and a writer that sets each iframe's
+`transform`/`top`/`left`/`width`/`height` (so a container resize is one recompute). An
 iframe never moves in the document, so a move is a pure geometry change: no reload, no lost socket. This
 is the literal reading of the dispatch's "render by geometry, never by re-parenting" and it is why the
 chat columns can join: they already hand session state between frames (section 0), so a chat leaf is
@@ -297,7 +300,8 @@ the gutter drag in `tests/test_pane_gutters.py`/`test_pane_gutter_drag.py`, and 
 `ui/webview/chat-split.test.ts`. A phase that changes any of those literals is not additive and is
 called out.
 
-**The versioned layout store.** A NEW key `romp-layout` (`{v:1, tree}`), written only when the kit is
+**The versioned layout store.** A NEW key `romp-layout` (`{v:1, tree, parked}`, where `parked` is the ids
+of panes closed from the rail but kept mounted, section 5), written only when the kit is
 on. Turning the kit ON migrates ONCE by READING the three old keys to SEED the tree (romp-panes ->
 which leaves exist, romp-pane-grow -> the row split's ratios, romp-chat-cols -> the chat leaves and
 their bottom splits), and does NOT rewrite them. Turning the kit OFF keeps `romp-layout` on disk but
@@ -338,8 +342,8 @@ Each phase is a `feature` (section 10), ships DEFAULT OFF, keeps every existing 
 green, and adds served labs at `deviceScaleFactor` 1 and 2 (per-test `newContext({deviceScaleFactor:N})`,
 the pattern of `tests/test_chat_line_raster_served.py`, the shipped 1-and-2 case).
 
-1. **The pure layout-tree module.** `ui/webview/pane-tree.ts`: `split`, `move`, `close`, `resize`,
-   `serialise`/`parse`, `layout(tree,size)->rects`, all pure, no DOM. Node tests
+1. **The pure layout-tree module.** `ui/webview/pane-tree.ts`: `splitAt`, `move`, `closePane` (park),
+   `openPane`, `resize`, `serialise`/`parse`, `layout(node, box, gutter)->[{pane,rect}]`, all pure, no DOM. Node tests
    (`ui/webview/pane-tree.test.ts`) that EXECUTE it (the `chat-columns.ts` + `chat-columns.test.ts`
    precedent: a documented pure module run under `node --test out-tests/**`, `esbuild.js testBuild`).
    Behind the switch this phase renders today's row unchanged (the tree seeded from the old keys
@@ -396,6 +400,14 @@ linked issue. The plan avoids it by keeping the old keys as the OFF-path source 
   (section 2). Open question: whether the tree should store all edges as ratios (uniform) and translate
   to the flex-grow store only at the row level for the OFF path, or keep two stores. Recommendation:
   the tree stores ratios uniformly; the OFF path keeps `romp-pane-grow`.
+- **The timeline band keeps a FIXED height via a fixed-px kid (decided, phase two).** Today `#tl-pane`
+  is `flex:0 0 var(--tl)`, a fixed ~200 px band, but a ratio kid grows with the window (200 px at 900
+  high becomes 312 px at 1400). Decision: a split kid may carry a FIXED px size instead of a ratio share;
+  `layout` allots the fixed kids their px first, then divides the remainder among the ratio kids. This
+  matches the band's `flex:0 0` exactly and is cleaner than the alternative (the shell re-seeding the
+  band's ratio from the viewport on every resize, which drifts and needs a resize listener). The module
+  gains the fixed-px kid in PHASE TWO, when the band is first wired; until then `seedRowOverBand`'s ratio
+  band is a phase-one placeholder with no consumer, so no module change is needed this round.
 - **Feed/outline/timeline have no top grab run** (section 3). If, later, the user wants a consistent top
   grab strip across panes, feed and outline would need to surface a thin top row (both currently dock
   controls in a bottom footer); that is a per-pane change outside this kit and is left open.

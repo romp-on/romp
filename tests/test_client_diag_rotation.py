@@ -76,7 +76,7 @@ class ClientDiagRotationTest(unittest.TestCase):
         self.assertEqual(err.getvalue(), "", "a fresh state directory has no file yet: that is not a refused rotation")
         rows = self.rows(self.fp)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(sorted(rows[0]), ["data", "surface", "t", "what", "wid"])
+        self.assertEqual(sorted(rows[0]), ["data", "reconnect", "surface", "t", "what", "wid"])
         self.assertEqual(rows[0]["wid"], WID)
         self.assertEqual(rows[0]["surface"], "perf")
         self.assertEqual(rows[0]["what"], "minute")

@@ -64,7 +64,7 @@ test("T418: the group head speaks by action (actionHead) with the edits' totals 
   assert.match(RENDER, /if \(ev\.file\) head\.appendChild\(fileLink\(ev\.file\)\);/, "every event with a file keeps its link (round two, medium 2)");
   assert.doesNotMatch(RENDER, /lbl\.totals/, "the head carries no totals span: an edit's totals are the diff fold's toggle, once per row, and a failed edit prints none (round three, low a and d)");
   assert.match(RENDER, /a FAILED edit's error fold\s*\n\s*\/\/ replaces that fold and prints no totals: a failed edit changed nothing/, "the rule for a failed edit is stated where the head is built");
-  assert.match(RENDER, /inlineFold\(head, turn, `\+\$\{add\} -\$\{del\}`, pre, fkey\);/, "the fold's toggle in the approved shape, a hyphen minus");
+  assert.match(RENDER, /inlineFold\(head, turn, diffTotals\(add, del\), pre, fkey\);/, "the fold's toggle in the approved shape (+A -R, a hyphen minus), dressed in the diff colours like the folded summary (2026-09-18)");
   assert.match(RENDER, /const lbl = toolRowLabel\(ev\);\s*\n\s*const name = el\("span", "tool-label" \+ \(lbl\.code \? " tool-label-code" : ""\)\); name\.textContent = lbl\.text;/,
     "the row's label is the description or the derived phrase; a bare command wears the code face");
   assert.match(RENDER, /if \(lbl\.secondary\) \{ const c = el\("span", "tool-name tool-secondary"\); c\.textContent = lbl\.secondary; head\.appendChild\(c\); \}/, "the tool's name is secondary, only where no phrase names the action");

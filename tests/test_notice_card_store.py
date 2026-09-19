@@ -100,7 +100,6 @@ class PostNotice(unittest.TestCase):
 
     def test_every_refusal_is_said_and_nothing_is_written(self):
         cases = [
-            (dict(sid="", key="k", title="t"), "needs a session"),
             (dict(sid=SID, key="bad key!", title="t"), "the key must match"),
             (dict(sid=SID, key="a" * 65, title="t"), "the key must match"),
             (dict(sid=SID, key="k", title=""), "needs a title"),
@@ -305,6 +304,112 @@ class Actions(unittest.TestCase):
         self.assertNotIn(iid, km._cleared_ids())
         self.assertEqual(km._notice_action(iid, "/send", {"text": "hello"}), (True, ""), "a card that stays is meant to run again")
         self.assertEqual(len(self.w.delivered), 2)
+
+
+class OwnerLess(unittest.TestCase):
+    """Owner-less cards (plans/notice-cards.md, "Owner-less cards and the terse command"; the user 2026-09-18): a card with no
+    session lives in the reserved file notes.jsonl, shows under Notes with no colour, carries the board model's fields, has no
+    actions, and rides the ledger, the pass and the archive bound as any notice card does."""
+    def setUp(self): self.w = World()
+    def tearDown(self): self.w.close()
+
+    def test_an_empty_sid_posts_to_the_reserved_home_and_the_card_reads_notes_with_no_colour(self):
+        row, err = km.post_notice("", "k1", "Remember the standup moved", body="to 10:30", producer="cli", now=100, t=100)
+        self.assertIsNone(err); self.assertEqual(row["sid"], km.NOTICE_OWNERLESS_SID)
+        self.assertEqual(km.NOTICE_OWNERLESS_SID, "notes", "a word: a uuid is hex and hyphens, so no sid can collide")
+        self.assertTrue((km.jd.STATE / "notices" / "notes.jsonl").exists(), "the reserved file under STATE/notices")
+        self.assertEqual([r["op"] for r in _rows(km.NOTICE_OWNERLESS_SID)], ["post"])
+        cards = km._notice_cards(500, set())
+        self.assertEqual(len(cards), 1); c = cards[0]
+        self.assertEqual(c["itemId"], "notice:notes:k1:1", "the same id shape, the reserved key in the sid slot")
+        self.assertEqual((c["sid"], c["name"], c["color"]), ("notes", "Notes", None), "the run reads Notes with no identity colour")
+        self.assertEqual((c["board"], c["category"], c["column"]), ("feed", "completed", "completed"), "the board model's fields beside the column")
+        self.assertEqual(c["text"], "Remember the standup moved"); self.assertEqual(c["notice"]["body"], "to 10:30")
+        # needs-you still decides the category: an owner-less card that needs you files under needs_input
+        km.post_notice(None, "k2", "Decide the venue", producer="cli", needs_you=True, now=200, t=200)
+        by = {c["itemId"]: c for c in km._notice_cards(500, set())}
+        self.assertEqual((by["notice:notes:k2:1"]["category"], by["notice:notes:k2:1"]["column"]), ("needs_input", "needs_input"))
+        # every session card carries the two fields too
+        km.post_notice(SID, "s1", "Mine", producer="cli", now=300, t=300)
+        by = {c["itemId"]: c for c in km._notice_cards(500, set())}
+        self.assertEqual((by["notice:%s:s1:1" % SID]["board"], by["notice:%s:s1:1" % SID]["category"]), ("feed", "completed"))
+        self.assertEqual((by["notice:%s:s1:1" % SID]["name"], by["notice:%s:s1:1" % SID]["color"] is not None), ("web", True), "a session's card keeps its name and colour")
+
+    def test_an_owner_less_card_carries_no_actions_and_a_hand_made_action_id_is_refused(self):
+        acts = [{"label": "Send", "route": "/send", "body": {"text": "x"}}]
+        row, err = km.post_notice("", "k1", "t", producer="cli", actions=acts, now=100)
+        self.assertEqual(row, None); self.assertEqual(err, "an owner-less card has no session to send to: actions need a session")
+        self.assertEqual(_rows(km.NOTICE_OWNERLESS_SID), [], "nothing written")
+        km.post_notice("", "k1", "t", producer="cli", now=100)
+        self.assertEqual(km._notice_action("notice:notes:k1:1", "/send", {"text": "x"}), (False, "an owner-less card has no actions"))
+        self.assertEqual(self.w.delivered, [], "nothing delivered")
+
+    def test_the_reserved_word_as_a_name_is_refused_and_only_an_empty_sid_takes_the_owner_less_road(self):
+        # round two of PR 1831: _sid_of hands an unresolved name back unchanged, so "notes" as a name reached post_notice as the
+        # reserved sid and the store's session check answered yes; the owner-less road is an EMPTY sid alone
+        row, err = km.post_notice("notes", "k1", "t", producer="cli", now=100)
+        self.assertEqual((row, err), (None, 'no session answers to "notes"'), "the reserved word arriving as a sid is a name no session answers to")
+        self.assertFalse(km._notice_path("notes").exists(), "nothing reached the reserved home")
+        self.assertFalse(km._notice_session_known("notes"), "the session check never answers for the key")
+        row, err = km.expire_notice("notes", "k1")
+        self.assertEqual((row, err), (None, 'no session answers to "notes"'), "the expire door too")
+        # a DEAD session actually named notes: its name resolves to no live session, so it is refused as any dead name is,
+        # and never retargets the shared home
+        dead = "11111111-2222-3333-4444-777777777777"
+        (km.jd.NAMES / dead).write_text("notes\t%s\t#B69513\tblack\n" % self.w.cwd)
+        self.assertEqual(km._sid_of("notes"), "notes", "the dead name falls through unresolved (the registry is sid-keyed)")
+        row, err = km.post_notice(km._sid_of("notes"), "k1", "t", producer="cli", now=100)
+        self.assertEqual((row, err), (None, 'no session answers to "notes"'))
+        row, err = km.post_notice(dead, "k1", "t", producer="cli", now=100)
+        self.assertEqual((err, row["sid"]), (None, dead), "by its sid the dead session takes its own home, as any session's card does")
+        self.assertFalse(km._notice_path("notes").exists())
+        # the owner-less road: an empty sid, and nothing else
+        row, err = km.post_notice("", "k1", "t", producer="cli", now=100)
+        self.assertEqual((err, row["sid"]), (None, "notes"))
+        row, err = km.post_notice(None, "k2", "t", producer="cli", now=100)
+        self.assertEqual((err, row["sid"]), (None, "notes"))
+
+    def test_the_reveal_road_refuses_the_reserved_key_loudly_instead_of_offering_a_revive(self):
+        # round three of PR 1831, medium A: showOnTimeline with sid notes reached _reveal_or_confirm, which found notes absent from
+        # the live map and popped confirmRevive for a session that never existed. The confirm travels _reveal_chat_for ->
+        # _send_to_view (the asking window's chat), never the asking client's own send, so THAT is the stub (round four, low: an
+        # assertFalse over the client's messages could never fail); a dead real session is the control that shows the stub sees one.
+        seen = []
+        saved = (km._send_to_view, km._reaffirm_active_chat)
+        km._send_to_view = lambda app, msg, wid="": seen.append((app, msg))
+        km._reaffirm_active_chat = lambda client: None
+        try:
+            sent = []; client = {"send": lambda m: sent.append(json.loads(m)), "wid": "w1"}
+            dead = "11111111-2222-3333-4444-777777777777"
+            km._reveal_or_confirm(dead, {"type": "showOnTimeline", "itemId": "notice:%s:k:1" % dead}, client)
+            self.assertEqual([(a, m["id"]) for a, m in seen if m.get("type") == "confirmRevive"], [("chat", dead)], "a dead real session still gets the confirm, through the asking window's chat")
+            self.assertEqual(sent, [], "and no error")
+            seen.clear()
+            km._reveal_or_confirm("notes", {"type": "showOnTimeline", "itemId": "notice:notes:k:1"}, client)
+            self.assertEqual(seen, [], "nothing reaches the chat for the reserved key: no confirmRevive, no focus")
+            self.assertEqual(len(sent), 1); self.assertEqual(sent[0]["type"], "err", "an error to the asking pane instead")
+            self.assertIn("belongs to no session", sent[0]["text"]); self.assertIn("nothing to revive", sent[0]["text"])
+        finally:
+            km._send_to_view, km._reaffirm_active_chat = saved
+
+    def test_owner_less_cards_ride_the_ledger_the_pass_the_index_and_undo_like_any_notice_card(self):
+        km.post_notice("", "k1", "first", producer="cli", now=100, t=100)
+        iid = "notice:notes:k1:1"
+        km._clear_ask(iid)
+        self.assertEqual(km._notice_cards(200, km._cleared_ids()), [], "dismissed: hidden")
+        self.assertEqual(km._compact_notices(now=300), 1, "the pass archives the owner-less file's row")
+        self.assertTrue((km._notice_archive_dir() / "notes.jsonl").exists()); self.assertTrue(km._notice_revs_path("notes").exists(), "its own revision index")
+        self.assertEqual(json.loads(km._notice_revs_path("notes").read_text())["revs"], {"k1": 1})
+        row, err = km.post_notice("", "k1", "second", producer="cli", now=400, t=400)
+        self.assertEqual((err, row["rev"]), (None, 2), "the index counts the archived revision: never rev 1 again")
+        self.assertEqual(km._undo_clear(), {})
+        self.assertEqual(sorted(c["itemId"] for c in km._notice_cards(500, km._cleared_ids())), ["notice:notes:k1:2"], "rev 1 back live but superseded by rev 2")
+        self.assertEqual([r["rev"] for r in _rows("notes") if r["op"] == "post"], [2, 1], "the restored row is live again")
+        # the fifty-live-keys cap applies to the owner-less home on its own
+        for i in range(60):
+            km.post_notice("", "cap%02d" % i, "c", producer="cli", now=1000 + i, t=1000 + i)
+        live = km._notice_cards(2000, km._cleared_ids())
+        self.assertEqual(len(live), km.NOTICE_LIVE_KEYS_MAX, "capped as one session's would be")
 
 
 class Retention(unittest.TestCase):
@@ -757,7 +862,7 @@ class TheDoors(unittest.TestCase):
     def test_the_route_answers_in_the_watch_shape(self):
         self.assertNotEqual(self._post({"id": SID, "key": "k", "title": "t"}, token=False)[0], 200, "no token: refused")
         st, r = self._post(b"[]"); self.assertEqual(st, 400)
-        st, r = self._post({"id": SID, "title": "t"}); self.assertEqual(st, 400); self.assertIn("key, title and id|name", r["error"])
+        st, r = self._post({"id": SID, "title": "t"}); self.assertEqual(st, 400); self.assertIn("key and title required", r["error"])
         st, r = self._post({"id": SID, "key": "bad key", "title": "t"}); self.assertEqual((st, r["ok"]), (200, False)); self.assertIn("the key must match", r["error"])
         st, r = self._post({"id": "99999999-2222-3333-4444-555555555555", "key": "k", "title": "t"}); self.assertEqual((st, r["ok"]), (200, False)); self.assertIn("no session answers", r["error"])
         st, r = self._post({"id": SID, "key": "k", "title": "t", "actions": [{"label": "x", "route": "/watch", "body": {}}]}); self.assertEqual(r["ok"], False); self.assertIn("not allowed", r["error"])
@@ -774,6 +879,33 @@ class TheDoors(unittest.TestCase):
             km.Sessions.live, km._live_names = saved
         st, r = self._post({"id": SID, "expire": "figure"}); self.assertEqual((st, r["ok"], r["notice"]["op"], r["notice"]["rev"]), (200, True, "expire", 2))
         st, r = self._post({"id": SID, "expire": "never"}); self.assertEqual(r["ok"], False)
+
+    def test_the_route_posts_owner_less_only_when_id_and_name_are_absent_and_still_refuses_an_unknown_name(self):
+        # a name no session answers to is refused, never guessed owner-less (the design's rule)
+        st, r = self._post({"name": "nobody", "key": "k", "title": "t"})
+        self.assertEqual((st, r.get("ok"), r.get("error")), (200, False, 'no session answers to "nobody"'))
+        # the reserved word as a NAME through the route: refused like any name no session answers to (round two of PR 1831)
+        st, r = self._post({"name": "notes", "key": "k", "title": "t"})
+        self.assertEqual((st, r.get("ok"), r.get("error")), (200, False, 'no session answers to "notes"'))
+        st, r = self._post({"id": "notes", "key": "k", "title": "t"})
+        self.assertEqual((st, r.get("ok"), r.get("error")), (200, False, 'no session answers to "notes"'), "and as an id")
+        st, r = self._post({"name": "notes", "expire": "k"})
+        self.assertEqual((st, r.get("ok")), (200, False)); self.assertIn("no session answers", r.get("error", ""))
+        self.assertFalse(km._notice_path("notes").exists(), "nothing reached the reserved home by name")
+        # a whitespace-only id or name names nobody: refused, never guessed owner-less (round three of PR 1831, low)
+        for who in ({"id": "   "}, {"name": " \t"}):
+            st, r = self._post({**who, "key": "k", "title": "t"})
+            self.assertEqual((st, r.get("ok")), (200, False), r); self.assertIn("no session answers to", r.get("error", ""))
+        self.assertFalse(km._notice_path("notes").exists(), "nothing reached the reserved home")
+        st, r = self._post({"key": "k1", "title": "Owner-less through the route", "body": "b"})
+        self.assertEqual((st, r.get("ok")), (200, True), r); self.assertEqual(r["notice"]["sid"], "notes")
+        self.assertEqual([c["itemId"] for c in km._notice_cards(500, set())], ["notice:notes:k1:1"])
+        # a missing key or title is still a 400 with its words
+        st, r = self._post({"title": "t"}); self.assertEqual(st, 400); self.assertIn("key and title required", r["error"])
+        # the owner-less expire road: no id, no name, the key
+        st, r = self._post({"expire": "k1"})
+        self.assertEqual((st, r.get("ok")), (200, True), r); self.assertEqual([x["op"] for x in _rows("notes")], ["post", "expire"])
+        self.assertEqual(km._notice_cards(500, set()), [], "retired")
 
     def test_the_backend_helper_resolves_the_hook_defensively_and_the_kernel_wires_it_at_boot(self):
         class Bare(sb.SdkBackend):                 # a stand-in class carrying no hook, as the backend's own tests bind

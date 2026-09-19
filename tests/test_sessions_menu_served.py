@@ -17,7 +17,13 @@ for api with one open top, so its row carries a tree. Roads, one browser run:
      round-two high: the pick once worked on the detached row and latched the render hold, freezing the pane);
   6. a federated row (a synthetic frame with a host-prefixed session): Rename edits the bare name and posts it bare (the
      round-two medium: the display string with its host prefix was seeded and posted, which the far kernel refuses);
-  7. focus returns to the row's head when the menu closes, and Tab closes the menu (the round-two lows).
+  7. focus returns to the row's head when the menu closes, and Tab closes the menu (the round-two lows);
+  8. a push never pulls the focus into the pane: a head holding the focus through a push keeps it, and a head left for a goal
+     row and then for the chat frame's composer is not refocused by a push (the typing stays in the composer);
+  9. a click into another pane while the menu is open closes it through the pane window's blur and moves nothing in the pane:
+     no head is refocused, the composer keeps the keyboard (the unguarded return once pulled the focus back to the head after
+     the blur); and after a push rebuilt the list under the open menu, Escape still lands the focus on the same session's new
+     head, the return the guard keeps.
 Red first per road at the merge base (no menu opens there). Skips loudly without the extension deps or a browser.
 """
 import json
@@ -292,6 +298,33 @@ await page.keyboard.type("of the sentence");
 out.roads.typedThrough = { composer, rebuilt: rebuilt8, value: await page.evaluate(() => document.getElementById("f-chat").contentDocument.getElementById("lab-composer").value),
   composerFocused: await page.evaluate(() => { const cd = document.getElementById("f-chat").contentDocument; return cd.activeElement === cd.getElementById("lab-composer"); }),
   paneFocused: await focusedHead(), paneActive: await activeDesc(), postedTypes: await page.evaluate(() => (document.getElementById("f-fleet").contentWindow.__posted || []).map((m) => m && m.type)) };
+// 9. a click into another pane closes the open menu through the pane window's blur and moves nothing in the pane
+// (a) the blur close: the menu up on web's row with the pane holding the focus, then a real click on the chat frame's composer
+await clearPosted();
+const opened9 = await rightClick(cfg.web);
+const paneHadFocus9 = await paneHasFocus();
+// the stand-in composer (road 8b) takes a fixed spot at the top left so the pointer reaches it: the chat page's own layout can
+// cover an input appended to its body, and a click Playwright refuses reads as a red claim below, never as a dead driver
+await page.evaluate(() => { const cd = document.getElementById("f-chat").contentDocument; const i = cd.getElementById("lab-composer"); if (i) { i.style.cssText = "position:fixed;top:4px;left:4px;z-index:2147483647"; i.value = ""; } });   // emptied: the letters typed after the close are then the whole value
+const chatFr = await (await page.$("#f-chat")).contentFrame();
+const clicked9 = await chatFr.locator("#lab-composer").click({ timeout: 2500 }).then(() => true).catch(() => false);
+const menuGone9 = await page.waitForFunction(() => !document.getElementById("f-fleet").contentDocument.querySelector(".ctx-menu.fl-sess-menu"), null, { timeout: 5000 }).then(() => true).catch(() => false);
+out.roads.blurClose = { opened: opened9, paneHadFocus: paneHadFocus9, clicked: clicked9, menuGone: menuGone9, menu: (await menuState()).open, focused: await focusedHead(), active: await activeDesc(), paneHasFocus: await paneHasFocus(),
+  composerFocused: await page.evaluate(() => { const cd = document.getElementById("f-chat").contentDocument; return cd.activeElement === cd.getElementById("lab-composer"); }) };
+await page.keyboard.type("more");
+out.roads.blurClose.value = await page.evaluate(() => document.getElementById("f-chat").contentDocument.getElementById("lab-composer").value);
+out.roads.blurClose.postedTypes = await page.evaluate(() => (document.getElementById("f-fleet").contentWindow.__posted || []).map((m) => m && m.type));
+// (b) the return the guard keeps: a push rebuilds the list under the open menu (the opener is detached, so the builder's own
+// return stands down), and Escape lands the focus on the same session's new head through the sid-keyed close
+await rightClick(cfg.web);
+await postFromPane({ type: "renameSession", id: cfg.tests, name: "tests-seven" });
+const rebuilt9 = await testsNamed("tests-seven");
+const menuStillOpen9 = (await menuState()).open;
+await page.keyboard.press("Escape");
+// the wait is on the head taking the focus, recorded: a head that never takes it reads false here (and null below) after the wait's 5 s
+const headFocused9 = await page.waitForFunction(() => { const a = document.getElementById("f-fleet").contentDocument.activeElement; return !!a && a.classList.contains("fl-head"); }, null, { timeout: 5000 }).then(() => true).catch(() => false);
+out.roads.rebuiltEscape = { rebuilt: rebuilt9, menuStillOpen: menuStillOpen9, headFocused: headFocused9, menu: (await menuState()).open, focused: await focusedHead(),
+  name: await page.evaluate(() => { const d = document.getElementById("f-fleet").contentDocument; const a = d.activeElement; const n = a && a.classList.contains("fl-head") ? a.querySelector(".fl-name") : null; return n ? n.textContent : null; }) };
 await finish();
 """
 
@@ -369,7 +402,7 @@ class SessionsMenuServed(unittest.TestCase):
             cls.driver_error = "driver timed out; partial output:\n%s" % so
             return
         if p.returncode == 3:
-            raise unittest.SkipTest("no playwright browser on this box: the served leg needs one (CI installs none)")
+            raise unittest.SkipTest("no playwright browser on this machine: the served leg needs one (CI installs Chromium and treats this skip as a failure)")
         if p.returncode != 0 or not os.path.exists(res):
             cls.driver_error = "driver failed:\n" + p.stdout[-3000:] + p.stderr[-3000:]
             return
@@ -483,6 +516,20 @@ class SessionsMenuServed(unittest.TestCase):
         self.assertTrue(tt["rebuilt"], "the kernel's push rebuilt the list meanwhile")
         self.assertEqual((tt["value"], tt["composerFocused"], tt["paneFocused"], tt["postedTypes"]), ("the rest of the sentence", True, None, []),
                          "the whole sentence reached the composer; the pane took no focus and posted nothing (the round-three high): %r" % tt)
+
+    def test_9_a_click_into_another_pane_closes_the_menu_and_moves_nothing_in_the_pane(self):
+        r = self.result["roads"]
+        bc = r["blurClose"]
+        self.assertEqual((bc["opened"], bc["paneHadFocus"], bc["clicked"]), (True, True, True), "the menu opened with the pane holding the focus, and the click reached the chat frame's composer: %r" % bc)
+        self.assertEqual((bc["menuGone"], bc["menu"]), (True, False), "the pane window's blur closed the menu: %r" % bc)
+        self.assertEqual((bc["focused"], bc["paneHasFocus"]), (None, False),
+                         "the close followed the focus out of the pane and moved nothing: no head holds the pane's focus (the unguarded return refocused the head after the blur): %r" % bc)
+        self.assertTrue((bc["active"] or "").startswith("BODY"), "the pane's active element fell to its body with the menu's removal and stayed there: %r" % bc)
+        self.assertEqual((bc["composerFocused"], bc["postedTypes"]), (True, []), "the composer holds the keyboard and the pane posted nothing: %r" % bc)
+        self.assertEqual(bc["value"], "more", "the letters typed after the close reached the composer, and only they: %r" % bc)
+        re_ = r["rebuiltEscape"]
+        self.assertEqual((re_["rebuilt"], re_["menuStillOpen"], re_["headFocused"], re_["menu"], re_["focused"], re_["name"]), (True, True, True, False, SID_WEB, "web"),
+                         "a push rebuilt the list under the open menu; Escape still lands the focus on the same session's new head: %r" % re_)
 
 
 if __name__ == "__main__":

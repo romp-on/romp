@@ -791,7 +791,12 @@ class StaleGestureAnswersTheDeliveringSocket(_Base):
                  ({"type": "setCommentEffort", "effort": "high"}, {"type": "setCommentEffort", "effort": "session"},
                   "comment-effort", "high"),
                  ({"type": "setCommentFast", "fast": "on"}, {"type": "setCommentFast", "fast": "session"},
-                  "comment-fast", "on")]
+                  "comment-fast", "on"),
+                 # the two model switches (Settings, Automation, Model; 2026-09-17) ride the judge-knob door: gt-gated and answering like the rest
+                 ({"type": "setAlwaysFast", "enabled": True}, {"type": "setAlwaysFast", "enabled": False},
+                  "always-fast", "on"),
+                 ({"type": "setRetryUpgrade", "enabled": True}, {"type": "setRetryUpgrade", "enabled": False},
+                  "retry-upgrade", "on")]
         for newer, older, store, kept in cases:
             sent = self.dispatch_rec(dict(newer, gt=T_NEW))
             self.assertEqual([m for m in sent if m.get("type") == "settingStale"], [],
@@ -821,7 +826,7 @@ class VersionReportsEveryStoredStamp(_Base):
     def test_a_fresh_install_reports_every_store_at_zero(self):
         gts = km._version_info()["settingsGt"]
         self.assertEqual(set(gts), set(km._GT_STORES), "one key per gt-gated store, no more, no less")
-        self.assertEqual(len(km._GT_STORES), 20, "seven toggles/modes (the task-tracking switch since T404, the Whole chat frames switch since 2026-09-15) + thirteen kernel-side stores (judge-concurrency since T277, judge-fast with the judges' fast mode, distill-fast and index-fast with T300's box per tier; the terminal-backend store went with that backend, T332)")
+        self.assertEqual(len(km._GT_STORES), 22, "seven toggles/modes (the task-tracking switch since T404, the Whole chat frames switch since 2026-09-15) + thirteen kernel-side stores (judge-concurrency since T277, judge-fast with the judges' fast mode, distill-fast and index-fast with T300's box per tier; the terminal-backend store went with that backend, T332); + the two model switches (always-fast, retry-upgrade; Settings, Automation, Model; 2026-09-17)")
         self.assertEqual(set(gts.values()), {0}, "nothing applied yet reads 0 — nothing to outrank")
         self.assertEqual(json.loads(json.dumps(gts)), gts, "plain JSON — ints, no paths, nothing to redact")
 
@@ -868,7 +873,8 @@ class VersionReportsEveryStoredStamp(_Base):
                  {"type": "setDistillEffort", "effort": "high"}, {"type": "setCommentModel", "model": "haiku"},
                  {"type": "setCommentEffort", "effort": "high"}, {"type": "setCommentFast", "fast": "on"},
                  {"type": "setJudgeFast", "enabled": True},
-                 {"type": "setDistillFast", "enabled": True}, {"type": "setIndexFast", "enabled": True}]
+                 {"type": "setDistillFast", "enabled": True}, {"type": "setIndexFast", "enabled": True},
+                 {"type": "setAlwaysFast", "enabled": True}, {"type": "setRetryUpgrade", "enabled": True}]   # the model switches (Settings, Automation, Model; 2026-09-17)
         older = [{"type": "setAutoNudge", "enabled": True}, {"type": "setCompactSuggest", "enabled": False},
                  {"type": "setFileEditing", "enabled": False}, {"type": "setUpdateMode", "mode": "off"},
                  {"type": "setThinkingSummaries", "enabled": False}, {"type": "setJudgeModel", "model": "opus"},
@@ -879,14 +885,15 @@ class VersionReportsEveryStoredStamp(_Base):
                  {"type": "setDistillEffort", "effort": "low"}, {"type": "setCommentModel", "model": "session"},
                  {"type": "setCommentEffort", "effort": "session"}, {"type": "setCommentFast", "fast": "session"},
                  {"type": "setJudgeFast", "enabled": False},
-                 {"type": "setDistillFast", "enabled": False}, {"type": "setIndexFast", "enabled": False}]
+                 {"type": "setDistillFast", "enabled": False}, {"type": "setIndexFast", "enabled": False},
+                 {"type": "setAlwaysFast", "enabled": False}, {"type": "setRetryUpgrade", "enabled": False}]
         with contextlib.redirect_stderr(io.StringIO()):
             for n, o in zip(newer, older):
                 km.Handler._dispatch_ws(types.SimpleNamespace(), dict(n, gt=T_NEW), client)
                 km.Handler._dispatch_ws(types.SimpleNamespace(), dict(o, gt=T_OLD), client)
         named = {m["setting"] for m in sent if m.get("type") == "settingStale"}
         self.assertEqual(named, set(km._version_info()["settingsGt"]), "frames and the report share one vocabulary")
-        self.assertEqual(len(named), 20)   # thirteen kernel-side stores (T300's box per judge tier, minus the terminal-backend store, T332) + seven toggles/modes (the task-tracking switch since T404, the Whole chat frames switch since 2026-09-15)
+        self.assertEqual(len(named), 22)   # thirteen kernel-side stores (T300's box per judge tier, minus the terminal-backend store, T332) + seven toggles/modes (the task-tracking switch since T404, the Whole chat frames switch since 2026-09-15) + the two model switches (2026-09-17)
 
 
 class ASkewedClockCannotLockTheStore(_Base):

@@ -240,7 +240,8 @@ class OneHopNeverALoop(unittest.TestCase):
                      'args=({"commentModel": str(msg["model"]), "gt": _jgt},)',
                      'args=({"commentEffort": str(msg["effort"]), "gt": _jgt},)',
                      'args=({"commentFast": str(msg["fast"]), "gt": _jgt},)',
-                     'args=({_ffield: _jfv, "gt": _jgt},)'):    # Fast mode, one field per judge tier
+                     'args=({_ffield: _jfv, "gt": _jgt},)',    # Fast mode, one field per judge tier
+                     'args=({_sfield: _sfv, "gt": _jgt},)'):    # the model switches (Settings, Automation, Model; 2026-09-17)
             self.assertIn(frag, self.src, frag)
         self.assertGreaterEqual(self.src.count("if _jgt is not None:"), 11,
                                 "every judge-tier fan-out is gated on the pick actually applying")

@@ -209,7 +209,7 @@ const survey = () => page.evaluate(() => {
     name: nm ? nm.textContent : null, nameColor: nm ? getComputedStyle(nm).color : null, nameTitle: nm ? nm.title : null,
     caret: q(".feed-focus-caret")?.textContent ?? null,
     total: shown(q(".feed-focus-count")) ? q(".feed-focus-count").textContent : null,
-    emptyShown: shown(q(".feed-focus-empty")), colsShown: shown(q(".feed-focus-cols")), divider: shown(q("hr.feed-focus-divider")),
+    emptyShown: shown(q(".feed-focus-empty")), colsShown: shown(q(".feed-focus-cols")), divider: shown(sec && sec.nextElementSibling && sec.nextElementSibling.matches("hr.feed-focus-divider") ? sec.nextElementSibling : null),
     secOrder: byLeft(cols), boardOrder: byLeft(Array.from(document.querySelectorAll("#feed-cols .feed-col"))),
     // the single-column layout's order: the VISIBLE blocks top to bottom (a hidden block's rect is all zeros)
     secOrderY: cols.filter((c) => shown(c)).sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top).map(keyOf),
@@ -232,7 +232,7 @@ const survey = () => page.evaluate(() => {
 const metrics = () => page.evaluate(() => {
   const cs = (s) => { const e = document.querySelector(s); return e ? getComputedStyle(e) : null; };
   const lbl = cs("#feed-focus .feed-focus-head .feed-focus-fold"), head = cs("#feed-focus .feed-focus-head"), nm = cs("#feed-focus .feed-focus-head .fname");
-  const col = cs("#feed-cols .feed-col-head"), sess = cs("#feed-cols .feed-sess-head"), hr = cs("#feed-focus .feed-focus-divider");
+  const col = cs("#feed-cols .feed-col-head"), sess = cs("#feed-cols .feed-sess-head"), hr = cs("#feed-focus + hr.feed-focus-divider");
   const caret = cs("#feed-focus .feed-focus-caret"), blockCaret = cs("#feed-focus .col-asks .fcol-fold"), chip = cs("#feed-focus .col-asks .fcol-chip");
   const sessName = cs("#feed-cols .feed-sess-head .fname");
   const pick = (c, k) => (c ? c[k] : null);

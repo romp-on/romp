@@ -25,6 +25,14 @@ export function prefixId(host: string, id: string): string {
   return host ? host + SEP + id : id;
 }
 
+/** A NOTICE card's item id wears its host the way its sid does (round three of PR 1831, every inbound face since round four):
+ *  the reserved owner-less key sits in the sid slot on every host, so two hosts' cards under one key minted one id; and the
+ *  pane's maps are keyed by the prefixed id, so a row's id AND a reply's (noticeActionDone, settingRefused, an err naming its
+ *  op) take the same prefix, or the answer misses the card it names. A goal card's id ("sid:gN") stays bare (T287). */
+export function prefixNoticeId(host: string, id: any): any {
+  return typeof id === "string" && id.startsWith("notice:") ? prefixId(host, id) : id;
+}
+
 // hostOf/bareId live in host-prefix.ts (the side-effect-free helper module) so that OTHER modules can
 // read a host prefix WITHOUT importing this file — importing federation.ts boots a FederationManager
 // (the module-tail bootstrap below), and a second copy bundled into a pane emitted remote-only merged
@@ -82,7 +90,8 @@ const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel"
                                 "setDistillModel", "setDistillEffort", "setFileEditing",
                                 "setCompactSuggest", "setTaskTracking",   // T404: the master switch, one value across machines
                                 "setCommentModel", "setCommentEffort", "setCommentFast",
-                                "setJudgeFast", "setDistillFast", "setIndexFast"]);   // Fast mode per judge tier, one value across machines
+                                "setJudgeFast", "setDistillFast", "setIndexFast",   // Fast mode per judge tier, one value across machines
+                                "setAlwaysFast", "setRetryUpgrade"]);   // the model switches (Settings, Automation, Model; 2026-09-17), one value across machines
 
 // ── what a send to a host whose relay socket is NOT open does, by message class (2026-09-10) ─────────
 // Three classes, decided by an EXPLICIT list — never guessed from the type's spelling at run time:
@@ -148,6 +157,11 @@ export function prefixInbound(host: string, msg: any): any {
     if (typeof out[k] === "string") out[k] = prefixId(host, out[k]);
   for (const k of ARRAY_ID)
     if (Array.isArray(out[k])) out[k] = out[k].map((x: any) => (typeof x === "string" ? prefixId(host, x) : x));
+  // a kernel's REPLY names the card it answers at the top level (noticeActionDone, settingRefused, an err naming its op): a
+  // notice id there wears the host too, or the pane's maps, keyed by the prefixed id, miss it and the answer is lost (round
+  // four of PR 1831: a remote card's dismissing action stayed on the board with its button latched until the next push)
+  if (typeof out.itemId === "string") out.itemId = prefixNoticeId(host, out.itemId);
+  if (Array.isArray(out.itemIds)) out.itemIds = out.itemIds.map((x: any) => prefixNoticeId(host, x));
   for (const k of OBJ_SID)
     if (Array.isArray(out[k]))
       out[k] = out[k].map((o: any) => _prefixIdBearing(host, o, "sid"));
@@ -203,6 +217,7 @@ function _prefixIdBearing(host: string, o: any, idKey: string): any {
   if (!o || typeof o !== "object" || typeof o[idKey] !== "string") return o;
   const out: any = { ...o, [idKey]: prefixId(host, o[idKey]) };
   if (typeof out.name === "string") out.name = prefixId(host, out.name);
+  out.itemId = prefixNoticeId(host, out.itemId);   // a NOTICE card's item id is prefixed like its sid; a goal card's id stays bare (T287)
   // A feed card's delegation origin (asks[].origin): peerHost empty means the SENDER is local to the
   // card's own kernel — attribute it to that host, and prefix peerSid so the click routes there. A
   // set peerHost means the sender lives on some OTHER host (that kernel recorded which); keep it,
@@ -415,6 +430,10 @@ export function routeOutbound(msg: any, knownHosts?: ReadonlySet<string>): Route
     // "g448"; the owning kernel then recorded a node id with no session, cleared nothing, and the cards the
     // laptop's session-header Clear all had crossed off came back with the next payload and every restart.
     if (Array.isArray(out.itemIds)) out.itemIds = out.itemIds.map((x: any) => typeof x === "string" ? stripHost(host, x) : x);
+    // a NOTICE card's item id is host-prefixed on the way in (prefixInbound: two hosts' owner-less cards under one key would
+    // otherwise share one id on the merged board, round three of PR 1831), so it is stripped on the way out like the sid;
+    // a goal card's id ("sid:gN") is never prefixed and passes untouched
+    if (typeof out.itemId === "string" && bareId(out.itemId).startsWith("notice:")) out.itemId = stripHost(host, out.itemId);
     return [{ host, msg: out }];
   }
 
@@ -485,6 +504,9 @@ export function applyViewerClears(merged: any, ledgers: any[], clearedForeign: a
   // ("sid:gN") and compare as they are against the bare foreign ids (T287: reading the id's own first colon as
   // a host took the uuid for a host and compared "gN", so nothing ever matched).
   const remote = (sid: any) => typeof sid === "string" && hostOf(sid) !== LOCAL;
+  // the foreign ids are GOAL ids alone: the kernel's _cleared_foreign drops every prefixed family (notice: among them, the
+  // _CLEARED_NO_SESSION list), so no overlay ever clears a notice card; its dismissal is a routed gesture (askClear with the
+  // card's sid) that the owning kernel's ledger records under the bare id (round four of PR 1831 dropped an unreachable arm here)
   const hit = (sid: any, id: any) => remote(sid) && typeof id === "string" && foreign.has(id);
   merged.asks = merged.asks.filter((a: any) => !hit(a?.sid, a?.itemId));
   merged.items = merged.items.filter((c: any) => !hit(c?.sid, c?.itemId));
@@ -519,6 +541,7 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
                                arrivedAt: Record<string, number> = {}, hostsRead = true): any {
   const local = perHost[LOCAL] || {};
   const merged: any = { ...local, type: "feed", items: [], asks: [], working: [], awaiting: [], stateUnknown: [], order: [], sessions: [] };
+  const boards: Record<string, any> = {};
   let anchor = typeof local.now === "number" ? LOCAL : null;
   if (anchor === null) {
     for (const h of hostSeq) {
@@ -580,6 +603,12 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
     if (Array.isArray(f.stateUnknown)) merged.stateUnknown.push(...f.stateUnknown);
     if (Array.isArray(f.order)) merged.order.push(...f.order);   // grouped-mode session rank: local first, ids pre-prefixed
     if (Array.isArray(f.sessions)) merged.sessions.push(...f.sessions);   // the tab-strip session list (footer filter menu), sid+name pre-prefixed
+    // the data-defined boards (plans/card-boards.md): every host's definitions by id, the LOCAL host's winning on a collision
+    // (a board defined on both kernels shows both hosts' cards under this dashboard's definition); a remote-only board keeps
+    // the remote's shipped definition
+    if (f.boards && typeof f.boards === "object" && !Array.isArray(f.boards)) {
+      for (const [bid, defn] of Object.entries(f.boards)) if (h === LOCAL || !(bid in boards)) boards[bid] = defn;
+    }
     if (Array.isArray(f.ledgers)) { anyLedgers = true; ledgers.push(...f.ledgers); }
     if (typeof f.dismissedCount === "number") { anyDismissed = true; dismissed += f.dismissedCount; }
     if (f.canUndoClear) canUndo = true;
@@ -605,6 +634,7 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
   if (syncs.length) merged.syncNotices = syncs;
   else delete merged.syncNotices;
   merged.buildIds = buildIds;
+  merged.boards = boards;   // the hosts' data-defined boards, the local definition winning on an id (plans/card-boards.md)
   merged.offHosts = offHosts;
   // Hosts ATTACHED but yet to contribute a feed payload (the user 2026-08-25: after attaching, the
   // sessions land via the faster tabOrder/timeline channels while the cards trail with no cue) —
@@ -718,27 +748,45 @@ export function rebaseExecs(messages: any[], offsets: Record<string, number>): a
  *  (hasExec: the recipient's kernel binds exec to its own transcript; the sender's can't). */
 export function stitchMessages(messages: any[], sessions: readonly any[]): any[] {
   if (!messages.length) return messages;
-  const laneIds = new Set(sessions.map((s: any) => s && s.id));
-  const byBare = new Map(sessions.filter((s: any) => s && typeof s.id === "string").map((s: any) => [bareId(s.id), s]));
+  const lanes = sessions.filter((s: any) => s && typeof s.id === "string");
+  const byId = new Map(lanes.map((s: any) => [s.id, s]));
+  const byBare = new Map(lanes.map((s: any) => [bareId(s.id), s]));
+  // A relayed message has TWO ids: the sender's bus minted one, the recipient's bus another for the delivered copy.
+  // The copy carries the sender's as `originMid` from the moment it lands, and the read receipt carries the copy's
+  // back to the sender's row as `dmid`. The sender's row and the recipient's are ONE message: key both under the
+  // sender's id so the board draws one connector, never a pair, now that the sender's kernel ends its row at the
+  // recipient's lane (the user 2026-09-18). Either link alone joins them, so the pair never shows in the receipt's lag.
+  const canon = new Map<string, string>();
+  for (const m of messages) {
+    if (!m || typeof m.id !== "string") continue;
+    if (typeof m.dmid === "string" && m.dmid) canon.set(m.dmid, m.id);
+    if (typeof m.originMid === "string" && m.originMid) canon.set(m.id, m.originMid);
+  }
   const best = new Map<string, any>();
   const out: any[] = [];
   for (const m of messages) {
     if (!m || typeof m !== "object") { out.push(m); continue; }
     const c: any = { ...m };
-    for (const [idKey, nameKey] of [["fromId", "from"], ["toId", "to"]] as const) {
+    for (const [idKey, nameKey, anchorKey] of [["fromId", "from", "fromThreadT"], ["toId", "to", "toThreadT"]] as const) {
       const v = c[idKey];
-      if (typeof v !== "string" || laneIds.has(v)) continue;
-      const lane = byBare.get(bareId(v));
-      if (lane) {
-        c[idKey] = lane.id;
-        if (!c[nameKey]) c[nameKey] = lane.name; // the emitting kernel never knew the foreign name
-      }
+      if (typeof v !== "string") continue;
+      const lane = byId.get(v) || byBare.get(bareId(v));
+      if (!lane) continue;
+      c[idKey] = lane.id;
+      // The display name follows the LANE. A kernel names its own session bare ("web") and the merged lane wears the
+      // host ("TESTHOST:web"), so a remote twin of a local session is told apart in the tooltip exactly as on its
+      // label; the emitting kernel never knew a foreign end's name at all. A thread-anchored end keeps the THREAD's
+      // name (the kernel's rule: the tooltip says who really spoke, from the parent's lane).
+      if (!c[nameKey] || (hostOf(lane.id) !== LOCAL && c[anchorKey] == null)) c[nameKey] = lane.name;
     }
-    const key = typeof c.id === "string" ? c.id : null;
+    const key = typeof c.id === "string" ? (canon.get(c.id) || c.id) : null;
     if (!key) { out.push(c); continue; }
     const prev = best.get(key);
     if (!prev) { best.set(key, c); out.push(c); continue; }
-    if (c.hasExec && !prev.hasExec) Object.assign(prev, c); // upgrade in place — keeps sent-order
+    if (c.hasExec && !prev.hasExec) {   // upgrade in place: keeps sent-order and the sender's ids (the join keys)
+      const id = prev.id, dmid = prev.dmid;
+      Object.assign(prev, c, { id, ...(dmid ? { dmid } : {}), pending: false });   // an exec IS the landing: nothing is pending
+    }
   }
   return out;
 }
@@ -879,6 +927,11 @@ interface Conn {
 function pendingTypes(c: Conn): string[] {
   return [...c.pending.values()].map((m) => (m && typeof m.type === "string" ? m.type : ""));
 }
+
+// The apps that RENDER a pushed channel a remote host can be heard on (pendingFor): the chat its tab list, the feed and the
+// Outline pane the feed payload, the timeline its lanes. settings and files load this module too, for the fan-out and the routing,
+// and receive no pushed view, so they are not here.
+const PANE_CHANNELS = new Set(["chat", "feed", "fleet", "timeline"]);
 
 export class FederationManager {
   app = "chat";
@@ -1277,11 +1330,21 @@ export class FederationManager {
     });
   }
 
-  private lastPendingSig = "";
+  // null, not "": the FIRST publish always posts, an empty list included, so a pane's fresh instance (a reload) replaces
+  // whatever list its dead predecessor left in the shell; with "" a reloaded pane that pended nothing never spoke and the
+  // shell kept the stale names (2026-09-18)
+  private lastPendingSig: string | null = null;
 
   /** Which attached hosts THIS pane is still waiting on, by the channel it renders: the chat reads the
-   *  tab list, the feed and fleet the feed payload, the timeline the lanes skeleton. */
+   *  tab list, the feed and the Outline pane the feed payload, the timeline the lanes skeleton. A page that renders no
+   *  pushed channel pends nothing: the settings page and the file browser load this module (the gear's
+   *  kernel-side settings fan out to every host; the browser routes by host) but sit outside every build
+   *  audience (kernel.py _settings_page, app=settings), so no frame of theirs could ever retire a host, and
+   *  the settings frame's manager posted every attached host as pending for good: the network panel read
+   *  every connected remote as "connected · loading sessions…" from the moment the gear was first opened
+   *  (the user's 2026-09-18 screenshot, three remotes, all up, their sessions in the tabs). */
   private pendingFor(): string[] {
+    if (!PANE_CHANNELS.has(this.app)) return [];
     const src = this.app === "timeline" ? this.perHostTl : this.app === "chat" ? this.perHostOrder : this.perHostFeed;
     return this.hostSeq.filter((h) => h !== LOCAL && !(h in src));
   }
@@ -1292,6 +1355,7 @@ export class FederationManager {
   // says "connected · loading sessions…" until this pane's first payload from that host retires it.
   // Posted on CHANGE only, and only to a same-origin parent (a cross-origin host has no network panel).
   private publishPending(): void {
+    if (!PANE_CHANNELS.has(this.app)) return;   // no channel to retire by: nothing to tell the shell (see pendingFor)
     const hosts = this.pendingFor();
     const sig = hosts.join("\u0000");
     if (sig === this.lastPendingSig) return;

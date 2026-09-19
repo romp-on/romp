@@ -46,8 +46,10 @@ const pageEvents = [];
 page.on("pageerror", (e) => pageEvents.push("pageerror:" + String(e).slice(0, 300)));
 const painted = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
 const shot = async (name) => { if (cfg.drops) { try { await page.screenshot({ path: cfg.drops + "/romp_chat-T418-" + name + "-1200.png" }); } catch (e) { pageEvents.push("shot:" + e); } } };
-const groupHead = () => page.evaluate(() => { const g = document.querySelector("#content .turn-toolgroup"); if (!g) return null; const line = g.querySelector(".toolgroup-line"); return { text: line ? line.textContent.replace(/\s+/g, " ").trim() : null, expanded: g.classList.contains("expanded"), head: (g.querySelector(".toolgroup-head") || {}).textContent || null, plus: (g.querySelector(".tool-plus") || {}).textContent || null, minus: (g.querySelector(".tool-minus") || {}).textContent || null }; });
-const rows = () => page.evaluate(() => Array.from(document.querySelectorAll("#content .turn-tool")).map((t) => ({ label: (t.querySelector(".tool-label") || t.querySelector(".tool-name") || {}).textContent || null, code: !!t.querySelector(".tool-label-code"), path: (t.querySelector(".tool-head .tool-file") || {}).textContent || null, totals: (t.querySelector(".tool-totals") || {}).textContent || null, err: t.classList.contains("tool-err"), toggle: (t.querySelector(".tool-fold-toggle") || {}).textContent || null,
+const groupHead = () => page.evaluate(() => { const g = document.querySelector("#content .turn-toolgroup"); if (!g) return null; const line = g.querySelector(".toolgroup-line"); return { text: line ? line.textContent.replace(/\s+/g, " ").trim() : null, expanded: g.classList.contains("expanded"), head: (g.querySelector(".toolgroup-head") || {}).textContent || null, plus: (g.querySelector(".tool-plus") || {}).textContent || null, minus: (g.querySelector(".tool-minus") || {}).textContent || null,
+  plusColor: g.querySelector(".tool-plus") ? getComputedStyle(g.querySelector(".tool-plus")).color : null, minusColor: g.querySelector(".tool-minus") ? getComputedStyle(g.querySelector(".tool-minus")).color : null }; });
+const rows = () => page.evaluate(() => Array.from(document.querySelectorAll("#content .turn-tool")).map((t) => ({ label: (t.querySelector(".tool-label") || t.querySelector(".tool-name") || {}).textContent || null, code: !!t.querySelector(".tool-label-code"), path: (t.querySelector(".tool-head .tool-file") || {}).textContent || null, totals: (t.querySelector(".tool-head > .tool-totals") || {}).textContent || null, err: t.classList.contains("tool-err"), toggle: (t.querySelector(".tool-fold-toggle") || {}).textContent || null,
+  togglePlus: (() => { const e = t.querySelector(".tool-fold-toggle .tool-plus"); return e ? { text: e.textContent, color: getComputedStyle(e).color } : null; })(), toggleMinus: (() => { const e = t.querySelector(".tool-fold-toggle .tool-minus"); return e ? { text: e.textContent, color: getComputedStyle(e).color } : null; })(),
   head: t.querySelector(".tool-head") ? t.querySelector(".tool-head").textContent.replace(/\s+/g, " ").trim() : null, name: (t.querySelector(".tool-name") || {}).textContent || null })));
 const run = async (theme) => {
   await page.addInitScript((th) => { try { localStorage.setItem("romp:settings", JSON.stringify({ theme: th })); } catch (e) {} }, theme);
@@ -238,6 +240,14 @@ class ToolRowsVocab(unittest.TestCase):
         self.assertEqual(rows[13]["head"].count("+12 -0"), 1, "round two, medium 1: the Edit row's head carries its numbers ONCE, the fold toggle being the totals: %r" % rows[13]["head"])
         self.assertIsNone(rows[13]["totals"], "…no second totals span beside the toggle: %r" % rows[13])
         self.assertEqual(rows[13]["toggle"], "+12 -0", "…the toggle in the approved shape, a hyphen minus: %r" % rows[13])
+        # 2026-09-18: the expanded row's numbers wear the folded summary's dress (tool-plus green, tool-minus red, the same tokens),
+        # measured: the toggle holds the two spans, each the colour the collapsed head's span of the same class computes to
+        head_colors = (d["collapsed"]["plusColor"], d["collapsed"]["minusColor"])
+        self.assertTrue(all(head_colors), "the collapsed head's totals are coloured: %r" % (head_colors,))
+        self.assertNotEqual(head_colors[0], head_colors[1], "green and red are two colours")
+        self.assertEqual((rows[13]["togglePlus"], rows[13]["toggleMinus"]),
+                         ({"text": "+12", "color": head_colors[0]}, {"text": "-0", "color": head_colors[1]}),
+                         "the row's toggle numbers wear the summary's classes and colours (the base printed plain dim text): %r" % rows[13])
         self.assertEqual(rows[16]["label"], "Read ", "a Read reads Read + the path: %r" % rows[16])
         self.assertTrue((rows[16]["path"] or "").endswith("src/read-0.py"), rows[16])
         self.assertTrue(all(not x["err"] for x in rows), "no row failed")

@@ -25,14 +25,14 @@ test("the feed handles the kernel's cardPredict fan-back with the same predictio
   // a sub-goal id (per-sub follow-up target) resolves to the visible top card that carries it in its tree
   assert.match(FEED, /asks\.find\(\(a\) => a\.itemId === raw\) \?\? asks\.find\(\(a\) => a\.tree\?\.some\(\(n\) => n\.id === raw\)\)/);
   // a card already in Working needs no prediction (and no pointless revert timer)
-  assert.match(FEED, /if \(top && top\.column !== "working"\) \{ optimisticFollowMove\(top\.itemId, kind\); moved = true; \}/);
+  assert.match(FEED, /if \(top && askColumn\(top\) !== "asks"\) \{ optimisticFollowMove\(top\.itemId, kind\); moved = true; \}/);   // Working through askColumn: the category first (card boards, the 1837 round-two read)
 });
 
 test("an ANSWER prediction yields to the FIRST authoritative payload and reverts silently", () => {
   // the kernel rebuilds right after retiring the picker (answerAsk → _mark_views_dirty), so a payload that
   // still shows the card out of Working is post-answer truth — e.g. the next permission prompt of a burst.
   // Holding the prediction would mask a genuine "needs you".
-  assert.match(FEED, /if \(!a \|\| a\.column === "working" \|\| pendingMoveKind\.get\(id\) === "answer"\) \{/);
+  assert.match(FEED, /if \(!a \|\| askColumn\(a\) === "asks" \|\| pendingMoveKind\.get\(id\) === "answer"\) \{/);   // Working by the kernel's category since the boards' phase two (askColumn reads it first, the column from an older kernel)
   // the backstop toasts for followup/plain (an answer romp never gave must be apparent) but never for an
   // ANSWER prediction — the re-shown ⏸ blocked card IS the signal. An answer is never acked either, so it
   // reaches neither branch of ackFollowMove; the reconcile above always retires it first (2026-07-21).
@@ -41,10 +41,10 @@ test("an ANSWER prediction yields to the FIRST authoritative payload and reverts
 
 test("executed replica: reconcile keeps a followup prediction pending but drops an answer either way", () => {
   // mirrors reconcileFollowMove exactly (feed.ts) — kinds map + incoming authoritative payload
-  const reconcile = (pending: Set<string>, kinds: Map<string, string>, incoming: { itemId: string; column: string }[]) => {
+  const reconcile = (pending: Set<string>, kinds: Map<string, string>, incoming: { itemId: string; column: string; category?: string }[]) => {
     for (const id of Array.from(pending)) {
       const a = incoming.find((x) => x.itemId === id);
-      if (!a || a.column === "working" || kinds.get(id) === "answer") { pending.delete(id); kinds.delete(id); }
+      if (!a || (a.category ?? a.column) === "working" || kinds.get(id) === "answer") { pending.delete(id); kinds.delete(id); }   // askColumn's read: the category first
     }
   };
   // a follow-up not yet confirmed stays predicted (the kernel hasn't caught up)

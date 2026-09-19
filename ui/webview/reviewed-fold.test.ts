@@ -17,7 +17,8 @@ const JUDGE = fs.readFileSync(path.resolve(process.cwd(), "..", "bin", "romp-jud
 
 test("the stale-takeaway note: EXECUTED rule — completed + stale + shown text, nothing otherwise", () => {
   assert.equal(distillStaleNote(true, true, "the takeaway"),
-    "You followed up since this — it updates when the new work lands.");
+    "You replied after this summary was written. It refreshes when the new work lands.");
+  assert.doesNotMatch(distillStaleNote(true, true, "the takeaway"), /\u2014|followed up/, "two sentences, no dash; a quoted reply is a reply too");
   assert.equal(distillStaleNote(false, true, "the takeaway"), "", "not stale → silent");
   assert.equal(distillStaleNote(true, false, "the takeaway"), "", "not completed → the brief owns blocked");
   assert.equal(distillStaleNote(true, true, "  "), "", "no shown takeaway → nothing to annotate");
@@ -40,11 +41,24 @@ test("kernel: reviewedEarlier keys on the SHARED review boundary, never a second
 
 test("feed: reviewed-earlier sub-goals collapse behind ONE toggle row, fresh rows first", () => {
   assert.match(FEED, /reviewedEarlier\?: boolean;/);
-  assert.match(FEED, /const revKids = \(root\.children \|\| \[\]\)\.filter\(\(c\) => !!byId\.get\(c\)\?\.reviewedEarlier\);/);
+  // the fold's label counts what its walk RENDERS: a handoff child (walk skips it) is out of both lists, so the count never
+  // exceeds the rows the open fold shows (2026-09-18: "3 reviewed earlier" opened to two rows)
+  assert.match(FEED, /const shown = \(c: string\) => \{ const n = byId\.get\(c\); return !!n && n\.kind !== "handoff"; \};/);
+  assert.match(FEED, /const revKids = \(root\.children \|\| \[\]\)\.filter\(\(c\) => shown\(c\) && !!byId\.get\(c\)\?\.reviewedEarlier\);/);
+  assert.match(FEED, /const freshKids = \(root\.children \|\| \[\]\)\.filter\(\(c\) => shown\(c\) && !byId\.get\(c\)\?\.reviewedEarlier\);/);
   assert.match(FEED, /const revOpen = cardTreeExpanded\.has\(id \+ ":reviewed"\);/);
   assert.match(FEED, /rows\.slice\(0, freshEnd\)\.forEach\(paintRow\);/);
   assert.match(FEED, /txt\.textContent = revKids\.length \+ " reviewed earlier";/);
-  // the fold expands in place (state survives re-renders) and never dead-ends: progressive disclosure
-  assert.match(FEED, /if \(revOpen\) for \(const c of revKids\) walk\(c, 0\);/);
+  // the fold expands in place (state survives re-renders) and never dead-ends: progressive disclosure; its kids walk at
+  // depth 1, one level under the fold row that is their visual parent, where the fresh kids walk at depth 0 (2026-09-18:
+  // walked at 0, they rendered flush with the fresh rows), and paintRow indents a row by its depth
+  assert.match(FEED, /for \(const c of freshKids\) walk\(c, 0\);/);
+  assert.match(FEED, /if \(revOpen\) for \(const c of revKids\) walk\(c, 1\);/);
+  assert.match(FEED, /if \(depth\) row\.style\.paddingLeft = \(depth \* TREE_INDENT_EM\) \+ "em";/);
   assert.match(FEEDCSS, /\.fcheck\.freviewed \{ opacity: 0\.6; cursor: pointer; \}/);
+  // the fold row's expanded state is its own class, never the not-done STATUS class "open": .fcheck.open .fcheck-mark
+  // draws the hollow ring, and the open fold wore it with its ✓ dropped low inside (the user's 2026-09-18 screenshot)
+  assert.match(FEED, /el\("div", "fcheck freviewed" \+ \(revOpen \? " expanded" : ""\)\)/);
+  assert.doesNotMatch(FEED, /"fcheck freviewed" \+ \(revOpen \? " open"/);
+  assert.match(FEEDCSS, /\.fcheck\.open \.fcheck-mark \{/, "the status rule the fold row must not match");
 });

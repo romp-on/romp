@@ -90,7 +90,7 @@ test("the order is stored whole by one writer, the divider's id among the tab wi
   assert.match(SECTION, /var want = prev \? prev\.nextSibling : cfg\.host\.firstChild;\s*\n\s*if \(want !== r\) cfg\.host\.insertBefore\(r, want\);\s*\n\s*prev = r;/);
   assert.doesNotMatch(SECTION.slice(SECTION.indexOf("function placeRows"), SECTION.indexOf("function nudge")), /appendChild/, "no unconditional append in placeRows");
   assert.match(SECTION, /var focused = document\.activeElement && cfg\.host\.contains\(document\.activeElement\) \? document\.activeElement : null;\s*\n\s*placeRows\(cfg\.order\(prefs\)\);[^\n]*\n\s*if \(focused && document\.activeElement !== focused && focused\.isConnected\) focused\.focus\(\);/);
-  assert.match(GEAR, /order: TW\.tabListOrder, divider: \{ id: TW\.NAME_DIVIDER, label: 'session name' \}, group: null,/, "the tab section's order carries the divider and knows no groups");
+  assert.match(GEAR, /order: TW\.tabListOrder, divider: \{ id: TW\.NAME_DIVIDER, label: 'Session name' \}, group: null,/, "the tab section's order carries the divider and knows no groups");
   assert.match(GEAR, /order: SW\.statusListOrder, divider: null,\s*\n\s*group: function \(id\) \{ var w = SW\.statusWidget\(id\); return w \? w\.slot : null; \},/, "the status line has no divider: its rows stay in their slot's group");
   // round two: the polite live region every move speaks through, position and (tab widgets) the side of the name
   assert.match(SECTION, /live\.setAttribute\('aria-live', 'polite'\)/);
@@ -117,7 +117,8 @@ test("the Tab widgets divider is a separator named for the session name's place,
   assert.match(SECTION, /lbl\.className = 'rs-divider-label'; lbl\.textContent = cfg\.divider\.label;/);
   assert.doesNotMatch(SECTION, /dividerRow\.appendChild\(grip\)|rs-divider[^\n]*rs-switch/, "no grip and no switch on the divider: it is not a widget");
   assert.match(GEAR_CSS, /#rsettings \.rs-divider::before, #rsettings \.rs-divider::after \{ content: ""; flex: 1 1 auto; height: 2px; background: var\(--hairline\);/, "a thicker line either side of the words");
-  assert.match(GEAR_CSS, /#rsettings \.rs-divider \{[^}]*text-transform: uppercase;/, "small subtle text, not a rendered name");
+  assert.match(GEAR_CSS, /#rsettings \.rs-divider \{[^}]*color: var\(--accent, #9cd2ff\); font-size: 11px; font-weight: 600;/, "small text in the section-label dress, not a rendered name");
+  assert.doesNotMatch(GEAR_CSS, /\.rs-divider \{[^}]*(uppercase|letter-spacing)/);
 });
 
 test("the previews are drawn by the surfaces' own composers over the demo records, under each section's rows, repainted with every paint", () => {
@@ -132,7 +133,7 @@ test("the previews are drawn by the surfaces' own composers over the demo record
   assert.match(GEAR, /chip\.className = 'chip rs-sl-chip'; chip\.textContent = 'Ready';/);
   assert.match(GEAR, /SW\.composeStatusWidgets\(right, 'right', SW\.DEMO_RECORD, prefs\);/);
   assert.match(GEAR, /SC\.syncMetaControls\(meta, st, null, \{\}\); right\.appendChild\(meta\);\s*\n\s*var bar = SC\.ctxBar\(\); SC\.setCtxBar\(bar, st\.ctx, false, SC\.pickTone\(st\.ctxColor, st\.ctxTone\), false\); right\.appendChild\(bar\);/, "the fixed controls, drawn by the line's own renderer over the demo status, the battery's tone picked by theme (T415 part two, round three)");
-  assert.match(GEAR_CSS, /#rsettings \.rs-preview-title \{[^}]*text-transform: uppercase;/);
+  assert.match(GEAR_CSS, /#rsettings \.rs-preview-title \{[^}]*color: var\(--accent, #9cd2ff\); font-size: 11px; font-weight: 600;/);
 });
 
 // THE RINGS (2026-09-14): a section built with reorder: false has no grip and wires no drag; its rows keep the grid's

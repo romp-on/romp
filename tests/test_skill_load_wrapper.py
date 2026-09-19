@@ -469,7 +469,12 @@ class HealOlderStores(unittest.TestCase):
         self.assertEqual(set(asks), {ask}, "the skill-load top is no card; the ask stays")
         h = km._heal_session_tops(str(self.tpath), json.loads((jd.GOALDIR / (SID + ".json")).read_text())["nodes"], {})
         self.assertEqual(h[own][0], ask, "the machine top's host is the ask, never the skill-load top")
-        self.assertEqual(h[skill][0], ask)
+        # the skill-load top was minted BEFORE the ask (a pre-clear lineage): no host was current at its mint, so it is
+        # hidden, not nested (2026-09-18: the oldest-host fallback that nested it under the later ask swept old roots
+        # into a newer request's tree; the feed's outcome above, no card, is the same either way)
+        self.assertIsNone(h[skill][0], "no host minted before it")
+        self.assertTrue(h[skill][1].get("hidden"), "hidden: the session's own view keeps the work")
+        self.assertIn("hidden (rooted in a skill the harness loaded", err)
 
     def test_the_boot_pass_converges_a_second_boot_reads_the_appended_bytes_only(self):
         # boot one indexes the directory whole and checks the real ask for good; boot two (the persisted index and memo

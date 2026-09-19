@@ -21,6 +21,7 @@
 // settings modal never mounts. Synthetic only: the notes-api demo world, placeholder sids, hostname TESTHOST.
 import { test, mock, after } from "node:test";
 import * as assert from "node:assert/strict";
+import { prefixInbound } from "./federation";   // the inbound transform a remote host's frames and replies pass through (no DOM needed)
 
 // ── a DOM stand-in ─────────────────────────────────────────────────────────────────────────────────
 class Style {
@@ -1135,4 +1136,196 @@ test("a NOTICE CARD (T370) renders its producer, body, pinned image and action b
   const sent2 = posted.length;
   c2._clr.onclick(ev);
   assert.deepEqual(posted.slice(sent2).filter((m) => m.type === "askClear"), [{ type: "askClear", itemId: "notice:" + API + ":dropped-sends:1", sid: API }]);
+});
+
+test("an OWNER-LESS notice card (no session) shows no session chip and heads its column in both modes; needs-you still wins its column", async () => {
+  // the user 2026-09-18: a card with no session at the top of the feed. The kernel posts it under the reserved owner key
+  // (kernel.py NOTICE_OWNERLESS_SID, "notes"; the pane's literal is pinned equal in federation-notice.test.ts) with the name
+  // Notes and no colour; the feed board's SORT RULE ranks that owner before every session run, then the session order, then
+  // time; needs-you still decides the column (plans/notice-cards.md, "Owner-less cards")
+  const setPrefs = (v: string) => { stores.local.set("romp:settings", v); win.dispatchEvent(Object.assign(new Event("storage"), { key: "romp:settings", newValue: v })); };
+  const notice = (key: string, t: number, column: string) =>
+    ({ ...cardOf("notice:notes:" + key + ":1", "notes", "Notes", "", "A note for everyone " + key, column, { live: false, tree: [], blocked: null, board: "feed", category: column,
+       notice: { producer: "cli", key, rev: 1, body: "", attachment: null, actions: [], expiresAt: null, dismissOnAction: false, acted: false } }), t, color: null });
+  // ungrouped: one owner-less card older than every session card and one newer, both standing first, in their own time order
+  setPrefs(JSON.stringify({ grouped: false, newestFirst: false }));
+  const older = notice("old", 5, "completed"); const newer = notice("new", 5000, "completed"); const ask = notice("ask", 5001, "needs_input");
+  // a SESSION's needs-you card, older than the Notes ask: a time sort would put it first, the owner rule puts Notes first
+  const sAsk = { ...cardOf("s-ask", WEB, "web", "#3366cc", "A question from the web session", "needs_input", { live: true, tree: [], blocked: null }), t: 1 };
+  await dispatch(frame([g1, g2, g3, sAsk, older, newer, ask], { working: ["web"] }));
+  const c = card("notice:notes:new:1");
+  assert.ok(c, "on the board"); assert.equal(c._name.style.display, "none", "no session chip: no session stands behind it (the name node hides; the row keeps its other parts)");
+  assert.equal(card("g1")._name.style.display, "", "a session's card keeps its chip");
+  assert.equal(colOf("notice:notes:new:1"), "col-completed-list"); assert.equal(colOf("notice:notes:ask:1"), "col-needsInput-list", "needs-you still wins its column");
+  const order = (col: string) => Array.from(body.querySelector("#" + col)!.children).filter((n: any) => n.dataset && n.dataset.key).map((n: any) => n.dataset.key as string);
+  const done = order("col-completed-list");
+  assert.deepEqual(done.slice(0, 2), ["a:notice:notes:old:1", "a:notice:notes:new:1"], "the owner-less cards first, in their own time order (stable): " + done.join(" "));
+  assert.ok(done.length > 2 && done.slice(2).every((k) => !k.startsWith("a:notice:notes:")), "the sessions' cards after them");
+  assert.deepEqual(order("col-needsInput-list").filter((k) => k.startsWith("a:")), ["a:notice:notes:ask:1", "a:s-ask"], "and first in the needs-you column, above the session's older card");
+  // grouped: the Notes run opens the column, its header says Notes, before the order list's first session
+  setPrefs(JSON.stringify({ grouped: true, newestFirst: false }));
+  await dispatch(frame([g1, g2, g3, sAsk, older, newer, ask], { working: ["web"], order: [WEB] }));
+  // the needs-you column holds a Notes card AND a session's card: the Notes run's header stands first, then the session's,
+  // and the Notes card precedes every session card (the completed column holds the two Notes cards and stream items alone)
+  const heads = Array.from(body.querySelectorAll("#col-needsInput-list .feed-sess-head")).filter((h: any) => !h.classList.contains("sess-exit")) as any[];
+  assert.ok(heads.length >= 2, "a header per run in the needs-you column: " + heads.length);
+  assert.equal(heads[0].getAttribute("data-fsid"), "notes", "the Notes run heads the column, before the session runs");
+  assert.match(heads[0].textContent, /Notes/, "its header says Notes");
+  assert.notEqual(heads[1].getAttribute("data-fsid"), "notes", "then a session's run");
+  const kids = order("col-needsInput-list").filter((k) => k.startsWith("a:"));
+  assert.deepEqual(kids, ["a:notice:notes:ask:1", "a:s-ask"], "its card above the session's, though older: " + kids.join(" "));
+  assert.equal(heads[1].getAttribute("data-fsid"), WEB, "the session order's first run follows");
+  assert.equal(order("col-completed-list").filter((k) => k.startsWith("a:")).slice(0, 2).join(" "), "a:notice:notes:old:1 a:notice:notes:new:1", "the completed column's Notes run keeps its time order under its header");
+  setPrefs(JSON.stringify({ grouped: false, newestFirst: false }));
+});
+
+test("a REMOTE host's owner-less card (sid host-prefixed by federation) ranks first, hides its chip, and its Notes header is plain text with no anchor, title, dead class or click", async () => {
+  // round two of PR 1831: federation's prefixInbound hands the pane "TESTHOST:notes" and "TESTHOST:Notes"; the owner test strips
+  // the host the way federation adds it (host-prefix bareId), so the rank, the chip and the header agree across hosts; the
+  // header offered to revive a session named notes that never existed on the remote host
+  const setPrefs = (v: string) => { stores.local.set("romp:settings", v); win.dispatchEvent(Object.assign(new Event("storage"), { key: "romp:settings", newValue: v })); };
+  const remote = { ...cardOf("TESTHOST:notice:notes:r1:1", "TESTHOST:notes", "TESTHOST:Notes", "", "A note from the other machine", "needs_input", { live: false, tree: [], blocked: null, board: "feed", category: "needs_input",
+    notice: { producer: "cli", key: "r1", rev: 1, body: "", attachment: null, actions: [], expiresAt: null, dismissOnAction: false, acted: false } }), t: 7000, color: null };
+  const sAsk = { ...cardOf("s-ask2", WEB, "web", "#3366cc", "A question from the web session", "needs_input", { live: true, tree: [], blocked: null }), t: 1 };
+  setPrefs(JSON.stringify({ grouped: true, newestFirst: false }));
+  await dispatch(frame([g1, g2, g3, sAsk, remote], { working: ["web"], order: [WEB] }));
+  const c = card("TESTHOST:notice:notes:r1:1");
+  assert.ok(c, "on the board"); assert.equal(c._name.style.display, "none", "no session chip for the remote owner-less card");
+  const order = (col: string) => Array.from(body.querySelector("#" + col)!.children).filter((n: any) => n.dataset && n.dataset.key).map((n: any) => n.dataset.key as string);
+  assert.deepEqual(order("col-needsInput-list").filter((k) => k.startsWith("a:")), ["a:TESTHOST:notice:notes:r1:1", "a:s-ask2"], "the remote Notes run first, above the session's older card");
+  const heads = Array.from(body.querySelectorAll("#col-needsInput-list .feed-sess-head")).filter((h: any) => !h.classList.contains("sess-exit")) as any[];
+  assert.equal(heads[0].getAttribute("data-fsid"), "TESTHOST:notes", "its header heads the column");
+  const nm = heads[0]._name;
+  assert.equal(nm.tagName, "SPAN", "plain text: no anchor"); assert.equal(nm.className, "fname-plain");
+  assert.equal(nm.getAttribute("title"), null, "no title"); assert.ok(!nm.classList.contains("dead"), "no dead class"); assert.equal(nm.onclick, null, "no click: nothing to open or revive");
+  assert.match(nm.textContent, /Notes/, "the host-prefixed name reads through: " + nm.textContent);
+  assert.equal(heads[1]._name.tagName, "A", "a session's header keeps its anchor"); assert.equal(heads[1]._name.getAttribute("title"), "open this session");
+  setPrefs(JSON.stringify({ grouped: false, newestFirst: false }));
+});
+
+test("two hosts' owner-less cards under ONE key both render (the inbound prefix tells their ids apart), and an owner-less title click opens the card's own modal: the notice, no session gesture", async () => {
+  // round three of PR 1831, medium B: federation prefixes a remote notice card's item id like its sid, so the local and the remote
+  // Notes cards under the same hand-picked key are two elements (the remote one arrives through prefixInbound here, with the SAME
+  // bare id as the local one: round four, low); medium A: the title click used to post showOnTimeline with sid notes and the
+  // kernel offered to revive a session that never existed. Round four, medium 2: the modal it opens shows the NOTICE (title,
+  // producer, body, actions) in place of the goal tree a notice never has, and offers no session gesture (Follow up, Check
+  // status and Continue hidden; Clear stays); every assertion is scoped to the modal element.
+  const setPrefs = (v: string) => { stores.local.set("romp:settings", v); win.dispatchEvent(Object.assign(new Event("storage"), { key: "romp:settings", newValue: v })); };
+  setPrefs(JSON.stringify({ grouped: false, newestFirst: false }));
+  const mk = (title: string, body: string, t: number) => ({ ...cardOf("notice:notes:same:1", "notes", "Notes", "", title, "completed", { live: false, tree: [], blocked: null, board: "feed", category: "completed",
+    notice: { producer: "cli", key: "same", rev: 1, body, attachment: null, actions: [{ label: "Ping", route: "/send", body: { text: "ping" } }], expiresAt: null, dismissOnAction: false, acted: false } }), t, color: null });
+  const local = mk("A local note", "Remember the standup moved to half past ten.", 10);
+  const remoteIn = prefixInbound("TESTHOST", { type: "feed", asks: [mk("A remote note", "", 11)], sessions: [], working: [], awaiting: [], order: [] });
+  const remote = remoteIn.asks[0];
+  assert.equal(remote.itemId, "TESTHOST:notice:notes:same:1", "the same bare id, told apart by the host on the way in");
+  await dispatch(frame([g1, local, remote], { working: ["web"] }));
+  assert.ok(card("notice:notes:same:1"), "the local card"); assert.ok(card("TESTHOST:notice:notes:same:1"), "and the remote one, a second element");
+  assert.equal(card("notice:notes:same:1")._title.textContent, "A local note"); assert.equal(card("TESTHOST:notice:notes:same:1")._title.textContent, "A remote note", "neither overwrote the other");
+  const sent = posted.length;
+  card("notice:notes:same:1")._title.onclick(ev);
+  assert.equal(posted.length, sent, "the title click on an owner-less card posts nothing (no showOnTimeline, no openSession)");
+  const modal = body.querySelector("#feed-modal") as any;
+  assert.ok(modal, "it opens the card's modal instead");
+  const q = (sel: string) => modal.querySelector(sel) as any;
+  assert.equal(q("#feed-modal-title").style.display, ""); assert.equal(q("#feed-modal-title").textContent, "A local note", "the modal's title is the card's");
+  assert.equal(q("#feed-modal-title").onclick, null, "the title locates nothing (a notice has no chat turn)");
+  const mb = q("#feed-modal-body");
+  assert.match(mb.querySelector(".fask-nbody")?.textContent ?? "", /Remember the standup moved to half past ten\./, "the body shows the notice's words");
+  assert.equal(mb.querySelector(".fask-nprod")?.textContent, "via cli", "and the producer line");
+  const mbtns = mb.querySelectorAll(".fask-nactions button");
+  assert.equal(mbtns.length, 1); assert.equal(mbtns[0].textContent, "Ping", "and the card's action");
+  assert.equal(q("#feed-modal-follow").style.display, "none", "no Follow up"); assert.equal(q("#feed-modal-status").style.display, "none", "no Check status");
+  assert.equal(q("#feed-modal-continue").style.display, "none", "no Continue"); assert.equal(q("#feed-modal-clear").style.display, "", "Clear stays");
+  const agent = q("#feed-modal-agent");
+  assert.equal(agent.onclick, null, "the header's name opens no session"); assert.ok(agent.classList.contains("fname-plain")); assert.ok(!agent.classList.contains("dead"), "and is never struck");
+  // the modal's action posts once with the card's sid, latches, and lets go on the kernel's refusal
+  const sent2 = posted.length;
+  mbtns[0].onclick(ev);
+  assert.deepEqual(posted.slice(sent2).filter((m) => m.type === "noticeAction"), [{ type: "noticeAction", itemId: "notice:notes:same:1", sid: "notes", route: "/send", body: { text: "ping" } }]);
+  assert.equal(mbtns[0].disabled, true, "latched");
+  await dispatch({ type: "noticeActionDone", itemId: "notice:notes:same:1", ok: false, error: "an owner-less card has no actions" });
+  const after = (body.querySelector("#feed-modal-body") as any).querySelectorAll(".fask-nactions button");
+  assert.equal(after.length, 1); assert.equal(after[0].disabled, false, "re-armed on the answer (the face is rebuilt)");
+  assert.ok(body.querySelector("#feed-modal"), "a refusal keeps the modal open");
+  q(".feed-modal-close").onclick(ev);
+  assert.equal(body.querySelector("#feed-modal"), null, "closed");
+  setPrefs(JSON.stringify({ grouped: false, newestFirst: false }));
+});
+
+test("a REMOTE notice card's answer names the owning kernel's bare id: the inbound prefix dresses it too, so a dismissing card leaves on the answer and a refused one re-arms", async () => {
+  // round four of PR 1831, medium 1: prefixInbound covered a row's itemId and never a reply's, so a remote card's noticeActionDone
+  // missed the pane's map (keyed host:notice:...): the card stayed on the board with its button latched until the next push
+  const HOSTB = "HOSTB";
+  const rn = (key: string, dismiss: boolean) => cardOf("notice:" + WEB + ":" + key + ":1", WEB, "web", "#3366cc", "A remote figure is ready (" + key + ")", "completed", { live: false, tree: [], blocked: null,
+    notice: { producer: "figure", key, rev: 1, body: "", attachment: null, actions: [{ label: "Send again", route: "/send", body: { text: "again" } }], expiresAt: null, dismissOnAction: dismiss } });
+  const rf = prefixInbound(HOSTB, { type: "feed", asks: [rn("leaves", true), rn("stays", false)], sessions: [{ sid: WEB, name: "web", color: g1.color }], working: [], awaiting: [], stateUnknown: [], order: [WEB] });
+  const leaves = HOSTB + ":notice:" + WEB + ":leaves:1", stays = HOSTB + ":notice:" + WEB + ":stays:1";
+  assert.deepEqual(rf.asks.map((a: any) => a.itemId), [leaves, stays], "the rows' ids wear the host (round three)");
+  await dispatch(frame([g1, g2, g3, ...rf.asks], { working: ["web"], sessions: [...frame([]).sessions, ...rf.sessions] }));
+  assert.ok(card(leaves)); assert.ok(card(stays));
+  const b1 = card(leaves)._nActions.querySelectorAll("button")[0];
+  const sent = posted.length;
+  b1.onclick(ev);
+  assert.deepEqual(posted.slice(sent).filter((m) => m.type === "noticeAction").map((m) => [m.itemId, m.sid]), [[leaves, HOSTB + ":" + WEB]], "the gesture carries the prefixed ids (routeOutbound strips them)");
+  assert.equal(b1.disabled, true, "latched");
+  // the owning kernel answers with ITS id, bare; the socket's inbound transform dresses it the way it dressed the row
+  await dispatch(prefixInbound(HOSTB, { type: "noticeActionDone", itemId: "notice:" + WEB + ":leaves:1", ok: true, error: "" }));
+  assert.equal(card(leaves) === null, true, "the remote dismissing card left on the owning kernel's answer");
+  const b2 = card(stays)._nActions.querySelectorAll("button")[0];
+  b2.onclick(ev); assert.equal(b2.disabled, true);
+  await dispatch(prefixInbound(HOSTB, { type: "noticeActionDone", itemId: "notice:" + WEB + ":stays:1", ok: false, error: "no running backend owns web" }));
+  assert.ok(card(stays), "a refused card stays"); assert.equal(b2.disabled, false, "and its button let go on the answer, not on the next push");
+});
+
+// ── the predicted move on a card that carries its category (plans/card-boards.md, phase two, round two) ──────────────────
+// Every card the kernel builds carries `category` since phase two and askColumn reads it first; the optimistic follow-up
+// move predicted `column` alone, so a Continue, a reply or a Check status left the card in Blocked (with the re-check
+// styling) until the kernel re-filed it. The four follow-move tests are source pins that never boot feed.ts, which is how
+// it escaped them; this one boots it.
+test("Continue on a category-carrying card predicts the move to Working: the prediction writes the category too", async () => {
+  const others = Array.from(body.querySelectorAll(".fitem")).map((c: any) => c._it).filter(Boolean);
+  const g9 = cardOf("g9", WEB, "web", "#3366cc", "Decide the notes-api retry policy", "needs_input", { board: "feed", category: "needs_input" });
+  await dispatch(frame([g9, ...others], { working: ["api"] }));   // web is live and waiting on you
+  assert.equal(colOf("g9"), "col-needsInput-list", "the kernel filed it under Blocked by its category");
+  const cont = card("g9")._cont;
+  assert.equal(cont.style.display, ""); assert.equal(cont.disabled, false);
+  const sent = posted.length;
+  cont.onclick(ev);
+  assert.deepEqual(posted.slice(sent).filter((m) => m.type === "askFollowUp"), [{ type: "askFollowUp", itemId: "g9", sid: WEB, cont: true }]);
+  assert.equal(colOf("g9"), "col-asks-list", "the predicted move: the card goes to Working ahead of the kernel, category and column alike");
+  const shown = card("g9")._it;
+  assert.equal(shown.category, "working", "the rendered copy's category is the prediction");
+  assert.equal((g9 as any).category, "needs_input", "the frame's own object is untouched (the copy-on-write rule)");
+  await dispatch(frame([g9, ...others], { working: ["api"] }));   // a re-emit of the same objects: nothing decided
+  assert.equal(colOf("g9"), "col-asks-list", "the prediction holds through a re-emit");
+  await dispatch(frame([{ ...g9, column: "working", category: "working", followupPending: true, followupAt: K0 }, ...others], { working: ["web", "api"] }));
+  assert.equal(colOf("g9"), "col-asks-list", "the kernel's re-filing confirms it");
+});
+
+// ── phase three of the boards: the kernel's fan-back on a category-carrying card, and a card on a data-defined board ────────
+test("the kernel's cardPredict fan-back moves a category-carrying card to Working through askColumn (the 1837 round-two read, low 1)", async () => {
+  const others = Array.from(body.querySelectorAll(".fitem")).map((c: any) => c._it).filter(Boolean).filter((it: any) => it.itemId !== "g9");
+  // the card whose category disagrees with its column (a data-defined board's, or a kernel that files by category where the
+  // column keeps the feed's word): the renderer files it by the category, so the fan-back must read the same field
+  const g10 = cardOf("g10", WEB, "web", "#3366cc", "Approve the notes-api schema change", "working", { board: "feed", category: "needs_input" });
+  await dispatch(frame([g10, ...others], { working: ["api"] }));
+  assert.equal(colOf("g10"), "col-needsInput-list", "filed by its category");
+  await dispatch({ type: "cardPredict", ids: ["g10"], flavor: "followup" });   // a reply fired in the chat: the kernel says so ahead of its rebuild
+  assert.equal(colOf("g10"), "col-asks-list", "the fan-back predicted the move: Working by the card's category, not its column");
+  await dispatch(frame([{ ...g10, column: "working", category: "working", followupPending: true, followupAt: K0 }, ...others], { working: ["web", "api"] }));
+  assert.equal(colOf("g10"), "col-asks-list");
+});
+
+test("a notice card on a data-defined board shows on the feed under the default column with its board named beside the producer, until the board has a view of its own", async () => {
+  const others = Array.from(body.querySelectorAll(".fitem")).map((c: any) => c._it).filter(Boolean);
+  const notes = { id: "notes", title: "Notes", categories: [{ id: "new", title: "New", chip: "neutral" }], defaultCategory: "new", rules: [], sort: { key: "t", dir: "desc" },
+    subSorts: [], groupBy: null, order: [], notify: ["new"], needsYou: "new", kinds: ["notice"] };
+  const n1 = cardOf("notice:" + WEB + ":sweep:1", WEB, "web", "#3366cc", "The sweep finished", "completed",
+    { board: "notes", category: "new", live: false, tree: [], notice: { producer: "cli", key: "sweep", rev: 1, body: "", attachment: null, actions: [], expiresAt: null, dismissOnAction: false } });
+  await dispatch(frame([n1, ...others], { boards: { notes } }));
+  const c = card("notice:" + WEB + ":sweep:1");
+  assert.equal(colOf("notice:" + WEB + ":sweep:1"), "col-asks-list", "a category the feed lacks files under the feed's default column");
+  assert.equal(c._nProd.textContent, "via cli · on Notes", "the board's title beside the producer");
+  await dispatch(frame([n1, ...others], {}));   // a frame from a kernel that ships no boards: the board is unknown, the label says nothing of it
+  assert.equal(c._nProd.textContent, "via cli");
 });

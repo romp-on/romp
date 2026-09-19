@@ -342,6 +342,10 @@ class MonitorLoop(unittest.TestCase):
 
 class RefusedNotifyRevives(unittest.TestCase):
     def setUp(self):
+        # a kernel that OWNS a bus: the run's floor sets ROMP_POSTAL_CLIENT_ONLY=1 (2026-09-18, so no in-process kernel starts a bus
+        # by an ensure or a revive) and the revive skips under it; these pins are the contract of a kernel that owns one, so the
+        # flag goes for the class and comes back in tearDown after the revive thread is waited out (the ensure is a stub here)
+        self._client_only = os.environ.pop("ROMP_POSTAL_CLIENT_ONLY", None)
         self._bp = km.BUS_PORT
         self._ens = km._ensure_postal_bus
         km.BUS_PORT = _dead_port()
@@ -350,9 +354,15 @@ class RefusedNotifyRevives(unittest.TestCase):
         km._bus_reviving[0] = False
 
     def tearDown(self):
+        for _ in range(200):                      # the revive thread finishes before the world goes back
+            if not km._bus_reviving[0]:
+                break
+            time.sleep(0.01)
         km.BUS_PORT = self._bp
         km._ensure_postal_bus = self._ens
         km._bus_reviving[0] = False
+        if self._client_only is not None:
+            os.environ["ROMP_POSTAL_CLIENT_ONLY"] = self._client_only
 
     def test_refused_peer_notify_kicks_one_ensure(self):
         self.assertFalse(km._notify_bus_peer("TESTHOST", 1, True), "the caller still sees the failure")

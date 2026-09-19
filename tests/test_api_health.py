@@ -105,7 +105,7 @@ def _session(be, sid=SID, label=LABEL, model_id="claude-fable-5-1"):
     s._skill_tool_ids, s._cli_working = set(), True
     s.marks = []
     s._mark = lambda st: s.marks.append(st)
-    s._learn_model = lambda pm, raw="": None
+    s._learn_model = lambda pm, raw="", served=False: None   # served: the AssistantMessage site names the served turn (2026-09-17)
     # the settle branch (ResultMessage) reads and clears all of these
     s._last_cost_total, s._last_usage_totals = 0.0, {}
     s.inflight, s._inflight_texts = 1, []

@@ -18,7 +18,7 @@
 #                 prints a notice and stands down; CI runs the same scan over
 #                 the full history, so nothing goes unscanned for long.
 #
-# The identifier scan makes two checks per pushed ref, both about what THIS
+# The identifier scan makes four checks per pushed ref, all about what THIS
 # push changes on the remote:
 #
 #   the tip's tree    the content the push exposes. A banned string anywhere in
@@ -35,6 +35,46 @@
 #                     inherits it that way, and a per-commit TREE scan refuses
 #                     them all, over files the branch never touched, when the
 #                     only exposure any of them could add is its tip.
+#   each new commit   the ADDRESSES it is authored and committed under: the part
+#                     after the @, grepped like a line of content. A commit is
+#                     published with its metadata, and the two checks above read
+#                     none of it. A clone with no user.email set in any scope has
+#                     git stamp <login>@<hostname -f> on every commit it makes,
+#                     and a machine's name and its domain suffix are exactly the
+#                     strings a denylist holds: such an address rode a branch's
+#                     commits and a pushed merge through both content checks and
+#                     gitleaks (2026-09-09). The domain only: the login and the
+#                     names are the author's own, on the denylist too (a FILE
+#                     must not carry them) and on every commit they make. And
+#                     only for an address the clone is NOT configured to publish
+#                     under (user.email in any scope, or GIT_AUTHOR_EMAIL,
+#                     GIT_COMMITTER_EMAIL or EMAIL in the environment): the
+#                     chosen address is the author's to publish whatever it says,
+#                     and its domain may well be their own name. An unset
+#                     user.email chooses nothing, which is the case this check
+#                     is for.
+#   each new commit   its MESSAGE, subject and body, grepped like lines of
+#                     content. Metadata too, and the place a commit describing a
+#                     fix names the path that failed or the machine it failed
+#                     on. A string a FILE carries has a forward remedy once it
+#                     is out (redact it in a later commit, push); a string a
+#                     message carries has none, only a rewrite of the commit
+#                     takes it back, so the push is the last check before it is
+#                     out for good. The whole denylist, the author's own name
+#                     included: the message is text they typed, and a file
+#                     naming them is refused on the same ground. Only what THIS
+#                     push publishes, like the other per-commit checks: a message
+#                     a remote already holds is refused to no purpose.
+#   an annotated tag  its OWN tagger and message, under the two checks above.
+#                     Every other read here peels a tag to the commit it names
+#                     (git grep, rev-list and log take a tag as that commit), so
+#                     the tag object's metadata was read by nothing, and a
+#                     `git push --tags` from a clone with no user.email stamps
+#                     the tagger the way it stamps a committer. The tag object
+#                     is read whenever its ref is pushed: a remote holding it at
+#                     this sha would not be updating the ref, and one holding it
+#                     at another sha is receiving a new object. A tag of a tag
+#                     is peeled one object at a time.
 #
 # The credential scan reads the same new commits, each merge by its
 # first-parent diff, and refuses the push on a hit. A range this clone cannot
@@ -56,6 +96,9 @@ set -euo pipefail
 refs="$(cat)"
 zero=0000000000000000000000000000000000000000
 blocked_ids=0
+blocked_addresses=0     # a subset of blocked_ids, with a remedy of its own
+blocked_messages=0      # likewise a subset of blocked_ids, with a remedy of its own
+blocked_tags=0          # an annotated tag's own tagger or message: one of the two above, with a remedy of its own
 blocked_creds=0
 failed_scan=0
 
@@ -110,9 +153,58 @@ added_lines() {   # <rev>
         !hdr && substr($0, 1, n) == plus { print f "\t" substr($0, n + 1) }'
 }
 
+# The addresses this clone publishes under BY CHOICE: user.email from any config
+# scope (an includeIf's included, as git resolves it for this repository) and the
+# environment's overrides, one per line. An unset user.email contributes nothing,
+# so on a clone that never set one every stamped address is checked. Blank lines
+# are harmless: a non-empty address never matches one whole.
+chosen_emails() {
+    git config --get-all user.email 2>/dev/null || true
+    printf '%s\n' "${GIT_AUTHOR_EMAIL:-}" "${GIT_COMMITTER_EMAIL:-}" "${EMAIL:-}"
+}
+
+# Whether an address is one this clone chose: matched whole, case-insensitively.
+is_chosen() {   # <address> <chosen addresses, one per line>
+    printf '%s\n' "$2" | grep -qixF -e "$1"
+}
+
+# The addresses a commit is stamped with that this clone did not choose, one
+# line per role as "<role>\t<address>", authored and committed, whether or not
+# the two addresses are the same. An empty address is skipped (there is nothing
+# to publish in `<>`), and so is a chosen one.
+#
+# --no-show-signature here and on the message read below: with log.showSignature
+# set, git log prints a signed commit's verification report (the signer's name
+# or address among it) ahead of whatever the format asks for. Read as part of the
+# message, that refused a clean signed commit whose signer is on the denylist,
+# as the author's own name and address are, and numbered a real hit's line from
+# the report's first line rather than the subject. The flag keeps both reads to
+# the commit's own fields.
+stamped_addresses() {   # <rev> <chosen addresses, one per line>
+    local role email
+    git log -1 --no-show-signature --format='authored%x09%ae%ncommitted%x09%ce' "$1" | while IFS=$'\t' read -r role email; do
+        [ -n "$email" ] || continue
+        is_chosen "$email" "$2" && continue
+        printf '%s\t%s\n' "$role" "$email"
+    done
+}
+
+# One header field of an annotated tag object (`tagger`, `object`), or its
+# message: the header ends at the first empty line and the message is the rest
+# (a signed tag's signature included; it is text like any other). awk reads the
+# whole object before either function prints.
+tag_field() {   # <tag_sha> <field>
+    git cat-file -p "$1" | awk -v f="$2" 'BEGIN { hdr = 1 }
+        hdr && !NF { hdr = 0; next }
+        hdr && !seen && $1 == f { seen = 1; sub(/^[^ ]+ /, ""); print }'
+}
+tag_message() {   # <tag_sha>
+    git cat-file -p "$1" | awk 'BEGIN { hdr = 1 } hdr && !NF { hdr = 0; next } !hdr { print }'
+}
+
 # ── identifiers ───────────────────────────────────────────────────────────
 scan_identifiers() {
-    local strings_file line grep_args local_ref local_sha _remote_ref remote_sha
+    local strings_file line grep_args local_ref local_sha _remote_ref remote_sha lines role email obj tagger chosen
     local hits links link blob link_path target revs rev
     strings_file="${ROMP_PRIVATE_STRINGS:-${XDG_CONFIG_HOME:-$HOME/.config}/romp/private-strings.txt}"
     [ -f "$strings_file" ] || return 0
@@ -126,6 +218,7 @@ scan_identifiers() {
         [ -n "$line" ] && grep_args+=(-e "$line")
     done < "$strings_file"
     [ ${#grep_args[@]} -gt 0 ] || return 0
+    chosen="$(chosen_emails)"      # the same for every commit in the push: read once
 
     while read -r local_ref local_sha _remote_ref remote_sha; do
         [ -n "${local_sha:-}" ] || continue
@@ -170,6 +263,52 @@ scan_identifiers() {
                 echo "$hits" | sed 's/^/  /' >&2
                 blocked_ids=1
             fi
+            # The addresses it is stamped with: the domain of each one the clone did
+            # not choose. `${email##*@}` is the whole string for an address with no @,
+            # which git never stamps; such an address is read whole.
+            while IFS=$'\t' read -r role email; do
+                if printf '%s' "${email##*@}" | grep -qi -F "${grep_args[@]}"; then
+                    echo "romp pre-push: commit ${rev:0:10} is $role as <$email>, an address this clone is not configured to use, whose domain carries a personal identifier" >&2
+                    blocked_ids=1
+                    blocked_addresses=1
+                fi
+            done < <(stamped_addresses "$rev" "$chosen")
+            # Its message, subject and body, like lines of content. -n so the report
+            # can point at the line (1 is the subject) without echoing the string;
+            # --no-show-signature so the message is all it reads (stamped_addresses).
+            if hits=$(git log -1 --no-show-signature --format=%B "$rev" | grep -in -F "${grep_args[@]}" | cut -d: -f1) && [ -n "$hits" ]; then
+                lines=$(printf '%s\n' "$hits" | tr '\n' ,); lines=${lines%,}
+                echo "romp pre-push: the MESSAGE of commit ${rev:0:10} carries a personal identifier on line $lines (line 1 is the subject)" >&2
+                blocked_ids=1
+                blocked_messages=1
+            fi
+        done
+
+        # An annotated tag's own tagger and message (the header note): the pushed
+        # object, peeled tag by tag down to the commit, which the loop above read.
+        # The tagger's address is read as a commit's are (not when the clone chose
+        # it, its domain otherwise) and the message like a commit's. A field that
+        # cannot be read counts as empty, as a symlink blob does above: under set -e
+        # a failed substitution would end the hook before its verdict.
+        obj="$local_sha"
+        while [ "$(git cat-file -t "$obj" 2>/dev/null || true)" = tag ]; do
+            tagger="$(tag_field "$obj" tagger 2>/dev/null)" || tagger=""
+            email=""
+            case "$tagger" in *"<"*">"*) email="${tagger#*<}"; email="${email%%>*}";; esac
+            if [ -n "$email" ] && ! is_chosen "$email" "$chosen" && printf '%s' "${email##*@}" | grep -qi -F "${grep_args[@]}"; then
+                echo "romp pre-push: tag $local_ref (${obj:0:10}) is tagged as <$email>, an address this clone is not configured to use, whose domain carries a personal identifier" >&2
+                blocked_ids=1
+                blocked_addresses=1
+                blocked_tags=1
+            fi
+            if hits=$(tag_message "$obj" 2>/dev/null | grep -in -F "${grep_args[@]}" | cut -d: -f1) && [ -n "$hits" ]; then
+                lines=$(printf '%s\n' "$hits" | tr '\n' ,); lines=${lines%,}
+                echo "romp pre-push: the MESSAGE of tag $local_ref (${obj:0:10}) carries a personal identifier on line $lines" >&2
+                blocked_ids=1
+                blocked_messages=1
+                blocked_tags=1
+            fi
+            obj="$(tag_field "$obj" object 2>/dev/null)" || obj=""
         done
     done <<< "$refs"
 
@@ -180,6 +319,18 @@ scan_identifiers() {
         echo "  If the string is only in an INTERMEDIATE commit, squash or rewrite the branch." >&2
         echo "  If the tip only INHERITS a string an older commit added, merge the main that has since redacted it." >&2
         echo "  If the named commit is already on some remote, this clone has not fetched it: fetch, then push again." >&2
+        if [ "$blocked_addresses" -ne 0 ]; then
+            echo "  An address this clone is not configured to use, with a banned string in its domain, is refused on every commit it stamps:" >&2
+            echo "    if it is yours, say so (git config --global user.email <address>) and push again;" >&2
+            echo "    if git filled it from the hostname (an unset user.email gets <login>@<hostname>), set yours, add user.useConfigOnly true" >&2
+            echo "    so git never fills it again, and rewrite the named commits, e.g. git rebase <base> --exec 'git commit --amend --no-edit --reset-author'." >&2
+        fi
+        if [ "$blocked_messages" -ne 0 ]; then
+            echo "  A commit MESSAGE is never redacted forward: rewrite the named commit (git commit --amend for the tip, a reword rebase with git rebase -i <base> for an older one) and push again." >&2
+        fi
+        if [ "$blocked_tags" -ne 0 ]; then
+            echo "  An annotated TAG's tagger and message are the tag object's own: re-create it under your configured address, with a clean message (git tag -f -a <name> <commit>), and push it again." >&2
+        fi
     fi
 }
 

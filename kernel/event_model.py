@@ -2859,8 +2859,11 @@ class FileAdapter:
         self._adopted = {}       # boundary uuid -> its episode's splice record (the /compact stdout),
         #                          filled by _adopt_detached_compactions. Downstream consumers key on
         #                          membership: an ADOPTED boundary is a LIVE manual compact, so the
-        #                          replay dedup must not arm on it (nothing after it is a replayed
-        #                          tail) and its atom must sort AFTER the episode's stdout.
+        #                          replay dedup, which arms at the pair's SUMMARY record keyed to that
+        #                          record's own boundary, must not arm for an adopted pair (nothing
+        #                          after the pair is a replayed tail: the 2026-08-19 reason, the arming
+        #                          record named 2026-09-19) and its atom must sort AFTER the episode's
+        #                          stdout.
         self._repair_compaction_stitches()
         self._stitch_resume_forks()
         self._adopt_detached_compactions()
@@ -2958,11 +2961,13 @@ class FileAdapter:
         stitching (the active path must already cross files). parent_of/leaf_uuid only —
         records are never mutated, so the shared _read_jsonl_incremental cache lists stay
         pristine. Adopted boundaries are recorded in self._adopted for the two downstream
-        consumers that must NOT treat them as attached: the replay dedup (a live manual
-        compact replays no tail — arming it ate the user's next genuine prompt whenever its
-        text repeated an earlier one) and the emit-order override (the boundary record is
-        appended BEFORE the stdout, so raw (t, seq) order would put the card inside the
-        command exchange it belongs after).
+        consumers that must NOT treat them as attached: the replay dedup, which arms at the
+        pair's SUMMARY record keyed to that record's own boundary and must not arm for an
+        adopted pair (2026-09-19; a live manual compact replays no tail, and armed there the
+        dedup ate the user's next genuine prompt whenever its text repeated an earlier one,
+        2026-08-19), and the emit-order override (the boundary record is appended BEFORE the
+        stdout, so raw (t, seq) order would put the card inside the command exchange it
+        belongs after).
 
         Placement note (re-derived 2026-08-19 against the golden scenario AND every
         boundary-bearing live-corpus transcript, plan_units pre vs post — the first cut
@@ -3004,8 +3009,8 @@ class FileAdapter:
         # seq-nearest the boundary+summary pair; the replayed copy's atoms fall to the dedup) —
         # else the last record seen: a MID-WRITE episode, one parse wide, never hidden, each
         # phase self-correcting at the next record. Boundary- or summary-as-leaf the pair is ON
-        # the active path (attached by shape, emits natively; the dedup arms there on an empty
-        # window — the file ends at the pair); caveat- or wrapper-as-leaf it adopts AT the
+        # the active path (attached by shape, emits natively; the dedup arms at the summary on an
+        # empty window — the file ends at the pair); caveat- or wrapper-as-leaf it adopts AT the
         # episode's last landed record — adopted, so unarmed — and re-seats once the stdout lands.
         episodes = {}
         for eu, er in self.by_uuid.items():          # insertion order = file read order
@@ -3554,22 +3559,61 @@ class FileAdapter:
                 continue
             if r.get("type") == "system" and r.get("subtype") == "compact_boundary":
                 _compacted = True
-                if u not in self._adopted:
-                    # the restore burst starts here and ends at the next assistant. An ADOPTED
-                    # boundary (a LIVE manual compact) never arms it: its transcript replays NO
-                    # tail — the records after it are the user's genuine next actions, and the
-                    # armed window silently ate the next typed prompt whenever its text repeated
-                    # any earlier message ("continue", a nudge) — a dropped real ask (2026-08-19).
-                    # Attached boundaries (auto, and the resume re-splice, which DOES replay) keep it.
-                    _restoring = True
                 last_boundary = u
+                # The boundary alone arms NOTHING (2026-09-19): the restore window opens at the
+                # isCompactSummary record below, the record that begins the Claude CLI's replay.
+                # Armed here, the window also covered a boundary that NO replay follows — a Codex
+                # session compacts at the top of the next turn and writes no summary record, so the
+                # record right after its boundary is the person's next prompt, and one whose text
+                # repeated an earlier message ("continue", a canned follow-up sent twice) was read
+                # as a replay and dropped: gone from the chat and the turns, its reply filed as a
+                # triggerless continuation of the boundary's turn. Measured on one machine's live
+                # corpus (2026-09-19, counts only): every attached boundary (338 in 32 transcripts,
+                # all trigger auto) has its summary as the very next record in FILE order, but this
+                # walk is (second, read order) and the CLI stamps the summary one second BEFORE its
+                # boundary in 104 of the 338 (9 of them the transcript's first compaction), so there
+                # the summary is walked first; no live window holds a textual replayed record (0 of
+                # 338, so the atom sets could not tell the two arming records apart), and old-vs-new
+                # direct parses of all 32 agree atom for atom and turn for turn (371,758 atoms and
+                # 10,418 turns each side; no PLACEMENTS_V bump), while the cards carrying a summary
+                # rose from 261 to 338 because an early-stamped summary now lands on its own card.
+                # The summary branch keys on its OWN boundary, so the window opens before the first
+                # replayed record on either stamp order (tests/test_event_model_compact_turn.py).
             elif r.get("type") == "assistant":
                 _restoring = False         # work resumed → anything later is new, not restored context
             elif r.get("type") == "user" and r.get("isCompactSummary") is True:
+                # The summary's OWN boundary, by the record's designed link (2026-09-19): its parent
+                # when that is a compact_boundary on record, else the last boundary walked. The walk
+                # is (second, read order) and the CLI stamps the summary one second before its
+                # boundary in 104 of the 338 attached boundaries on one machine's corpus (every one
+                # of the 338 parents its summary to its boundary), so keyed on the last boundary
+                # walked this branch met NO boundary yet (a transcript's first compaction: the window
+                # never opened and a replayed tail rendered as new asks) or the PREVIOUS one (an
+                # adopted manual pair earlier in the session disarmed an unrelated auto compaction's
+                # dedup, and this summary's text landed on the manual card). The fallback serves a
+                # summary whose boundary is not on record here: a restored assembly entry holds only
+                # the tail's records and carries last_boundary from its checkpoint.
+                bp = self.parent_of.get(u)
+                br = self.by_uuid.get(bp) if bp else None
+                own = bp if (br is not None and br.get("type") == "system"
+                             and br.get("subtype") == "compact_boundary") else last_boundary
                 stext = _text_of(_content(r.get("message")))
-                if last_boundary and stext:            # attach to the boundary just seen; cap for transport
-                    summaries[last_boundary] = stext[:SUMMARY_CAP] + (
+                if own and stext:                      # attach to its own boundary; cap for transport
+                    summaries[own] = stext[:SUMMARY_CAP] + (
                         "\n\n…(summary truncated)" if len(stext) > SUMMARY_CAP else "")
+                if own and own not in self._adopted:
+                    # the restore burst starts HERE — the summary is what the CLI writes before it
+                    # replays the recent tail verbatim — and ends at the next assistant. An ADOPTED
+                    # boundary's summary (a LIVE manual compact) never arms it: its transcript replays
+                    # NO tail — the records after the pair are the user's genuine next actions, and
+                    # the armed window silently ate the next typed prompt whenever its text repeated
+                    # any earlier message ("continue", a nudge) — a dropped real ask (2026-08-19).
+                    # Attached boundaries' summaries (auto, and the resume re-splice, which DOES
+                    # replay) arm it. _adopted is complete by now: every _prepass caller runs on an
+                    # adapter whose __init__ ended in _run_graph_passes (which fills it), or right
+                    # after _asm_fold's own _run_graph_passes call (all five call sites read
+                    # 2026-09-19), so membership here is the whole parse's, never a partial one.
+                    _restoring = True
             elif r.get("type") == "user" and not r.get("isMeta"):
                 txt = _text_of(_content(r.get("message")))
                 if txt:
@@ -4828,9 +4872,10 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             parent_d[u] = None if p == u else p
             new_leaf = u
         if t == "system" and r.get("subtype") == "compact_boundary":
-            return _asm_demote("boundary")   # arms the restore dedup and can re-seat adoptions
+            return _asm_demote("boundary")   # sets the pre-pass's compaction gate and can re-seat adoptions
         if r.get("isCompactSummary") is True:
-            return _asm_demote("summary")    # attaches to boundaries in the chronological pre-pass
+            return _asm_demote("summary")    # attaches to its boundary and arms the restore dedup in the
+            #                                  chronological pre-pass (the summary, not the boundary, 2026-09-19)
         if t == "user" and r.get("promptId") and r["promptId"] in ad.prompt_ids:
             # A repeated promptId is ROUTINE — every record of a turn wears its prompt's id, so
             # tool results repeat it on nearly every append (measured: this gate, unshaped,

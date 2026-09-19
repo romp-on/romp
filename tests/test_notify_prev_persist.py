@@ -70,7 +70,7 @@ def _feed(*cards, sessions=None, now=None):
 def _entry(col, sid, announced="same", at=1_000):
     """A store entry as the last life wrote it: seen in `col`, announced for `announced` (the column
     itself by default — a card in a notified column was told when it got there) at `at`."""
-    return {"sid": sid, "column": col, "announced": col if announced == "same" else announced,
+    return {"sid": sid, "board": "feed", "column": col, "announced": col if announced == "same" else announced,   # board: phase three of the card boards (the entry is checked against its board's notify set)
             "announcedAt": at if (announced == "same" or announced is not None) else None}
 
 
@@ -212,7 +212,7 @@ class TheSamePairIsAnnouncedOnce(_Base):
         self.boot(_feed(_card(WEB + ":g1", WEB, "working"), sessions=[WEB]))
         km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "needs_input"), sessions=[WEB]))
         km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "working"), sessions=[WEB]))
-        self.assertEqual(self.disk()[WEB + ":g1"], {"sid": WEB, "column": None, "announced": "needs_input",
+        self.assertEqual(self.disk()[WEB + ":g1"], {"sid": WEB, "board": "feed", "column": None, "announced": "needs_input",
                                                     "announcedAt": self.disk()[WEB + ":g1"]["announcedAt"]})
         out, _ = self.boot(_feed(_card(WEB + ":g1", WEB, "working"), sessions=[WEB]))
         self.assertEqual(out, [])
@@ -414,7 +414,7 @@ class CorruptOrUnreadableSnapshot(_Base):
     def test_malformed_entries_are_skipped_not_fatal(self):
         self.seed_disk({WEB + ":g1": _entry("completed", WEB), WEB + ":g2": "completed", WEB + ":g3": 7,
                         WEB + ":g4": {"column": "working", "sid": WEB},
-                        WEB + ":g5": {"column": None, "announced": None, "sid": WEB}})
+                        WEB + ":g5": {"board": "feed", "column": None, "announced": None, "sid": WEB}})
         out, err = self.boot(_feed(_card(WEB + ":g1", WEB, "completed"),
                                    _card(WEB + ":g2", WEB, "completed"), sessions=[WEB]))
         self.assertEqual([o[3] for o in out], [WEB + ":g2"], "an entry we could not read is no memory of the card")

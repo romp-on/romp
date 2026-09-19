@@ -434,6 +434,47 @@ test("stitchMessages: fills a missing display name from the matched lane; unmatc
   assert.equal(g.toId, ghost);
 });
 
+test("stitchMessages: the sender's row ends at the recipient's lane, named with its host; the two kernels' copies dedupe by the delivery mid", () => {
+  // The LOCAL kernel's web mailed TESTHOST's web (a twin by name). Its kernel's row ends at the recipient's bare sid
+  // (the bus row's to_sid) and names it "TESTHOST:web"; the read receipt gave it the recipient's delivery mid (dmid).
+  // TESTHOST's kernel emitted the delivered copy under THAT mid, both ends named bare, its foreign end prefixed.
+  const sessions = [{ id: U, name: "web" }, { id: "TESTHOST:" + V, name: "TESTHOST:web" }];
+  const merged = stitchMessages([
+    { id: "m1", dmid: "m1-landed", fromId: U, toId: V, from: "web", to: "TESTHOST:web", sent: 100, exec: 130, hasExec: true, pending: false },
+    { id: "m1-landed", fromId: "TESTHOST:" + U, toId: "TESTHOST:" + V, from: "web", to: "web", sent: 100, exec: 130, hasExec: true, pending: false },
+  ], sessions);
+  assert.equal(merged.length, 1, "one message, one connector: the recipient's copy is the sender's, by the delivery mid");
+  assert.deepEqual([merged[0].id, merged[0].dmid, merged[0].fromId, merged[0].toId], ["m1", "m1-landed", U, "TESTHOST:" + V]);
+  assert.deepEqual([merged[0].from, merged[0].to], ["web", "TESTHOST:web"], "the remote twin is told apart by its host, as on its lane label");
+  // the recipient's copy upgrades a sender's row that has no exec yet, keeping the sender's ids (the join keys) and
+  // ending the pending state: an exec IS the landing
+  const up = stitchMessages([
+    { id: "m4", dmid: "m4-landed", fromId: U, toId: V, from: "web", to: "TESTHOST:web", sent: 100, exec: 100, hasExec: false, pending: true },
+    { id: "m4-landed", fromId: "TESTHOST:" + U, toId: "TESTHOST:" + V, from: "web", to: "web", sent: 100, exec: 140, hasExec: true, pending: false },
+  ], sessions);
+  assert.equal(up.length, 1);
+  assert.deepEqual([up[0].id, up[0].dmid, up[0].exec, up[0].hasExec, up[0].pending], ["m4", "m4-landed", 140, true, false]);
+  // before the read receipt reaches the sender's kernel its row has no dmid yet; the delivered copy's originMid alone
+  // joins them, so the pair never shows in the receipt's lag
+  const early = stitchMessages([
+    { id: "m6", fromId: U, toId: V, from: "web", to: "TESTHOST:web", sent: 100, exec: 100, hasExec: false, pending: true },
+    { id: "m6-landed", originMid: "m6", fromId: "TESTHOST:" + U, toId: "TESTHOST:" + V, from: "web", to: "web", sent: 100, exec: 150, hasExec: true, pending: false },
+  ], sessions);
+  assert.equal(early.length, 1);
+  assert.deepEqual([early[0].id, early[0].exec, early[0].hasExec, early[0].pending], ["m6", 150, true, false]);
+});
+
+test("stitchMessages: a remote kernel's own connector names its lanes as the board labels them; a thread-anchored end keeps the thread's name", () => {
+  const sessions = [{ id: "TESTHOST:" + U, name: "TESTHOST:web" }, { id: "TESTHOST:" + V, name: "TESTHOST:api" }];
+  const [m] = stitchMessages([{ id: "m2", fromId: "TESTHOST:" + U, toId: "TESTHOST:" + V, from: "web", to: "api", sent: 1, exec: 1, hasExec: false }], sessions);
+  assert.deepEqual([m.from, m.to], ["TESTHOST:web", "TESTHOST:api"], "bare names from the remote kernel wear the host on the merged board");
+  const [t] = stitchMessages([{ id: "m3", fromId: "TESTHOST:" + U, fromThreadT: 5, toId: "TESTHOST:" + V, from: "review-thread", to: "api", sent: 1, exec: 1, hasExec: false }], sessions);
+  assert.deepEqual([t.from, t.to], ["review-thread", "TESTHOST:api"], "a thread speaks under its own name from its parent's lane");
+  // a LOCAL lane's row keeps the kernel's own name for it (a local thread's name among them): only remote lanes re-label
+  const [l] = stitchMessages([{ id: "m5", fromId: U, toId: V, from: "notes-thread", to: "", sent: 1, exec: 1, hasExec: false }], [{ id: U, name: "web" }, { id: V, name: "api" }]);
+  assert.deepEqual([l.from, l.to], ["notes-thread", "api"]);
+});
+
 test("mergeHostBars: stitches connectors against the lane list handed in (bars carry no lanes)", () => {
   const sessions = [{ id: U, name: "a" }, { id: "TESTHOST:" + V, name: "TESTHOST:b" }];
   const perHost = {

@@ -429,7 +429,7 @@ class ServedWidgetReorder(unittest.TestCase):
         self.assertEqual(self._ids(p["statusRows"]), ["name", "folder", "branch", "host"])
         for r in p["tabRows"] + p["statusRows"]:
             if r["divider"]:
-                self.assertEqual((r["role"], r["aria"], r["label"], r["grip"], r["hasSwitch"]), ("separator", "session name", "session name", None, False), "the divider: a separator named for the name's place, no grip, no switch: %r" % r)
+                self.assertEqual((r["role"], r["aria"], r["label"], r["grip"], r["hasSwitch"]), ("separator", "Session name", "Session name", None, False), "the divider: a separator named for the name's place, no grip, no switch: %r" % r)
             else:
                 self.assertEqual(r["grip"]["text"], "⠿", "the six-dot grip: %r" % r)
                 self.assertEqual(r["grip"]["aria"], "Drag to reorder: " + r["label"])

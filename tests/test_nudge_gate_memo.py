@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""The nudge walk's planner-placement gate is derived once per (parse, store) and served while both stand
-(2026-09-09), and the walk reads the store through the shared read-only view.
+"""The nudge walk's planner-placement gate is derived once per (parse, store, episode log, clears log) and
+served while all four stand (2026-09-09), and the walk reads the store through the shared read-only view.
 
 Measured on the maintainer's box (py-spy over the live kernel, 90 s): the pusher's jobs stage was 77% of the
 kernel's samples, _auto_nudge_tick 91% of that, and the gate's derivation (re-segmenting every turn, applying
 the seams, building the plan units, normalizing every recorded placement key) the bulk of it, run for every
 idle session on every cycle with nothing changed; the walk's fresh goal-store load per session per cycle was
-most of the 66 loads a cycle. Pins: the gate is served on the second call and re-derived when the parse or the
-store moves, its answer equals the direct derivation, a failed derivation is never cached, a parse the cache
-does not hold is derived every time, the memo is bounded, the walk reads through the shared view and never a
-fresh load, and the counters ride /perf.
+most of the 66 loads a cycle. Pins: the gate is served on the second call and re-derived when the parse, the
+store, the episode log or the clears log moves (a row landing on either log during the derivation re-derives
+the next call), its answer equals the direct derivation, a failed derivation is never cached, a parse the
+cache does not hold is derived every time, the memo is bounded, the walk reads through the shared view and
+never a fresh load, and the counters ride /perf.
 
 Synthetic transcript, states and store under a temp root; a private synthetic sid (the goal-store fixture
 rule); the closer is off so the walk reaches the gate without judge marks."""
@@ -32,6 +33,7 @@ km = load_source("romp_kernel_nudge_gate", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 SID = "11111111-2222-3333-4444-888888888801"
+OTHER_SID = "11111111-2222-3333-4444-888888888802"    # a second session, whose cleared card seeds the clears log
 NOW = 1_800_000_000
 T0 = NOW - 3600
 
@@ -76,6 +78,9 @@ class _Gate(unittest.TestCase):
         self.store = {"rompUuid": SID, "seq": 1, "lastNode": g["id"], "closedTurns": [], "nodes": {g["id"]: g},
                       "placements": {}, "status": {g["id"]: "working"}}
         self._save_store()
+        (jd.STATE / "cleared.jsonl").write_text(json.dumps({"id": OTHER_SID + ":g1", "t": T0, "op": "clear"}) + "\n")
+        # ^ another session's cleared card: the clears log stands before every test, so a test's own row is an
+        #   append to an existing log (its stat moves; a check of the file's existence alone would not)
         self._reset()
 
     def _write(self, recs):
@@ -157,7 +162,7 @@ class GateMemo(_Gate):
         self.assertEqual(pu.call_count, 1, "the journal is a store input: the key moved")
 
     def test_a_clear_boundary_re_derives(self):
-        """_placed_key scopes its fuzzy match by the episode floor, read from the clears log: a boundary row
+        """_placed_key scopes its fuzzy match by the episode floor, read from the episode log: a boundary row
         appended there changes the gate's answer with neither the parse nor the store moving, so the log's
         stat is part of the key."""
         km._nudge_placement_gate(SID, self._turns(), self._view())
@@ -166,7 +171,96 @@ class GateMemo(_Gate):
                                                   + json.dumps({"head": "u9", "fsid": SID, "t": NOW - 60}) + "\n")
         with patch.object(jd, "plan_units", wraps=jd.plan_units) as pu:
             km._nudge_placement_gate(SID, self._turns(), self._view())
+        self.assertEqual(pu.call_count, 1, "the episode log is a gate input: the key moved")
+
+    def test_a_cleared_row_re_derives(self):
+        """plan_units reads STATE/cleared.jsonl live for the open segment's live re-plan unit (_live_anchor_gone ->
+        _cleared_under -> _view_cleared): a clear row appended there changes the gate's answer with the parse, the
+        shared view and the episode log all standing, so that file's stat is part of the key too. The row alone: no
+        store, journal, transcript or episode-log write, and the view object is the same one."""
+        turns, store = self._turns(), self._view()
+        km._nudge_placement_gate(SID, turns, store)
+        with (jd.STATE / "cleared.jsonl").open("a") as f:
+            f.write(json.dumps({"id": SID + ":g1", "t": NOW, "op": "clear"}) + "\n")
+        self.assertIs(self._view(), store, "a clear row moves no store input: the shared view stands")
+        with patch.object(jd, "plan_units", wraps=jd.plan_units) as pu:
+            km._nudge_placement_gate(SID, turns, store)
         self.assertEqual(pu.call_count, 1, "the clears log is a gate input: the key moved")
+        self.assertEqual(km._NUDGE_GATE_STATS, {"served": 0, "derived": 2, "failed": 0})
+        with patch.object(jd, "plan_units", wraps=jd.plan_units) as pu:
+            km._nudge_placement_gate(SID, turns, store)
+        self.assertEqual(pu.call_count, 0, "nothing moved since: served")
+        self.assertEqual(km._NUDGE_GATE_STATS, {"served": 1, "derived": 2, "failed": 0})
+
+    def _row_landing_during_the_derivation_re_derives_the_next_call(self, land):
+        """Each log's stat is taken BEFORE the derivation: a row that lands while plan_units runs sits under a
+        stat the stored key does not hold, so the next call re-derives instead of serving an answer computed
+        over a log the row had not reached; the call after that, with nothing moved, is served."""
+        turns, store = self._turns(), self._view()
+        real = jd.plan_units
+
+        def landing(*a, **kw):
+            land()
+            return real(*a, **kw)
+        with patch.object(jd, "plan_units", side_effect=landing):
+            km._nudge_placement_gate(SID, turns, store)              # derived, with the row landing mid-derivation
+        self.assertIs(self._view(), store, "the row moves no store input: the shared view stands")
+        with patch.object(jd, "plan_units", wraps=jd.plan_units) as pu:
+            km._nudge_placement_gate(SID, turns, store)
+        self.assertEqual(pu.call_count, 1, "the key holds the stat from before the derivation: derived again")
+        self.assertEqual(km._NUDGE_GATE_STATS, {"served": 0, "derived": 2, "failed": 0})
+        with patch.object(jd, "plan_units", wraps=jd.plan_units) as pu:
+            km._nudge_placement_gate(SID, turns, store)
+        self.assertEqual(pu.call_count, 0, "nothing moved since: served")
+        self.assertEqual(km._NUDGE_GATE_STATS, {"served": 1, "derived": 2, "failed": 0})
+
+    def test_a_clear_row_landing_during_the_derivation_re_derives_the_next_call(self):
+        def land():
+            with (jd.STATE / "cleared.jsonl").open("a") as f:
+                f.write(json.dumps({"id": SID + ":g1", "t": NOW, "op": "clear"}) + "\n")
+        self._row_landing_during_the_derivation_re_derives_the_next_call(land)
+
+    def test_an_episode_row_landing_during_the_derivation_re_derives_the_next_call(self):
+        jd.EPIDIR.mkdir(parents=True, exist_ok=True)
+        epi = jd.EPIDIR / (SID + ".jsonl")
+        epi.write_text(json.dumps({"head": "u1", "fsid": SID, "t": T0}) + "\n")   # the log stands before the first call
+
+        def land():
+            with epi.open("a") as f:
+                f.write(json.dumps({"head": "u9", "fsid": SID, "t": NOW - 60}) + "\n")
+        self._row_landing_during_the_derivation_re_derives_the_next_call(land)
+
+    def test_a_cleared_anchor_reopens_the_planner_queue(self):
+        """The answer the term protects: an open segment whose ask is placed on a card reads 'every unit placed',
+        and a clear of that card owes the planner a live re-plan (plan_units yields the segment's unplaced live
+        unit), so the gate's answer flips on the row alone, with the store, the parse and the episode log
+        unchanged. Served from a key without the clears log, the walk would read the queue as empty and wave the
+        nudge past the planner gate while the re-plan is due. An undo row puts the card back, the placed ask
+        with it, and the answer returns to False on that row alone."""
+        self._write([uline(T0 + 3000, "wire up the reconnect banner", "u1")])   # one OPEN segment: its prompt unit only
+        turns, store = self._turns(), self._view()
+        units = jd.plan_units({"turns": turns}, store)
+        self.assertEqual([u[1] for u in units], ["prompt"], "an open final segment yields its prompt unit alone")
+        seg_id = units[0][0]
+        self.store["placements"] = {seg_id + "#p": SID + ":g1"}     # the prompt-run placed the ask on the card
+        self.store["seq"] = 2
+        self._save_store()
+        turns, store = self._turns(), self._view()
+        self.assertFalse(km._nudge_placement_gate(SID, turns, store), "the ask is placed: the queue is empty")
+        with (jd.STATE / "cleared.jsonl").open("a") as f:
+            f.write(json.dumps({"id": SID + ":g1", "t": NOW, "op": "clear"}) + "\n")
+        self.assertIs(self._view(), store, "a clear row moves no store input: the shared view stands")
+        got = km._nudge_placement_gate(SID, turns, store)
+        self.assertEqual(got, self._direct(turns, store), "the gate's answer is the direct derivation")
+        self.assertTrue(got, "the cleared anchor owes a live re-plan: the queue is not empty")
+        self.assertEqual(km._NUDGE_GATE_STATS, {"served": 0, "derived": 2, "failed": 0})
+        with (jd.STATE / "cleared.jsonl").open("a") as f:
+            f.write(json.dumps({"id": SID + ":g1", "t": NOW + 1, "op": "undo"}) + "\n")
+        self.assertIs(self._view(), store, "an undo row moves no store input either")
+        got = km._nudge_placement_gate(SID, turns, store)
+        self.assertEqual(got, self._direct(turns, store), "the gate's answer is the direct derivation")
+        self.assertFalse(got, "the card is back and the ask placed on it: the queue is empty again")
+        self.assertEqual(km._NUDGE_GATE_STATS, {"served": 0, "derived": 3, "failed": 0})
 
     def test_a_placement_landing_between_the_read_and_the_derivation_is_never_pinned(self):
         """The maintainers' review of the first cut (2026-09-09): cycle N read the view, a judge published a
@@ -223,7 +317,7 @@ class GateMemo(_Gate):
         turns, store = self._turns(), self._view()
         km._nudge_gate_memo.clear()
         for i in range(km._NUDGE_GATE_MEMO_MAX + 1):
-            km._nudge_gate_memo["11111111-2222-3333-4444-%012d" % i] = (("k",), None, None, False)
+            km._nudge_gate_memo["11111111-2222-3333-4444-%012d" % i] = (("k",), None, None, None, False)
         oldest = next(iter(km._nudge_gate_memo))
         before = len(km._nudge_gate_memo)
         km._nudge_placement_gate(SID, turns, store)    # a store past the bound evicts the oldest entry first

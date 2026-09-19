@@ -489,6 +489,39 @@ test("the control is absent for a picture and a PDF, present for the SVG Source 
   assert.equal(blank(o), false, "back with the read view");
 });
 
+test("the view group holding the Source button is shown after an SVG's first paint and stays shown after Source on and after Source off; for a picture or a PDF it stays hidden", async (t) => {
+  // Over a picture the Source button is the view group's one control (no format pair, the zoom glyph hidden), and
+  // renderBody's media branch decides it AFTER the group's sync at the top of the paint, so the group is re-read
+  // once the button is decided. The SVG's first-paint assertion on the group is the pin. The Source-on and
+  // Source-off assertions held before the re-read too (on those paints the button, or the glyph, was already
+  // shown when the top sync ran); they pin the two later paints. The PNG and the PDF pin the re-read's other
+  // outcome: every control hidden, the group hidden with them, so the bar keeps no gap.
+  const o = await openFile(t, FIG);
+  const group = o.wrap.querySelector(".fileview-group-view");
+  assert.ok(group, "the view group");
+  assert.equal(o.body.children[0].className, "fileview-imgbox", "the first paint: the picture");
+  assert.equal(o.btn("Source").hidden, false, "the Source button is shown once the SVG's bytes landed");
+  assert.equal(group!.hidden, false, "after the first paint the group is shown: the Source button is its one control, decided by the media branch after the group's sync, so the group is re-read after it (before the re-read, the shown button sat in a hidden group and the Source view was unreachable)");
+  o.btn("Source").click();
+  await settle();
+  assert.equal(o.body.children[0].className, "fileview-code", "Source on: the XML");
+  assert.equal(group!.hidden, false, "Source on: still shown (a text view: the zoom glyph shows too)");
+  o.btn("Source").click();
+  await settle();
+  assert.equal(o.body.children[0].className, "fileview-imgbox", "Source off: the picture again");
+  assert.equal(group!.hidden, false, "Source off: still shown (the Source button is still its one control)");
+  o.fv.closeFileView();
+  const pic = await openFile(t, PLOT);
+  assert.equal(pic.body.children[0].className, "fileview-imgbox", "a PNG: the picture");
+  assert.equal(pic.btn("Source").hidden, true, "a PNG has no Source view");
+  assert.equal(pic.wrap.querySelector(".fileview-group-view")!.hidden, true, "a picture: every view control hidden, the group with them");
+  pic.fv.closeFileView();
+  const pdf = await openFile(t, PAPER);
+  assert.equal(pdf.body.children[0].className, "fileview-frame", "a PDF: the browser's viewer in a frame");
+  assert.equal(pdf.btn("Source").hidden, true, "a PDF has no Source view");
+  assert.equal(pdf.wrap.querySelector(".fileview-group-view")!.hidden, true, "a PDF: every view control hidden, the group with them");
+});
+
 test("the control shows only once a text body is KNOWN: hidden beside the loader, shown when a text file's bytes land, never for a picture", async (t) => {
   store.set(SIZE_KEY, "130");
   const o = await openFile(t, REPORT, false);

@@ -912,6 +912,15 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
     body.replaceChildren(why);
   };
 
+  // The view group takes no gap when every control in it is hidden (edit mode hides the format pair too). Its
+  // state is derived from the controls' own hidden states, so it is read after the last of them is decided: at
+  // the top of the paint, and again inside the media branch, which decides the Source button after that first
+  // read. Over a picture the Source button is the group's one control (no format pair, the zoom glyph hidden),
+  // so an SVG's first paint would otherwise leave the shown button inside a hidden group and the Source view
+  // unreachable; a PNG or a PDF keeps every control hidden and the group hidden with them.
+  const syncViewGroup = () => {
+    viewGroup.hidden = !(segBtns.some(([, b]) => !b.hidden) || !textSize.trigger.hidden || !srcBtn.hidden);
+  };
   // Chooses the body for the current prefs and syncs the buttons. The pressed state flips SYNCHRONOUSLY
   // in the click handler — the immediate acknowledgement ui/CLAUDE.md requires — and so does the content
   // swap, since the text is already in memory.
@@ -925,7 +934,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
     }
     editBtn.hidden = editing || text === null || !isText || !mtimeNs;
     textSize.sync();                          // the text-size control follows every paint: shown over a text view only
-    viewGroup.hidden = !(segBtns.some(([, b]) => !b.hidden) || !textSize.trigger.hidden || !srcBtn.hidden);   // an all-hidden group takes no gap (edit mode hides the pair too)
+    syncViewGroup();
     saveBtn.hidden = !editing;
     cancelBtn.hidden = !editing;
     if (isImage || isPdf) {
@@ -939,6 +948,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
       srcBtn.hidden = !(isSvgImage && objUrl !== null);
       srcBtn.classList.toggle("on", svgSource);
       srcBtn.setAttribute("aria-pressed", String(svgSource));
+      syncViewGroup();                        // the Source button was decided after the group's read above: the group follows it
       if (objUrl === null) return;            // the romp loader holds the body until the bytes land
       if (svgSource && svgText !== null) {
         body.replaceChildren(codeBlock(svgText, path, true));   // long lines always soft-wrap (the user 2026-08-24)
@@ -1736,10 +1746,13 @@ export function initFileView(poster: (m: Record<string, unknown>) => void,
     } else if (m.type === "fileSaveFailed" && editHooks && m.reqId === editHooks.reqId) {
       const h = editHooks; editHooks = null;
       h.failed(String(m.error || "the save failed"));
-    } else if (m.type === "warn" && editHooks) {
+    } else if (m.type === "warn" && typeof m.sid !== "string" && editHooks) {
       // A federation drop (the session's host unreachable) answers a saveFile with a warn instead
       // of a reply — the feed page renders no toasts, so without this the button spins forever
       // (the same hole the browse overlay closed for listDir).
+      // A warn carrying a session id answers a send INTO that session (the kernel's refusal of a slash command a
+      // Codex session cannot take, broadcast to every chat pane when no socket carried it; 2026-09-19), never this
+      // save: mid-save it read as the save failing. A save's own failure names no session.
       const h = editHooks; editHooks = null;
       h.failed(String(m.text || "the session's host is not answering — the save was not sent"));
     }

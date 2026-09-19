@@ -205,8 +205,8 @@ test("the ONE gate in applyFeedPayload: the frame's reading is taken first, and 
   assert.equal((body.match(/pendingCleared\.delete\(/g) || []).length, 1, "one confirmation by absence, the gated one");
   // the two reconcilers honour the flag they are handed
   const fm = FEED.slice(FEED.indexOf("function reconcileFollowMove("), FEED.indexOf("\n}\n", FEED.indexOf("function reconcileFollowMove(")));
-  assert.match(fm, /if \(!a && cardsUnknown\) continue;\s*\n\s*if \(!a \|\| a\.column === "working" \|\| pendingMoveKind\.get\(id\) === "answer"\) \{/, "absent: gone only when the frame can vouch for every host's cards; the three verdicts' one condition stands");
-  assert.match(fm, /clearFollowMove\(id, !a \? "gone" : a\.column === "working" \? "confirmed" : "answer-yield"\);/, "presence-driven verdicts go on");
+  assert.match(fm, /if \(!a && cardsUnknown\) continue;\s*\n\s*if \(!a \|\| askColumn\(a\) === "asks" \|\| pendingMoveKind\.get\(id\) === "answer"\) \{/, "absent: gone only when the frame can vouch for every host's cards; the three verdicts' one condition stands");
+  assert.match(fm, /clearFollowMove\(id, !a \? "gone" : askColumn\(a\) === "asks" \? "confirmed" : "answer-yield"\);/, "presence-driven verdicts go on (Working read through askColumn since the boards' phase two)");
   const pd = FEED.slice(FEED.indexOf("function reconcilePendingDone("), FEED.indexOf("\n}\n", FEED.indexOf("function reconcilePendingDone(")));
   assert.match(pd, /if \(st === "done" \|\| \(st === undefined && !cardsUnknown\)\) pendingDone\.delete\(id\);/);
   // the mirror's card half takes the frame's reading through, a set or a boolean

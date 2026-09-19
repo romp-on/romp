@@ -38,8 +38,8 @@ test("arbitrary combinations union-filter; All is exclusive and the default boar
 test("the lens is its own slot in the view family; needs-you passes (the family's interrupt rule)", () => {
   assert.match(FEED, /function viewScope\(list: AskItem\[\]\): AskItem\[\]/,
     "the combobox/search scoping kept its own layer");
-  assert.match(FEED, /return s\.filter\(\(a\) => lensVisible\(feedLens, u, a\.sid\) \|\| a\.column === "needs_input"\);/,
-    "the same breakthrough the satellite and internals lens wear");
+  assert.match(FEED, /return s\.filter\(\(a\) => lensVisible\(feedLens, u, a\.sid\) \|\| isNeedsYou\(FEED_BOARD, a\.category \?\? a\.column\)\);/,
+    "the same breakthrough the satellite and internals lens wear: the board's badge category (board-def.ts, phase two), needs_input for the feed");
   // hover-freeze counts through viewFiltered = viewBase — the badges stay honest for free (the
   // team-internals slot retired 2026-08-25 on the user's verdict; the slot family stands)
   assert.match(FEED, /return viewBase\(list\);/);

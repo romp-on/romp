@@ -49,7 +49,7 @@ test("every existing control keeps its id and sits in exactly one pane, by the a
     chat: ["rs-compact", "rs-dense", "rs-chatscheme", "rs-striprows", "rs-cmtmodel", "rs-cmteffort", "rs-cmtfast", "rs-thinksum", "rs-wholechat", "rs-widgets", "rs-rings", "rs-swidgets"],   // rs-rings: the ring widgets' rows (2026-09-14), under the title widgets' rows in the same section
     feed: ["rs-feedcollapsed"],
     sessions: ["rs-defaultdir", "rs-backend"],
-    automation: ["rs-autonudge", "rs-suggestcompact"],
+    automation: ["rs-autonudge", "rs-suggestcompact", "rs-alwaysfast", "rs-retryupgrade"],   // the two model switches: kernel policies applied to sessions on the kernel's own initiative (2026-09-17)
     tasks: ["rs-tasktrack", "rs-judgemodel", "rs-judgefast", "rs-judgeeffort", "rs-distillmodel", "rs-distillfast", "rs-distilleffort", "rs-indexmodel", "rs-indexfast", "rs-indexeffort", "rs-judgeconc"],
     debug: ["rs-judges-index", "rs-judges-triage", "ra-open", "rs-log-open", "rsver"],
   };
@@ -102,7 +102,9 @@ test("every existing control keeps its id and sits in exactly one pane, by the a
   assert.doesNotMatch(C, /id=rs-badge|id=rs-branch/, "the badge and branch checkboxes left the Display section: the Status line section's rows are the controls (T409)");
   assert.doesNotMatch(C, />Transcript<|>Text and comments<|>Files<|>Strip</, "the old Chat heads are gone");
   // Automation: the nudges; Task tracking: the judges alone; Debug: the judges' views then the diagnostics
-  assert.ok(ps.automation.indexOf(">Nudges<") < ps.automation.indexOf("id=rs-autonudge") && ps.automation.indexOf("id=rs-autonudge") < ps.automation.indexOf("id=rs-suggestcompact"), "Automation: Nudges, Auto Nudge, Suggest /compact");
+  assert.ok(ps.automation.indexOf(">Nudges<") < ps.automation.indexOf("id=rs-autonudge") && ps.automation.indexOf("id=rs-autonudge") < ps.automation.indexOf("id=rs-suggestcompact")
+            && ps.automation.indexOf("id=rs-suggestcompact") < ps.automation.indexOf("<div class='rs-sec'>Model</div>") && ps.automation.indexOf(">Model<") < ps.automation.indexOf("id=rs-alwaysfast")
+            && ps.automation.indexOf("id=rs-alwaysfast") < ps.automation.indexOf("id=rs-retryupgrade"), "Automation: Nudges, Auto Nudge, Suggest /compact; then Model, Always fast, Retry upgrades after downgrades (2026-09-17)");
   assert.ok(ps.tasks.indexOf("<div class='rs-sec rs-sec-first'>Task tracking</div>") === ps.tasks.indexOf("<div class='rs-sec") && ps.tasks.indexOf("id=rs-tasktrack") < ps.tasks.indexOf(">Judges<") && ps.tasks.indexOf(">Judges<") < ps.tasks.indexOf("id=rs-judgemodel"), "Task tracking opens with the master switch, then the Judges (T404 PR 2)");
   // T408: the two Automation rows carry a permanent one-sentence line in place of a hover tooltip, and no title attribute
   assert.match(ps.automation, /<span class=rs-line id=rs-autonudge-sub>' \+ AUTONUDGE_SUB \+ '<\/span>'/, "Auto Nudge's line, the var fillAutoNudge appends the mixed hosts to");

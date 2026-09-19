@@ -156,6 +156,16 @@ replies, thinking, commands, file diffs, web searches), steering a running
 turn, interrupts, model and reasoning-effort switches, resume after restarts,
 and postal delivery into Codex sessions.
 
+Slash commands: `/model` and `/effort` work (they apply at the session's next
+turn). Anything else (`/clear`, `/compact`, `/new`, a skill) typed into the
+composer, sent from the timeline's lane menu, or sent with `romp send` is
+refused with a notice and not sent to the model as text, and the composer's
+`/` list shows only what a Codex session takes. Two paths still reach the
+model as text until the native clear lands: a follow-up typed from a card
+whose whole body is a slash command, and a slash command a Codex session had
+already queued before this guard existed. Clearing and compacting a Codex
+conversation natively are coming (`plans/codex-backend.md`).
+
 The chat and timeline effort menus use the selected model's supported levels
 from the Codex app-server's model catalog. Romp also validates effort changes
 against that catalog; it does not maintain a separate list of Codex levels.

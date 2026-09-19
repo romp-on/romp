@@ -132,10 +132,12 @@ test("same-row badges wear the SAME metric set; micro-labels wear the section-he
   // .fcol-chip's comment says it reproduces the chat .chip — now its padding does too
   assert.match(FEED, /\.fcol-chip \{[^}]*padding: 3px 10px;/s);
   assert.match(CHAT, /\.chip \{[^}]*padding: 3px 10px;/s);
-  // uppercase section micro-labels: 10.5px/700/.08em (the .rs-sec spec, documented at the kernel's
-  // .rnet-khead) — .sn-khead is the same feature in the VS Code strip and had drifted off it
-  assert.match(STRIP, /\.sn-khead \{[^}]*font-weight: 700; letter-spacing: 0\.08em;/);
-  assert.match(GEAR, /\.rs-sec \{[^}]*font-weight: 700; letter-spacing: 0\.08em;/s);
+  // section labels: sentence case in the accent colour, 11px/600, never uppercase or letter-spaced (the user 2026-09-18;
+  // the .rs-sec spec, mirrored at the kernel's .rnet-khead); .sn-khead is the same feature in the VS Code strip
+  assert.match(STRIP, /\.sn-khead \{ color: var\(--accent, #9cd2ff\); font-size: 11px; font-weight: 600;/);
+  assert.match(GEAR, /\.rs-sec \{ font-size: 11px; font-weight: 600; color: var\(--accent, #9cd2ff\);/s);
+  assert.doesNotMatch(GEAR, /text-transform: uppercase/, "no all-caps rule survives in the settings sheet");
+  assert.doesNotMatch(STRIP, /\.sn-khead \{[^}]*(uppercase|letter-spacing)/);
   // no px letter-spacing (an em value scales with its label; 0.4px was the one outlier)
   const SESSIONS = read("fleet-pane.css");   // the Sessions pane sheet (file keeps its legacy name)
   assert.doesNotMatch(SESSIONS, /letter-spacing:0\.4px/);

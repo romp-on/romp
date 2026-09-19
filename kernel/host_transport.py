@@ -174,6 +174,40 @@ def host_lease_state(lease, now: float, start=None) -> str:
 
 
 # ── the transport ──────────────────────────────────────────────────────────────────────────────
+async def request_reexec(sock_path, python: str, launcher: str, version: str, timeout: float = 10.0) -> dict:
+    """Ask the host behind `sock_path` to re-exec itself into the code at `launcher` under `python` (the kernel's own):
+    one connection, one `reexec` frame, one answer, then closed. The answer is the host's `reexec` frame ({"ok": True,
+    "when": "now" | "at-turn-end"} or {"ok": False, "reason"}); a host that closes without one, one older than the frame
+    (a `fault` answer), or no answer within `timeout` reads as {"ok": False, "reason": ...}. Never raises."""
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(sock_path)), timeout)
+    except Exception as e:
+        return {"ok": False, "reason": "connect: %s" % type(e).__name__}
+    try:
+        writer.write(sh.encode_frame({"t": "reexec", "python": str(python), "launcher": str(launcher), "version": str(version)}))
+        await writer.drain()
+        fr = sh.FrameReader()
+        deadline = time.time() + timeout
+        while time.time() < deadline:                      # loop-ok: a bounded read for the one answer frame
+            try:
+                chunk = await asyncio.wait_for(reader.read(65536), max(0.05, deadline - time.time()))
+            except asyncio.TimeoutError:
+                break
+            if not chunk:
+                return {"ok": False, "reason": "the host closed the socket without an answer"}
+            for f in fr.feed(chunk):
+                if f.get("t") == "reexec":
+                    return {"ok": bool(f.get("ok")), "when": f.get("when"), "reason": f.get("reason")}
+                if f.get("t") == "fault":
+                    return {"ok": False, "reason": "the host does not know the request (%s)" % f.get("kind")}
+        return {"ok": False, "reason": "no answer within %.0f s" % timeout}
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
 class HostTransport(_Base):
     """The SDK's Transport over the host's socket (live) or over an orphan journal (replay).
 
@@ -192,7 +226,7 @@ class HostTransport(_Base):
     The session's receive loop is the same either way, which is the point."""
 
     def __init__(self, sock_path=None, *, kernel=None, ack=sh.ACK_NONE, end_grace=sh.END_GRACE_DEFAULT_S,
-                 on_ack=None, on_hello=None, on_stderr=None, on_exit=None, on_fault=None, journal_dir=None):
+                 on_ack=None, on_hello=None, on_stderr=None, on_exit=None, on_fault=None, journal_dir=None, on_reexec=None):
         self.sock_path = str(sock_path) if sock_path else None
         self.kernel = dict(kernel or {})
         self.ack_offset = int(ack)
@@ -203,6 +237,7 @@ class HostTransport(_Base):
         #                                 transport's current offset is never the handled record's; the tag is
         self.end_grace = float(end_grace)
         self.on_ack, self.on_hello, self.on_stderr, self.on_exit, self.on_fault = on_ack, on_hello, on_stderr, on_exit, on_fault
+        self.on_reexec = on_reexec      # the host's `reexec-now`: it is about to exec into the kernel's code and close this socket
         self.journal_dir = str(journal_dir) if journal_dir else None
         self.detach_mode = False
         self.hello = None
@@ -370,6 +405,8 @@ class HostTransport(_Base):
                 self.on_exit(f)
         elif t == "fault" and self.on_fault:
             self.on_fault(f)
+        elif t == "reexec-now" and self.on_reexec:
+            self.on_reexec(f)
         return None
 
     def _advance(self, out: dict) -> None:

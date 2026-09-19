@@ -80,6 +80,7 @@ class HermeticKernelPostal(unittest.TestCase):
         src = open(os.path.join(HERE, "conftest.py"), encoding="utf-8", errors="replace").read()
         self.assertIn('os.environ.pop("ROMP_POSTAL_PORT", None)', src, "a machine's named bus port never reaches a lab or an in-process kernel")
         self.assertIn('os.environ["ROMP_POSTAL_HERMETIC"] = "1"', src)
+        self.assertIn('os.environ["ROMP_POSTAL_CLIENT_ONLY"] = "1"', src, "no in-process kernel of the run owns a bus: its ensure and revive start none (2026-09-18)")
         floor = src.index('os.environ.pop("ROMP_STATE_DIR", None)')
         self.assertLess(floor, src.index('os.environ.pop("ROMP_POSTAL_PORT", None)'), "…beside the state floor, at import, before any test module loads")
         self.assertLess(src.index('os.environ.pop("ROMP_POSTAL_PORT", None)') - floor, 600, "…right beside it")

@@ -16,6 +16,12 @@ Behaviour:
                        (or `hook_0` if none) and wait for the response
       cancel-after=N   cancel an unanswered control request after N seconds (the CLI's own timeout)
       after=N          wait N seconds before the extras above (so a test can detach first)
+      pad=N            the turn's assistant record carries N bytes of filler (one record that fills a socket)
+  * FAKE_CLI_TRIGGER (env, a path; FAKE_CLI_TRIGGER_DELAY seconds, FAKE_CLI_TRIGGER_COUNT rows): once the file
+    appears, that many bookkeeping `assistant` records that long after, OUTSIDE any turn (the host's turn count
+    reads zero while they arrive), each with n=trigger<i>: output arriving while nothing was asked.
+      merge=1          at the end of the turn, fold every user message queued meanwhile INTO this turn and answer
+                       them all with this one result (the real CLI's shape for messages typed while it works)
   * Stdin end-of-file: finish the current turn, then exit 0 (probe finding 4).
   * SIGINT, or an `interrupt` control request (the SDK's interrupt()): the current turn ends with an
     `interrupted` result, as the real CLI's does.
@@ -97,8 +103,11 @@ def run_turn(text: str) -> None:
         _init_sent = True
         emit({"type": "system", "subtype": "init", "session_id": SESSION_ID, "model": "fake-model",
               "cwd": os.getcwd(), "tools": [], "apiKeySource": "none"})
-    emit({"type": "assistant", "message": {"role": "assistant", "model": "fake-model", "content": [{"type": "text", "text": "working on it"}]},
-          "session_id": SESSION_ID, "uuid": str(uuid.uuid4())})
+    rec = {"type": "assistant", "message": {"role": "assistant", "model": "fake-model", "content": [{"type": "text", "text": "working on it"}]},
+           "session_id": SESSION_ID, "uuid": str(uuid.uuid4())}
+    if "pad" in opts:
+        rec["pad"] = "x" * int(opts["pad"])
+    emit(rec)
     cancel_after = float(opts["cancel-after"]) if "cancel-after" in opts else None
     if "after" in opts:                       # the scripted extras wait this long (a test detaches meanwhile)
         time.sleep(float(opts["after"]))
@@ -124,6 +133,12 @@ def run_turn(text: str) -> None:
     end = time.time() + sleep
     while time.time() < end and not _interrupted.is_set():   # loop-ok: a bounded wait on the scripted turn length
         time.sleep(0.05)
+    if "merge" in opts:                       # the fold: the queued messages join this turn, one result for all of them
+        while not _turns.empty():             # loop-ok: bounded by the queue's length
+            try:
+                _turns.get_nowait()
+            except Exception:
+                break
     emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": int(sleep * 1000), "duration_api_ms": 1,
           "num_turns": 1, "result": "interrupted" if _interrupted.is_set() else "done", "session_id": SESSION_ID,
           "total_cost_usd": 0.0, "usage": {"input_tokens": 1, "output_tokens": 1}, "uuid": str(uuid.uuid4())})
@@ -181,6 +196,18 @@ def _reader() -> None:
     _turns.put(None)          # stdin end-of-file: finish what is queued, then leave
 
 
+def _trigger_watch(path: str, delay: float, count: int) -> None:
+    deadline = time.time() + 120
+    while time.time() < deadline and not os.path.exists(path):   # loop-ok: the scripted trigger, bounded
+        time.sleep(0.02)
+    if not os.path.exists(path):
+        return
+    time.sleep(delay)
+    for i in range(count):                                       # loop-ok: a fixed count from the test
+        emit({"type": "assistant", "message": {"role": "assistant", "model": "fake-model", "content": [{"type": "text", "text": "bookkeeping"}]},
+              "session_id": SESSION_ID, "uuid": str(uuid.uuid4()), "n": "trigger%d" % i})
+
+
 def main() -> int:
     global _turns
     if len(sys.argv) > 1 and sys.argv[1] in ("-v", "--version"):
@@ -190,6 +217,10 @@ def main() -> int:
     _turns = queue.Queue()
     signal.signal(signal.SIGINT, lambda *a: _interrupted.set())
     threading.Thread(target=_reader, daemon=True).start()
+    trig = os.environ.get("FAKE_CLI_TRIGGER")
+    if trig:
+        threading.Thread(target=_trigger_watch, args=(trig, float(os.environ.get("FAKE_CLI_TRIGGER_DELAY") or 1.0),
+                                                      int(os.environ.get("FAKE_CLI_TRIGGER_COUNT") or 1)), daemon=True).start()
     while True:
         text = _turns.get()
         if text is None:

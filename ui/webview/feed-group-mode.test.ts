@@ -25,7 +25,8 @@ test("session rank = the kernel's session-order list (tab/lane order); unknown s
   // the order rides every feed push; the kernel emits session-order.json, federation concatenates per host
   assert.match(FEED, /if \(Array\.isArray\(m\.order\)\) sessionOrder = m\.order\.filter/);
   assert.match(FEED, /const rank = new Map\(sessionOrder\.map\(\(s, i\) => \[s, i\] as const\)\);/);
-  assert.match(FEED, /return rank\.has\(s\) \? rank\.get\(s\)! : 1e9 \+ \(extra\.get\(s\) \|\| 0\);/);
+  // the owner-less notice run (the reserved no-session key) heads the column before the order list (the feed board's owner rule, 2026-09-18)
+  assert.match(FEED, /return isOwnerless\(s\) \? -1 : rank\.has\(s\) \? rank\.get\(s\)! : 1e9 \+ \(extra\.get\(s\) \|\| 0\);/);   // isOwnerless strips a remote host's prefix (round two of PR 1831)
   // stable sort: per-session cards keep the column's newest/oldest order
   assert.match(FEED, /buckets\[k\]\.sort\(\(x, y\) => rk\(x\) - rk\(y\)\);/);
   assert.match(FED, /if \(Array\.isArray\(f\.order\)\) merged\.order\.push\(\.\.\.f\.order\);/);

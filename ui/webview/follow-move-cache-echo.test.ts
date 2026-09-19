@@ -30,7 +30,8 @@ const body = (() => {
 
 test("applyFollowMove replaces the list slot with a copy — it never mutates the payload object", () => {
   // the copy idiom: spread into a fresh AskItem, column set on the copy, slot replaced
-  assert.match(body, /const c: AskItem = \{ \.\.\.a, column: "working" \};/);
+  assert.match(body, /const c: AskItem = \{ \.\.\.a, column: "working", category: "working" \};/, "the prediction names Working under both keys (the boards' phase two: askColumn reads the category first)");
+  assert.doesNotMatch(body, /a\.column === "working"/, "the skip reads the card through askColumn, never the raw column");
   assert.match(body, /list\[i\] = c;/);
   // and no write lands on the shared object itself (assignment, not the `===` comparison in the guard)
   assert.doesNotMatch(body, /\ba\.(column|recheck|followupPending|t)\s*=[^=]/);
@@ -54,23 +55,25 @@ test("rendering a predicted card leaves the cached frame untouched, so a re-emit
   const apply = (list: any[]) => {                       // replica of the pinned copy-on-write body
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
-      if (!pending.has(a.itemId) || a.column === "working") continue;
-      const c: any = { ...a, column: "working" };
+      if (!pending.has(a.itemId) || (a.category ?? a.column) === "working") continue;
+      const c: any = { ...a, column: "working", category: "working" };
       if ((kind.get(a.itemId) ?? "followup") === "followup") { c.recheck = true; c.followupPending = true; }
       if (c.t < nowSec) c.t = nowSec;
       list[i] = c;
     }
   };
-  const cached: any[] = [{ itemId: "s1:g1", column: "needs_input", t: 900 }];   // the manager's stored local frame
+  const cached: any[] = [{ itemId: "s1:g1", column: "needs_input", category: "needs_input", t: 900 }];   // the manager's stored local frame
   const merged: any[] = [...cached];                      // mergeHostFeeds: fresh array, shared elements
   apply(merged);
   // the render shows the prediction…
   assert.equal(merged[0].column, "working");
+  assert.equal(merged[0].category, "working");
   assert.equal(merged[0].recheck, true);
   assert.equal(merged[0].t, nowSec);
   // …while the cache still holds exactly what the kernel sent, so the next merged re-emit still shows the
   // card blocked and reconcileFollowMove keeps waiting for the kernel's real answer
   assert.equal(cached[0].column, "needs_input");
+  assert.equal(cached[0].category, "needs_input");
   assert.equal(cached[0].t, 900);
   assert.equal("recheck" in cached[0], false);
   // and a second render pass over a re-merge of the same cache predicts again without double-copying

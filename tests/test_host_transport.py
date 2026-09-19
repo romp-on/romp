@@ -445,9 +445,157 @@ class BackendHostRules(unittest.TestCase):
         s = types.SimpleNamespace(sid=SID, name="web", inflight=0, _host=t, _host_is_attach=True, _fire_boot_settled=lambda: fired.append(1))
         be._on_host_hello(s, {"host": {"pid": 1, "start": "a"}, "cli": {"pid": 2, "start": "b"}, "journal": {"next": 6}, "parked": [], "inflight": 1})
         self.assertEqual((s.inflight, fired), (1, [1]), "mid-turn adopted; the boot slot released for an attach")
-        s2 = types.SimpleNamespace(sid=SID, name="web", inflight=1, _host=t, _host_is_attach=False, _fire_boot_settled=lambda: fired.append(2))
+        s2 = types.SimpleNamespace(sid=SID, name="web", inflight=1, _inflight_texts=["a fed text"], _host=t, _host_is_attach=False,
+                                   _fire_boot_settled=lambda: fired.append(2))
         be._on_host_hello(s2, {"host": {"pid": 1, "start": "a"}, "cli": {}, "journal": {"next": 0}, "parked": [], "inflight": 0})
-        self.assertEqual((s2.inflight, fired), (1, [1]), "a lower count never lowers ours; a spawn's hello leaves the slot to the init record")
+        self.assertEqual((s2.inflight, s2._inflight_texts, fired), (0, [], [1]),
+                         "the host's count is adopted EXACTLY, down as well as up: a stale count on our side never survives an attach "
+                         "(the base kept the higher of the two and read Working for two days); a spawn's hello leaves the slot to the init record")
+
+    def test_a_reexec_request_reads_the_hosts_answer_and_an_older_host_as_a_refusal(self):
+        """The kernel's half of the re-exec (2026-09-18): one connection, one frame, one answer. A host that knows the frame
+        answers it; a host older than the frame answers `fault not-attached`, which reads as a refusal; a socket nobody
+        serves reads as a refusal too. Never a raise out of the connect."""
+        fn = getattr(ht, "request_reexec", None)
+        self.assertIsNotNone(fn, "the kernel can ask a host to re-exec (the base cannot)")
+        answers = {"new": {"t": "reexec", "ok": True, "when": "now"}, "old": {"t": "fault", "kind": "not-attached", "text": "attach first"}}
+        d = tempfile.mkdtemp()
+        loop = asyncio.new_event_loop()
+        async def serve(path, answer):
+            async def on_client(reader, writer):
+                fr = sh.FrameReader()
+                chunk = await reader.read(65536)
+                for f in fr.feed(chunk):
+                    if f.get("t") == "reexec":
+                        writer.write(sh.encode_frame(answer)); await writer.drain()
+                writer.close()
+            return await asyncio.start_unix_server(on_client, path=path)
+        async def run():
+            out = {}
+            for name, ans in answers.items():
+                path = os.path.join(d, name + ".sock")
+                srv = await serve(path, ans)
+                out[name] = await fn(path, sys.executable, "/bin/true", "def67890", timeout=5)
+                srv.close()
+            out["none"] = await fn(os.path.join(d, "absent.sock"), sys.executable, "/bin/true", "def67890", timeout=2)
+            return out
+        try:
+            out = loop.run_until_complete(run())
+        finally:
+            loop.close()
+        self.assertEqual((out["new"]["ok"], out["new"]["when"]), (True, "now"))
+        self.assertEqual(out["old"]["ok"], False); self.assertIn("does not know", out["old"]["reason"])
+        self.assertEqual(out["none"]["ok"], False); self.assertIn("connect", out["none"]["reason"])
+
+    def test_a_hosts_reexec_now_frame_makes_the_reconnect_planned_and_the_hello_files_the_row(self):
+        d, be = self._be()
+        s = types.SimpleNamespace(sid=SID, name="web", inflight=0, _reconnect=False, _host=None, _host_is_attach=True,
+                                  _host_reexec_from="abc12345", _fire_boot_settled=lambda: None)
+        now = getattr(be, "_on_host_reexec_now", None)
+        self.assertIsNotNone(now, "the kernel knows the host's reexec-now frame (the base does not)")
+        now(s)
+        self.assertTrue(s._reconnect, "the stream's end that follows is the planned handover: the connect loop's next pass attaches")
+        self.assertFalse(hasattr(s, "_host_reexec_expected"), "no flag written that nothing reads (round two of the review)")
+        t = types.SimpleNamespace(hello={}, ack_offset=5)
+        s._host = t
+        be.code_version = "def67890"
+        be._on_host_hello(s, {"host": {"pid": 1, "start": "a", "version": "def67890"}, "cli": {"pid": 2, "start": "b"}, "journal": {"next": 6}, "parked": [], "inflight": 0})
+        rows = [json.loads(l) for l in (Path(d) / "session-events.jsonl").read_text().splitlines() if l.strip()]
+        kinds = [r["kind"] for r in rows]
+        self.assertIn("host.reexeced", kinds, "the re-exec is a row of its own: %r" % kinds)
+        row = [r for r in rows if r["kind"] == "host.reexeced"][0]
+        self.assertEqual((row.get("fromVersion"), row.get("toVersion")), ("abc12345", "def67890"))
+        self.assertIsNone(s._host_reexec_from, "filed once")
+
+    def test_a_handover_that_fails_after_the_ok_answer_files_a_row(self):
+        """Round two of the re-exec review: a host that accepted and then failed before its exec sent a `fault` the kernel only
+        logged, so a failed upgrade was on no ledger while a refused one was. The fault now files `host.reexec-failed`."""
+        d, be = self._be(short=True)
+        be.code_version = "def67890"
+        s = types.SimpleNamespace(sid=SID, name="web", _host_reexec_from="abc12345", _host_end_grace=None, _on_cli_stderr=lambda line: None)
+        t = be._new_host_transport(s, ht.host_sock(d, SID), -1)
+        t.on_fault({"t": "fault", "kind": "reexec-failed", "text": "RuntimeError"})
+        def rows():
+            p = Path(d) / "session-events.jsonl"
+            return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+        self.assertEqual([(r["kind"], r.get("fromVersion"), r.get("toVersion")) for r in rows()],
+                         [("host.reexec-failed", "abc12345", "def67890")], "the failure is a row, as the refusal is")
+        self.assertIsNone(s._host_reexec_from, "and the pending re-exec is forgotten")
+        t.on_fault({"t": "fault", "kind": "reader-behind", "text": "the journal lags"})
+        self.assertEqual(len(rows()), 1, "any other fault stays a log line")
+        self.assertTrue(any("reader-behind" in m for m in be._test_logs))
+
+    def test_the_reexec_wait_needs_a_listener_not_a_socket_path(self):
+        """Round two of the re-exec review: the kernel's wait for the re-executed host passed on the lease's version, the holder
+        pid and the socket PATH existing; under Python 3.12 the old process's path outlives its listener and refuses every
+        connect, so the kernel attached into nobody and read a launch failure on a host fine a moment later. The wait now needs
+        a listener that accepts: a refusing path holds it to its bound (then a `host.reexec-failed` row and the plain attach);
+        a listener that comes up while it waits satisfies it."""
+        import socket
+        d, be = self._be(short=True)
+        be.code_version = "def67890"
+        hdir = ht.host_dir(d, SID); hdir.mkdir(parents=True, exist_ok=True)
+        (hdir / "spawn.json").write_text(json.dumps({"sid": SID, "version": "abc12345"}))
+        sock = str(ht.host_sock(d, SID))
+        old = {"sid": SID, "fsid": SID, "name": "web", "pid": 11, "start": "c", "holder": {"pid": 10, "start": "h", "kind": "host"},
+               "version": "abc12345", "t": time.time()}
+        def rows():
+            p = Path(d) / "session-events.jsonl"
+            return [r["kind"] for r in (json.loads(l) for l in p.read_text().splitlines() if l.strip())] if p.exists() else []
+        async def host(serve_again):
+            """Answers `now`, then leaves a bound-but-closed path (ECONNREFUSED, the path present) and writes the new lease;
+            with `serve_again`, a listener comes back on the path a little later."""
+            async def on_client(reader, writer):
+                fr = sh.FrameReader(); chunk = await reader.read(65536)
+                for f in fr.feed(chunk):
+                    if f.get("t") == "reexec":
+                        writer.write(sh.encode_frame({"t": "reexec", "ok": True, "when": "now"})); await writer.drain()
+                writer.close(); await writer.wait_closed()
+                srv.close(); await srv.wait_closed()
+                try:
+                    os.unlink(sock)
+                except OSError:
+                    pass
+                stale = socket.socket(socket.AF_UNIX); stale.bind(sock); stale.close()
+                sb.write_lease(d, dict(old, version="def67890", t=time.time()))
+                if serve_again:
+                    await asyncio.sleep(0.3)
+                    os.unlink(sock)
+                    async def bye(r, w):
+                        accepted.set()                       # the kernel's probe connect, seen from the listener's side
+                        w.close(); await w.wait_closed()
+                    again = await asyncio.start_unix_server(bye, path=sock)
+                    servers.append(again)
+            servers = []
+            srv = await asyncio.start_unix_server(on_client, path=sock)
+            servers.append(srv)
+            return servers
+        accepted = asyncio.Event()
+        async def run(serve_again):
+            servers = await host(serve_again)
+            s = types.SimpleNamespace(sid=SID, name="web", _host_reexec_from=None)
+            with mock.patch.object(ht, "SOCKET_WAIT_S", 1.5):
+                got = await be._host_reexec_on_skew(s, old)
+            if serve_again:
+                await asyncio.wait_for(accepted.wait(), 5)   # the probe's accept and its handler run before the listener closes
+            for x in servers:
+                x.close(); await x.wait_closed()
+            return got, s
+        loop = asyncio.new_event_loop()
+        try:
+            got, s = loop.run_until_complete(run(False))
+            self.assertIsNone(got, "a path that refuses every connect never satisfies the wait (the base returned the fresh lease at once)")
+            self.assertEqual(rows(), ["host.reexec-failed"], "the wait that ran out is a row")
+            self.assertTrue(any("no re-executed host served" in m for m in be._test_logs))
+            self.assertIsNone(s._host_reexec_from)
+            for p in (Path(d) / "session-events.jsonl",):
+                p.unlink()
+            got, s = loop.run_until_complete(run(True))
+            self.assertEqual((got or {}).get("version"), "def67890", "a listener that comes up while it waits: the fresh lease")
+            self.assertEqual(rows(), [])
+            self.assertEqual(s._host_reexec_from, "abc12345", "the hello after the attach files host.reexeced from this")
+        finally:
+            loop.close()
 
     def test_the_hello_decides_the_fresh_cli_by_identity_and_tolerates_older_shapes(self):
         """The fresh-CLI decision at the hello (the connect loop's pins drive it through the loop; this one drives the handler):

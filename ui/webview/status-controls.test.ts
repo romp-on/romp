@@ -170,3 +170,14 @@ test("the battery: filled to its percentage in the colour given, the number insi
   assert.deepEqual(swept[1], ["ctx-scan", false], "a reused scan keeps its phase");
   const clicked: N[] = []; const live = SC.ctxBar((b: N) => clicked.push(b)); live.dispatch("click"); assert.equal(clicked[0], live, "the chat's hook gets the bar");
 });
+
+test("a bar that cannot compact says why in its tooltip (a Codex session's battery, 2026-09-19); without the reason an inert bar still says nothing", () => {
+  const cx = SC.ctxBar();
+  cx.dataset.inertWhy = "this session runs in Codex, which has no /compact";
+  SC.setCtxBar(cx, "62%", false, [1, 2, 3], false);
+  assert.equal(cx.title, "context 62% used — this session runs in Codex, which has no /compact");
+  SC.setCtxBar(cx, "100%", false, null, true);
+  assert.match(cx.title, /exceeds this model's window — this session runs in Codex/);
+  const plain = SC.ctxBar(); SC.setCtxBar(plain, "62%", false, [1, 2, 3], false);
+  assert.equal(plain.title, "", "no reason, no click: the inert bar keeps no tooltip");
+});

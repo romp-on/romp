@@ -6528,8 +6528,8 @@ class TimelinePanel {
         // CLICK the battery → send /compact to that live session; optimistically show the cue at once.
         if (s.live) {
           const hit = el('rect', { x: ctxColX, y: byTop, width: BAT_W, height: BAT_H, rx: 3, fill: 'transparent' });
-          hit.style.cursor = 'pointer';
-          const cmt = () => '<div class="r"><span class="chip" style="background:' + s.color + '"></span><span class="who" style="color:' + s.color + '">' + esc(s.name) + '</span><span class="k">' + (isComp ? 'compacting' : ((cinfo ? cinfo.label : '') + ' context')) + '</span></div><div class="b">' + (isComp ? 'compaction in progress' : 'click to /compact this session') + '</div>';
+          hit.style.cursor = s.backend === 'codex' ? 'default' : 'pointer';   // a Codex lane has no /compact: nothing to click for (2026-09-19)
+          const cmt = () => '<div class="r"><span class="chip" style="background:' + s.color + '"></span><span class="who" style="color:' + s.color + '">' + esc(s.name) + '</span><span class="k">' + (isComp ? 'compacting' : ((cinfo ? cinfo.label : '') + ' context')) + '</span></div><div class="b">' + (isComp ? 'compaction in progress' : (s.backend === 'codex' ? 'this session runs in Codex, which has no /compact' : 'click to /compact this session')) + '</div>';
           hit.addEventListener('mouseenter', (e) => this.showTip(cmt(), e));
           hit.addEventListener('mousemove', (e) => this.moveTip(e));
           hit.addEventListener('mouseleave', () => this.hideTip());
@@ -6542,6 +6542,7 @@ class TimelinePanel {
           // (it starts no drag: only the empty rowHit does), so there's nothing to wait for a release to confirm.
           hit.addEventListener('pointerdown', (e) => {
             if (e.button !== 0) return;
+            if (s.backend === 'codex') return;   // no stamp, no post for a lane the kernel would refuse (2026-09-19)
             e.stopPropagation(); this.hideTip();
             this._compactClicked[s.id] = (Date.now ? Date.now() : 0);
             this._compactSession(s.name); this.draw();
@@ -6735,7 +6736,8 @@ class TimelinePanel {
                       'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'pointer-events': 'none' };
       if (!arrived) attrs['stroke-dasharray'] = '1 4';   // in flight — the pending-connector dash (same key as the span)
       if (!arrived && !mm.toThreadT) liveRiders = true;   // an un-arrived stub spans to the live edge: the tick cannot translate that
-      plot.appendChild(el('path', attrs));
+      const stubEl = el('path', attrs); stubEl.setAttribute('data-tl-stub', String(senderVisible ? mm.toId : mm.fromId));   // the lane-less end, for the served pins
+      plot.appendChild(stubEl);
       // same affordances as a full connector: own-color highlight overlay + wide transparent hit —
       // the SAME path each, so highlight and hover cover the whole half-elbow as one unit —
       // co-lit with the arrival dot (PASS 2 links via msgUI), tooltip + click → where it landed

@@ -119,6 +119,8 @@ class Harness {
   stale() { return this.posted.filter((m) => m.romp === "wsStale" && !m.build).length; }
   fresh() { return this.posted.filter((m) => m.romp === "wsFresh").length; }
   diags(what: string) { return this.sent.filter((m) => m.type === "clientDiag" && m.what === what); }
+  /** the bundle's ready frames that went up a socket, first send and any re-post */
+  readys() { return this.sent.filter((m) => m.type === "ready").length; }
   kaReachedBundle() { return this.toBundle.some((m) => m && m.type === "ka"); }
   /** the bundle has loaded and installed its listener: its own connect handshake goes through the shim's send() */
   bundleReady() { this.win.__rompLocalSend({ type: "ready" }); }
@@ -343,8 +345,67 @@ test("every close the browser reports for a socket that OPENED leaves a wsclose 
   const rows = h.diags("wsclose");
   assert.equal(rows.length, 1, "…and delivered on the reconnect");
   assert.equal(rows[0].surface, "pane-shim");
-  assert.deepEqual(rows[0].data, { app: "feed", code: 1006, reason: "", wasClean: false, sinceOpenMs: 6_500, quietMs: 2_500, everConnected: true });
+  // bundleReady, readyAcked, readyQueued all false: the bundle never said ready on this page, so the redial dialed as a fresh page (the four shapes below)
+  assert.deepEqual(rows[0].data, { app: "feed", code: 1006, reason: "", wasClean: false, sinceOpenMs: 6_500, quietMs: 2_500, everConnected: true, bundleReady: false, readyAcked: false, readyQueued: false });
   assert.equal(h.diags("wsconnfail").length, 0, "no handshake failed");
+});
+
+// The wsclose row carries the dial term's inputs at the CLOSE (bundleReady, readyAcked, readyQueued; everConnected was already
+// there and is true on every such row), and the kernel stamps every row with whether the socket that carried it declared the
+// redial (?reconnect=1&proto=N). The queued row rides the redial, so the two together name the redial's kind in
+// client-diag.jsonl (2026-09-10; the kernel half and the joined read-back are tests/test_client_diag_reconnect_stamp.py).
+// A redial declares itself only once the kernel's caps frame has answered the bundle's ready; until then it dials fresh and
+// re-posts the bundle's own ready message behind the flushed rows, and an acked ready is never re-sent.
+const bits = (h: Harness) => { const d = h.diags("wsclose")[0].data; return [d.bundleReady, d.readyAcked, d.readyQueued]; };
+/** the frames the redial socket carried from `from` on: a clientDiag row as its what, any other frame as its type */
+const carried = (h: Harness, from: number) => h.sent.slice(from).map((m) => (m.type === "clientDiag" ? m.what : m.type));
+
+test("wsclose bits, declared: the bundle said ready, the kernel answered, and the redial carries the term", () => {
+  const h = FEED();
+  h.ws.open(); h.bundleReady(); h.ws.msg({ type: "caps", caps: [] }); h.ws.msg({ type: "feed", asks: [] });
+  h.ws.close(); h.runTimers();
+  assert.match(h.ws.url, /&reconnect=1&proto=1$/, "the redial declares itself, with the wire protocol its ready named");
+  const n = h.sent.length; h.ws.open();
+  assert.deepEqual(bits(h), [true, true, false], "ready sent and answered, none waiting");
+  assert.deepEqual(carried(h, n), ["wsclose"], "the queued row flushes and nothing follows it");
+  assert.equal(h.readys(), 1, "the acked ready is not re-sent on a declared redial");
+  h.settles(0);
+});
+
+test("wsclose bits, gated off: the socket died before the bundle said ready, and the redial dials as a fresh page", () => {
+  const h = FEED();
+  h.ws.open(); h.ws.close(); h.runTimers();
+  assert.doesNotMatch(h.ws.url, /reconnect=1/, "no term: the page held nothing");
+  const n = h.sent.length; h.ws.open();
+  assert.deepEqual(bits(h), [false, false, false], "the bundle had not said ready at the close");
+  assert.deepEqual(carried(h, n), ["wsclose"]);
+  assert.equal(h.readys(), 0, "no ready to re-post: the bundle has not sent its own");
+  h.settles(0);
+});
+
+test("wsclose bits, a ready during the close: it queued, the row says so, and it rides the redial ahead of the row", () => {
+  // the browser holds a closing handshake open; the queued ready is the bundle's own, so the redial carries no term
+  const h = FEED();
+  h.ws.open(); h.ws.readyState = 2; h.bundleReady();
+  h.ws.close(); h.runTimers();
+  assert.doesNotMatch(h.ws.url, /reconnect=1/, "the ready is still queued for this open, so no term");
+  const n = h.sent.length; h.ws.open();
+  assert.deepEqual(bits(h), [true, false, true], "ready sent into the queue, unanswered, waiting");
+  assert.deepEqual(carried(h, n), ["ready", "wsclose"], "the ready queued first, during the close, then the row");
+  assert.equal(h.readys(), 1, "the queued ready went out once; nothing re-posted it");
+  h.settles(0);
+});
+
+test("wsclose bits, an unacked ready: it left on the socket that died, and the redial dials fresh and re-posts it", () => {
+  // no caps frame came back; without readyAcked and readyQueued on the row this shape read like the one above
+  const h = FEED();
+  h.ws.open(); h.bundleReady(); h.ws.msg({ type: "feed", asks: [] }); h.ws.close(); h.runTimers();
+  assert.doesNotMatch(h.ws.url, /reconnect=1/, "no answer, no term: the redial dials fresh");
+  const n = h.sent.length; h.ws.open();
+  assert.deepEqual(bits(h), [true, false, false], "ready sent and gone, unanswered, none waiting");
+  assert.deepEqual(carried(h, n), ["wsclose", "ready"], "the flushed row, then the re-posted ready");
+  assert.equal(h.readys(), 2, "the ready went out on each socket: once before the drop, once re-posted");
+  h.settles(0);
 });
 
 test("the redials an outage refuses leave ONE coalesced row on the next open, never a wsclose each", () => {

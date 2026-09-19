@@ -35,7 +35,7 @@ test("the rail dot keeps the click (open the feed card), separate from turn hove
 test("the feed modal title hover lights the originating chat message", () => {
   assert.match(FEED, /ttlEl\.onmouseenter = titleHoverId \? \(\) => hoverEmit\(titleHoverId\) : null/);
   assert.match(FEED, /ttlEl\.onmouseleave = titleHoverId \? \(\) => hoverEmit\(null\) : null/);
-  assert.match(FEED, /titleHoverId = it\.turnId/);
+  assert.match(FEED, /titleHoverId = nt \? null : it\.turnId;/);
   assert.match(FEED, /titleHoverId = grp\.turnId/);
 });
 

@@ -113,6 +113,9 @@ if [[ -n "${MOCK_CURL_FAIL_NEW:-}" && "$url" == */new ]]; then exit 7; fi
 if [[ -n "${MOCK_CURL_SEND_QUEUED:-}" && "$url" == */send ]]; then echo '{"ok": true, "queued": true}'; exit 0; fi
 if [[ -n "${MOCK_CURL_SEND_REFUSED:-}" && "$url" == */send ]]; then echo '{"ok": false, "error": "no running backend owns web — the message was not delivered"}'; exit 0; fi
 if [[ -n "${MOCK_CURL_NOTICE_REFUSE:-}" && "$url" == */notice ]]; then echo '{"ok": false, "error": "attachment refused: not a file"}'; exit 0; fi
+if [[ -n "${MOCK_CURL_BOARDS:-}" && "$url" == */boards ]]; then echo "$MOCK_CURL_BOARDS"; exit 0; fi
+if [[ -n "${MOCK_CURL_BOARD_REFUSE:-}" && "$url" == */board ]]; then echo "$MOCK_CURL_BOARD_REFUSE"; exit 0; fi
+if [[ -n "${MOCK_CURL_BOARD_DEFINED:-}" && "$url" == */board ]]; then echo "$MOCK_CURL_BOARD_DEFINED"; exit 0; fi
 if [[ -n "${MOCK_CURL_WATCH_PR_REFUSE:-}" && "$url" == */watch-pr ]]; then
   echo '{"ok": false, "retryable": true, "error": "the watch could not be saved ([Errno 28] No space left on device) - nothing is watching TESTORG/testrepo#7; retry once the state directory takes writes again"}'
   exit 0
@@ -2504,14 +2507,74 @@ PY
 }
 
 
-@test "card: posts key, title, body and session to /notice; ROMP_SID is the default; usage errors exit 2" {
-    # T370 (plans/notice-cards.md): door three of the kernel's post_notice, romp watch's mechanics
+@test "board: define posts the definition to /board with the command's id, list and show read /boards, remove posts the id; usage errors exit 2; a refusal exits 1" {
+    # plans/card-boards.md, phase three: the board store's command-line door, romp watch's mechanics
     _stub_curl
     touch "$MOCK_LOG"
     export ROMP_SERVE_TOKEN=testtok
-    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card --title "A new version of the figure is ready" --body "regenerated after the sweep" --key figure --needs-you --producer figure
+    export ROMP_KERNEL_PORT=29855
+    # define: the JSON's missing id takes the command's; the body rides -d, the token never the command line
+    local defn='{"title": "Notes", "categories": [{"id": "new", "title": "New", "chip": "neutral"}], "defaultCategory": "new", "rules": [], "sort": {"key": "t", "dir": "desc"}, "subSorts": [], "groupBy": null, "order": [], "notify": [], "needsYou": null, "kinds": ["notice"]}'
+    MOCK_CURL_BOARD_DEFINED='{"ok": true, "board": {"id": "notes", "categories": [{"id": "new"}]}}' run "$ROMP_SCRIPT" board define notes --json "$defn"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *"romp board: defined notes (1 category)"* ]]
+    grep -q -- '-X POST http://127.0.0.1:29855/board' "$MOCK_LOG"
+    grep -q -- '"id": "notes"' "$MOCK_LOG"
+    grep -q -- '--config -' "$MOCK_LOG"
+    [ "$(grep -c -- "testtok" "$MOCK_LOG")" -eq 0 ]   # the token never rides the command line (a count, the ratchet's rule for negatives)
+    # …from a file too, and an id inside the JSON that disagrees with the command's is a usage error
+    printf '%s' "$defn" > "$TEST_DIR/notes.json"
+    MOCK_CURL_BOARD_DEFINED='{"ok": true, "board": {"id": "notes", "categories": [{"id": "new"}]}}' run "$ROMP_SCRIPT" board define notes --from "$TEST_DIR/notes.json"
+    [[ "$status" -eq 0 ]]
+    run "$ROMP_SCRIPT" board define notes --json '{"id": "scratch"}'
+    [[ "$status" -eq 2 ]]
+    [[ "$output" == *"names id 'scratch', the command 'notes'"* ]]
+    run "$ROMP_SCRIPT" board define notes --json 'not json'
+    [[ "$status" -eq 2 ]]
+    # list and show read /boards
+    local rows='{"boards": [{"id": "feed", "title": "Feed", "categories": [{"id": "working"}, {"id": "needs_input"}, {"id": "completed"}], "source": "code"}, {"id": "notes", "title": "Notes", "categories": [{"id": "new"}], "source": "data"}]}'
+    MOCK_CURL_BOARDS="$rows" run "$ROMP_SCRIPT" board list
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *"feed  Feed  working/needs_input/completed  [code]"* ]]
+    [[ "$output" == *"notes  Notes  new"* ]]
+    MOCK_CURL_BOARDS="$rows" run "$ROMP_SCRIPT" board show notes
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *'"title": "Notes"'* ]]
+    [[ "$output" != *'"source"'* ]]
+    MOCK_CURL_BOARDS="$rows" run "$ROMP_SCRIPT" board show scratch
+    [[ "$status" -eq 1 ]]
+    [[ "$output" == *"no board scratch"* ]]
+    MOCK_CURL_BOARDS='{"boards": [{"id": "feed", "title": "Feed", "categories": [], "source": "code"}]}' run "$ROMP_SCRIPT" board list
+    [[ "$output" == *"feed  Feed"* ]]
+    # remove posts the id; a refusal names the reason and exits 1
+    : > "$MOCK_LOG"
+    MOCK_CURL_BOARD_DEFINED='{"ok": true}' run "$ROMP_SCRIPT" board remove notes
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *"romp board: removed notes"* ]]
+    grep -q -- '{"remove": "notes"}' "$MOCK_LOG"
+    MOCK_CURL_BOARD_REFUSE='{"ok": false, "error": "2 standing cards still name board '"'"'notes'"'"': dismiss them first"}' run "$ROMP_SCRIPT" board remove notes
+    [[ "$status" -eq 1 ]]
+    [[ "$output" == *"romp board: refused: 2 standing cards still name board"* ]]
+    # usage: no verb, an unknown verb, define with neither source, show with no id
+    run "$ROMP_SCRIPT" board
+    [[ "$status" -eq 2 ]]
+    run "$ROMP_SCRIPT" board rename notes
+    [[ "$status" -eq 2 ]]
+    run "$ROMP_SCRIPT" board define notes
+    [[ "$status" -eq 2 ]]
+    run "$ROMP_SCRIPT" board show
+    [[ "$status" -eq 2 ]]
+    [[ "$output" == *"usage: romp board define <id>"* ]]
+}
+
+@test "card: -t/-m post title, text and the session to /notice; ROMP_SID is the default; -k names the card; usage errors exit 2" {
+    # T370 (plans/notice-cards.md, "Owner-less cards and the terse command"): door three of the kernel's post_notice
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card -t "A new version of the figure is ready" -m "regenerated after the sweep" -k figure --needs-you --producer figure
     [ "$status" -eq 0 ]
-    [[ "$output" == *"romp card: posted"* ]]
+    [[ "$output" == *"romp card: posted (key figure)"* ]]
     grep '/notice' "$MOCK_LOG" | grep -q '"key": *"figure"'
     grep '/notice' "$MOCK_LOG" | grep -q '"title": *"A new version of the figure is ready"'
     grep '/notice' "$MOCK_LOG" | grep -q '"body": *"regenerated after the sweep"'
@@ -2520,31 +2583,72 @@ PY
     grep '/notice' "$MOCK_LOG" | grep -q '"id": *"11111111-2222-3333-4444-555555555555"'
     # the token never rides the command line: curl reads it from the piped config
     [ "$(grep '/notice' "$MOCK_LOG" | grep -c 'testtok')" -eq 0 ]
-    # --session sends a NAME
-    run env ROMP_SID= "$ROMP_SCRIPT" card --key sweep --title "Sweep done: see the plot" --session web
+    # the long forms still work, --body as --message's alias; -s sends a NAME
+    run env ROMP_SID= "$ROMP_SCRIPT" card --key sweep --title "Sweep done: see the plot" --body "the plot is in the folder" --session web
     [ "$status" -eq 0 ]
     grep '/notice' "$MOCK_LOG" | grep -q '"name": *"web"'
     grep '/notice' "$MOCK_LOG" | grep -q '"key": *"sweep"'
-    # the key is REQUIRED (a slug of the title made an edited title a second card): usage, exit 2, nothing posted
-    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card --title "Sweep done: see the plot"
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"--key is the card's stable name"* ]]
-    [ "$(grep -c '/notice' "$MOCK_LOG")" -eq 2 ]
-    # outside a session with no --session: a loud usage refusal, never a silent guess
-    run env ROMP_SID= "$ROMP_SCRIPT" card --key x --title "x"
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"--session <name> required"* ]]
+    grep '/notice' "$MOCK_LOG" | grep -q '"body": *"the plot is in the folder"'
+    # usage errors: no title; -s with --no-session (two homes); a bad --expires; a third bare word
     run run_romp card
     [ "$status" -eq 2 ]
-    run run_romp card --key x --title "x" --expires soon
+    run env ROMP_SID= "$ROMP_SCRIPT" card -t x -s web --no-session
     [ "$status" -eq 2 ]
+    run run_romp card -k x -t "x" --expires soon
+    [ "$status" -eq 2 ]
+    run env ROMP_SID= "$ROMP_SCRIPT" card "one" "two" "three"
+    [ "$status" -eq 2 ]
+    [ "$(grep -c '/notice' "$MOCK_LOG")" -eq 2 ]
+}
+
+@test "card: no -k mints a key, printed for the next revision, never a slug of the title; the shorthand romp card \"title\" \"text\"" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card -t "Sweep Done: see the plot" -m "some text"
+    [ "$status" -eq 0 ]
+    _k="$(printf '%s' "$output" | sed -n 's/.*posted (key \([0-9a-f]*\)).*/\1/p')"
+    [ "${#_k}" -eq 8 ]                                      # the first eight hex of a uuid4
+    [[ "$output" == *"a post with -k $_k revises it"* ]]     # the line says how to revise
+    grep '/notice' "$MOCK_LOG" | grep -q "\"key\": *\"$_k\""   # the same key rode the payload
+    [ "$(grep '/notice' "$MOCK_LOG" | grep -c -i 'sweep-done\|sweep_done')" -eq 0 ]   # never a slug of the title
+    # the shorthand: a bare first word is the title, a bare second the text
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card "Backups finished" "all three volumes"
+    [ "$status" -eq 0 ]
+    grep '/notice' "$MOCK_LOG" | grep -q '"title": *"Backups finished"'
+    grep '/notice' "$MOCK_LOG" | grep -q '"body": *"all three volumes"'
+    [ "$(grep -c '/notice' "$MOCK_LOG")" -eq 2 ]
+}
+
+@test "card: no session named posts an OWNER-LESS card (no id, no name); inside a session --no-session forces it" {
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    # outside a session with no -s: owner-less, said so on the success line (the user 2026-09-18: a card at the top of the feed)
+    run env ROMP_SID= "$ROMP_SCRIPT" card -t "Remember the standup moved" -m "to 10:30"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"at the top of the feed (no session)"* ]]
+    [ "$(grep '/notice' "$MOCK_LOG" | grep -c '"id"')" -eq 0 ]
+    [ "$(grep '/notice' "$MOCK_LOG" | grep -c '"name"')" -eq 0 ]
+    grep '/notice' "$MOCK_LOG" | grep -q '"title": *"Remember the standup moved"'
+    # inside a session: ROMP_SID owns by default; --no-session forces owner-less
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card -t "Mine" -m "x"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"posted (key"* ]]
+    [[ "$output" != *"(no session)"* ]]
+    [ "$(grep '/notice' "$MOCK_LOG" | grep -c '"id": *"11111111-2222-3333-4444-555555555555"')" -eq 1 ]
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 "$ROMP_SCRIPT" card --no-session -t "Everyone" -m "x"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(no session)"* ]]
+    [ "$(grep '/notice' "$MOCK_LOG" | grep -c '"id"')" -eq 1 ]   # still the one from the default post
+    [ "$(grep -c '/notice' "$MOCK_LOG")" -eq 3 ]
 }
 
 @test "card: a refused post is relayed with the kernel's reason and exit 1, never reported as posted" {
     _stub_curl
     touch "$MOCK_LOG"
     export ROMP_SERVE_TOKEN=testtok
-    run env ROMP_SID=11111111-2222-3333-4444-555555555555 MOCK_CURL_NOTICE_REFUSE=1 "$ROMP_SCRIPT" card --key x --title "x" --attach /nowhere.png
+    run env ROMP_SID=11111111-2222-3333-4444-555555555555 MOCK_CURL_NOTICE_REFUSE=1 "$ROMP_SCRIPT" card -k x -t "x" --attach /nowhere.png
     [ "$status" -eq 1 ]
     [[ "$output" == *"romp card: refused — attachment refused: not a file"* ]]
     [[ "$output" != *"romp card: posted"* ]]

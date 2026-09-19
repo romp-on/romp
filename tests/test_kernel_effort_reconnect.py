@@ -75,7 +75,7 @@ class EffortReconnect(unittest.TestCase):
         for pin in ('self._update_reg(sid, effort=value, effortPending=True)',
                     'self._update_reg(sid, auth=side, authLogin=login_id, authPending=True, apiKeyAuth=None)',
                     'self._update_reg(sid, mode=mode)',
-                    'self._update_reg(sid, fast=(value == "on"), liveFast=value)',
+                    'self._update_reg(sid, fast=(value == "on"), fastOff=(value == "off"), fastRuleRefused="", liveFast=value)',   # + the explicit Slow and the switch's refusal memory (2026-09-17)
                     'self._update_reg(sid, name=new_name,',   # + the rename ping rides the same locked RMW when owed (2026-08-24/25)
                     'self._update_reg(sid, model=value, modelPending=pending)',   # the live model write
                     'self._update_reg(sid, model=value, liveModel=_alias_label(value), modelPending=False)'):

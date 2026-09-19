@@ -33,6 +33,7 @@ const env = (over: Partial<GateEnv> = {}): GateEnv => ({
   selfHost: "TESTHOST",
   repo: () => null,
   seq: 1,
+  boardTitle: () => "",   // the feed's cards name no data-defined board (card boards, phase three)
   ...over,
 });
 
@@ -47,6 +48,7 @@ test("each board-level input flips the key on its own", () => {
   const it = card();
   const base = cardInputsKey(it, env());
   const flips: Record<string, Partial<GateEnv>> = {
+    board: { boardTitle: () => "Notes" },   // a card on a data-defined board: its title rides the label, so it is an input
     "the card's own working dot":      { dot: (n) => (n === "web" ? "work" : "") },
     "the card's own awaiting dot":     { dot: (n) => (n === "web" ? "await" : "") },
     "the card's own unknown ring":     { dot: (n) => (n === "web" ? "unknown" : "") },

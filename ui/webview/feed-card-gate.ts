@@ -39,6 +39,7 @@ export interface GateItem {
   blocked?: { state: string } | null;
   tree?: { kind: string; who: string; whoSid?: string }[] | null;
   delegTracked?: { name: string }[] | null;
+  board?: string | null;
 }
 
 /** The board-level inputs, resolved by the render once per pass. */
@@ -68,6 +69,10 @@ export interface GateEnv {
   /** A per-render counter for cards that must never skip: a quarantine card reads sessionColors by
    *  name, a map the payload rebuilds every frame, so its key is unique per render. */
   seq: number;
+  /** The title of the data-defined board a card names (board-def.ts boardOf), "" for the feed: the producer label
+   *  names it, and a board defined, retitled or removed between two frames must repaint its cards (card boards,
+   *  phase three). */
+  boardTitle: (it: GateItem) => string;
 }
 
 /** One string of every board-level input this card's face reads. Two renders with equal inputs
@@ -87,6 +92,7 @@ export function cardInputsKey(it: GateItem, env: GateEnv): string {
     // the colour echo (feed.ts applyColorEcho) writes `a.color` IN PLACE — the one write into a shared
     // ask object — so identity cannot carry it; the colour rides the key instead
     (it.color && it.color.bg) || "",
+    env.boardTitle(it),
   ];
   for (const n of it.tree || []) {
     if (n.kind !== "handoff" || !n.whoSid) continue;

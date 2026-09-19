@@ -32,7 +32,8 @@ test("a delta gap asks the kernel for a full session instead of freezing", () =>
 
 test("the resync is asked ONCE per desync, and re-arms when the full session lands", () => {
   // the pusher runs every 0.5-3s; without the guard every rejected delta would re-ask
-  assert.match(RENDER, /awaitingFull\.has\(id\)\) return;/, "one ask per desync");
+  assert.match(RENDER, /if \(awaitingFull\.has\(id\)\) \{[\s\S]*?\n\s*return;\n\s*\}\n\s*awaitingFull\.add\(id\);/,
+    "one ask per desync: the latched branch returns before a second ask (its row is pinned in needfull-latch-hygiene.test.ts, 2026-09-19)");
   assert.match(RENDER, /awaitingFull\.add\(id\);/);
   assert.match(RENDER, /awaitingFull\.delete\(msg\.id\)/,
     "upsert() must clear the flag so a LATER gap can ask again");

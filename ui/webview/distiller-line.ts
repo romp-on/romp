@@ -94,11 +94,14 @@ export function applyDistillLine(
 }
 
 /** The STALE-takeaway note (the user 2026-08-19): shown above a COMPLETED card's takeaway when the user
- *  followed up AFTER the summary they read (kernel summaryStale: followupAt postdates what distilledMt
- *  covers) — an old takeaway must never present as current beside a newer reply. "" when there is
+ *  replied AFTER the summary they read (kernel summaryStale: followupAt postdates what distilledMt
+ *  covers), an old takeaway must never present as current beside a newer reply. "" when there is
  *  nothing to say: not stale, not completed, or no takeaway shown to annotate. Self-clearing by
- *  construction: the re-distill stamps a newer distilledMt and the kernel stops sending the flag. */
+ *  construction: the re-distill stamps a newer distilledMt and the kernel stops sending the flag.
+ *  The copy says "replied", which covers a quoted reply as well as a follow-up (the 2026-09-18 read:
+ *  "followed up" was wrong for a quoted reply), in two sentences with no dash. When the note shows and
+ *  whether the card moves are unchanged: that call is the user's. */
 export function distillStaleNote(summaryStale: boolean, completed: boolean, shownText: string): string {
   if (!summaryStale || !completed || !shownText.trim()) return "";
-  return "You followed up since this — it updates when the new work lands.";
+  return "You replied after this summary was written. It refreshes when the new work lands.";
 }

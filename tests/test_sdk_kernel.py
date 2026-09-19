@@ -193,9 +193,10 @@ class KernelWiring(unittest.TestCase):
         # its timeline lane still offers the gpt-… choices — and a pick sends "/model gpt-…" for a sid no backend
         # owns (CodexBackend.owns says False once dead; backend_for answers _UNOWNED). That pick is vouched for the
         # unowned route too, so it reaches the route's refusal arm like a dead SDK lane's "/model opus": the client
-        # is warned and nothing is stamped. Before this the gpt-… vouch asked only the live Codex backend, the route
-        # answered False, and the sendCommand arm handed the text to _UNOWNED.send, whose refusal is a stderr line
-        # the client never hears (review find, 2026-09-11).
+        # hears the refusal on the settingRefused frame (gesture command, the sid, the command head's word as the
+        # flag, so the lane's pending dim ends on it) and nothing is stamped. Before the 2026-09-11 find, the gpt-…
+        # vouch asked only the live Codex backend, the route answered False, and the sendCommand arm handed the text
+        # to _UNOWNED.send, whose refusal is a stderr line the client never hears.
         cx = FakeBackend(); cx._owned = set()                      # the Codex backend is up; this session of its own is dead
         saved, saved_name, saved_sid_of = km._codex, km._name_of, km._sid_of
         km._codex = lambda: cx
@@ -208,9 +209,13 @@ class KernelWiring(unittest.TestCase):
             with contextlib.redirect_stderr(err):
                 self.assertTrue(km._drive({"type": "sendCommand", "name": "web", "cmd": "/model gpt-5-test"},
                                           {"send": heard.append}))
-            warns = [json.loads(m) for m in heard if json.loads(m).get("type") == "warn"]
-            self.assertEqual(len(warns), 1, "the client hears the refusal once: %r" % (heard,))
-            self.assertIn("no running backend owns this session", warns[0]["text"])
+            frames = [json.loads(m) for m in heard]
+            refusals = [m for m in frames if m.get("type") == "settingRefused"]
+            self.assertEqual(len(refusals), 1, "the client hears the refusal once: %r" % (heard,))
+            self.assertEqual({k: refusals[0].get(k) for k in ("gesture", "sid", "flag")},
+                             {"gesture": "command", "sid": "sid-unowned", "flag": "model"})
+            self.assertIn("no running backend owns this session", refusals[0]["text"])
+            self.assertEqual([m for m in frames if m.get("type") == "warn"], [], "no bare warn beside it")
             self.assertNotIn("sid-unowned", km._model_switch_pending, "refused before any switching-dots stamp")
             self.assertEqual(cx.calls, [], "a dead session's backend is not asked to set or send anything")
             self.assertEqual(self.be.calls, [], "the SDK backend was untouched")

@@ -263,6 +263,9 @@ export function setCtxBar(bar: HTMLElement, ctxStr: string | undefined, compacti
   if (bar.dataset.compacts) bar.title = ctxOver   // the click-to-compact tooltip belongs to a bar that compacts (the chat's); an inert one keeps none (round three)
     ? "context exceeds this model's window — the next turn compacts or trims; click to /compact now"
     : `context ${pct}% used — click to /compact`;
+  else if (bar.dataset.inertWhy) bar.title = ctxOver   // a bar that cannot compact says why (a Codex session's, marked by the chat where it fills the bar; 2026-09-19)
+    ? `context exceeds this model's window — ${bar.dataset.inertWhy}`
+    : `context ${pct}% used — ${bar.dataset.inertWhy}`;
   else bar.removeAttribute("title");
 }
 

@@ -108,9 +108,11 @@ machinery on such boxes without it.
   `runtimeWorkspaceRoots`, output schema. The legacy `sandboxPolicy` shape is
   retained only by the explicit danger-full-access live-smoke override.
 - **Notifications** (exact methods): `turn/started`, `turn/completed`,
-  `item/started`, `item/completed` (+ delta streams), `thread/compacted`,
-  `thread/tokenUsage/updated`, `account/rateLimits/updated`, `error`
-  (with `willRetry`), `thread/status/changed`, approval server-requests.
+  `item/started`, `item/completed` (+ delta streams), `thread/compacted`
+  (deprecated on Codex 0.153.3 and never sent: a compaction arrives as a
+  `contextCompaction` item on the running turn), `thread/tokenUsage/updated`,
+  `account/rateLimits/updated`, `error` (with `willRetry`),
+  `thread/status/changed`, approval server-requests.
 - **Item vocabulary** (`ThreadItem` variants): `userMessage`, `agentMessage`,
   `reasoning`, `commandExecution` (command, cwd, aggregatedOutput, exitCode,
   durationMs, status), `fileChange` (changes: [{path, kind, diff}], status),
@@ -132,7 +134,7 @@ machinery on such boxes without it.
 | `item/*` fileChange | per change: `tool_use` (add→`Write`, else `Edit`, input {file_path}) + `tool_result` carrying the diff |
 | `item/*` mcpToolCall | `tool_use` named `mcp__<server>__<tool>` + `tool_result` (result or error) |
 | `item/*` webSearch | `tool_use` `WebSearch` {query} + result |
-| `thread/compacted` | `system`/`compact_boundary` with `logicalParentUuid` = pre-compaction leaf (the stitch the FileAdapter follows) |
+| `item/completed` contextCompaction | `system`/`compact_boundary`, uuid = the item id, `logicalParentUuid` = the pre-compaction leaf (the stitch the FileAdapter follows), `compactMetadata.trigger` `"auto"` (every compaction inside a turn romp started is automatic). The item completes only after the runtime replaced the history, so a failed compaction writes nothing; `item/started` writes nothing (no content yet). The read side's replay window arms on the summary record, never on this boundary (the event-model change this row depends on), so the prompt that directly follows a pre-turn boundary survives even when it repeats earlier text. `thread/compacted` (deprecated on Codex 0.153.3 and never sent; turn-scoped in the pinned client, so it could only ever arrive on a registered turn's queue, never the global pump) → the same record when no item wrote it for that turn: boundaries per turn = max(items, notifications) |
 | turn failed / terminal `error` | assistant record flagged `isApiErrorMessage` (the error-card tag) |
 | `thread/tokenUsage/updated` | not a record — feeds `live_sessions().context` |
 | `plan`, `subAgentActivity`, `collabAgentToolCall` | **phase 2** (skipped, logged once) |

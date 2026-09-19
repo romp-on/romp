@@ -20,8 +20,8 @@ test("ask cards render the goal's WHOLE sub-goal tree (the 'subgoals' section), 
   assert.match(FEED, /const walk = \(nid: string, depth: number\) =>/);
   assert.match(FEED, /for \(const c of freshKids\) walk\(c, 0\);/);
   // …and the reviewed-earlier kids still walk the SAME whole-tree recursion when expanded
-  // (the user 2026-08-19: collapsed behind one row, never dropped)
-  assert.match(FEED, /if \(revOpen\) for \(const c of revKids\) walk\(c, 0\);/);
+  // (the user 2026-08-19: collapsed behind one row, never dropped), one level UNDER the fold row (2026-09-18)
+  assert.match(FEED, /if \(revOpen\) for \(const c of revKids\) walk\(c, 1\);/);
   assert.match(FEED, /for \(const c of n\.children \|\| \[\]\) walk\(c, depth \+ 1\)/);
   assert.doesNotMatch(FEED, /root\.children\.map/, "no longer capped at the direct children");
   assert.match(FEED, /s\.status === "done" \? "✓"/);         // ✓ done / ⏸ question(blocked) / empty-ring open mark

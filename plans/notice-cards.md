@@ -466,6 +466,71 @@ growth stays as the reference says; the byte bound is the user's call. Known and
 not archived yet reads the whole archive (its rows are live, the tail read finds none and walks to the start), no worse
 than before the bound.
 
+## Owner-less cards and the terse command (2026-09-18)
+
+**The ask.** The user found `romp card` overly restrictive: they want cards WITHOUT a session that appear at the TOP of the
+feed, no key to manage, and the terse form `romp card -t "title" -m "some text"` to just make a card.
+
+**The home.** An owner-less card lives in the reserved file `STATE/notices/notes.jsonl`, the key `notes`
+(`NOTICE_OWNERLESS_SID`). It cannot collide with a session: the store is keyed by sid, a sid is a uuid (thirty-six
+characters of hex and hyphens), and `notes` is a word. A session NAMED notes has a uuid sid, and the kernel resolves a
+name to its sid before the store sees it, so a name no session answers to is still refused ("no session answers to"),
+never guessed owner-less: only an ABSENT session (no `id`, no `name` on the route; no `--session` and no `ROMP_SID` on the
+command line, or `--no-session` inside a session) takes the owner-less road. `post_notice` takes an EMPTY `sid` as that
+road and nothing else: the reserved word arriving as a sid (an unresolved name handed back by `_sid_of`) is refused as a
+name no session answers to, and the session check never answers for the key.
+
+**Name and colour.** On the feed the owner-less run reads **Notes** (`NOTICE_OWNERLESS_NAME`) with no identity colour, since
+no session stands behind it; the card carries no session chip. In a federated view the remote host's prefix distinguishes
+one host's Notes from another's, as it does every remote card (federation prefixes a remote card's sid and name with its
+host); the kernel bakes no hostname into the card, so the repo and the state carry no machine identifier.
+
+**Item id and the ledger.** `notice:notes:<key>:<rev>`, the same shape as every notice card's; the cleared ledger already
+treats `notice:` ids as sessionless (`_CLEARED_NO_SESSION`), and Undo, the restore and the retention pass split the id the
+same way, so no reader changes.
+
+**The archive bound.** The owner-less file is one more `<sid>.jsonl` to the retention pass: dismissed, expired,
+superseded and over-cap rows move to `notices-archive/notes.jsonl`, the revision index `notes.revs.json` counts its
+revisions, the restore's tail read serves its Undo. The fifty-live-keys cap applies to the file on its own, so owner-less
+cards are capped as one session's would be.
+
+**Order: the feed board's rule.** Every NOTICE card carries two fields the board model reads (plans/card-boards.md;
+the names agreed with its author 2026-09-18): `board`, the board the card sits on, `"feed"` today; and `category`, the
+card's category, which is today's raw column value (`needs_input`, `working`, `completed`), carried beside `column` until
+the renderer reads `category` alone (`column` stays byte-identical meanwhile). The other card families write `column`
+alone; every family carrying the two fields is the boards' phase two, as the card-boards plan says. The owner-less cards' place
+is a SORT RULE of the feed board, not a card field and not a timestamp trick: within a category, runs order by the owner
+key, the reserved no-session key first, then the session order, then time; needs-you still decides the category, so an
+owner-less card that needs you heads the needs-you column and one that does not heads Completed. In grouped mode the Notes
+run opens each column it has cards in; in ungrouped mode the owner-less cards sort first within the column by the same key
+(a stable sort, so their own time order holds).
+
+**Actions and attachments.** An owner-less card carries no actions: `/send` needs a session to send to, so `post_notice`
+refuses actions on the owner-less road and the action runner refuses a hand-made owner-less id. An attachment is judged
+against the home directory alone (no session folder to admit).
+
+**The command.** `romp card -t <title> [-m <text>] [-k <key>] [-s <session> | --no-session] [--body-file <path>]
+[--attach <path>] [--needs-you] [--expires <seconds>] [--producer <label>]`, with `--title`, `--message` (`--body` stays
+as its alias), `--key` and `--session` the long forms, and the positional shorthand `romp card "title" "text"` (a bare
+first word is the title, a bare second the text; anything more is a usage error). `-k` is OPTIONAL: when absent the command
+mints a key, the first eight hex of a uuid4, never a slug of the title (an edited title must not make a second card, the
+round-two lesson), and the success line prints it so a later revision can name it (`romp card -k <key> ...`). Outside a
+session with no `-s` the card posts owner-less; inside a session `ROMP_SID` owns it by default and `--no-session` forces
+owner-less. The usage string stays short; the reference documents the shorthand.
+
+**The card's modal, and a reply's id (2026-09-18, the read of the owner-less cards' third round).** A notice card's modal shows
+the notice: its title heads the overlay and its body is the card's own face (the producer line, the body through the sanitizer,
+the attachment, the actions as the same latching buttons), in place of the goal tree a notice never has (the tree body read "No
+work yet." and hid the title). No session gesture shows there: the kernel's follow-up road reads the session out of a GOAL id, so
+Follow up, Check status and Continue on a notice id are refused as a session no kernel has, and they hide for every notice card;
+Clear stays. An owner-less card's header name is plain text, never a session link, never struck through; the title locates
+nothing and lights no chat turn. The kernel's answer to an action reaches the modal as it reaches the card: a success on a
+dismissing card closes both, any other answer re-arms. In a federated view a NOTICE id wears its host on EVERY inbound face, a
+row's and a reply's alike (noticeActionDone, a refused bell, an err naming its request), or the answer misses the card the
+pane holds; the prefix comes off on the way out beside the sid's. The viewer's cleared overlay never touches a notice card: the
+kernel ships goal ids alone as foreign clears (the prefixed families never ride), and a notice card's dismissal is a routed
+gesture the owning kernel's ledger records under the bare id.
+
 ## Privacy
 
 The store holds the producer's payload and nothing more. The kernel log names the session, the key
@@ -615,12 +680,221 @@ Moving it onto the notice store is a follow-up, not part of this note.
   separate change with its own tests.
 - **A Notices pane.** Additive, and a question about the board's layout rather than about this
   store.
-- **More action routes.** `/send` covers the first consumer; each further route needs its own
-  argument for why a button may call it.
-- **A chat presence for a notice.** Deliberately absent: a producer that wants the agent told
-  sends the session a message itself.
+- **More action routes.** Superseded (2026-09-19): actions are of a KIND the kernel defines, and the
+  allowlist admits kinds, never routes; the section "Action kinds and the held-mail card" below.
+- **A chat presence for a notice.** The AGENT is still told nothing (a producer that wants the agent
+  told sends the session a message itself); the USER, since 2026-09-19, sees the session's needs-you
+  notices in a box at the bottom of the chat pane (the section below), the held-mail card first.
 - **Posting to a session on another host from this host's command line tool.** `romp card` talks
   to the local kernel, so a notice for a remote session is posted on the host that owns it. The
   federated dashboard then shows it either way.
 - **The archive bound.** The section above (2026-09-16) designs the revision index sidecar, Undo's tail read
   and the memo bound, and lays out the disk-growth decision; the code follows the design's read.
+
+## Action kinds and the held-mail card (2026-09-19)
+
+**The ask (the user, 2026-09-18, through the manager; paraphrased).** A notice card's actions are of a
+KIND the backend defines: a kind names its route and its body shape, and the allowlist admits kinds,
+never bare routes, so a producer can route the user's click only where the kind allows. The held-mail
+(quarantine) kind is the first: Approve and Deny only, no Edit (nobody edits mail); Approve delivers,
+Deny drops, both through the kernel's existing quarantine act road. The held-mail card becomes a notice
+card the kernel produces when a message is held, replacing today's hand-built quarantine family where the
+model allows. The card's modal shows the MESSAGE TEXT, never a struck-through remote thread name (the
+user's screenshot: a struck name where the text belongs). The chat pane gets an approval box ABOVE the
+background-agents box at the bottom, listing the session's held messages with Approve and Deny, vanishing
+on the decision; and a held message puts the session in the blocked state (the dashed yellow ring) until
+decided, so a user with the feed's messages off still sees it. The settings plan
+(`plans/settings-across-machines.md`) leans on the same API: its three answers against
+`/setting-proposal` are one kind.
+
+**Where the pieces are today** (verified at `upstream/main` `48c313a5`). The hand-built family:
+`_quarantine_cards` (`kernel/kernel.py`) reads the bus's held files under `STATE/postal/quarantine`
+(each `{mid, to, toId, frm, frmId, body, kind, origin, via, at, toWireId?, userAsk?, relayed?}`) and builds
+a card under `quarantine:<mid>` with the flavour `blocked.state === "quarantine"` carrying `mid, frm, to,
+origin, body, gist, what`; the pane's face (`feed.ts`: the `qbody` block, `quarWho`, the Approve and Deny
+latches keyed `{kind: "quarantine", mid}`, the decision dialog `showQuarantineDialog` with its deny-note
+step, the `showBlk` exclusion and the gate line) posts `quarantineDecision {mid, action, text?, sid,
+feedback?}`; the kernel's op proxies it to the bus (`_bus_quarantine_act`, `POST /quarantine/act` with
+the recipient `sid` since 2026-09-18, dialled by the bus's port record) and answers a refusal as
+`quarantineRefused {mid}`; the bus's `quarantine_decide(mid, action, text, feedback, sid)` approves by
+replaying `deliver()` (refusing when the held sid is no longer live, id-addressed mail never re-matched by
+name) or denies by dropping the hold after parking the optional note to the sender. The notice model:
+`post_notice` validates `actions` through `_notice_actions_check` (up to `NOTICE_ACTIONS_MAX` entries
+`{label, route, body}`, the route in `NOTICE_ACTION_ROUTES`, today `/send` alone, with the two guards on a
+`/send` body); `_notice_action` runs a stored action matched exactly by route and body under the in-flight
+set, `dismissOnAction` appending the `acted` row and clearing the card; the pane's `fillNoticeFace` builds
+the buttons and posts `noticeAction {itemId, sid, route, body}`, answered by `noticeActionDone`; the
+modal of a notice card shows the notice (`renderNoticeModalBody`, PR 1831 round four). The kernel's WS op
+chain handles `noticeAction` for any client, the chat's included. The ask ring: `_feed_needs_input` holds
+the sids of every card filed under `needs_input` at the last feed build, `build_session` ships it as the
+status's `needsYou`, and the tab strip composes the dashed yellow ring from it (`styles.css`, the ASK
+ring, 2026-09-13). The chat's bottom box: `#bg-tasks` in the chat page's markup, rendered by
+`renderBgTasks` from the session's `awaitingItems`, `awaitingWhy` and `bgTasks`, hidden when empty.
+
+**Correction to today's card, from the code:** every notice card is stamped `live: False`
+(`_notice_cards`), and the card modal's header strikes the owner's name through on `!it.live` (the
+dead-session dress). That is the struck-through name in the user's screenshot: not a remote thread's
+name, the recipient's, struck because the notice card claims its session dead. The held-mail card
+inherits the fix below for every notice card.
+
+### Action kinds
+
+**Decision: a stored action is `{label, kind, body}`; the kernel's kind table names each kind's route,
+its body shape and its click-time input; the post validates against the table and refuses an unknown
+kind or a body outside its shape; the click is matched to the stored action exactly and may add only the
+input the kind names.** The allowlist is the kind table. The stored `route` member is gone from new rows;
+a row written before this (`{label, route: "/send", body}`) reads as kind `send`, so no store is
+rewritten and no migration runs.
+
+The table, `_NOTICE_ACTION_KINDS` in `kernel/kernel.py`, one entry per kind:
+
+```
+send        route: the plain-message door (_deliver_text, POST /send's), target: the card's OWN session;
+            body: {text: non-empty, never beginning with a slash}; no click input.
+            The two guards of the review of PR 1757 stand: no id or name in the body, no typed command.
+quarantine  route: the bus's /quarantine/act through _bus_quarantine_act, with the card's OWNER as the
+            recipient sid; body: {mid: a safe id, verdict: "approve" | "deny"}; click input: on a deny,
+            an optional {note: string} (the note the bus parks for the sender, as today); on an approve,
+            none. No Edit: no text rides an approve (the user).
+setting-proposal  the settings plan's kind (its three answers, Apply / Keep mine / Keep mine and pin,
+            against /setting-proposal); defined in that plan and added to the table by its phase one.
+```
+
+Each kind's runner is a function in the kernel (`_notice_run_send`, `_notice_run_quarantine`) taking
+`(row, action, input)`; `_notice_action` looks the kind up, refuses the click when the stored action is
+not on the card's revision (matched by kind and body), refuses an `input` the kind does not name or with
+members outside its shape, and calls the runner. The owner-less home (`NOTICE_OWNERLESS_SID`) takes no
+actions, as today. The one-delivery-per-click guard (the in-flight set), `dismissOnAction`'s `acted`
+row and the rule that a card is never a way to issue an arbitrary request hold for every kind. The kind
+`quarantine` refuses at the post when the card's owner is the owner-less home (a verdict needs a
+recipient) and at the click when the held file's `toId` is not the card's owner (the bus checks the
+recipient it serves too, since 2026-09-18, so a decision routed to the wrong kernel names itself).
+
+**The wire.** The pane posts `noticeAction {itemId, sid, kind, body, input?}`; `route` is accepted from an
+older pane and read as kind `send`. The answer stays `noticeActionDone {itemId, ok, error}`, to the
+asking client, whichever pane it is. `quarantineDecision` and `quarantineRefused` retire with the
+hand-built family.
+
+**Alternatives weighed.** A general `route` kind whose body names an allowlisted route: rejected, it is
+a bare route under another name, the shape the user ruled out. Validating the kind at the click rather
+than the post: rejected, the producer learns of a refused button when the user presses it. A per-kind
+plugin registry: rejected, the table is small and each kind's runner needs the kernel's own doors.
+
+### The held-mail card
+
+**Decision: a held message is a notice card the KERNEL posts, keyed by the message id, owned by the
+recipient, needs-you, Approve and Deny of kind `quarantine`, `dismissOnAction`; the hand-built family
+goes.** The census of today's card and where each field lands:
+
+- the sender (`frm`, with `origin`): the title, `New message from <frm>` (the host prefix as the card's
+  chip vocabulary renders it), and the body's first line names the route, `from <origin>:<frm> to
+  <to>, held because peer <origin> is DIRECTED`;
+- the recipient (`toId`, `to`): the card's owner, so its chip, colour, host routing and memo key;
+- the reason held: the body's first line above, and the producer label `postal`;
+- the message text (`body`): the body, through the sanitizer as every notice body (peer content, shown,
+  never auto-run; the card shows its first lines, the modal the whole);
+- the gist: no field of its own, the body's first ninety characters are on the card;
+- the message id (`mid`): the key, and the action body's `mid`; the item id `notice:<toId>:<mid>:<rev>`.
+
+**Who posts, and when.** The kernel, at every notice attach in `build_feed` (`_notice_cards`), before
+the projection: each held file under `STATE/postal/quarantine` whose `mid` has no notice under the
+recipient's key, in the live rows or the revision index, gets one `post_notice(toId, mid, ...)`; the
+check is one directory listing memoized on the directory's stat (the held file's publish is an
+`os.replace`, which moves it), so a boot, a first build and a hold landing while the kernel was down are
+all covered and a decided or dismissed card is never re-posted. The bus changes nothing for this (a
+later immediacy post through `POST /notice` stays idempotent by the same key check). A held file whose
+recipient this kernel does not know (a renamed or ended session) posts to the owner-less home with the
+recipient's name in the title and no actions, since a verdict needs a live recipient; the bus's approve
+refusal for a gone recipient is the same fact.
+
+**How the card moves.** On a decision the runner calls `_bus_quarantine_act({mid, action, sid: owner,
+feedback?})`; success appends the `acted` row and clears the card (`dismissOnAction`), and appends an
+`expire` row for the key so the projection retires it whatever the ledger later says; the bus deletes the
+held file, so the backfill sees nothing to post. A refusal re-arms the buttons with the bus's reason
+through `noticeActionDone`. Clear dismisses the card while the held file stays, as today, and the
+backfill's key check keeps the dismissed key dismissed. A message re-held under the same id cannot
+happen (the sender never resends a `peer_seen` id), so a key has one revision in practice; the revision
+index keeps it so even if it did.
+
+**The card's liveness (the struck name).** `_notice_cards` stamps `live` from the build's alive roster
+for the owner (`sid in alive`), False for the owner-less home, instead of False for every card; the
+modal's header then strikes a name only for a session that is dead, and a live recipient's held-mail
+card shows the recipient's name plain over the message text. A federated frame carries the owning
+kernel's word, prefixed like its sid.
+
+**Removal, one commit.** `_quarantine_cards` and its attach; the `quarantineDecision` op and
+`quarantineRefused`; the pane's quarantine kind (the `blocked` fields, the latch kind, `_qApprove`,
+`_qDeny`, `_qBody`, the `isQuar` block of `updateAskCard`, `showQuarantineDialog`, `quarWho`, the
+`showBlk` exclusion, the gate line and the render-counter exemption); the kind `quarantine` in
+`ui/webview/board-def.ts` (`KindId`, `KIND_IDS`, `FEED_BOARD.kinds`, the descriptor, `kindOf`), in the
+kernel's `_CODE_BOARDS["feed"]["kinds"]` and `_BOARD_KINDS` (asserted together at import), in
+`board-def.test.ts` (`KIND_TABLE`, the `KIND_IDS` equality, the `kindOf` case), in
+`tests/test_card_boards.py` (the families dict, the count of `"board": "feed"` sites, the kinds
+literal) and in `plans/card-boards.md` section 2. The pins on the family, re-aimed or retired with it:
+`tests/test_kernel_trust.py` (sixteen), `tests/test_kernel_goal_compaction.py` (three),
+`feed-render-incremental.test.ts` (eight), `feed-quarantine.test.ts` (the file), `feed-card-gate.test.ts`
+(four), `feed-sess-clear.test.ts` (three), `feed-judge-auth.test.ts` (its exclusion), `card-notify.test.ts`
+(the attach order), `feed-render-incremental.test.ts`'s render-counter case. The notice descriptor's
+actions entry stays `stored`.
+
+### The chat pane's approval box
+
+**Decision: the chat's session frame carries a per-session slice, `notices`, the session's standing
+needs-you notice cards; the chat page renders them in a box ABOVE the background-agents box; the box is
+the session's needs-you notice list, the held-mail card its first content, never a mail-only widget.**
+The chat page hears no feed frame (the kernel sends the feed to feed clients alone), so the box rides
+`build_session`'s frame beside `needsYou`: `notices: [{itemId, title, producer, body, attachment,
+actions}]`, the projection's needs-you rows for the sid in post order (at most the live cap), empty for a
+session with none, absent before the first feed build as `needsYou` is. The pane renders `#notices`, a
+slot above `#bg-tasks` in the chat page's markup, shown and hidden by content as that box is
+(`renderNotices` beside `renderBgTasks`, keyed on the slice's content): per card the title with the
+producer, the body through the sanitizer, and the action buttons, the same stored actions posted as
+`noticeAction {itemId, sid, kind, body, input?}` over the chat's own socket and re-armed on
+`noticeActionDone` (the chat page gains that handler), one delivery per click; a deny's note prompt is
+the same optional step the feed's card takes. The box vanishes once the decision lands: the `expire` row
+drops the card from the next session frame the pane hears. The box follows the transcript's bottom-box
+rule (the ResizeObserver over the boxes below the transcript keeps an at-bottom reader at the bottom),
+and its click-safety is the delegate on the stable `#notices` container.
+
+**The blocked state, pinned.** A held message puts the recipient in the needs-you state by construction:
+the dashed yellow ask ring reads `_feed_needs_input`, the sids of every card filed under `needs_input`,
+and the recipient's held-mail notice is such a card. The rewrite keeps that road and pins it with a
+served lab: a hold lands, the recipient's tab wears the ring while the decision waits, the ring clears on
+the decision; the chip and the state line keep their own states, since the ring is the needs-you mark in
+every live state.
+
+### Phasing and tiers
+
+1. **This section** (docs; the pull request carrying it).
+2. **The kind API, the held-mail card, the liveness fix and the removal** (feature, unarmed; additive
+   contract to producers under the user's standing ruling). Tests: `_notice_actions_check` over the
+   table (each kind's shape accepted and refused by name, an unknown kind refused, an older row's route
+   read as `send`); `_notice_action` matching by kind and body, refusing an unnamed input, the quarantine
+   runner's bus call with the owner sid (a stubbed bus), the `acted` and `expire` rows on success, the
+   re-arm on refusal; the backfill (a held file posts once, a decided or dismissed key never re-posts, a
+   file for an unknown recipient posts owner-less without actions); `live` from the alive roster; the
+   removal's pins retired. A served lab over a hermetic bus and kernel: a held message appears as the
+   card with the sender, the text and Approve and Deny; the modal shows the message text with the
+   recipient's name plain; Approve delivers (the bus's held file gone, the card gone); a second held
+   message denied with a note (the note parked). Red first per test at the base.
+3. **The chat box and the ring's pin** (feature, unarmed). Tests: the session frame's `notices` slice
+   (present, empty, absent before the first build); the box's render (content-keyed, hidden when empty,
+   the buttons posting over the chat socket, the re-arm); a served lab: a hold lands with the feed pane
+   off, the box shows above the background-agents box with Approve and Deny, the tab wears the dashed
+   yellow ring, Deny clears both. Red first per test at the base.
+4. Two and three may be one pull request if the size stays readable; the settings plan's kind lands in
+   its own phase one against the same table.
+
+### What stays out
+
+No Edit action (the user). No tool-permission prompts: the ask is the mail approval cards. No general
+route kind. The agent is still told nothing about a notice (the injected-voice rule); the box is the
+user's. No change to the bus's hold or decide contracts beyond what 2026-09-18's recipient sid already
+carries.
+
+### Privacy
+
+The card's title and body are the held message's sender name and text, which live in the bus's held
+files and the notice store under the state root, never in this repository; the kernel log names the
+key (the message id) and the producer, never the text. Tests and labs use synthetic message ids,
+`TESTHOST` and the notes-api world.

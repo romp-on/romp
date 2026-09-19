@@ -89,6 +89,7 @@ the agents' working gold and the watches' awaiting green. That is a kind, not a 
 status still overrides it where it means something (a failed row's dot is the blocked red,
 a completed row's the dim ink). The light theme's accent is an orange, so `--kind-command`
 carries its own blue there (`#356890`).
+Section labels in the settings modal and its mirrors (`.rs-sec`, `.rs-divider`, `.rs-preview-title`, the network panel's `.rnet-khead` and the strip's `.sn-khead`) are sentence case in the accent colour at 11px/600, never uppercase and never letter-spaced: hierarchy by size and colour, not by shouting (the user 2026-09-18).
 
 ### Loading/waiting states: show the romp loader FIRST
 Anytime something is loading, parsing, or otherwise making the user wait, the FIRST

@@ -184,10 +184,14 @@ const rectIn = async (fid, sel) => { const fr = await frameOf(fid); if (!fr) ret
 const filled = async (fid) => {
   const fr = await frameOf(fid); if (!fr) return { missing: true };
   await fr.waitForFunction(() => document.querySelectorAll("#content .turn[data-uuid]").length >= 1, null, { timeout: 30000 }).catch(() => {});
-  await fr.evaluate(() => { const c = document.getElementById("content"); if (c) { c.scrollTop = 0; c.dispatchEvent(new Event("scroll")); } });
-  await page.waitForTimeout(300);
-  await fr.evaluate(() => { const c = document.getElementById("content"); if (c) { c.scrollTop = 0; c.dispatchEvent(new Event("scroll")); } });
-  await page.waitForTimeout(1800);
+  // WAIT for the fill (a run region at lo 0), re-nudging #content to the top on each poll so a slow observer keeps
+  // getting a scroll to act on; bounded and event-based, never a fixed sleep (a starved runner needs far longer than
+  // a fixed pause, a fast one far less). A genuine miss falls through and reports filled:false with the last regions.
+  await fr.waitForFunction((id) => {
+    const c = document.getElementById("content"); if (c) { c.scrollTop = 0; c.dispatchEvent(new Event("scroll")); }
+    const regions = (typeof window.__rompRegions === "function") ? window.__rompRegions(id) : null;
+    return !!(regions && regions.some((r) => r.kind === "run" && r.lo === 0));
+  }, cfg.bot, { timeout: 30000 }).catch(() => {});
   return await fr.evaluate((id) => { const regions = (typeof window.__rompRegions === "function") ? window.__rompRegions(id) : null; return { turns: document.querySelectorAll("#content .turn[data-uuid]").length, filled: !!(regions && regions.some((r) => r.kind === "run" && r.lo === 0)), regions }; }, cfg.bot);
 };
 // a wait that names itself (2026-09-18): the label says WHICH wait ran out (the zone's mount, the store write, the bottom
@@ -222,8 +226,28 @@ try {
   } catch (e) { if (!(e && e.name === "TimeoutError")) throw e; }
   if (!t) throw new Error("no drag start: the bottom session's tab (data-id " + cfg.bot + ") never rendered as a visible, draggable box in f-chat's strip within 40s");
   out.pane = await page.evaluate(() => { const p = document.getElementById("chat-pane"); const r = p.getBoundingClientRect(); return { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }; });
-  await page.mouse.move(t.x, t.y); await page.mouse.down(); await page.mouse.move(t.x + 24, t.y + 6, { steps: 4 });
-  await named("the split-down zone's mount after the drag start", page.waitForFunction(() => !!document.querySelector("#chat-pane > .col-drop.col-drop-bottom"), null, { timeout: 20000 }));
+  // Hear the page's dragstart from the SHELL: the tab's dragstart posts {romp:'tabDrag', on:true} to the parent,
+  // which is what makes the shell mount the zones (mountZones). Install the listener BEFORE the drag so none is missed.
+  await page.evaluate(() => { window.__vsplitDragStarted = false; window.addEventListener("message", (e) => { if (e && e.data && e.data.romp === "tabDrag" && e.data.on) window.__vsplitDragStarted = true; }, false); });
+  // Cross the native drag threshold in SEVERAL honoured pointer moves, yielding a paint between each so a starved
+  // runner registers the gesture and fires dragstart; stop as soon as the shell has heard it. Never a fixed sleep.
+  await page.mouse.move(t.x, t.y); await page.mouse.down();
+  let dragStarted = false;
+  for (const step of [[4, 1], [10, 3], [18, 6], [28, 9], [40, 12]]) {
+    await page.mouse.move(t.x + step[0], t.y + step[1]);
+    dragStarted = await page.evaluate(() => window.__vsplitDragStarted === true);
+    if (dragStarted) break;
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  }
+  if (!dragStarted) dragStarted = await page.waitForFunction(() => window.__vsplitDragStarted === true, null, { timeout: 15000 }).then(() => true).catch(() => false);
+  if (!dragStarted) throw new Error("no dragstart: the real pointer drag of the bottom tab (data-id " + cfg.bot + ") never fired the page's dragstart (no {romp:'tabDrag',on} reached the shell) across five stepped moves and a 15s wait; the drag threshold was not crossed under load");
+  // dragstart fired, so the shell mounts the zones now; this road drives the bottom drop zone
+  try {
+    await page.waitForFunction(() => !!document.querySelector("#chat-pane > .col-drop.col-drop-bottom"), null, { timeout: 20000 });
+  } catch (e) {
+    if (e && e.name === "TimeoutError") throw new Error("no drop zone: dragstart fired but the shell did not mount #chat-pane > .col-drop.col-drop-bottom within 20s (mountZones ran late, or the pane lost its zone under load)");
+    throw e;
+  }
   const bz = await page.evaluate(() => { const z = document.querySelector("#chat-pane > .col-drop.col-drop-bottom"); const r = z.getBoundingClientRect(); const p = z.parentElement.getBoundingClientRect(); return { col: z.getAttribute("data-col"), top: Math.round(r.top), height: Math.round(r.height), x: r.left + r.width / 2, y: r.top + r.height / 2, paneTop: Math.round(p.top), paneHeight: Math.round(p.height) }; });
   out.bottomZone = bz;
   // move the pointer over the bottom zone: the ghost shows the pane's BOTTOM half with the dragged session's name
@@ -254,7 +278,8 @@ try {
   const under = await page.evaluate(([x, y]) => { const el = document.elementFromPoint(x, y); return el ? (el.className || el.id || el.tagName) : null; }, [rel.x, rel.y]);
   await page.mouse.up();
   await named("the drop's store write (a place:'below' entry in romp-chat-cols; released at " + Math.round(rel.x) + "," + Math.round(rel.y) + " over " + under + ")", page.waitForFunction(() => { const cc = JSON.parse(localStorage.getItem("romp-chat-cols") || "{}"); return (cc.cols || []).some((c) => c.place === "below"); }, null, { timeout: 20000 }));
-  await page.waitForTimeout(500);
+  // wait for the bottom pane's iframe to be BUILT (event-based), not a fixed settle, so afterDrop reads its id under load
+  await page.waitForFunction(() => !!document.querySelector(".pane.split-v .chat-sub iframe"), null, { timeout: 20000 }).catch(() => {});
   out.afterDrop = await page.evaluate(() => {
     const cc = JSON.parse(localStorage.getItem("romp-chat-cols") || "{}"); const be = (cc.cols || []).find((c) => c.place === "below");
     const g = document.getElementById("col-ghost"); const bot = document.querySelector(".pane.split-v .chat-sub iframe");
@@ -262,7 +287,7 @@ try {
              ghostCls: g.className, zones: document.querySelectorAll(".col-drop").length, paneSplit: !!(bot && bot.closest(".pane") && bot.closest(".pane").classList.contains("split-v")) };
   });
   const botFid = out.afterDrop.botId;
-  if (botFid) { await named("the bottom pane's iframe mount", page.waitForFunction((fid) => !!document.getElementById(fid), botFid, { timeout: 20000 })); await page.waitForTimeout(600); out.botFill = await filled(botFid); }
+  if (botFid) { await named("the bottom pane's iframe mount", page.waitForFunction((fid) => !!document.getElementById(fid), botFid, { timeout: 20000 })); out.botFill = await filled(botFid); }
 } catch (e) { out.died = String(e).slice(0, 500); }
 process.stdout.write("RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();

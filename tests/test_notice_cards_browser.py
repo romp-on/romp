@@ -47,7 +47,10 @@ await page.addInitScript(() => {
   window.__feedNotices = []; window.__nad = []; window.__toasts = [];
   document.addEventListener("DOMContentLoaded", () => new MutationObserver(() => { for (const t of document.querySelectorAll(".feed-toast")) { const x = t.textContent || ""; if (x && !window.__toasts.includes(x)) window.__toasts.push(x); } })
     .observe(document.documentElement, { childList: true, subtree: true, characterData: true }));
-  const record = (m) => { if (!m) return; if (m.type === "feed" && Array.isArray(m.asks)) window.__feedNotices.push(m.asks.filter((a) => a && a.notice).map((a) => a.itemId));
+  window.__feedAll = [];
+  const record = (m) => { if (!m) return; if (m.type === "feed" && Array.isArray(m.asks)) { window.__feedNotices.push(m.asks.filter((a) => a && a.notice).map((a) => a.itemId));
+      window.__feedAll.push({ n: m.asks.length, notes: m.asks.filter((a) => a && String(a.itemId || "").startsWith("notice:notes:")).map((a) => a.itemId + "|" + a.column), keys: Object.keys(m).filter((k) => k !== "asks").slice(0, 12) }); }
+    else if (m.type === "feed") window.__feedAll.push({ shape: Object.keys(m).slice(0, 12) });
     if (m.type === "noticeActionDone") window.__nad.push(m); };
   let fed = null;
   Object.defineProperty(window, "__rompFed", { configurable: true, get() { return fed; },
@@ -128,7 +131,35 @@ await page.waitForFunction(([id, n]) => { const fr = window.__feedNotices || [];
 const expiry = { shown: soonShown, goneAfterBuild: await page.evaluate((id) => { const fr = window.__feedNotices || []; return fr.length > 0 && !fr[fr.length - 1].includes(id); }, id4) };
 // (6) a refused post over the route: a disallowed action route
 const refused = await post({ id: cfg.sid, key: "bad", title: "x", actions: [{ label: "x", route: "/watch", body: {} }] });
-process.stdout.write("RESULT:" + JSON.stringify({ first, second, latched, done2, stillThere, toasts, rearmed, afterClear, undone, revision, expiry, refused, errors, diag }) + "\n");
+// (7) an OWNER-LESS card (the user 2026-09-18): posted with neither id nor name, it heads its column under a Notes header that
+// is plain text (no anchor, no title, no dead class, no click, no revive offer), with no session chip on the card; the reserved
+// word as a NAME is refused like any name no session answers to (round two of PR 1831)
+await page.mouse.move(2, 2);   // the pointer left resting on a card by the roads above holds every payload (the hover-freeze gate): release it
+await page.waitForTimeout(300);
+const r7 = await post({ key: "everyone", title: "Remember the standup moved", body: "to 10:30", producer: "cli" });
+const id7 = "notice:notes:everyone:" + (r7.notice || {}).rev;
+await page.waitForSelector(sel(id7), { state: "attached", timeout: 60000 }).catch(() => {});
+const ownerless = await page.evaluate((s) => {
+  const c = document.querySelector(s);
+  if (!c) return { missing: true, inFrames: (window.__feedNotices || []).filter((f) => f.some((k) => k.startsWith("notice:notes:"))).length, frames: (window.__feedNotices || []).length,
+                   completed: Array.from(document.querySelectorAll("#col-completed-list [data-key]")).map((n) => n.dataset.key).slice(0, 12),
+                   heads: Array.from(document.querySelectorAll(".feed-sess-head")).map((h) => (h.parentNode && h.parentNode.id) + ":" + h.getAttribute("data-fsid")) };
+  const col = c.parentNode; const cards = Array.from(col.children).filter((n) => n.dataset && n.dataset.key && n.dataset.key.startsWith("a:")).map((n) => n.dataset.key);
+  const head = Array.from(col.querySelectorAll(".feed-sess-head")).find((h) => h.getAttribute("data-fsid") === "notes");
+  const nm = head ? head._name : null;
+  // a click on the header's name must open nothing: no dialog, no new Revive button (a dead session's card carries its own
+  // Revive, so the count is compared before and after), and never the closed-session offer's words
+  const revives = () => Array.from(document.querySelectorAll("button, .fbtn")).filter((b) => /revive/i.test(b.textContent || "")).length;
+  const dialogsBefore = document.querySelectorAll("dialog[open], .fmodal, .modal").length; const revBefore = revives();
+  if (nm) nm.click();
+  const dialogsAfter = document.querySelectorAll("dialog[open], .fmodal, .modal").length;
+  const revive = revives() !== revBefore || /is closed, revive it/i.test(document.body.textContent || "");
+  return { col: col.id, cards, chipDisplay: getComputedStyle(c._name || c.querySelector(".fname") || c).display, headFound: !!head, headText: head ? head.textContent : null,
+           nmTag: nm ? nm.tagName : null, nmClass: nm ? nm.className : null, nmTitle: nm ? nm.getAttribute("title") : null, nmDead: nm ? nm.classList.contains("dead") : null,
+           nmClick: nm ? (nm.onclick === null) : null, dialogsBefore, dialogsAfter, reviveOffered: revive, grouped: (JSON.parse(localStorage.getItem("romp:settings") || "{}").grouped !== false) };
+}, sel(id7));
+const byName = await post({ name: "notes", key: "k", title: "t" });
+process.stdout.write("RESULT:" + JSON.stringify({ first, second, latched, done2, stillThere, toasts, rearmed, afterClear, undone, revision, expiry, refused, errors, diag, r7, ownerless, byName }) + "\n");
 await browser.close();
 """
 
@@ -255,6 +286,22 @@ class NoticeCardsServed(unittest.TestCase):
         self.assertFalse(r["afterClear"], "Clear took the card off the board")
         self.assertIsNotNone(r["undone"], "an Undo affordance was offered"); self.assertTrue(r["undone"], "…and it restored the card")
         self.assertEqual(r["revision"], {"rev": 2, "oldBack": False, "newShown": True}, "a revision under the same key shows under a new id though rev 1 was dismissed")
+
+    def test_an_owner_less_card_heads_its_column_under_a_plain_notes_header_with_no_chip_and_the_reserved_name_is_refused(self):
+        r = self._result()
+        self.assertTrue(r["r7"].get("ok"), r["r7"]); self.assertEqual(r["r7"]["notice"]["sid"], "notes", "no id, no name: the reserved home")
+        o = r["ownerless"]
+        self.assertIsNotNone(o, "the owner-less card is on the board")
+        self.assertEqual(o["col"], "col-completed-list")
+        self.assertEqual(o["cards"][0], "a:notice:notes:everyone:%s" % r["r7"]["notice"]["rev"], "first in its column, above the session's cards: %r" % o["cards"])
+        self.assertEqual(o["chipDisplay"], "none", "no session chip on the card")
+        self.assertTrue(o["grouped"], "grouped mode is the default: the run has a header")
+        self.assertTrue(o["headFound"], "the Notes run's header")
+        self.assertIn("Notes", o["headText"] or "")
+        self.assertEqual((o["nmTag"], o["nmClass"], o["nmTitle"], o["nmDead"], o["nmClick"]), ("SPAN", "fname-plain", None, False, True),
+                         "plain text: a span, no title, no dead class, no click handler: %r" % o)
+        self.assertEqual((o["dialogsBefore"], o["dialogsAfter"], o["reviveOffered"]), (0, 0, False), "a click on it opens nothing and offers no revive")
+        self.assertEqual((r["byName"].get("ok"), r["byName"].get("error")), (False, 'no session answers to "notes"'), "the reserved word as a name is refused")
 
     def test_an_expired_notice_leaves_at_the_next_build_and_a_disallowed_action_is_refused_at_the_door(self):
         r = self._result()

@@ -489,6 +489,10 @@ PY
 # pushed ref's TIP tree must be clean, and each commit new to every fetched remote
 # must ADD no banned line — so a leak in an intermediate commit is caught even when
 # the tip is clean, while a tree that only inherits an older one is not refused.
+# The same new commits' metadata is read too (their author and committer address
+# domains, unless the clone is configured to use the address, and their messages;
+# an annotated tag's own tagger and message likewise), which pre-push-identity.bats
+# and pre-push-message.bats drive by hand.
 # No strings file → a no-op, so a contributor's clone is unaffected.
 # (ROMP_GITHOOK_DIR redirects install.sh's symlink target below; the behaviour
 # tests copy the hook directly.)

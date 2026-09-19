@@ -31,7 +31,7 @@ test("the system-context card persists per session (keyed by renderingSid)", () 
 
 test("foldable/inlineFold take a stable key and route through the persisted helpers", () => {
   assert.match(RENDER, /function foldable\(label: string, content: HTMLElement, key\?: string\)/);
-  assert.match(RENDER, /function inlineFold\(head: HTMLElement, turn: HTMLElement, label: string, content: HTMLElement, key\?: string\)/);
+  assert.match(RENDER, /function inlineFold\(head: HTMLElement, turn: HTMLElement, label: string \| HTMLElement, content: HTMLElement, key\?: string\)/, "a string or an element label (an edit's coloured totals, 2026-09-18)");
   assert.doesNotMatch(RENDER, /function ioClamp\(/, "ioClamp is gone — errors now fold onto the head like every other tool");
 });
 

@@ -225,9 +225,11 @@ class ParkedRules(unittest.TestCase):
 class KernelSide:
     """A tiny synchronous kernel stand-in over the host's socket."""
 
-    def __init__(self, sock_path, timeout=10.0):
+    def __init__(self, sock_path, timeout=10.0, rcvbuf=None):
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.s.settimeout(timeout)
+        if rcvbuf:                                       # a kernel that holds little: the host's writer backs up behind it
+            self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rcvbuf))
         self.s.connect(sock_path)
         self.fr = sh.FrameReader()
         self.frames = []
@@ -263,6 +265,98 @@ class KernelSide:
             pass
 
 
+class JournalReopenOracle(unittest.TestCase):
+    """Journal.reopen (the re-exec road) against the live journal it rebuilds: equality, not plausibility."""
+
+    @staticmethod
+    def _state(j):
+        reads = {o: [(a, b.get("n")) for a, b in j.read_from(o, o + 1)] for o in range(j.next_offset)}
+        return {"index": list(j._index), "next": j.next_offset, "segLast": dict(j._seg_last), "seg": j._seg, "pos": j._pos,
+                "gaps": set(j.gaps), "segments": j.segments(), "all": [(o, r.get("n")) for o, r in j.read_from(0)], "each": reads}
+
+    def _live(self, d, delete):
+        j = sh.Journal(d, segment_bytes=100)
+        j.append({"type": "assistant", "pad": "x" * 80, "n": 0})
+        j.append({"type": "result", "n": 1})               # past the size: the next segment starts at 2
+        j.note_gap(2)                                      # a gap at the new segment's HEAD (round two: counted at both segments)
+        j.append({"type": "assistant", "n": 3})
+        j.note_gap(4)                                      # a gap between two records
+        j.append({"type": "assistant", "pad": "y" * 80, "n": 5})
+        j.append({"type": "result", "n": 6})               # the next segment starts at 7
+        if delete:
+            j.ack(6)
+        j.append({"type": "assistant", "n": 7})
+        j.append({"type": "result", "n": 8})               # the boundary that deletes the acknowledged segments, when asked
+        j.note_gap(9)                                      # a gap after the last record
+        return j
+
+    def test_a_reopened_journal_equals_the_live_one_entry_for_entry(self):
+        """The shape the verifier drove (2026-09-18): segment_bytes 100, a rotation, a gap at the new segment's head, three
+        records. Live reads gave (3, 3), (4, 4), (5, 5); cold gave (4, 3), (5, 4): the head gap entered the index twice, so
+        every offset past it read the record before, the newest was unreachable, and appends kept the drift. Here the whole
+        state is compared: index, next offset, the per-segment last offsets, the open segment and position, the gaps, the
+        segment list, a read of everything and a read of each offset alone; with and without an early segment deleted."""
+        for delete in (False, True):
+            d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, True)
+            j = self._live(d, delete)
+            files = sorted(p.name for p in Path(d).glob("journal-*.jsonl"))
+            self.assertEqual(files, ["journal-7.jsonl"] if delete else ["journal-0.jsonl", "journal-2.jsonl", "journal-7.jsonl"])
+            live = self._state(j)
+            j.close()
+            r = sh.Journal.reopen(d, segment_bytes=100)
+            cold = self._state(r)
+            for key in live:
+                self.assertEqual(cold[key], live[key], "%s differs after the reopen (segment deleted: %r)" % (key, delete))
+            if delete:
+                self.assertEqual(live["all"], [(7, 7), (8, 8)], "a deleted segment's offsets read as nothing, live and cold alike")
+            else:
+                self.assertEqual(live["all"], [(0, 0), (1, 1), (3, 3), (5, 5), (6, 6), (7, 7), (8, 8)])
+            off = r.append({"type": "result", "n": 10})
+            self.assertEqual((off, [x for x in r.read_from(9)]), (10, [(10, {"type": "result", "n": 10})]), "and it appends where it should")
+            r.close()
+
+    def test_an_empty_directory_reopens_at_offset_zero(self):
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, True)
+        r = sh.Journal.reopen(d)
+        self.assertEqual((r.next_offset, r._index, r.segments()), (0, [], [0]))
+        r.close()
+
+
+class AdoptedCli(unittest.TestCase):
+    """The CLI a re-executed host inherits: the handoff's descriptors are trusted only once the CLI's own table agrees, and
+    an exit the new process cannot learn is unknown, never a clean zero (round two of the re-exec review)."""
+
+    def test_the_adoption_confirms_the_descriptors_against_the_clis_own_table(self):
+        if not sys.platform.startswith("linux"):
+            self.skipTest("the confirmation reads /proc")
+        match = getattr(sh, "_pipe_fds_match_cli", None)
+        self.assertIsNotNone(match, "one confirmation body for the old process and the new one (the base confirmed in the old process only)")
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        def stop():
+            child.kill(); child.wait(timeout=10)
+        self.addCleanup(stop)
+        ours = {"stdin": child.stdin.fileno(), "stdout": child.stdout.fileno(), "stderr": child.stderr.fileno()}
+        self.assertTrue(match(child.pid, ours), "the child's own pipes agree")
+        r, w = os.pipe(); self.addCleanup(os.close, r); self.addCleanup(os.close, w)
+        wrong = dict(ours, stdout=r)
+        self.assertFalse(match(child.pid, wrong), "another pipe under the CLI's stdout name does not")
+        t = sh.AdoptedCliTransport({"max_buffer_size": 65536}, lambda line: None, {"cli_pid": child.pid, "fds": wrong})
+        loop = asyncio.new_event_loop()
+        try:
+            with self.assertRaises(RuntimeError, msg="the adoption refuses a handoff the CLI's table contradicts"):
+                loop.run_until_complete(t.connect())
+        finally:
+            loop.close()
+
+    def test_an_exit_the_adopted_process_cannot_learn_is_unknown_not_clean(self):
+        p = subprocess.Popen(["true"]); p.wait()           # reaped already: waitpid raises ChildProcessError
+        a = sh._AdoptedProcess(p.pid, None, None, None)
+        a._waitpid()
+        self.assertEqual((a.returncode, getattr(a, "exited", None)), (None, True),
+                         "gone with the exit unknown: returncode None (the exit frame's word for unknown), never 0")
+
+
 class HostProcess(unittest.TestCase):
     """Each test starts one host on the fake CLI in a private state root and kills everything after."""
 
@@ -280,7 +374,10 @@ class HostProcess(unittest.TestCase):
                 "env": {"FAKE_CLI_LOG": self.fake_log, "FAKE_CLI_TRANSCRIPT_DIR": self.tdir, "FAKE_CLI_SESSION_ID": FSID,
                         "ROMP_CANARY_SECRET": "canary-" + uuid.uuid4().hex},
                 "max_buffer_size": 1024 * 1024, "hook_self_answer_s": 2, "unattached_grace_s": 3600}
+        extra = over.pop("env_extra", None)
         spec.update(over)
+        if extra:
+            spec["env"].update(extra)
         p = d / "spawn.json"
         p.write_text(json.dumps(spec)); p.chmod(0o600)
         return str(p), spec
@@ -410,6 +507,276 @@ class HostProcess(unittest.TestCase):
         journal = self._journal_landed(len(kinds), timeout=20)
         self.assertEqual([r["type"] for _, r in journal], kinds, "and holds every record, in the socket's order, once the writer landed them")
         k.close()
+
+    def _reexec(self, k, version="def67890", launcher=None):
+        k.send({"t": "reexec", "python": sys.executable, "launcher": launcher or os.path.join(BIN, "romp-session-host"), "version": version})
+        return k.recv_until(lambda f: f.get("t") == "reexec", timeout=15)
+
+    def _lease_version_becomes(self, version, timeout=20):
+        deadline = time.time() + timeout
+        while time.time() < deadline:                                   # loop-ok: the event is the re-executed host's lease
+            l = self._lease()
+            if l and str(l.get("version") or "") == version and (Path(self.state) / "hosts" / (SID[:8] + ".sock")).exists():
+                return l
+            time.sleep(0.05)
+        return self._lease()
+
+    def test_a_host_re_execs_into_the_kernels_code_keeping_its_cli_journal_and_pid(self):
+        """The version-skew fix (2026-09-18): a host kept its code for its session's life, so a host bug outlived every kernel
+        deploy. Asked by a newer kernel, an idle host execs itself into the kernel's launcher on the same pid with the CLI's
+        pipes held across the exec: the same CLI pid, the same host pid, the journal continued from its files, one attach
+        after, and a send that round-trips."""
+        host, sock, spec = self._start()                                # spec version abc12345, the "old" code
+        k, hello0 = self._attach(sock)
+        k.send({"t": "in", "data": self._user("before sleep=0")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        n0 = len(k.outs()); cli_pid = self._lease()["pid"]
+        spec_path = Path(self.state) / "hosts" / SID / "spawn.json"
+        spec_path.write_text(json.dumps(dict(json.loads(spec_path.read_text()), version="def67890")))   # the kernel rewrites it first
+        ans = self._reexec(k)
+        self.assertEqual((ans.get("ok"), ans.get("when")), (True, "now"), "an idle host accepts at once (the base has no such frame): %r" % ans)
+        k.close()
+        lease = self._lease_version_becomes("def67890")
+        self.assertEqual(lease.get("version"), "def67890", "the lease follows the code the host now runs")
+        self.assertEqual((lease["pid"], lease["holder"]["pid"]), (cli_pid, host.pid), "the same CLI, the same host pid across the exec")
+        self.assertIsNone(host.poll(), "the host process lives on (exec, not a restart)")
+        k2, hello = self._attach(sock, ack=n0 - 1, pid=4343)
+        self.assertEqual((hello["host"]["version"], hello["cli"]["pid"], hello["journal"]["next"], hello["inflight"]),
+                         ("def67890", cli_pid, n0, 0), "the hello names the new version, the same CLI, the journal where it was, no open turn")
+        k2.send({"t": "in", "data": self._user("after sleep=0")})
+        res = k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        self.assertEqual(res["offset"], n0 + 1, "the journal numbering continues across the exec (assistant, then result)")
+        journal = list(sh.read_journal_dir(os.path.join(self.state, "hosts", SID)))
+        self.assertEqual([r["type"] for _, r in journal][-4:], ["assistant", "result", "assistant", "result"], "one journal, both turns")
+        log = self._hostlog()
+        self.assertEqual([r["kind"] for r in log if r["kind"] in ("reexec", "reexeced")], ["reexec", "reexeced"], "the exec and the adoption, once each")
+        self.assertEqual(sum(1 for r in log if r["kind"] == "attached"), 2, "one attach before, one after; none lost to a death")
+        self.assertEqual([r["kind"] for r in log if r["kind"] in ("reexec", "socket-ready", "reexeced")],
+                         ["socket-ready", "reexec", "socket-ready", "reexeced"],
+                         "the re-executed host serves its socket BEFORE it writes the lease and logs the adoption (round two: the lease "
+                         "came first, and a kernel that read it could connect to a path nobody served yet)")
+        ready_t = [r["t"] for r in log if r["kind"] == "socket-ready"][-1]
+        self.assertGreaterEqual(lease["t"], ready_t - 0.001, "the lease with the new version is stamped after the socket is served")
+        self.assertFalse((Path(self.state) / "hosts" / SID / "reexec.json").exists(), "the handoff file is consumed")
+        k2.close()
+
+    def test_a_re_exec_asked_mid_turn_waits_for_the_turns_result_then_tells_the_kernel(self):
+        host, sock, spec = self._start()
+        k, _ = self._attach(sock)
+        spec_path = Path(self.state) / "hosts" / SID / "spawn.json"
+        spec_path.write_text(json.dumps(dict(json.loads(spec_path.read_text()), version="def67890")))
+        k.send({"t": "in", "data": self._user("slow sleep=1.2")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "assistant", timeout=15)
+        ans = self._reexec(k)
+        self.assertEqual((ans.get("ok"), ans.get("when")), (True, "at-turn-end"), "a turn is open: deferred to its result, never a timer")
+        res = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        now = k.recv_until(lambda f: f.get("t") == "reexec-now", timeout=15)
+        self.assertTrue(now, "the kernel is told before the socket closes")
+        kinds = [f.get("t") for f in k.frames]
+        self.assertLess(kinds.index("reexec-now"), len(kinds), "the result came first, then the handover")
+        self.assertGreater(kinds.index("reexec-now"), [i for i, f in enumerate(k.frames) if f.get("t") == "out" and f["data"].get("type") == "result"][0])
+        k.close()
+        lease = self._lease_version_becomes("def67890")
+        self.assertEqual(lease.get("version"), "def67890")
+        k2, hello = self._attach(sock, ack=res["offset"], pid=4343)
+        self.assertEqual((hello["host"]["version"], hello["inflight"]), ("def67890", 0))
+        k2.send({"t": "in", "data": self._user("after sleep=0")})
+        k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        k2.close()
+
+    def _log_row(self, pred, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:                                   # loop-ok: the event is the host.log row the test waits for
+            for r in self._hostlog():
+                if pred(r):
+                    return r
+            time.sleep(0.02)
+        return None
+
+    def _transcript_records(self):
+        p = Path(self.tdir) / (FSID + ".jsonl")
+        return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+
+    def test_output_arriving_while_a_slow_kernel_drains_defers_the_handover_and_loses_nothing(self):
+        """Round three of the re-exec review (2026-09-19): the quiet check ran BEFORE the kernel's drain was awaited and was never
+        re-read, so a kernel behind on its socket (a burst it had not read) opened up to five seconds in which the CLI's output
+        entered the stream buffer while the reader was held, and the exec discarded it: with three bookkeeping rows emitted a
+        second after the request, the journal kept the one row the in-flight read had taken and lost the other two, the counts
+        agreed (no drift row, no fault, no line), and a turn had re-opened right before the exec. Now the kernel's backlog is
+        drained first and the check is the last thing before the exec: a kernel that does not drain within the bound defers the
+        handover (`reexec-deferred`, kernel-behind), the rows are read and journaled meanwhile, the next result hands over, and
+        the journal equals what the CLI emitted, record for record."""
+        trigger = os.path.join(self.state, "trigger")
+        host, sock, spec = self._start(env_extra={"FAKE_CLI_TRIGGER": trigger, "FAKE_CLI_TRIGGER_DELAY": "1.0", "FAKE_CLI_TRIGGER_COUNT": "3"})
+        k = KernelSide(sock, timeout=30.0, rcvbuf=2048)                 # a kernel that will not read for a while
+        k.send({"t": "attach", "kernel": {"pid": 4242, "start": "1", "version": "abc12345"}, "ack": -1})
+        k.recv_until(lambda f: f.get("t") == "hello")
+        sp = Path(self.state) / "hosts" / SID / "spawn.json"
+        sp.write_text(json.dumps(dict(json.loads(sp.read_text()), version="def67890")))
+        k.send({"t": "in", "data": self._user("padded pad=600000 sleep=0")})
+        self.assertEqual([r["type"] for _, r in self._journal_landed(3, timeout=20)], ["system", "assistant", "result"],
+                         "the turn is over in the host (its writer backs up behind the kernel, which has not read)")
+        open(trigger, "w").close()                                       # a second from now: three rows outside any turn
+        k2 = KernelSide(sock)                                            # the request over a second connection: the answer must not queue behind the burst
+        ans = self._reexec(k2)
+        self.assertEqual((ans.get("ok"), ans.get("when")), (True, "now"), "idle: accepted at once: %r" % ans)
+        row = self._log_row(lambda r: r["kind"] in ("reexec-deferred", "reexec"), timeout=20)
+        self.assertEqual((row or {}).get("kind"), "reexec-deferred", "a kernel behind on its socket defers the handover, never an exec over "
+                         "output the reader could not take (the base execed after the drain's bound and lost two rows): %r" % row)
+        self.assertEqual(row.get("reason"), "kernel-behind")
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("n") == "trigger2", timeout=30)   # the kernel catches up
+        k.send({"t": "in", "data": self._user("after sleep=0")})
+        k.recv_until(lambda f: f.get("t") == "reexec-now", timeout=25)
+        seen = {f["offset"]: (f["data"].get("type"), f["data"].get("uuid")) for f in k.outs()}
+        k.close(); k2.close()
+        self.assertEqual(self._lease_version_becomes("def67890", timeout=25).get("version"), "def67890", "the next result handed over")
+        emitted = [(r["type"], r.get("uuid")) for r in self._transcript_records()]
+        journal = self._journal_landed(len(emitted), timeout=20)
+        self.assertEqual([(r["type"], r.get("uuid")) for _, r in journal], emitted, "the journal holds every record the CLI emitted, the three "
+                         "bookkeeping rows included")
+        self.assertEqual([o for o, _ in journal], list(range(len(emitted))))
+        by_offset = {o: (r["type"], r.get("uuid")) for o, r in journal}
+        self.assertEqual({o: by_offset.get(o) for o in seen}, seen, "every frame the kernel saw sits at its own offset")
+        log = self._hostlog()
+        self.assertEqual([r["kind"] for r in log if r["kind"] in ("reexec-deferred", "reexec", "reexeced")], ["reexec-deferred", "reexec", "reexeced"])
+        self.assertTrue(any(r["kind"] == "turn-reopened" for r in log), "the bookkeeping rows re-opened a turn, which the after turn's result closed")
+        self.assertEqual([r for r in log if r["kind"] in ("journal-offset-drift", "journal-write-failed")], [])
+
+    def test_a_turn_re_opened_during_the_handovers_flush_defers_it(self):
+        """The other deferral (a pin: the base deferred here too, before its drain): a row arriving while the journal flush runs
+        (the writer lagging through the spec's seam) re-opens a turn, and the handover waits for that turn's result."""
+        trigger = os.path.join(self.state, "trigger")
+        host, sock, spec = self._start(_test_journal_delay_s=0.4, env_extra={"FAKE_CLI_TRIGGER": trigger, "FAKE_CLI_TRIGGER_DELAY": "0", "FAKE_CLI_TRIGGER_COUNT": "1"})
+        k, _ = self._attach(sock)
+        sp = Path(self.state) / "hosts" / SID / "spawn.json"
+        sp.write_text(json.dumps(dict(json.loads(sp.read_text()), version="def67890")))
+        k.send({"t": "in", "data": self._user("one sleep=0")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        open(trigger, "w").close()
+        ans = self._reexec(k)
+        self.assertEqual((ans.get("ok"), ans.get("when")), (True, "now"))
+        row = self._log_row(lambda r: r["kind"] in ("reexec-deferred", "reexec"), timeout=20)
+        self.assertEqual(((row or {}).get("kind"), (row or {}).get("reason"), (row or {}).get("inflight")), ("reexec-deferred", "output-arriving", 1), "%r" % row)
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("n") == "trigger0", timeout=15)
+        k.send({"t": "in", "data": self._user("two sleep=0")})
+        k.recv_until(lambda f: f.get("t") == "reexec-now", timeout=25)
+        k.close()
+        self.assertEqual(self._lease_version_becomes("def67890", timeout=25).get("version"), "def67890")
+        emitted = [(r["type"], r.get("uuid")) for r in self._transcript_records()]
+        journal = self._journal_landed(len(emitted), timeout=20)
+        self.assertEqual([(r["type"], r.get("uuid")) for _, r in journal], emitted)
+
+    def _transcript_types(self):
+        p = Path(self.tdir) / (FSID + ".jsonl")
+        return [json.loads(l).get("type") for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+
+    def _transcript_results(self, n, timeout=25):
+        deadline = time.time() + timeout
+        types_ = self._transcript_types()
+        while time.time() < deadline and types_.count("result") < n:      # loop-ok: the event is the fake CLI's n-th result
+            time.sleep(0.02)
+            types_ = self._transcript_types()
+        return types_
+
+    def test_a_lagging_writer_and_a_queued_turn_lose_no_record_at_the_handover(self):
+        """Round two of the re-exec review (2026-09-18): the reader ran on through the handover, so with the writer lagging
+        (the spec's own seam) and a second message queued behind the first turn, the rows read after the journal flush were
+        counted in the handoff and lost with the process: the disk held three records where the hello said five, every later
+        record landed one offset below the offset the kernel was told (journal-offset-drift rows), and a replay served the
+        third turn's rows under the second turn's offsets. Now the reader is held at the handover, a turn that re-opened
+        meanwhile defers the exec to its own result, and every record read is on disk before the exec: the journal holds
+        exactly what the CLI emitted, numbered contiguously, every frame's offset is its journal offset, no drift row."""
+        host, sock, spec = self._start(_test_journal_delay_s=0.4)
+        k, _ = self._attach(sock)
+        sp = Path(self.state) / "hosts" / SID / "spawn.json"
+        sp.write_text(json.dumps(dict(json.loads(sp.read_text()), version="def67890")))
+        k.send({"t": "in", "data": self._user("first slow sleep=1.5")})
+        k.send({"t": "in", "data": self._user("second sleep=0")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "assistant", timeout=15)
+        ans = self._reexec(k)
+        self.assertEqual((ans.get("ok"), ans.get("when")), (True, "at-turn-end"))
+        k.recv_until(lambda f: f.get("t") == "reexec-now", timeout=25)
+        seen = {f["offset"]: f["data"].get("type") for f in k.outs()}
+        k.close()
+        lease = self._lease_version_becomes("def67890", timeout=25)
+        self.assertEqual(lease.get("version"), "def67890", "the exec happened")
+        d = os.path.join(self.state, "hosts", SID)
+        k2, hello = self._attach(sock, ack=-1, pid=4343)
+        k2.send({"t": "in", "data": self._user("third sleep=0")})
+        emitted = self._transcript_results(3)
+        self.assertEqual(emitted.count("result"), 3, "three turns ran: %r" % emitted)
+        last = k2.recv_until(lambda f: f.get("t") == "out" and f["offset"] == len(emitted) - 1, timeout=20)
+        self.assertEqual(last["data"].get("type"), "result", "the last frame is the third turn's result at the last offset")
+        journal = self._journal_landed(len(emitted), timeout=20)
+        self.assertEqual([r.get("type") for _, r in journal], emitted, "the journal holds every record the CLI emitted, across the exec")
+        self.assertEqual([o for o, _ in journal], list(range(len(emitted))), "numbered contiguously: nothing skipped, nothing twice")
+        by_offset = {o: r.get("type") for o, r in journal}
+        seen.update({f["offset"]: f["data"].get("type") for f in k2.outs()})
+        self.assertEqual({o: by_offset.get(o) for o in seen}, seen, "every frame the kernels saw sits at its own offset in the journal")
+        self.assertEqual([r for r in self._hostlog() if r["kind"] in ("journal-offset-drift", "journal-write-failed")], [], "no drift")
+        self.assertEqual([r["kind"] for r in self._hostlog() if r["kind"] in ("reexec", "reexeced")], ["reexec", "reexeced"], "one exec")
+        k2.close()
+
+    def test_a_re_exec_it_cannot_do_is_refused_and_the_host_serves_on(self):
+        host, sock, spec = self._start()
+        k, _ = self._attach(sock)
+        ans = self._reexec(k, launcher=os.path.join(self.state, "no-such-launcher"))
+        self.assertEqual((ans.get("ok"), ans.get("reason")), (False, "no such launcher"), "a bad launcher is a refusal, not an exec")
+        k.send({"t": "in", "data": self._user("still here sleep=0")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        self.assertEqual(self._lease().get("version"), "abc12345", "the old host, the old version, still serving")
+        self.assertEqual([r["kind"] for r in self._hostlog() if r["kind"].startswith("reexec")], ["reexec-refused"])
+        k.close()
+    def test_a_turn_that_folded_a_queued_message_leaves_no_open_turn_for_the_next_attach(self):
+        """The stuck-Working shape (2026-09-18): the host counted every user line fed and took one off per result, so a
+        turn that folded a second message (the real CLI answers messages typed while it works with the running turn's
+        single result) left the count at one for good, and every kernel that attached afterwards adopted it: Ready on the
+        page, Working to the drain, every send parked. One result now closes everything fed."""
+        host, sock, spec = self._start()
+        k, _ = self._attach(sock)
+        k.send({"t": "in", "data": self._user("one sleep=0.6 merge=1")})
+        k.send({"t": "in", "data": self._user("two sleep=0")})                   # queued while the turn runs; folded into it
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        self.assertEqual(sum(1 for f in k.outs() if f["data"].get("type") == "result"), 1, "one result answered both messages")
+        k.send({"t": "detach"}); k.close()
+        k2, hello = self._attach(sock, ack=-1, pid=4343)
+        self.assertEqual(hello["inflight"], 0, "no open turn after the fold's result (the base reported one: fed two, resulted one)")
+        k2.send({"t": "in", "data": self._user("three sleep=0")})                 # and the idle CLI takes the next send at once
+        k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result" and f["data"].get("uuid") not in
+                      {g["data"].get("uuid") for g in k.outs() if g["data"].get("type") == "result"}, timeout=15)
+        k2.close()
+
+    def test_a_queued_line_the_cli_runs_as_its_own_turn_re_opens_the_count_and_holds_the_grace_gate(self):
+        """Round two of 1838: zeroing the count on every result read 0 during a genuinely separate queued turn (two lines
+        fed before the first result, the CLI running the second as its own turn): the hello said idle, the drain fed into
+        the running turn, and the unattached grace gate ended a working CLI. The count re-opens from the OUTPUT side: the
+        second turn's first assistant row after the result. A fold (one result for both) still reads 0."""
+        host, sock, spec = self._start(unattached_grace_s=1.5)
+        k, _ = self._attach(sock)
+        k.send({"t": "in", "data": self._user("one sleep=0.3")})
+        k.send({"t": "in", "data": self._user("two sleep=1.0")})                   # queued; the fake runs it as its own turn
+        first = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "assistant" and f["offset"] > first["offset"], timeout=15)
+        k.send({"t": "detach"}); k.close()                                          # unattached while the second turn runs
+        k2, hello = self._attach(sock, ack=first["offset"], pid=4343)
+        self.assertEqual(hello["inflight"], 1, "the second turn counts as open once its output started (the fold-only settle read 0)")
+        second = k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result" and f["offset"] > first["offset"], timeout=15)
+        k2.send({"t": "detach"}); k2.close()
+        k3, hello3 = self._attach(sock, ack=second["offset"], pid=4344)
+        self.assertEqual((hello3["inflight"], hello3["exited"]), (0, False), "idle after the second result, the CLI alive")
+        kinds = [r["kind"] for r in self._hostlog()]
+        self.assertNotIn("unattached-grace-expired", kinds, "the grace gate saw the open turn and did not end a working CLI")
+        self.assertEqual(kinds.count("turn-reopened"), 1, "the re-open happened once, for the queued turn")
+        k3.close()
+
+    def test_only_a_user_line_carrying_text_opens_a_turn(self):
+        fn = getattr(sh, "_opens_turn", None)
+        self.assertIsNotNone(fn, "the host decides which user lines open a turn (the base counted every one)")
+        self.assertTrue(fn({"type": "user", "message": {"role": "user", "content": "hello"}}))
+        self.assertTrue(fn({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}}))
+        self.assertFalse(fn({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}))
+        self.assertFalse(fn({"type": "user", "message": {"role": "user", "content": ""}}))
+        self.assertFalse(fn({"type": "user"}))
 
     def test_a_detached_kernel_reattaches_and_replays_from_its_ack_while_the_turn_kept_running(self):
         host, sock, spec = self._start()

@@ -1,6 +1,7 @@
 # Card boards: the feed as one instance of a generic card UI
 
-Status: PROPOSED (2026-09-18), phased. Landing commits: TBD per phase. Tier per phase in section 6:
+Status: IN PROGRESS (2026-09-18), phased. Landing commits: phase one 58c3ce83 (PR 1834, the definition
+extracted); phase two f2ecb7bb (PR 1837, the record fields); the rest TBD per phase. Tier per phase in section 6:
 `feature` for phases one, two, four and five; phase three (the board definition store, its door and
 its frame field) is the `major-feature` discussion point, called out there with the reasons, and the
 phasing is built so nothing before it changes a persisted record or the feed protocol.
@@ -29,7 +30,7 @@ generic model has to reach:
   (`kernel/kernel.py:42169`) emits `column` as one of three strings. For a goal card the value is a
   projection of the judges' rolled-up status (`rollup_status`, `kernel/judge.py:7927`, writes
   `cleared`, `blocked`, `working`, `completed` per top at `:8163` to `:8182`) through one expression
-  (`kernel.py:41890`): `needs_input` when the session is stopped on an API error, a judges' billing
+  (`kernel.py:41976`): `needs_input` when the session is stopped on an API error, a judges' billing
   refusal, a live permission or picker prompt, a stall block, or a landed block not under a re-check;
   else `completed` when the rollup says so; else `working`. The awaiting state is a flavour riding
   Working, never a column (`col = "awaiting"` at `:41662`, folded into `had_awaiting`). The renderer's
@@ -157,7 +158,7 @@ Three rules of the model, each chosen against an alternative:
   the field. The alternative, a membership rule the renderer evaluates over the card's fields on
   every render, would move a card whenever the rule's inputs flapped between two renders over the
   same information, which is the flap the repository's law forbids. The feed board's rule is the
-  code expression at `kernel.py:41890`, run once per session derivation and memoized, which is the
+  code expression at `kernel.py:41976`, run once per session derivation and memoized, which is the
   same arrangement with the judges' verdict as the event. A rule-based selection that shows cards it
   does not own is allowed as a VIEW, the precedent being the focused-session section (T347,
   `feed.ts:4990`), which shows the chat's active session's cards above a divider without moving them.
@@ -203,7 +204,7 @@ FEED_BOARD: Board = {
     { id: "completed",   title: "Completed", chip: "completed" },
   ],
   defaultCategory: "working",
-  rules: [],                               // the feed's rule is code: _feed_category, the expression at kernel.py:41890
+  rules: [],                               // the feed's rule is code: the column expression in _feed_session_entry (kernel.py:41976)
   sort: { key: "t", dir: "asc" },          // oldest at the top (the user 2026-06-27); newestFirst flips it (:5629)
   subSorts: [],                            // none today; phase five adds them (section 5)
   groupBy: "session",                      // grouped mode, default ON (feedPrefs, :589; the user 2026-07-13)
@@ -225,9 +226,12 @@ them is a sweep of its own and not this change.
 **Where the kernel writes a card's category.** For a goal card, `rollup_status` writes the per-top
 status from the judges' verdicts (the verdict kinds recorded through `record_verdict`,
 `judge.py:10508`: `done`, `block`, `unblock`, `settle`, `reopen`, `awaiting`, the planner's and the
-closer's), and `build_feed`'s expression (`kernel.py:41890`) projects that status plus the live
-floors onto the category. That expression is the feed board's category writer; it moves to a
-function named for it (`_feed_category(col, floors)`) and changes no branch. For the kernel-made
+closer's), and `build_feed`'s expression (`kernel.py:41976`) projects that status plus the live
+floors onto the category. That expression is the feed board's category writer. It stays inline in
+`_feed_session_entry` (correction at phase two: three tests pin the expression's text as the record of
+the 2026-06-29 and 2026-07-07 rulings, and naming it out would move those pins for no change of
+behaviour; a named function is phase four's if a second board ever needs to write a goal card's
+category). For the kernel-made
 families the literal each one sets today becomes the same literal under `category`. The law that
 cards move only on new information is therefore unchanged in mechanism: a category changes when a
 verdict lands, a live state changes, or the user acts, and never because a render re-evaluated a
@@ -244,8 +248,8 @@ definition names the kinds a board renders.
 - `placeholder`: `provisional`, `awaiting:<sid>` and `blocked:<sid>` cards. No sections; actions
   Clear (where the family allows it) and the bell.
 - `parked`: `blocked.state === "parkedHandoff"`; action Revive.
-- `quarantine`: `blocked.state === "quarantine"`; the held body shown in full; actions Approve,
-  Deny, Edit.
+- `quarantine`: `blocked.state === "quarantine"`; the held body shown in full; actions Approve and
+  Deny (the edit happens in the modal, not as a card action; the 1834 read, 2026-09-18).
 - `notice`: `it.notice`; the producer label, the body through the sanitizer, the attachment; actions
   the record's own `actions` list (`noticeAction`), Clear and the bell. The one kind a data-defined
   board renders.
@@ -482,8 +486,8 @@ nothing.
    Tier `feature`.
 2. **The kernel's card records carry `board` and `category`, the feed as default.** A kernel table
    `_CODE_BOARDS = {"feed": <the schema's dict>}` beside `_NOTIFY_COLUMNS`, which becomes a read of
-   it, checked by `_board_check` at import; `_feed_category()` named out of `build_feed`'s
-   expression; every family's dict gains `"board": "feed"` and `"category": <its column>`;
+   it, checked by `_board_check` at import; the column expression stays inline (section 2's
+   correction); every family's dict gains `"board": "feed"` and `"category": <its column>`;
    `_feed_notifications` and `_needs_you_count` read the table for the card's board. `column` stays
    byte-identical beside `category`. The frame gains two additive fields per card, both fixed across
    unchanged builds (the dedup holds), both per-session derived (inside the memoized entry, no new
@@ -502,16 +506,23 @@ nothing.
    `category` on the notice row, the owner-less rule as `FEED_BOARD.order = ["ownerRank"]` on the
    renderer side and romp_cards' reserved owner key on the kernel side. romp_cards owns the notice
    producer and `romp card`; the field names are agreed (2026-09-18) and the door's shape is this
-   document's, so the phase is co-authored: the store and the route here, the command and the row
-   there, or one branch by whoever is free. **Call-out, the tier:** this phase adds a new interface
-   contract in three forms (a route, a command, an in-process function), a new persisted store with
-   its own validation and a removal rule, and a new frame field, and it makes the notice row's two
-   new fields persisted. That is the notice plan's own reasoning for `major-feature` (a contract to
-   producers, not one card's look), and the recommendation here is the same: file it `major-feature`
-   against a linked issue with a comment by someone other than the author, `--auto` off, the merge
-   left to the maintainers. The call belongs to the user; the additive notice-row fields alone would
-   be `feature`, and the phase is written so the row fields could land first as a small `feature`
-   if the store's discussion takes time.
+   document's, so the phase is co-authored, in two pull requests on one seam agreed by mail
+   (2026-09-18): first the store, `define_board`, `_boards()`, `remove_board`, `POST /board`,
+   `GET /boards`, `romp board`, the frame's `boards` field and its reads in the renderer and the
+   federation merge, `_notice_standing_count` (the notice store's reader the door's refusals call,
+   handed over to the notice producer's owner afterwards) and a PURE `_board_resolve_post(board,
+   category, *, needs_you, producer, key) -> (board_id, category_id, error, pending)` that runs the
+   five-step resolution and returns `pending`, the definition to write (a new board with the
+   defaults, or a data board with the unknown category appended in neutral dress); then, on top,
+   `romp card -b -c` on the `/notice` body, `post_notice` calling the resolver and writing `pending`
+   through `define_board` only after every other check of the post has passed, right before the row
+   appends (so a refused post leaves no board behind, and a crash between the two leaves a board with
+   no card rather than a card on no board), the row storing `board` and `category`, and
+   `_notice_cards` copying them (a row without the fields keeps the phase-two mapping). Until the
+   second lands, a card can name no board but the feed. **The tier, the user's ruling (2026-09-18):
+   a REGULAR `feature`**, merged on green under their account by the manager; no linked issue, no
+   maintainers' hold. (The recommendation this document made before the ruling, `major-feature` on
+   the notice plan's reasoning of a contract to producers, is superseded by it.)
 4. **A second board, the proof of the door.** The owner-less notes board, DATA-DEFINED: the lab
    runs `romp card -b notes -c new --title ...` against a hermetic kernel with no such board, and the
    board exists on the next frame with the defaults (one category `new`, chip neutral, newest first);
