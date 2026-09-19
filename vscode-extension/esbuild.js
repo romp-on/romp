@@ -53,6 +53,7 @@ const webview = {
     "../ui/webview/api-health-global.ts",   // window.__rompApiHealthMerge: the API-health merge + reading rules for the shell's rail (T301)
     "../ui/webview/palette-main.ts",   // command palette + Cmd/Ctrl+O/P hotkeys for the kernel's shell page
     "../ui/webview/panedock-main.ts",  // the pane docking engine (plans/pane-docking.md): a shell bundle, inert unless the gear's paneDocking switch is on
+    "../ui/webview/pane-grab.ts",      // the pane pages' grab detector: injected into each pane document by the engine while the kit is on (section 3, the empty space inside a pane)
     "../ui/webview/shell-perf.ts",     // the shell page's performance collector (a pane's long animation frames are reported to the top-level window)
     "../ui/webview/editor-chunk.ts",   // CodeMirror editing substrate — ON-DEMAND (file-view loads it by
                                        // script tag on first edit); nothing else may import it, so the

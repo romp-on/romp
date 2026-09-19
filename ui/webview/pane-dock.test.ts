@@ -8,7 +8,7 @@ import * as assert from "node:assert/strict";
 import {
   GUTTER, RING, SLOP, CHAT, FLEET, FEED, FILES, BAND,
   edgeZone, zoneAt, landingRect, grabbable, crossedSlop, growKey, seedLayout, defaultDock, reconcileShown,
-  bandPxOf, roundRect,
+  bandPxOf, roundRect, colNumberOf, ownerColumn, planTabDrop,
 } from "./pane-dock";
 import { layout, leaves, isSplit, has, type Split, type Layout } from "./pane-tree";
 
@@ -158,4 +158,38 @@ test("reconcileShown is idempotent on a layout that already matches the shown se
 test("bandPxOf and roundRect", () => {
   assert.equal(bandPxOf("312px"), 312); assert.equal(bandPxOf(""), 200); assert.equal(bandPxOf(null), 200); assert.equal(bandPxOf("nope"), 200);
   assert.deepEqual(roundRect(R(0.4, 0.6, 99.7, 10.2)), R(0, 1, 100, 10), "far edges rounded as edges, so neighbours meet");
+});
+
+test("colNumberOf and ownerColumn: the first chat pane is column 1, chat-pane-<n> is n, any other pane none; a session's column from the sets", () => {
+  assert.equal(colNumberOf(CHAT), 1); assert.equal(colNumberOf("chat-pane-3"), 3); assert.equal(colNumberOf(FEED), null); assert.equal(colNumberOf(BAND), null);
+  const sets = { "2": ["s-a", "s-b"], "3": ["s-c"] };
+  assert.equal(ownerColumn(sets, "s-b"), 2); assert.equal(ownerColumn(sets, "s-c"), 3);
+  assert.equal(ownerColumn(sets, "s-z"), 1, "unlisted: the first column holds the rest"); assert.equal(ownerColumn(null, "s-a"), 1);
+});
+
+test("planTabDrop: a strip joins that column, a non-chat strip refuses, an edge opens a new column, a lone later column moves itself and refuses its own edge", () => {
+  const sets = { "2": ["s-a", "s-b"], "3": ["s-c"] };
+  assert.deepEqual(planTabDrop({ target: CHAT, strip: true }, "s-a", sets), { kind: "join", col: 1 });
+  assert.deepEqual(planTabDrop({ target: "chat-pane-2", strip: true }, "s-z", sets), { kind: "join", col: 2 });
+  assert.equal(planTabDrop({ target: FEED, strip: true }, "s-a", sets).kind, "refuse", "a non-chat pane has no strip to join");
+  assert.deepEqual(planTabDrop({ target: FEED, edge: "bottom" }, "s-a", sets), { kind: "newColumn" }, "a tab from a column of two: a new column with it");
+  assert.deepEqual(planTabDrop({ target: FEED, edge: "bottom" }, "s-z", sets), { kind: "newColumn" }, "a tab from the first column: a new column with it");
+  assert.deepEqual(planTabDrop({ target: FEED, edge: "left" }, "s-c", sets), { kind: "moveColumn", pane: "chat-pane-3" }, "alone in column 3: the column's pane moves, nothing is minted");
+  assert.equal(planTabDrop({ target: "chat-pane-3", edge: "left" }, "s-c", sets).kind, "refuse", "a lone column on its own edge");
+  assert.deepEqual(planTabDrop({ target: FEED, edge: "top" }, "s-a", null), { kind: "newColumn" }, "no sets: the first column");
+});
+
+test("reconcileShown: a dock hint puts the next new chat column at the drop edge; without one it lands right of the last chat", () => {
+  const base = seedLayout({ row: [CHAT, FLEET, FEED], band: false, bandPx: 0, grow: { chat: 50, fleet: 25, feed: 25 } });
+  const hinted = reconcileShown(base, { row: [CHAT, "chat-pane-2", FLEET, FEED], band: false, bandPx: 0, grow: {}, newChatDock: { target: FEED, edge: "bottom" } });
+  const row = hinted.tree as Split;
+  assert.equal(row.dir, "row"); assert.deepEqual(leaves(hinted.tree), [CHAT, FLEET, FEED, "chat-pane-2"]);
+  const last = row.kids[2] as Split;
+  assert.ok(isSplit(last) && last.dir === "col", "the feed's slot became a column: the feed over the new pane");
+  assert.deepEqual(row.ratios.map((r) => Math.round(r * 100) / 100), [0.5, 0.25, 0.25], "the other panes' shares are untouched");
+  const plain = reconcileShown(base, { row: [CHAT, "chat-pane-2", FLEET, FEED], band: false, bandPx: 0, grow: {} });
+  assert.deepEqual(leaves(plain.tree), [CHAT, "chat-pane-2", FLEET, FEED], "no hint: right of the last chat");
+  // the hint names a target that is not in the tree, or the pane itself: the default dock
+  const stray = reconcileShown(base, { row: [CHAT, "chat-pane-2", FLEET, FEED], band: false, bandPx: 0, grow: {}, newChatDock: { target: "ghost", edge: "left" } });
+  assert.deepEqual(leaves(stray.tree), [CHAT, "chat-pane-2", FLEET, FEED]);
 });

@@ -198,6 +198,29 @@ slop is crossed:
 long-press timer that arms a pane move; a scroll before the timer cancels it. Desktop needs no
 long-press (the slop + Option cover it).
 
+**The empty space INSIDE a pane is a grab surface (decided 2026-09-19, the user, who switched the kit on,
+reached for the empty area of the feed below its cards and of the sessions band, and got no hand and no drag: the
+hand showed only on the ring).** The shell can see only its own chrome (the ring, the dividers) and what it reads
+into the same-origin pane documents; a pane's content is an iframe whose pointer events never reach the parent. So
+each inner page owns the detection, and the shell owns the drag:
+
+- While the kit is on, the shell marks every pane document's body `pane-docking` and injects the grab detector
+  (`dist/pane-grab.js`, the same road as the cursor stylesheet it already injects); with the kit off the pages
+  carry no class, no detector and no rule, so they stay byte-identical.
+- The detector knows each page's EMPTY BACKGROUND by app: the feed's list, its columns and their card lists where
+  no card, chip or control is under the pointer; the sessions band's SVG and its wrap outside every lane, bar and
+  mark; the outline's list below its rows and its footer; the Files pane's empty state and its body. The chat is
+  the deliberate exception: a press-drag over the transcript is a text selection (the rule above), so its grab
+  surface stays the strip's empty run. The open hand shows over exactly those targets: the detector toggles a body
+  class on pointer moves by the target under the pointer, so a card's text never wears a hand it cannot honour.
+- On a primary-button press with no modifier on an empty target, the detector CAPTURES the pointer on the pressed
+  element, so the moves keep flowing to that document once the pointer leaves the iframe, and posts
+  `{romp:"paneGrab", clientX, clientY, pointerId}` to the shell. The shell resolves the pane from the message's
+  source frame and arms exactly the press it arms on the ring: the slop, the closed hand, the live outline, Escape,
+  the drop as a tree move. It hears the frame's pointermove and pointerup through the frame's window, as it already
+  does for Option-drag; no transparent capture layer is laid over the iframes, because capture inside the child
+  document is what keeps the pressed pointer's events addressable at all.
+
 ## 4. One drop protocol, two payloads, one zone set per pane
 
 **Decision: one drag protocol carries either a WHOLE PANE or a SINGLE TAB, dropped against one uniform
@@ -356,6 +379,17 @@ the pattern of `tests/test_chat_line_raster_served.py`, the shipped 1-and-2 case
    edit; `romp-chat-cols` is read to seed and then the tree is authoritative while the kit is on. The
    take/adopt handoff (section 0) is unchanged. Served labs: a long session in every pane (the wall
    lesson from `plans/chat-vertical-split.md` section 6), reorder within a strip still green.
+   **First step, landed ahead of the fold (2026-09-19, the user's bar: a tab dropped in a zone is a pane
+   there, a pane dropped on a strip joins it):** tabs are drop payloads under the KIT's own zones. The
+   chat's dragstart hands the shell the tab; the shell lays one hit area per docked pane (the source
+   pane's strip left uncovered for its live reorder), shows the landing half or the strip it would join,
+   and on the drop opens the column through the shipped mutation (`__rompMoveTab(sid, "new")`, or moves
+   a lone column's own pane) and moves its leaf to the target's edge; a tab on a chat strip joins that
+   column; a chat pane released on another chat's strip moves every session it holds there and the
+   emptied column closes. Membership stays the shipped store's (`romp-chat-cols`, written by the split
+   script under the kit as before) and the tree owns where each pane sits; the fold of membership into the
+   tree's leaf groups, with `moveTab` as a tree edit and the old key untouched under the kit, is the rest
+   of this phase.
 4. **Presets, reset, and the palette moves** (section 5).
 5. **The phone story** (section 8): the tree flattened into `#mtabs`, and a decision on touch docking.
 
