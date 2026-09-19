@@ -227,8 +227,11 @@ is caught by the maildir claim/retry and stuck-mail warnings either way.
      input), continuously refreshed as the session gains turns. The index + the
      TOC header.
 2. **A thin real-time live-state read**: `states/<sid>.jsonl` (working / permission /
-   compacting / idle / closed transitions) + the event tree's open turn. Drives the
-   chip, the timeline stripes, the hard-block floor, and the mid-turn pulse.
+   idle / closed transitions) + the event tree's open turn + the backend's own
+   compacting bracket (set when romp delivers a `/compact` or the CLI's stream says a
+   compaction started, automatic or manual; cleared by the stream's compaction result,
+   the `compact_boundary` or the turn's result). Drives the chip, the timeline stripes,
+   the hard-block floor, and the mid-turn pulse.
 
 ## The three panes (each a thin projection)
 

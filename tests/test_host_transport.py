@@ -1230,6 +1230,22 @@ class EndToEnd(unittest.TestCase):
             time.sleep(0.1)
         self.fail("timed out waiting for %s\nlog tail: %s" % (what, "\n".join(self.logs[-15:])))
 
+    def test_the_host_forwards_the_clis_compaction_status_and_the_backend_brackets_it(self):
+        """An automatic compaction under a host (2026-09-19): the CLI's `system`/`status` records ride the host's journal and
+        socket like any record, the SDK's parser turns them into SystemMessage, and the backend's bracket opens and closes on
+        them, so compacting(sid) reads True while the CLI compacts on its own and False after. Executed on the hosts-on
+        harness: a real host, the fake CLI compacting mid-turn for a few seconds, the real connect loop."""
+        be = self._backend()
+        self.assertTrue(be.send(self.sid, "compact on your own autocompact=4 sleep=0"))
+        self._wait(lambda: be.compacting(self.sid) is True, timeout=25, what="the bracket to open on the stream's compacting status")
+        journal = list(sh.read_journal_dir(ht.host_dir(self.d, self.sid)))
+        self.assertIn(("system", "status", "compacting"), [(r.get("type"), r.get("subtype"), r.get("status")) for _, r in journal],
+                      "the host journaled the status record it forwarded")
+        self._wait(lambda: be.compacting(self.sid) is False, timeout=25, what="the bracket to close on the compaction's result")
+        self._wait(lambda: any(r.get("type") == "result" for _, r in sh.read_journal_dir(ht.host_dir(self.d, self.sid))), what="the turn's result")
+        rows = [(r.get("subtype"), r.get("status"), "compact_result" in r) for _, r in sh.read_journal_dir(ht.host_dir(self.d, self.sid)) if r.get("type") == "system"]
+        self.assertIn(("status", None, True), rows, "the closing status record, with its result, went through the host too")
+
     def test_a_turn_survives_a_drain_and_finishes_under_the_next_backend(self):
         be = self._backend()
         self.assertTrue(be.send(self.sid, "start long sleep=6"))

@@ -17,6 +17,9 @@ Behaviour:
       cancel-after=N   cancel an unanswered control request after N seconds (the CLI's own timeout)
       after=N          wait N seconds before the extras above (so a test can detach first)
       pad=N            the turn's assistant record carries N bytes of filler (one record that fills a socket)
+      autocompact=N    the CLI compacts on its own mid-turn: a `system`/`status` record with status "compacting" after the
+                       assistant record, N seconds, then the status null record carrying compact_result (the CLI 2.1.257's
+                       stream shape for an automatic compaction; a manual /compact emits the same pair)
   * FAKE_CLI_TRIGGER (env, a path; FAKE_CLI_TRIGGER_DELAY seconds, FAKE_CLI_TRIGGER_COUNT rows): once the file
     appears, that many bookkeeping `assistant` records that long after, OUTSIDE any turn (the host's turn count
     reads zero while they arrive), each with n=trigger<i>: output arriving while nothing was asked.
@@ -129,6 +132,11 @@ def run_turn(text: str) -> None:
         got = wait_response(rid, cancel_after)
         emit({"type": "assistant", "message": {"role": "assistant", "model": "fake-model", "content": [{"type": "text",
               "text": "hook " + ("answered" if got else "cancelled")}]}, "session_id": SESSION_ID, "uuid": str(uuid.uuid4())})
+    if "autocompact" in opts:                 # the CLI's own compaction bracket on the stream (never a transcript row)
+        emit({"type": "system", "subtype": "status", "status": "compacting", "uuid": str(uuid.uuid4()), "session_id": SESSION_ID})
+        time.sleep(float(opts["autocompact"]))
+        emit({"type": "system", "subtype": "status", "status": None, "compact_result": {"trigger": "auto", "preTokens": 180000},
+              "uuid": str(uuid.uuid4()), "session_id": SESSION_ID})
     sleep = float(opts.get("sleep", "0.2"))
     end = time.time() + sleep
     while time.time() < end and not _interrupted.is_set():   # loop-ok: a bounded wait on the scripted turn length

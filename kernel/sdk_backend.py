@@ -8123,6 +8123,31 @@ class SdkSession:
                                    # is _amain's on-connect _do_refresh_context() (get_context_usage); this is
                                    # the refinement once a real turn lands.
             asyncio.ensure_future(self._do_refresh_context())   # re-pull the real context % + model from the SDK
+        elif isinstance(msg, SystemMessage) and msg.subtype == "status":
+            # The CLI's own compaction bracket (the user 2026-09-19: a session at its context ceiling sat "unresponsive"
+            # while it compacted on its own; no chip, no teal, no overlay card, because _compacting was set only when romp
+            # delivered a /compact). The CLI 2.1.257 stream emits {"subtype": "status", "status": "compacting"} when a
+            # compaction starts, automatic or manual, and a null status when it ends: with compact_result or
+            # compact_error after a compaction that ran, and BARE after one that did not (a PreCompact hook blocked it,
+            # or the reactive compaction of a too-long prompt ended), with no boundary following either. It also emits
+            # "requesting" at each request start, and a null status carrying permissionMode on a permission-mode change,
+            # which is not a compaction's edge (round two of 1904's review: a clear keyed on the result fields left the
+            # bracket open after a hook-blocked compaction, and an open bracket parks the drain and refuses the rewind for
+            # the rest of the turn). So: a null WITHOUT permissionMode clears, whatever else it carries; a null WITH
+            # permissionMode and no compaction field never touches the bracket (the bundle's mode emitters carry the
+            # mode alone and its compaction emitters never carry the mode; a frame carrying both, which no bundle emits
+            # today, reads as a compaction's end). Every surface reads the one bracket through compacting(sid), so the
+            # poke flips them all at once, as the init branch does for the model.
+            d = msg.data if isinstance(getattr(msg, "data", None), dict) else {}
+            status = d.get("status")
+            if status == "compacting":
+                if not self._compacting:
+                    self._compacting = True
+                    self.backend._poke()
+            elif status is None and ("permissionMode" not in d or "compact_result" in d or "compact_error" in d):
+                if self._compacting:
+                    self._compacting = False   # the compaction's end on the stream; the boundary and the result clear it too
+                    self.backend._poke()
         elif isinstance(msg, SystemMessage) and msg.subtype == "compact_boundary":
             self._compacting = False   # a real compaction LANDED → done; the CLI's continuation is normal work
             # Compaction just landed: the active context dropped to the summary. Re-pull the % NOW, on the
@@ -14333,10 +14358,11 @@ class SdkBackend:
             return s.inflight > 0 and not s._pending
 
     def compacting(self, sid: str) -> "bool | None":
-        """Authoritative 'is a /compact in progress' (see SessionBackend.compacting): set when /compact is
-        delivered, cleared event-based by the compact_boundary or the /compact turn's ResultMessage — so a
-        no-op compaction (nothing to compact, no boundary) can't strand the kernel's optimistic latch for
-        180s. None when we don't run this sid (→ the kernel's optimistic/tmux path)."""
+        """Authoritative 'is a compaction in progress' (see SessionBackend.compacting): set when /compact is
+        delivered and when the CLI's stream says a compaction started (the `status` frame: an automatic compaction at
+        the context ceiling as much as a manual one, 2026-09-19), cleared event-based by the stream's compaction
+        result, the compact_boundary or the turn's ResultMessage, so a no-op compaction (nothing to compact, no
+        boundary) can't strand the kernel's optimistic latch for 180s. None when we don't run this sid."""
         s = self.sessions.get(sid)
         if not s:
             return None
