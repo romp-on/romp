@@ -367,6 +367,7 @@ async function drag(page, x0, y0, waypoints, { release = true, escape = false } 
     const rejoined = await page.waitForFunction((sid) => { const g = document.getElementById("f-chat"); let d0 = null; try { d0 = g && g.contentDocument; } catch (e) { d0 = null; } return !!(d0 && d0.querySelector('#tabs .tab[data-id="' + sid + '"]') && !document.getElementById("chat-pane-2")); }, cfg.api, { timeout: 30000 }).then(() => true).catch(() => false);
     await frame(page);
     return { opened, up, rec, rejoined, leaves: await leavesOf(page), rects: await rectsOf(page) };
+  })();
   o.offOn = await (async () => {
     const ff = frameOfApp(page, /\/feed(\?|$)/); if (!ff) return { frame: false };
     const docState = () => ff.evaluate(() => ({ cls: document.body.className, script: document.querySelectorAll("#pd-grab").length, css: !!document.getElementById("pd-grab-css"), detector: !!window.__rompPaneGrab }));
