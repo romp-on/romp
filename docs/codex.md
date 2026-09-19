@@ -154,7 +154,11 @@ rules; it is not provided by this profile. Two host notes:
 Working today: lanes and status, task cards and judging, full chat (prompts,
 replies, thinking, commands, file diffs, web searches), steering a running
 turn, interrupts, model and reasoning-effort switches, resume after restarts,
-and postal delivery into Codex sessions.
+and postal delivery into Codex sessions. A resume whose reply the pinned SDK
+cannot read, because the thread's history holds an item kind newer than the
+SDK's models, still runs: the app-server has resumed the thread by the time the
+SDK objects, so ROMP logs the mismatch once and lets the next turn's own request
+decide.
 
 Slash commands: `/model` and `/effort` work (they apply at the session's next
 turn). Anything else (`/clear`, `/compact`, `/new`, a skill) typed into the

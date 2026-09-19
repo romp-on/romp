@@ -243,10 +243,10 @@ class FakeClient:
         return n
 
 
-def build(tmp=None, factory=None):
+def build(tmp=None, factory=None, log=None):
     tmp = tmp or tempfile.mkdtemp()
     fake = FakeClient()
-    be = cb.CodexBackend(tmp, client_factory=(factory or (lambda: fake)))
+    be = cb.CodexBackend(tmp, client_factory=(factory or (lambda: fake)), log=log)
     return be, fake, tmp
 
 
@@ -271,6 +271,71 @@ class Conformance(unittest.TestCase):
             error_type("InternalRpcError", -32603, "internal error")))
         self.assertFalse(cb._is_permanent_request_rejection(
             error_type("CodexRpcError", -32001, "temporary backend failure")))
+
+    def test_only_an_unreadable_success_reply_is_a_response_model_mismatch(self):
+        # The pinned SDK validates a success reply against its generated models after the app-server
+        # has acted on the request, and raises pydantic's ValidationError when the models predate what
+        # the reply carries. The predicate must match exactly that class and nothing else the RPC layer
+        # can raise: a transient RuntimeError keeps its retry, a JsonRpcError keeps its park, a class
+        # named ValidationError without errors() is not the SDK's, a class carrying errors() under
+        # another name is not either, and the match itself is never a permanent request rejection.
+        def error_type(name, text, **attrs):
+            return type(name, (RuntimeError,), attrs)(text)
+
+        mismatch = error_type("ValidationError", "2 validation errors for ThreadResumeResponse",
+                              errors=lambda self: [{"loc": ("thread",), "type": "missing"}] * 2)
+        self.assertTrue(cb._is_response_model_mismatch(mismatch))
+        self.assertFalse(cb._is_permanent_request_rejection(mismatch))
+        self.assertFalse(cb._is_response_model_mismatch(RuntimeError("synthetic transient resume failure")))
+        self.assertFalse(cb._is_response_model_mismatch(
+            error_type("JsonRpcError", "thread not found", code=-32600, message="thread not found")))
+        self.assertFalse(cb._is_response_model_mismatch(
+            error_type("ValidationError", "a lookalike without errors()")))
+        self.assertFalse(cb._is_response_model_mismatch(
+            error_type("LooksLikeValidation", "the class name is the SDK's contract",
+                       errors=lambda self: [])))
+
+    def test_the_mismatch_line_names_the_sdk_in_use_and_the_failing_items_by_position(self):
+        # The one line the resume tolerance logs must name the SDK that raised (the installed
+        # distribution's version, since an already-importable copy wins over codexvenv and need not be
+        # the pin; the pin, worded as the pin, only when no version reads) and the thread items that
+        # failed, by position and each once. Never the first error's location: the item union is plain,
+        # pydantic reports members in declaration order, so every unknown item fails first on the first
+        # member's own field, and never an input, which for a 'missing' error is the whole item.
+        with mock.patch.object(cb, "_installed_sdk_version", lambda: "0.147.0"):
+            self.assertEqual(cb._sdk_for_mismatch_log(), "the installed SDK (openai-codex 0.147.0)")
+        with mock.patch.object(cb, "_installed_sdk_version", lambda: None):
+            self.assertEqual(cb._sdk_for_mismatch_log(), "the pinned SDK (%s)" % cb.SDK_PIN)
+
+        def mismatch(errs):
+            return type("ValidationError", (ValueError,),
+                        {"errors": lambda self: errs, "error_count": lambda self: len(errs)})()
+
+        def under(turn, item, member, field, kind="missing"):
+            return {"type": kind, "input": {"text": "SYNTHETIC-ITEM-INPUT-NEVER-LOGGED"},
+                    "loc": ("thread", "turns", turn, "items", item, member, field), "msg": "synthetic"}
+
+        one_item = mismatch([under(0, 26, "UserMessageThreadItem", "content"),
+                             under(0, 26, "SubAgentActivityThreadItem", "kind", "enum")])
+        self.assertEqual(cb._response_model_mismatch_summary(one_item),
+                         "2 validation errors over 1 item (thread.turns.0.items.26)")
+        two_items = mismatch([under(0, 3, "UserMessageThreadItem", "content"),
+                              under(0, 3, "SubAgentActivityThreadItem", "kind", "enum"),
+                              under(2, 0, "UserMessageThreadItem", "content"),
+                              {"type": "missing", "input": {}, "loc": ("thread", "sessionId"), "msg": "synthetic"}])
+        self.assertEqual(cb._response_model_mismatch_summary(two_items),
+                         "4 validation errors over 2 items (thread.turns.0.items.3, thread.turns.2.items.0) "
+                         "and 1 outside the items")
+        top_level = mismatch([{"type": "missing", "input": {}, "loc": ("thread",), "msg": "synthetic"}])
+        self.assertEqual(cb._response_model_mismatch_summary(top_level),
+                         "1 validation error, none under a thread item")
+        many = mismatch([under(t, 0, "UserMessageThreadItem", "content") for t in range(15)])
+        summary = cb._response_model_mismatch_summary(many)
+        self.assertTrue(summary.startswith("15 validation errors over 15 items (thread.turns.0.items.0, "), summary)
+        self.assertTrue(summary.endswith("thread.turns.11.items.0, and 3 more)"), summary)
+        for text in (cb._response_model_mismatch_summary(one_item), summary):
+            self.assertNotIn("SYNTHETIC-ITEM-INPUT-NEVER-LOGGED", text)
+            self.assertNotIn("UserMessageThreadItem", text)
 
 
 class ApprovalModes(unittest.TestCase):
@@ -1135,6 +1200,154 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(be.send(sid, "retry transient prepare"))
         self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid), timeout=3))
         self.assertEqual(fake.resume_attempts, 2)
+
+    def test_resume_reply_the_sdk_cannot_parse_still_runs_the_turn(self):
+        # A kernel restart resumes every durable thread before its next turn. The pinned SDK validates
+        # thread/resume's success reply against its generated models AFTER the app-server has resumed
+        # the thread, and that reply carries the whole thread history: one item kind the runtime writes
+        # that the models predate (a subAgentActivity whose kind the SDK's enum lacks) fails the item
+        # union for every member, so a thread holding a few dozen of them raised over a thousand
+        # validation errors from a resume that had succeeded. The backend reads nothing from that reply,
+        # yet it treated the raise as a failed turn: a launchError the size of the error text, no
+        # turn/start, the queue parked on the backoff forever, and only ending the session (losing the
+        # thread) recovered it (2026-09-19). The fake reaches the server (super records the call) and
+        # then fails exactly as the client does; the resume must count as done and the turn must run.
+        class ValidationError(ValueError):
+            """The SDK's reply validation failure, by shape: pydantic's class name, errors() and
+            error_count(), a str() that opens with the count and the response model, and inputs
+            that carry the values which failed (for a 'missing' error, the whole item)."""
+            def __init__(self):
+                super().__init__("3 validation errors for ThreadResumeResponse")
+
+            def errors(self):
+                # in pydantic's order: the item union is plain, so the FIRST member (UserMessageThreadItem)
+                # fails first, a 'missing' whose input is the whole item, and the member that names the
+                # drift (SubAgentActivityThreadItem.kind, an enum failure) comes later; a second item in
+                # a later turn fails the same way, so the line must name two positions, each once
+                item = {"type": "subAgentActivity", "kind": "completed",
+                        "text": "SYNTHETIC-ITEM-INPUT-NEVER-LOGGED"}
+                return [{"type": "missing", "input": item,
+                         "loc": ("thread", "turns", 0, "items", 3, "UserMessageThreadItem", "content"),
+                         "msg": "Field required"},
+                        {"type": "enum", "input": "completed",
+                         "loc": ("thread", "turns", 0, "items", 3, "SubAgentActivityThreadItem", "kind"),
+                         "msg": "Input should be 'started', 'interacted' or 'interrupted'"},
+                        {"type": "missing", "input": item,
+                         "loc": ("thread", "turns", 2, "items", 0, "UserMessageThreadItem", "content"),
+                         "msg": "Field required"}]
+
+            def error_count(self):
+                return 3
+
+        class UnreadableResumeReplyClient(FakeClient):
+            def thread_resume(self, tid, params=None):
+                super().thread_resume(tid, params)    # recorded: the server was reached and resumed it
+                raise ValidationError()
+
+        fake = UnreadableResumeReplyClient()
+        lines = []
+        be, _, tmp = build(factory=lambda: fake, log=lines.append)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.resume("web", sid))       # loaded is off again: the next turn resumes first
+        # the line names the SDK that raised, read from the installed distribution (an already-importable
+        # copy wins over codexvenv and need not be the pin); stubbed, so the wording is pinned, not the box
+        with mock.patch.object(cb, "_installed_sdk_version", lambda: "0.999.0", create=True):
+            self.assertTrue(be.send(sid, "hello after the restart"))
+            self.assertTrue(until(lambda: be.launch_error(sid) is not None
+                                  or (not be.busy(sid) and not be.pending_queued(sid))))
+            self.assertIsNone(be.launch_error(sid), "an unreadable resume reply was filed as a failed turn")
+            self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
+        self.assertEqual(len(fake.called("thread_resume")), 1)
+        self.assertEqual(len(fake.called("turn_start")), 1)
+        self.assertIsNone(be.launch_error(sid))
+        rows = json.loads((Path(tmp) / "codex" / "registry.json").read_text())
+        self.assertIsNone(rows[sid].get("launchError"))
+        # one line says what happened, in identifiers only: the session, the installed SDK, the count and
+        # the failing items by position, each once
+        mention = [l for l in lines if "thread/resume" in l]
+        self.assertEqual(len(mention), 1, lines)
+        self.assertIn(sid, mention[0])
+        self.assertIn("the installed SDK (openai-codex 0.999.0)", mention[0])
+        self.assertIn("3 validation errors over 2 items (thread.turns.0.items.3, thread.turns.2.items.0)",
+                      mention[0])
+        # not the first error's location: its member is whichever the union declares first, unrelated to
+        # the drift, and would send a reader after user messages that are fine
+        self.assertNotIn("UserMessageThreadItem", mention[0])
+        # and no line carries a value from the reply: not an input (transcript content for a
+        # text-bearing item kind), not the exception's own text (which lists every input)
+        joined = "\n".join(lines)
+        self.assertNotIn("SYNTHETIC-ITEM-INPUT-NEVER-LOGGED", joined)
+        self.assertNotIn("3 validation errors for ThreadResumeResponse", joined)
+
+    def test_a_resume_failure_under_another_name_still_fails_the_turn(self):
+        # The tolerance is for the SDK's reply validation class alone. A failure that merely carries an
+        # errors() method under another name is not it, and keeps today's path: the turn fails, the
+        # launchError names it, turn/start is never sent, and the send stays queued for the retry.
+        class LooksLikeValidation(RuntimeError):
+            def errors(self):
+                return [{"loc": ("thread",), "type": "missing"}]
+
+        class ResumeFailingClient(FakeClient):
+            def thread_resume(self, tid, params=None):
+                super().thread_resume(tid, params)
+                raise LooksLikeValidation("synthetic resume failure that is not a model mismatch")
+
+        fake = ResumeFailingClient()
+        be, _, _ = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.resume("web", sid))
+        self.assertTrue(be.send(sid, "hello after the restart"))
+        self.assertTrue(until(lambda: be.launch_error(sid) is not None))
+        self.assertTrue(be.launch_error(sid)["text"].startswith(
+            "codex turn failed: synthetic resume failure that is not a model mismatch"))
+        self.assertEqual(fake.called("turn_start"), [])
+        self.assertEqual(be.pending_queued(sid), ["hello after the restart"])
+
+    def test_a_turn_streaming_an_unknown_item_kind_completes(self):
+        # The resume tolerance would only move the failure one step later if the same item kind broke
+        # the turn's own stream. It does not: the pinned SDK's reader hands a notification its models
+        # cannot parse to the router as an unknown notification carrying the raw wire params (no
+        # model_dump), the backend's _dump passes that dict through, and the normalizer counts the kind
+        # as vocabulary it does not render. Delivered here exactly as the reader would: raw params on
+        # item/started, item/completed and the turn/completed whose items list it (2026-09-19).
+        item = {"type": "subAgentActivity", "id": "s-1", "kind": "completed", "agentPath": "helper",
+                "agentThreadId": "11111111-2222-4333-8444-666666666666"}
+
+        def raw(method, params):
+            return SimpleNamespace(method=method, payload=SimpleNamespace(params=params))
+
+        class RawItemClient(FakeClient):
+            def turn_start(self, tid, input_items, params=None):
+                self.hold_open = True          # super queues nothing: the stream is scripted below
+                self.scripts = [[]]
+                started = super().turn_start(tid, input_items, params)
+                turn_id = started.turn.id
+                q = self.turn_queues[turn_id]
+                ms = 1781100000000 + self._n * 100000
+                q.put(note("item/completed", {"threadId": tid, "turnId": turn_id, "completedAtMs": ms,
+                                              "item": {"type": "userMessage", "id": "u-1",
+                                                       "content": list(input_items)}}))
+                q.put(raw("item/started", {"threadId": tid, "turnId": turn_id, "item": item}))
+                q.put(raw("item/completed", {"threadId": tid, "turnId": turn_id,
+                                             "completedAtMs": ms + 500, "item": item}))
+                q.put(note("item/completed", {"threadId": tid, "turnId": turn_id, "completedAtMs": ms + 1000,
+                                              "item": {"type": "agentMessage", "id": "a-1",
+                                                       "text": "ack after the helper finished"}}))
+                q.put(raw("turn/completed", {"threadId": tid,
+                                             "turn": {"id": turn_id, "items": [item],
+                                                      "status": "completed"}}))
+                return started
+
+        fake = RawItemClient()
+        be, _, _ = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.send(sid, "run the helper"))
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
+        self.assertIsNone(be.launch_error(sid))
+        recs = [json.loads(l) for l in Path(be.transcript_path(sid)).read_text().splitlines()]
+        self.assertEqual([r["type"] for r in recs], ["user", "assistant"])
+        self.assertIn("ack after the helper finished", json.dumps(recs[-1]))
+        self.assertEqual(be._session(sid).norm.skipped, {"subAgentActivity": 1})
 
     def test_new_client_generation_retries_a_parked_permanent_rejection(self):
         class InvalidRequestError(RuntimeError):

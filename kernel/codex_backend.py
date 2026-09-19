@@ -132,6 +132,96 @@ def _is_permanent_request_rejection(error):
 _is_permanent_turn_rejection = _is_permanent_request_rejection
 
 
+def _is_response_model_mismatch(error):
+    """Whether a request reached Codex, was answered with success, and only the pinned SDK's model of
+    the REPLY could not read it.
+
+    The pinned client validates every success reply against its generated models after the app-server
+    has already acted on the request, so pydantic's ValidationError out of a client method means the
+    server did the work and the client cannot parse the answer. Matched by class name plus a callable
+    errors(), the shape pydantic gives it, and nothing looser: a JsonRpcError keeps its park, a
+    RuntimeError its retry. Duck-typed for the same reason _is_permanent_request_rejection is: pydantic
+    lives only in codexvenv and the backend must import without the SDK (2026-09-19).
+    """
+    return (error.__class__.__name__ == "ValidationError"
+            and callable(getattr(error, "errors", None)))
+
+
+def _installed_sdk_version():
+    """The version of the openai-codex distribution this process imports, from its metadata, or None.
+
+    The mismatch log names the SDK that raised, and that is the installed copy, not necessarily SDK_PIN:
+    ensure_codex_sdk lets an already-importable openai_codex win over codexvenv and never reads its
+    version, so a box carrying another copy would otherwise be told a pin it does not run cannot read
+    the reply, and pointed at a pin bump that cannot reach it (2026-09-19). The caller words the
+    fallback as the pin.
+    """
+    try:
+        import importlib.metadata
+        return importlib.metadata.version("openai-codex")
+    except Exception:
+        return None
+
+
+def _sdk_for_mismatch_log():
+    """How the mismatch log names the SDK: the installed version when its metadata reads, else the pin,
+    each worded as what it is (2026-09-19)."""
+    installed = _installed_sdk_version()
+    if installed:
+        return "the installed SDK (openai-codex %s)" % installed
+    return "the pinned SDK (%s)" % SDK_PIN
+
+
+_MISMATCH_POSITIONS_LISTED = 12   # item positions named in the mismatch line before "and N more"
+
+
+def _response_model_mismatch_summary(error):
+    """One phrase for a response-model mismatch: the error count and the DISTINCT thread items that
+    failed, by position (thread.turns.N.items.M), never a value and never the first error's location.
+
+    pydantic's str() lists every failing input, and a 'missing' error's input is the WHOLE item dict:
+    for a text-bearing item kind that is transcript content, which must never reach the kernel log, the
+    registry or a card. The first error's own location is no pointer either: the item union is plain,
+    so pydantic reports its members in declaration order, and every unknown item fails first on the
+    FIRST member's fields (UserMessageThreadItem.content, 'missing'), a member and a field that have
+    nothing to do with the drift. The positions of the failing items are what a reader can act on,
+    and they are indices, so they carry nothing from the reply. Errors outside the items (a reply
+    missing a top-level field) are counted apart, so a malformed reply reads as one (2026-09-19).
+    """
+    try:
+        errs = list(error.errors())
+    except Exception:
+        errs = []
+    count = len(errs)
+    counter = getattr(error, "error_count", None)
+    if callable(counter):
+        try:
+            count = counter()
+        except Exception:
+            pass
+    positions = []
+    outside = 0
+    for err in errs:
+        loc = tuple(err.get("loc") or ()) if isinstance(err, dict) else ()
+        at = loc.index("items") + 1 if "items" in loc else 0
+        if not at or at >= len(loc) or not isinstance(loc[at], int):
+            outside += 1
+            continue
+        pos = ".".join(str(part) for part in loc[:at + 1])
+        if pos not in positions:
+            positions.append(pos)
+    text = "%s validation %s" % (count, "error" if count == 1 else "errors")
+    if not positions:
+        return text + ", none under a thread item"
+    listed = ", ".join(positions[:_MISMATCH_POSITIONS_LISTED])
+    if len(positions) > _MISMATCH_POSITIONS_LISTED:
+        listed += ", and %d more" % (len(positions) - _MISMATCH_POSITIONS_LISTED)
+    text += " over %d %s (%s)" % (len(positions), "item" if len(positions) == 1 else "items", listed)
+    if outside:
+        text += " and %d outside the items" % outside
+    return text
+
+
 class _PermanentRequestRejection(RuntimeError):
     def __init__(self, cause, operation, change_generation, client_generation):
         super().__init__(str(cause) or cause.__class__.__name__)
@@ -1512,7 +1602,14 @@ class CodexBackend:
             s.worker.start()
 
     def _prepare_thread(self, s, c):
-        """Resume a durable thread, or turn a visible pending/failed placeholder into a real one."""
+        """Resume a durable thread, or turn a visible pending/failed placeholder into a real one.
+
+        The resume reply is never read here, and the pinned SDK validates it only after the app-server
+        has answered success, so a reply its models cannot parse is not a failed resume: it is logged
+        once, without any value from the reply, and the turn goes on to turn/start, the next gate, which
+        stays loud about a thread the server does not hold (2026-09-19, after a session parked forever
+        on such a reply across a kernel restart).
+        """
         with s.lock:
             if s.dead:
                 return False
@@ -1574,8 +1671,28 @@ class CodexBackend:
                              "a same-name create may collide meanwhile" % (s.sid, e))
             self.push()
             return True
-        c.thread_resume(tid, {"cwd": cwd, **_approval_params(s.mode),
-                              **_execution_permissions(cwd, thread_start=True)})
+        try:
+            c.thread_resume(tid, {"cwd": cwd, **_approval_params(s.mode),
+                                  **_execution_permissions(cwd, thread_start=True)})
+        except Exception as e:
+            if not _is_response_model_mismatch(e):
+                raise
+            # The only RPC replies this backend consumes are thread/start's thread id and turn/start's
+            # turn id; the resume reply is discarded, and the SDK raises on it AFTER the server's
+            # success answer, with the thread resumed. A thread whose history held an item kind the
+            # SDK's generated models predate (a subAgentActivity kind the runtime added later) raised
+            # here on every attempt, each filed as a failed turn with the whole error text as its
+            # launchError, and the session could not run another turn until it was ended and its
+            # thread lost (2026-09-19). Say what happened once, in identifiers only (never str(e) or an
+            # input: a 'missing' error's input is the whole item; the failing items by position, not
+            # the first error's location, which names whichever union member pydantic tries first),
+            # naming the SDK that actually raised (the installed one, which need not be the pin), and
+            # proceed: turn/start is the authoritative gate and stays loud if the thread is really not
+            # there.
+            self.log("codex thread/resume for %s succeeded, but %s cannot read the reply: %s; the "
+                     "app-server has resumed the thread, so the turn proceeds and turn/start decides. "
+                     "A newer openai-codex reads those items."
+                     % (s.sid, _sdk_for_mismatch_log(), _response_model_mismatch_summary(e)))
         loaded_client_generation = self._client_generation_for(c)
         with s.lock:
             if s.dead:
