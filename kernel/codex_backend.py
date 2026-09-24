@@ -2594,6 +2594,28 @@ class CodexBackend:
             s.kick.set()
         return True
 
+    def relaunch(self, sid):
+        """Restart session (the kernel's _restart_session door; see SessionBackend.relaunch): always a refusal here,
+        in Codex's own terms. Every Codex session runs on this backend's ONE client, whose app-server is the kernel's
+        child, so no session has a process of its own to replace. The client, and with it the binary its app-server
+        started from, changes only when the kernel restarts or a client failure is recorded. So the base refusal's
+        advice, end it and revive it, never reached a newer binary: kill cuts a running turn on the shared client,
+        and resume marks the row live for its next turn on the same client (2026-09-24, the post-merge note on
+        #2125). The refusal names what does start a fresh app-server instead, and touches nothing: not the session,
+        not its turn, not the client. A row that is not live is pointed at Revive in SdkBackend.relaunch's words: the
+        door hands an ended row here by its record, since owns() is live-only, and a row ended after the door's
+        routing lands here too."""
+        s = self._session(sid)
+        if not s:
+            return "romp has no record of this session"
+        with s.lock:
+            dead = s.dead
+        if dead:
+            return "this session is not running — revive it to bring it back"
+        return ("Codex sessions share the romp kernel's Codex app-server, so this session has no process of its own "
+                "to relaunch — restarting the romp kernel starts a fresh one for every Codex session, and cuts any "
+                "Codex turn still running")
+
     def kill(self, sid):
         s = self._session(sid)
         if not s:

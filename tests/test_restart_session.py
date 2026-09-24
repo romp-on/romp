@@ -24,6 +24,12 @@ What this pins, on both sides of the backend seam:
     never focuses anything (the tab you are looking at is yours), never records a death, and leaves the
     names registry and the registry row exactly as it found them.
 
+  * CodexBackend.relaunch, a refusal in Codex's own terms (2026-09-24, the post-merge note on #2125). Every
+    Codex session runs on the kernel's one Codex app-server, so no session has a process of its own to
+    replace, and End then Revive leaves it on the same app-server: End cuts a running turn and Revive resumes
+    on the installed client. The refusal says what does start a fresh one, a restart of the romp kernel, and
+    touches nothing; an ended Codex row is pointed at Revive, as an ended Claude row is.
+
 Every leg reds at the merge base on the behaviour, not on a missing name: the two doors do not exist there,
 so the tests say so through the AttributeError the getattr guards raise as an explicit failure. Synthetic
 fixtures only: a hermetic state root, private placeholder sids, the notes-api demo names.
@@ -54,6 +60,33 @@ cb = load_source("romp_codex_backend_restart", os.path.join(ROOT, "kernel", "cod
 
 SID = "3a7c0001-2222-3333-4444-555555555555"      # a running session named web (this module's own sid)
 OTHER = "3a7c0002-2222-3333-4444-555555555555"    # one this kernel has never heard of
+UNHELD = "3a7c0003-2222-3333-4444-555555555555"   # one this kernel knows that no backend holds a row for
+
+
+def _no_app_server():
+    raise RuntimeError("this lab runs no Codex app-server")
+
+
+def _codex_backend(dead=False):
+    """A real CodexBackend over a hermetic state root holding one Codex row, web under SID, and no app-server. The
+    row is seeded in the backend's own registry file, so nothing starts a worker or a pump: there is no queue to
+    recover at load, and no client is ever built."""
+    d = tempfile.mkdtemp()
+    root = Path(d, "codex")
+    root.mkdir(parents=True)
+    (root / "registry.json").write_text(json.dumps({SID: {"tid": "T-1", "name": "web", "cwd": "/TESTDIR",
+                                                          "dead": dead}}))
+    return cb.CodexBackend(d, client_factory=_no_app_server, log=lambda m: None)
+
+
+class _AppServerClient:
+    """The installed Codex client, the one every Codex session's turns run on: records every call made on it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        return lambda *a, **k: self.calls.append(name)
 
 
 def _backend(d):
@@ -162,6 +195,26 @@ class RelaunchPrimitive(unittest.TestCase):
         self.assertIn("revive", km._UNOWNED.relaunch(SID))
 
 
+class CodexRelaunch(unittest.TestCase):
+    """CodexBackend.relaunch on the rows the door cannot tell apart by routing alone (2026-09-24, the post-merge
+    note on #2125): a sid the backend has no row for, and a row ended between the routing and the call."""
+
+    def relaunch(self, be, sid=SID):
+        fn = getattr(be, "relaunch", None)
+        self.assertIsNotNone(fn, "CodexBackend has no relaunch of its own: a Codex session reads the generic End then "
+                                 "Revive advice, which on Codex cuts a running turn and keeps the same app-server")
+        return fn(sid)
+
+    def test_a_sid_it_has_no_row_for_refuses_in_words(self):
+        self.assertIn("no record of this session", self.relaunch(_codex_backend(), OTHER))
+
+    def test_an_ended_row_is_pointed_at_revive_not_at_a_kernel_restart(self):
+        r = self.relaunch(_codex_backend(dead=True))
+        self.assertIn("not running", r)
+        self.assertIn("revive", r)
+        self.assertNotIn("app-server", r, "an ended row has no turn to lose: Revive is what brings it back")
+
+
 class _Loop:
     """The session's event loop as interrupt() touches it: what it schedules is counted, never run."""
 
@@ -248,7 +301,7 @@ class RestartDoor(unittest.TestCase):
         self.patch("_name_of", lambda sid: "web" if sid == SID else None)
         self.patch("_kernel_knows", lambda sid: sid == SID)
         self.be = _Be()
-        saved = km.Sessions.__dict__["backend_for"]
+        saved = self.real_backend_for = km.Sessions.__dict__["backend_for"]
         km.Sessions.backend_for = staticmethod(lambda sid: self.be)
         self.addCleanup(setattr, km.Sessions, "backend_for", saved)
         self.client = {"app": "chat", "wid": "win-A"}
@@ -286,19 +339,80 @@ class RestartDoor(unittest.TestCase):
         self.assertEqual([t for _, t, _, _ in self.frames()], ["restartFailed"])
         self.assertIn("the control channel is gone", self.sent[0][1]["text"])
 
-    def test_a_codex_session_is_refused_in_words_not_with_an_attribute_error(self):
-        # CodexBackend duck-types the backend interface without subclassing SessionBackend, so it inherits no
-        # relaunch: the door met the missing method as an AttributeError and sent its text as the toast (the review
-        # of #2059, 2026-09-24). A backend with no relaunch primitive answers the base refusal, as the move door does.
-        def no_client():
-            raise RuntimeError("this lab runs no Codex app-server")
-        self.be = cb.CodexBackend(tempfile.mkdtemp(), client_factory=no_client, log=lambda m: None)
-        self.assertFalse(hasattr(self.be, "relaunch"), "the case pinned here: the Codex backend has no relaunch")
+    def test_a_backend_without_the_primitive_answers_the_base_refusal_not_an_attribute_error(self):
+        # a backend may duck-type the interface without subclassing SessionBackend, and then it inherits no relaunch:
+        # the door met the missing method as an AttributeError and sent its text as the toast (the review of #2059,
+        # 2026-09-23). Such a backend answers the base refusal, as the move door does.
+        class DuckTyped:
+            pass
+        self.be = DuckTyped()
         self.door(SID, self.client)
         self.assertEqual(self.frames(), [("chat", "restartFailed", SID, "win-A")])
         text = self.sent[0][1]["text"]
-        self.assertIn("no way to relaunch", text, "the base refusal's words, which point at End and Revive")
+        self.assertIn("no way to relaunch", text, "the base refusal's words")
         self.assertNotIn("has no attribute", text, "never a Python error as the toast")
+
+    def test_a_codex_session_is_told_what_starts_a_fresh_app_server_and_nothing_is_touched(self):
+        # every Codex session shares the kernel's one Codex app-server, so the base refusal's End then Revive did not
+        # reach a newer binary: End cut a running turn, and Revive resumed on the same installed client (2026-09-24,
+        # the post-merge note on #2125). The refusal names what does start a fresh one, and it changes nothing: the
+        # turn keeps running on the client it started on, and the client is neither asked anything nor replaced.
+        self.be = _codex_backend()
+        s = self.be._session(SID)
+        client = self.be._client = _AppServerClient()
+        generation = self.be._client_generation
+        with s.lock:
+            s.turn_id = "t-1"                                  # a turn in flight on the shared app-server
+        row = (self.be.root / "registry.json").read_bytes()
+        self.door(SID, self.client)
+        self.assertEqual(self.frames(), [("chat", "restartFailed", SID, "win-A")])
+        text = self.sent[0][1]["text"]
+        self.assertIn("app-server", text, "why there is no process of this session's own to relaunch")
+        self.assertIn("romp kernel", text, "what starts a fresh app-server")
+        self.assertNotIn("revive", text.lower(), "End then Revive keeps a Codex session on the app-server it had")
+        self.assertNotIn("has no attribute", text)
+        self.assertEqual(client.calls, [], "nothing is asked of the shared app-server: no interrupt, no close")
+        self.assertIs(self.be._client, client, "and the client every Codex session runs on is not replaced")
+        self.assertEqual(self.be._client_generation, generation)
+        self.assertEqual((s.dead, s.turn_id), (False, "t-1"), "the session is not ended and its turn is not cut")
+        self.assertEqual((self.be.root / "registry.json").read_bytes(), row, "the registry row is not rewritten")
+
+    def routed(self, be):
+        """The kernel's own routing, Sessions.backend_for, instead of the stub, with this Codex backend as the kernel's
+        and no Claude Code backend to own the sid first."""
+        km.Sessions.backend_for = self.real_backend_for
+        self.patch("_sdk", lambda: None)
+        self.patch("_codex", lambda: be)
+
+    def test_the_kernels_routing_hands_a_live_codex_session_to_the_codex_backend(self):
+        self.routed(_codex_backend())
+        self.door(SID, self.client)
+        self.assertEqual(self.frames(), [("chat", "restartFailed", SID, "win-A")])
+        self.assertIn("app-server", self.sent[0][1]["text"], "the Codex backend's own refusal, not the base one")
+
+    def test_an_ended_codex_session_is_pointed_at_revive_as_an_ended_claude_session_is(self):
+        # owns() is live-only by design, so the routing alone hands an ended Codex row to the unowned route, whose
+        # base refusal told the user to end a session that had already ended; the revive door routes that row to the
+        # Codex backend by its record, and so does this one (2026-09-24, the post-merge note on #2125)
+        self.routed(_codex_backend(dead=True))
+        self.door(SID, self.client)
+        self.assertEqual(self.frames(), [("chat", "restartFailed", SID, "win-A")])
+        text = self.sent[0][1]["text"]
+        self.assertIn("not running", text)
+        self.assertIn("revive", text)
+        self.assertNotIn("end it", text, "the session has already ended")
+
+    def test_a_sid_the_codex_backend_holds_no_row_for_is_not_handed_to_it(self):
+        # the ended-row routing keys on the Codex backend's record, not on the unowned route alone: a sid this kernel
+        # knows but no backend holds is not a Codex session, so it keeps the base refusal instead of the Codex
+        # backend's "no record" (2026-09-24, the post-merge note on #2125)
+        self.patch("_kernel_knows", lambda sid: sid in (SID, UNHELD))
+        self.routed(_codex_backend())
+        self.door(UNHELD, self.client)
+        self.assertEqual(self.frames(), [("chat", "restartFailed", UNHELD, "win-A")])
+        text = self.sent[0][1]["text"]
+        self.assertIn("no way to relaunch", text, "the unowned route's base refusal")
+        self.assertNotIn("no record", text, "the Codex backend was never asked about a sid it holds no row for")
 
     def test_a_sid_this_kernel_does_not_have_is_refused_before_any_backend_is_asked(self):
         self.door(OTHER, self.client)

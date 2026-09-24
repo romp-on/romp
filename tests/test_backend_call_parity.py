@@ -113,6 +113,22 @@ class CallShapeParity(unittest.TestCase):
                 self.assertTrue(_binds(sigs["prune_live"], 4, []),
                                 "%s.prune_live does not take the kernel's four arguments" % name)
 
+    def test_the_restart_door_stays_in_the_scan_and_its_call_binds_on_the_codex_backend(self):
+        # the restart door routes an ENDED Codex row to the Codex backend by its record (2026-09-24, the post-merge
+        # note on #2125). Rebinding `be` there would take the whole door out of the call-shape scan, which reads only
+        # a function whose every `be` binding is Sessions.backend_for; pinned by name, as prune_live is, so it cannot
+        # pass vacuously. CodexBackend has a relaunch of its own since then, so the door's call must bind on it too.
+        calls = [c for c in self.calls if c[0] == "relaunch"]
+        self.assertTrue(calls, "kernel.py's restart door no longer calls be.relaunch on a backend_for backend: a "
+                               "second binding of be takes the door out of the scan")
+        self.assertIn("relaunch", self.sigs["CodexBackend"], "CodexBackend has no relaunch of its own")
+        for _, lineno, npos, kws in calls:
+            self.assertEqual((npos, kws), (1, []), "kernel.py:%d relaunch call shape" % lineno)
+            for name, sigs in self.sigs.items():
+                if "relaunch" in sigs:
+                    self.assertTrue(_binds(sigs["relaunch"], 1, []),
+                                    "%s.relaunch does not take the door's one argument" % name)
+
     def test_every_backend_for_call_binds_on_every_backend_that_defines_the_method(self):
         bad = []
         for method, lineno, npos, kws in self.calls:

@@ -212,9 +212,13 @@ it keeps taking your queue, and one still waiting at that turn's end is
 delivered by the new one.
 
 A session that is not running has nothing to restart: the row refuses and
-points at Revive, which is the same thing for a closed session. Every refusal
-(a session this kernel does not have, a backend with no relaunch of its own)
-is reported in the pane you asked from and changes nothing.
+points at Revive, which is the same thing for a closed session. A running
+Codex session is refused too, because every Codex session runs on the
+kernel's one Codex app-server: ending and reviving it keeps that app-server,
+and a kernel restart is what starts a fresh one, for every Codex session at
+once. Every refusal (a session this kernel does not have, a backend with no
+relaunch of its own) is reported in the pane you asked from and changes
+nothing.
 
 ## The Romp Postal Service
 

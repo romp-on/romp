@@ -21690,7 +21690,9 @@ def _restart_session(sid, client=None):
     request_reconnect, the road every connect-time switch already takes), so nothing here duplicates the
     revive's resume: the two doors reach different machinery on purpose, and only this one leaves the
     session live throughout. Runs off the WS recv loop like the revive — the interrupt and the reconnect
-    must not block the socket.
+    must not block the socket. CodexBackend.relaunch always refuses, and says why: every Codex session runs
+    on the kernel's one Codex app-server, which End + Revive leaves in place, so a newer binary is reached
+    there by a kernel restart instead (2026-09-24, the post-merge note on #2125).
 
     FAILURE IS LOUD and AIMED (the per-viewer rule, as reviveFailed is): a restartFailed carrying the reason
     goes to the pane that asked, in the window that asked (_restart_reply_views), and nowhere else. Success
@@ -21706,10 +21708,18 @@ def _restart_session(sid, client=None):
     else:
         try:
             be = Sessions.backend_for(sid)
-            # a backend with no relaunch primitive answers the base refusal, never an AttributeError: CodexBackend
-            # duck-types the interface without subclassing SessionBackend, so it inherits nothing (the review of
-            # #2059, 2026-09-24; the move door's hasattr guard)
-            detail = be.relaunch(sid) if hasattr(be, "relaunch") else sb.SessionBackend.relaunch(be, sid)
+            if be is _UNOWNED and (cx := _codex()) is not None and cx.has_record(sid):
+                # an ENDED Codex row: owns() is live-only, so the routing passed it by, and the base refusal told the
+                # user to end a session already ended. Routed by its record, as the revive door does, the Codex
+                # backend points it at Revive (2026-09-24, the post-merge note on #2125). Asked as cx, never by
+                # rebinding be: be keeps its one binding, Sessions.backend_for's, which is what keeps this door's
+                # call in the call-shape scan (tests/test_backend_call_parity.py)
+                detail = cx.relaunch(sid)
+            else:
+                # a backend with no relaunch primitive answers the base refusal, never an AttributeError: a backend
+                # may duck-type the interface without subclassing SessionBackend, and then it inherits nothing (the
+                # review of #2059, 2026-09-23; the move door's hasattr guard)
+                detail = be.relaunch(sid) if hasattr(be, "relaunch") else sb.SessionBackend.relaunch(be, sid)
         except Exception as e:
             detail = str(e)[:200]
     if detail:
