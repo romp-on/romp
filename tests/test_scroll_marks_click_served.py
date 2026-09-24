@@ -6,7 +6,7 @@ The served guard drives the real /chat page from a hermetic kernel (synthetic tr
 each answered by a long reply, so the first prompt sits far above the fold when the page opens at the tail;
 then two quick exchanges whose notches land a few pixels apart — the dense case). It checks, in the browser:
 the box stays pointer-events:none while each notch takes the pointer with the link cursor; hovering a notch
-shows the accent ring in BOTH themes (the painted 8×2 mark unchanged); the wheel over a notch still scrolls
+shows the accent ring in BOTH themes (the painted 4×2 mark unchanged; 8×2 until the comment-forward rail, 2026-09-24); the wheel over a notch still scrolls
 the transcript (review of the first cut: the box hangs off body, so the notch swallowed the wheel); a click on
 the first prompt's notch lands the chat on that message — the turn carrying that uuid is in view and wears the
 deep-link flash, exactly as a comment tick's jump does (the pendingAnchor route, not a pixel jump); and in the
@@ -268,7 +268,7 @@ class ServedNotchClickJumps(unittest.TestCase):
         self.assertEqual(b["boxPointer"], "none", "the box never intercepts the scrollbar: %r" % b)
         self.assertEqual(b["notchPointer"], "auto", "the notch takes the pointer: %r" % b)
         self.assertEqual(b["cursor"], "pointer", "the link cursor over a notch: %r" % b)
-        self.assertEqual(b["paint"], {"w": 8, "h": 2}, "the painted mark is still 8×2 — the hit box is the pseudo: %r" % b)
+        self.assertEqual(b["paint"], {"w": 4, "h": 2}, "the painted mark is 4×2 (the comment-forward rail) — the hit box is the pseudo: %r" % b)
         self.assertFalse(b["targetInView"], "the first prompt starts OFF-screen (the page opens at the tail), else the jump proves nothing: %r" % b)
         # the hit pads: 2px where there is room, clamped to half the gap where notches crowd (never a neighbour's paint)
         tops = b["tops"]
@@ -285,7 +285,7 @@ class ServedNotchClickJumps(unittest.TestCase):
             self.assertIn(rgb, h["shadow"], "%s hover ring is the accent: %r" % (name, h))
             self.assertIn("1.5px", h["shadow"], "%s hover ring is a ring, not a fill: %r" % (name, h))
             self.assertEqual(h["opacity"], "1", "%s hover lifts the notch to full opacity: %r" % (name, h))
-            self.assertEqual((h["w"], h["h"]), (8, 2), "%s hover keeps the painted size: %r" % (name, h))
+            self.assertEqual((h["w"], h["h"]), (4, 2), "%s hover keeps the painted size: %r" % (name, h))
             self.assertEqual(h["cursor"], "pointer", "%s theme: link cursor: %r" % (name, h))
         self.assertTrue(hl["light"], "the light theme was on for the light hover: %r" % hl)
         # the WHEEL over a notch scrolls the transcript (the box forwards it to #content)

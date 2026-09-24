@@ -41,6 +41,7 @@ import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, reveal
 import { compactDisplay, isFoldableNoticeShape, itemAnchor, type DisplayItem } from "./compact";
 import { insertRun, regionsFromRuns, gapHeight, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
+import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
 import { loadSettings, saveSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
 import { backendLabel, effectiveDefaultBackend } from "./backend-names";
 import { delegate } from "./actions";
@@ -10118,7 +10119,9 @@ function applyForkSpots(sid: string, v: View): void {
  *  real turn heights diverged from uniform (the user 2026-08-17) — two marks on one scrollbar may
  *  never disagree about order. Rides the notches' rAF scheduler so both repaint from one world; a
  *  signature skips untouched paints, and an unchanged tick set moves IN PLACE (same tids, same
- *  order) so a mid-press rebuild can't eat the click (these ticks are buttons). */
+ *  order) so a mid-press rebuild can't eat the click (these ticks are buttons). Each tick's hit pads
+ *  (--hit-t / --hit-b, read by its ::before) come from railPads, clamped against the ticks around it
+ *  (the comment-forward rail, the user 2026-09-24); both DOM paths dress them. */
 let cmtRailSig = "";
 function updateCommentRail(): void {
   let rail = document.getElementById("cmt-rail");
@@ -10148,24 +10151,31 @@ function updateCommentRail(): void {
   if (sig === cmtRailSig && rail) return;
   cmtRailSig = sig;
   if (!rail) { rail = el("div", "cmt-rail"); rail.id = "cmt-rail"; document.body.appendChild(rail); }
-  rail.style.left = (r.right - 10) + "px";
+  rail.style.left = (r.right - 16) + "px";
   rail.style.top = r.top + "px";
   rail.style.height = r.height + "px";
   const cls = (th: CommentThread) => "cmt-tick" + (th.status === "resolved" || th.status === "merged" ? " resolved" : "")
     + (th.unread && th.status === "open" ? " unread" : "")
     + (commentInFlight(th) ? " busy" : "");   // green while working OR a reply is owed (2026-08-24)
+  const pads = railPads(ticks.map((t) => ({ y: t.y, h: t.th.unread && t.th.status === "open" ? 6 : 4 })), TICK_PAD, r.height);
+  const dress = (tick: HTMLElement, t: typeof ticks[number], i: number) => {
+    tick.style.top = t.y + "px";
+    tick.className = cls(t.th);
+    tick.style.setProperty("--hit-t", pads[i][0] + "px");
+    tick.style.setProperty("--hit-b", pads[i][1] + "px");
+  };
   const kids = Array.from(rail.children) as HTMLElement[];
   if (kids.length === ticks.length && kids.every((k, i) => k.dataset.tid === ticks[i].th.tid)) {
-    ticks.forEach((t, i) => { kids[i].style.top = t.y + "px"; kids[i].className = cls(t.th); });
+    ticks.forEach((t, i) => dress(kids[i], t, i));
     return;
   }
-  rail.replaceChildren(...ticks.map((t) => {
+  rail.replaceChildren(...ticks.map((t, i) => {
     const tick = el("button", cls(t.th)) as HTMLButtonElement;
     tick.type = "button";
     tick.dataset.act = "cmtjump";
     tick.dataset.tid = t.th.tid;
     tick.dataset.uuid = t.th.anchorUuid;
-    tick.style.top = t.y + "px";
+    dress(tick, t, i);
     tick.title = (t.th.name || "comment") + ": click to jump to it";
     return tick;
   }));

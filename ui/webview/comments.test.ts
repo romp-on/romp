@@ -113,7 +113,7 @@ test("an unread thread wears ONE outline box around its whole passage and a shou
   assert.match(CSS, /\.cmt-tick\.unread \{[^}]*0 0 0 3px var\(--st-awaiting-bg\); \}/s, "the tick's halo agrees by colour");
   assert.match(UI, /function paintCommentOutlines\(sid: string\): void \{/);
   assert.doesNotMatch(CSS, /mark\.cmt-hl \{[^}]*position: relative;/s, "nothing left for the mark to anchor");
-  assert.match(CSS, /\.cmt-tick\.unread \{ width: 10px; height: 6px; right: 0; opacity: 1;/);
+  assert.match(CSS, /\.cmt-tick\.unread \{ width: 16px; height: 6px; right: 0; opacity: 1;/);   // 10px until the comment-forward rail (2026-09-24, rail-comment-forward.test.ts)
   // the clearing story is the existing machinery, untouched: optimistic on open + kernel watermark
   assert.match(UI, /if \(th\) th\.unread = false;\s*\/\/ optimistic; the kernel's watermark reconciles/);
 });
@@ -420,7 +420,8 @@ test("ticks and message notches share ONE scrollbar frame, so they can never dis
   assert.match(UI, /paintRailSticky\(\); paintScrollMarks\(\); updateCommentRail\(\);/);
   // an unchanged tick set moves IN PLACE — ticks are buttons, and a mid-press rebuild eats the click
   assert.match(UI, /kids\.every\(\(k, i\) => k\.dataset\.tid === ticks\[i\]\.th\.tid\)/);
-  assert.match(UI, /kids\[i\]\.style\.top = t\.y \+ "px";/);
+  assert.match(UI, /ticks\.forEach\(\(t, i\) => dress\(kids\[i\], t, i\)\);/);
+  assert.match(UI, /tick\.style\.top = t\.y \+ "px";/, "the one dress moves the tick (and sets its hit pads, rail-comment-forward.test.ts)");
 });
 
 test("while the thread is WRITING the passage holds the await-green tint and NOTHING crawls", () => {

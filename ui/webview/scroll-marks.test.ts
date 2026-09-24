@@ -199,18 +199,18 @@ test("a reply dot sits at its anchor's position in the notches' own frame, over 
   assert.match(RAIL, /const frame = contentOffsetFrame\(content, v, s\);/, "the ONE frame the notches use");
   assert.match(RAIL, /const off = frame\.offsetOf\(evUnit\[idx\]\);/, "event → unit → offset, like a notch");
   assert.match(RAIL, /ticks\.push\(\{ th, y: Math\.min\(r\.height - 6, Math\.round\(\(off \/ frame\.sh\) \* \(r\.height - 4\)\)\) \}\);/, "the same proportional map");
-  assert.match(RAIL, /rail\.style\.left = \(r\.right - 10\) \+ "px";/);
+  assert.match(RAIL, /rail\.style\.left = \(r\.right - 16\) \+ "px";/);   // 10 until the comment-forward rail (2026-09-24)
   assert.match(PAINT, /box\.style\.left = \(cRect\.right - 12\) \+ "px";/, "…the notch box's right edge is the rail's right edge");
-  assert.match(CSS, /\.cmt-rail \{ position: fixed; width: 10px; z-index: 40; pointer-events: none; \}/, "over the notches (z 3), passive between ticks");
+  assert.match(CSS, /\.cmt-rail \{ position: fixed; width: 16px; z-index: 40; pointer-events: none; \}/, "over the notches (z 3), passive between ticks");
   assert.match(RENDER, /paintRailSticky\(\); paintScrollMarks\(\); updateCommentRail\(\);/, "one scheduler paints notches and dots from one world");
 });
 
 test("the dot is the comment's landed colour; UNREAD shouts; keyed on the kernel's bit on an open thread", () => {
   // the tick's fill is the comment INK (T310): the highlighter yellow itself in the dark theme, a darker amber on the cream
   // page — never a raw hex; its UNREAD halo is the needs-you red the passage's box and ring wear (the user 2026-09-12:
-  // the rail agrees with the box's cue, by colour, since a 10×6 tick cannot show a dash)
-  assert.match(CSS, /\.cmt-tick \{\s*\n\s*position: absolute; right: 1px; width: 8px; height: 4px;[\s\S]{0,120}background: var\(--cmt-hl-outline\);/, "the ink token, never a raw hex");
-  assert.match(CSS, /\.cmt-tick\.unread \{ width: 10px; height: 6px; right: 0; opacity: 1; z-index: 1;\s*\n\s*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px var\(--st-awaiting-bg\); \}/,
+  // the rail agrees with the box's cue, by colour, since a 16×6 tick cannot show a dash)
+  assert.match(CSS, /\.cmt-tick \{\s*\n\s*position: absolute; right: 1px; width: 14px; height: 4px;[\s\S]{0,120}background: var\(--cmt-hl-outline\);/, "the ink token, never a raw hex");
+  assert.match(CSS, /\.cmt-tick\.unread \{ width: 16px; height: 6px; right: 0; opacity: 1; z-index: 1;\s*\n\s*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px var\(--st-awaiting-bg\); \}/,
     "…and lifted above a read sibling at the same top (nested-marks.test.ts)");
   assert.match(RAIL, /\+ \(th\.unread && th\.status === "open" \? " unread" : ""\)/, "the same predicate the mark's ring and the reply chips read");
   assert.match(RAIL, /\+ ":" \+ \(t\.th\.unread \? 1 : 0\)/, "the unread bit rides the signature: a reply landing repaints the dot");

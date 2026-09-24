@@ -2068,16 +2068,18 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    over the scroller's right edge (it never intercepts the native scrollbar); each notch is a 2px tick at
    its message's proportional position and, since T260, a LINK to that message (the [data-act] rules
    below). Blue = the OUTGOING-BUBBLE blue (#2b6cef, "yours"), deliberately not the romp accent; gray
-   (.machine, further down) = machine-sent. */
+   (.machine, further down) = machine-sent. 4px out from the edge since 2026-09-24 (8 before): the user
+   rarely navigates by their own turns here and often by comments, so the notch steps back and the
+   comment tick (.cmt-tick, 14px) reads first on a long transcript. */
 .scroll-marks { position: fixed; z-index: 3; pointer-events: none; width: 12px; }
-.scroll-marks .scroll-mark { position: absolute; right: 1px; width: 8px; height: 2px;
+.scroll-marks .scroll-mark { position: absolute; right: 1px; width: 4px; height: 2px;
   border-radius: 1px; background: var(--you); opacity: 0.65;
   transition: top 180ms ease; }   /* history streaming in rescales the map — carried, not teleported */
 @media (prefers-reduced-motion: reduce) { .scroll-marks .scroll-mark { transition: none; } }
 /* a notch is a LINK to its message (T260, the user 2026-09-08): the box above stays pointer-events:none —
    the native scrollbar under it keeps working wherever a notch is not — and only a notch that knows its
-   message (data-act) takes the pointer, with the link cursor. The painted mark stays 8×2; the HIT box is
-   the ::before, 12px wide and padded up to 2px above and below (a 6px target for a 2px line), each pad
+   message (data-act) takes the pointer, with the link cursor. The painted mark stays 4×2; the HIT box is
+   the ::before, 8px wide and padded up to 2px above and below (a 6px target for a 2px line), each pad
    CLAMPED per notch to half the gap to its neighbour (--hit-t / --hit-b, set by paintScrollMarks) so no
    pad reaches a neighbour's paint: hover, tip and click always answer for the notch under the pointer.
    The pads do sit over the scrollbar thumb's track: where notches are dense the thumb is grabbable only
@@ -4179,24 +4181,31 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 .cmt-meta-row { display: flex; gap: 6px; }
 
 /* comment ticks on the chat's scroll rail (the user 2026-08-15): where the comments are, at the
-   anchor's proportional position in the whole conversation; click = jump + open the thread */
-.cmt-rail { position: fixed; width: 10px; z-index: 40; pointer-events: none; }
+   anchor's proportional position in the whole conversation; click = jump + open the thread.
+   COMMENT-FORWARD (the user 2026-09-24: comments are what they click on the rail, and they were hard to pick out
+   and to hit on a long transcript): the tick reaches 14px out from the edge, past the 4px turn notch beside it,
+   and its HIT box (the ::before) is larger still: 4px further in, out to the pane edge, and up to 5px above and
+   below, each vertical pad clamped by updateCommentRail to half the free gap to the nearest tick at another
+   height (rail-pads.ts), so no pad reaches a neighbour's paint. The rail sits over the notches (z 40 vs 3), so
+   where a tick's pad overlaps a notch the comment answers: the forward mark wins. */
+.cmt-rail { position: fixed; width: 16px; z-index: 40; pointer-events: none; }
 .cmt-tick {
-  position: absolute; right: 1px; width: 8px; height: 4px;
+  position: absolute; right: 1px; width: 14px; height: 4px;
   border: 0; border-radius: 2px; padding: 0;
   background: var(--cmt-hl-outline); opacity: 0.75; pointer-events: auto; cursor: pointer;   /* the notch's own ink (T310); the unread halo below is the needs-you red */
 }
+.cmt-tick::before { content: ""; position: absolute; left: -4px; right: -1px; top: calc(-1 * var(--hit-t, 5px)); bottom: calc(-1 * var(--hit-b, 5px)); }
 .cmt-tick:hover { opacity: 1; }
 .cmt-tick.resolved { opacity: 0.3; }
 /* an UNREAD thread's tick shouts (the user 2026-08-23): full width, taller, double-ringed — the old
    faint glow read as a rendering artifact, not as "new here". The outer ring is the needs-you red the
-   passage's box and ring wear (the user 2026-09-12 wanted the rail to agree with the box's cue; a 10×6
+   passage's box and ring wear (the user 2026-09-12 wanted the rail to agree with the box's cue; a 16×6
    tick cannot show a dash, so it agrees by colour), past a 1.5px gap in the page colour; the fill stays
    the notch's ink, so the tick still says "a comment here" and the halo "it waits on you" — the same
    pattern as .cmt-tick.busy wearing the await green. It also stacks ABOVE its read siblings: two
    threads on one passage share a `top`, and the later-painted read tick covered the unread one
    (the user 2026-09-10) */
-.cmt-tick.unread { width: 10px; height: 6px; right: 0; opacity: 1; z-index: 1;
+.cmt-tick.unread { width: 16px; height: 6px; right: 0; opacity: 1; z-index: 1;
   box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--st-awaiting-bg); }
 /* a WRITING thread's tick wears the same await-green as the passage (the user 2026-08-24: the
    marching-ants crawl — the "spinning dots" — is retired; the state COLOR is the in-flight cue,

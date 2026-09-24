@@ -1,0 +1,49 @@
+<!-- SYNTHETIC fixture (notes-api demo domain, placeholder ids): a LONG transcript's scroll rail — forty user
+     messages (the blue turn notches) and four comment threads down the same edge: read, unread (the needs-you
+     halo), resolved (faded) and unread again — so the rail's two mark kinds can be compared at a glance. Static
+     DOM mirroring the builders' output (render.ts paintScrollMarks / updateCommentRail); the script places both
+     boxes the way the builders do, against the pane's right edge, reading each box's width from the sheet so the
+     same fixture renders any version of the rail's geometry truthfully (before/after shots). Run (dark, then light
+     with --body-class "theme-light chat-theme-yatharth"):
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/chat-rail-long.html \
+           --out /tmp/rail-dark.png --size 720x640 \
+           --extra-css 'html,body{height:100%} #content{height:100%;box-sizing:border-box}'
+-->
+<div id="content"><div class="thread" id="fx-thread"></div></div>
+<div class="scroll-marks" id="fx-marks"></div>
+<div class="cmt-rail" id="cmt-rail"></div>
+<script>
+(function () {
+  var thread = document.getElementById("fx-thread");
+  var html = "";
+  for (var k = 0; k < 40; k++) {
+    html += '<div class="turn turn-user" data-unit="' + (2 * k) + '"><div class="user-bubble">notes-api: step ' + k
+      + ', how does the retry curve look?</div></div>'
+      + '<div class="turn" data-unit="' + (2 * k + 1) + '"><div class="assistant md"><p>Step ' + k
+      + ' backs off with ten percent jitter; the curve flattens after the third attempt and the cap holds at two minutes.</p></div></div>';
+  }
+  thread.innerHTML = html;
+  var content = document.getElementById("content");
+  var r = content.getBoundingClientRect();
+  var marks = document.getElementById("fx-marks"), rail = document.getElementById("cmt-rail");
+  // the notch box: 12px, flush right (paintScrollMarks); the comment rail: its own width, flush right (updateCommentRail)
+  marks.style.left = (r.right - 12) + "px"; marks.style.top = r.top + "px"; marks.style.height = r.height + "px";
+  var railW = parseFloat(getComputedStyle(rail).width) || 10;
+  rail.style.left = (r.right - railW) + "px"; rail.style.top = r.top + "px"; rail.style.height = r.height + "px";
+  var H = r.height - 4;
+  for (var i = 0; i < 40; i++) {
+    var m = document.createElement("div");
+    m.className = "scroll-mark"; m.dataset.act = "markjump";
+    m.style.top = Math.round(((2 * i + 0.5) / 80) * H) + "px";
+    marks.appendChild(m);
+  }
+  // four threads on four replies: (reply index, state)
+  [[6, ""], [16, " unread"], [26, " resolved"], [34, " unread"]].forEach(function (t) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "cmt-tick" + t[1]; b.dataset.act = "cmtjump";
+    b.style.top = Math.min(r.height - 6, Math.round(((2 * t[0] + 1.5) / 80) * H)) + "px";
+    rail.appendChild(b);
+  });
+  content.scrollTop = 1200;
+})();
+</script>
