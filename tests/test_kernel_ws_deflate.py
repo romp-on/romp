@@ -14,10 +14,12 @@ fell megabytes behind on the feed and was dropped. Pinned here:
   floor exactly where it is documented; a short one, and every message to a client without the extension,
   gets the plain frame it always did, byte for byte; the client's sender thread is what compresses;
 - the reader: a client's compressed message (RSV1 on its first frame, fragments included, a 15-bit window
-  of varied content) is inflated before it is parsed; bytes that are not a deflate stream, an inflate past
-  the reassembly cap, RSV1 from a client that negotiated nothing, and RSV1 on a continuation or control
-  frame end the read as a dead connection, each naming a Close code; the cap bounds what a message costs
-  (a deflate bomb is refused within one piece past it), not only what it returns; a plain message is untouched;
+  of varied content) is inflated before it is parsed, and so is one ending in a final block, RFC 7692's own
+  example included; bytes that are not a deflate stream, bytes after the stream's end other than that
+  example's one 0x00 octet (a second stream, or one other octet), an inflate past the reassembly cap, RSV1
+  from a client that negotiated nothing, and RSV1 on a continuation or control frame end the read as a dead
+  connection, each naming a Close code; the cap bounds what a message costs (a deflate bomb is refused within
+  one piece past it), not only what it returns; a plain message is untouched;
 - end to end through the real Handler on a loopback server: both directions on one negotiated socket, a socket
   that offered nothing stays plain, and a kernel-decided end sends a Close frame with its code and logs once;
 - the federated relay, executed: a browser dialing a remote kernel through the hub negotiates with the remote.
@@ -287,12 +289,13 @@ class Reader(unittest.TestCase):
         # RFC 7692 §7.2.3.4 lets a sender end a message in a BFINAL block, so the tail the reader appends lands after the
         # stream's end. Once an earlier piece has filled the step, CPython keeps those leftover bytes in unconsumed_tail
         # even after the stream ends, and a reader stopping only on an empty unconsumed_tail refused the message as one
-        # that does not inflate (post-merge review of #2106, 2026-09-24). The sync-flushed shape is the control: it passed
+        # that does not inflate (review of #2106, 2026-09-23). The sync-flushed shape is the control: it passed. The
+        # RFC's own example, a final block and then one 0x00 octet, has its own test below
         body = varied_json(25000)
         self.assertGreater(len(body), 2 * km._WS_INFLATE_STEP)
         z = zlib.compressobj(6, zlib.DEFLATED, -15)
         shapes = {"sync-flushed, tail stripped": deflate(body),
-                  "the RFC's shape: sync-flushed, then an empty final block": deflate(body) + TAIL + b"\x03\x00",
+                  "sync-flushed, then an empty final block": deflate(body) + TAIL + b"\x03\x00",
                   "one stream finished with Z_FINISH": z.compress(body) + z.flush(zlib.Z_FINISH)}
         for name, payload in shapes.items():
             (op, got), fails = recv_message(cframe(payload, rsv1=True), inflate_=True)
@@ -313,6 +316,55 @@ class Reader(unittest.TestCase):
             self.assertEqual((got, [c for c, _ in fails]), ((None, None), [1009]))
         finally:
             km._WS_MAX_MESSAGE = saved
+
+    @staticmethod
+    def _finished(data):
+        """One raw deflate stream ended with Z_FINISH, so its last block carries BFINAL. A compressor takes no input once
+        finished, so each stream gets a fresh one."""
+        z = zlib.compressobj(6, zlib.DEFLATED, -15)
+        return z.compress(data) + z.flush(zlib.Z_FINISH)
+
+    def test_bytes_after_the_deflate_stream_ends_end_the_read(self):
+        # past the stream's end the reader expects the tail it appended and, before it, at most the one 0x00 octet RFC
+        # 7692 §7.2.3.4's example carries. More is not this stream (a second one, here): stopping at the first stream's
+        # end, the reader handed the handler that stream's text alone and dropped the rest unread, with no Close and no
+        # log line, whether the first stream ended inside the first piece or past it (review of #2137, 2026-09-24)
+        body = varied_json(25000)
+        self.assertGreater(len(body), 2 * km._WS_INFLATE_STEP)
+        for at in (km._WS_INFLATE_STEP // 2, 3 * km._WS_INFLATE_STEP // 2):   # the first stream ends in one piece, then past it
+            payload = self._finished(body[:at]) + self._finished(body[at:])
+            (op, got), fails = recv_message(cframe(payload, rsv1=True), inflate_=True)
+            # a length, not the bytes: a failing equality on megabytes renders its diff for minutes
+            self.assertEqual((op, got if got is None else len(got), [c for c, _ in fails]), (None, None, [1007]), at)
+            self.assertIn("after its deflate stream ends", fails[0][1])
+        # the bound's other side: two octets where the RFC's example has one, 6 bytes past the stream's end
+        got, fails = recv_message(cframe(self._finished(self.BODY) + b"\x00\x00", rsv1=True), inflate_=True)
+        self.assertEqual((got, [c for c, _ in fails]), ((None, None), [1007]))
+
+    def test_one_octet_after_the_stream_ends_must_be_the_rfcs_zero(self):
+        # the one octet the RFC's example leaves past the stream's end is 0x00, an empty stored block's header, which
+        # holds no data. Another single octet can hold some: 0x63 and the tail the reader appends make a whole second
+        # stream holding one byte, which a bound on the leftover's length alone would let through, dropping it unread
+        # (the bound the review of #2137, 2026-09-24, sketched)
+        z = zlib.decompressobj(-15)
+        self.assertEqual((z.decompress(b"\x63" + TAIL), z.eof), (b"\x00", True))
+        got, fails = recv_message(cframe(self._finished(self.BODY) + b"\x63", rsv1=True), inflate_=True)
+        self.assertEqual((got, [c for c, _ in fails]), ((None, None), [1007]))
+        self.assertIn("after its deflate stream ends", fails[0][1])
+
+    def test_the_rfcs_own_final_block_example_inflates(self):
+        # RFC 7692 §7.2.3.4: "Hello" in a BFINAL block, then one 0x00 octet, the header of the empty stored block whose
+        # last 4 octets the sender stripped. That leaves 5 bytes past the stream's end where the other final-block shapes
+        # leave the 4-byte tail, so a refusal of bytes after the end sized to the tail alone would reach it. The same
+        # shape at 2.5 MB (past one piece) and empty
+        rfc = bytes.fromhex("f348cdc9c9070000")
+        self.assertEqual(recv_message(cframe(rfc, rsv1=True), inflate_=True), ((0x1, b"Hello"), []))
+        self.assertEqual(recv_message(cframe(self._finished(b"") + b"\x00", rsv1=True), inflate_=True), ((0x1, b""), []))
+        body = varied_json(25000)
+        (op, got), fails = recv_message(cframe(self._finished(body) + b"\x00", rsv1=True), inflate_=True)
+        self.assertEqual((op, fails), (0x1, []))
+        self.assertEqual(len(got), len(body))
+        self.assertTrue(got == body)
 
     def test_rsv1_from_a_client_that_negotiated_nothing_ends_the_read(self):
         got, fails = recv_message(cframe(deflate(self.BODY), rsv1=True), inflate_=False)

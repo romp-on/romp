@@ -51790,16 +51790,17 @@ def _ws_deflate(data, wbits=15):
 
 def _ws_inflate(data, cap):
     """A compressed message's payload restored (RFC 7692 §7.2.2) → (bytes, None), or (None, why) when the bytes
-    are not a deflate stream or inflate past `cap` — the reader ends the connection on either, as it does on a
-    fragmented message overrunning the same cap. The stripped tail is appended and one fresh raw inflate stream
-    run (the response demanded no context takeover of the client), in _WS_INFLATE_STEP pieces joined only once
-    the whole is known to fit: the cap then bounds what a message COSTS as well as what it returns. A single
-    decompress call bounded by max_length still held its output blocks and the joined result at once, so a
-    deflate bomb cost about twice the cap before it was refused (review, 2026-09-23; measured: a 160 KB frame
-    inflating to 160 MiB against the 80 MiB cap peaked at 160 MiB that way, 82 MiB piecewise). What the reader
-    transiently holds is therefore about the cap plus one piece plus the compressed input for a bomb, and about
-    twice its size for a legitimate message near the cap (its pieces and their join, once) — per message, per
-    connection; only a client holding the serve token reaches this reader at all."""
+    are not one deflate stream (not deflate at all, or running on after the stream's end) or inflate past `cap` —
+    the reader ends the connection on either, as it does on a fragmented message overrunning the same cap. The
+    stripped tail is appended and one fresh raw inflate stream run (the response demanded no context takeover of
+    the client), in _WS_INFLATE_STEP pieces joined only once the whole is known to fit: the cap then bounds what
+    a message COSTS as well as what it returns. A single decompress call bounded by max_length still held its
+    output blocks and the joined result at once, so a deflate bomb cost about twice the cap before it was refused
+    (review, 2026-09-23; measured: a 160 KB frame inflating to 160 MiB against the 80 MiB cap peaked at 160 MiB
+    that way, 82 MiB piecewise). What the reader transiently holds is therefore about the cap plus one piece plus
+    the compressed input for a bomb, and about twice its size for a legitimate message near the cap (its pieces
+    and their join, once) — per message, per connection; only a client holding the serve token reaches this
+    reader at all."""
     src = data + _WS_DEFLATE_TAIL
     out, total = [], 0
     try:
@@ -51813,13 +51814,25 @@ def _ws_inflate(data, cap):
             # the stream ended, or its input is spent. A message may end in a BFINAL block (RFC 7692 §7.2.3.4), which
             # leaves the tail appended above past the stream's end, and once an earlier piece filled the step CPython
             # keeps such leftovers in unconsumed_tail as well as unused_data: stopping on the tail alone called again on
-            # the ended stream, got nothing, and refused a legal message as not inflating (post-merge review of #2106,
-            # 2026-09-24)
+            # the ended stream, got nothing, and refused a legal message as not inflating (review of #2106, 2026-09-23)
             if z.eof or not z.unconsumed_tail:
                 break
             if not piece:                        # no output and input left over: zlib is not moving (cannot happen with a
                 return None, "a compressed message that does not inflate"   # positive max_length, guarded so the loop cannot spin)
             src = z.unconsumed_tail
+        # after a stream that ended, the sender may have put nothing past its end, or the one octet RFC 7692 §7.2.3.4's
+        # example carries: 0x00, the header of an empty stored block whose last 4 octets the sender stripped and the
+        # tail appended above restores, so it holds no data. Anything else is refused: the loop stops at the stream's
+        # end, and before this check the rest went unread and the handler got the first stream's text alone, with no
+        # Close and no log line, whether that stream ended within the first piece or past it (review of #2137,
+        # 2026-09-24). That covers a second deflate stream, and one other octet too: 0x63 and the restored tail make a
+        # whole stream holding one byte, so the octet is checked by its value, not only counted. unused_data is every
+        # byte after the stream's end, whichever call the stream ended on, with the restored tail last (or only the
+        # tail's last bytes, when the stream ended inside it); unconsumed_tail holds them only once an earlier piece
+        # filled the step. The reason stays clear of the word "past", which the caller reads as the cap's 1009: this is
+        # a 1007.
+        if z.eof and z.unused_data[:-len(_WS_DEFLATE_TAIL)] not in (b"", b"\x00"):
+            return None, "a compressed message with bytes after its deflate stream ends"
     except zlib.error:
         return None, "a compressed message that is not a deflate stream"
     return b"".join(out), None
