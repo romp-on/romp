@@ -154,6 +154,14 @@ installMenuEcho();
     id: "chat.navForward", title: "Navigate forward in the chat",
     run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "chatNav", dir: 1 }, "*"); } catch (e) { /* chat not loaded */ } },
   });
+  // The chat's jump cluster (the user 2026-09-24): the chat pane owns the moves (it knows the transcript and the reader's
+  // place); these run when focus is in the SHELL, and with focus inside the chat its own capture handler (render.ts) reads
+  // the same bindings, the chat.navBack pattern
+  for (const [id, title] of [["chat.prevMine", "Go to your previous message"], ["chat.nextMine", "Go to your next message"],
+                             ["chat.prevComment", "Go to the previous comment"], ["chat.nextComment", "Go to the next comment"],
+                             ["chat.nextUnread", "Go to the next unread reply"]] as const) {
+    registerCommand({ id, title, run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "chatJump", move: id.slice(5) }, "*"); } catch (e) { /* chat not loaded */ } } });
+  }
   registerCommand({ id: "log.open", title: "Open the log", run: () => { if (w.__rompOpenErrs) w.__rompOpenErrs(); } });
   registerCommand({ id: "net.open", title: "Remote kernels", run: () => { if (w.__rompOpenNet) w.__rompOpenNet(); } });
   registerCommand({ id: "usage.open", title: "Token usage", run: () => { if (w.__rompUsagePanel) w.__rompUsagePanel(); } });

@@ -88,9 +88,11 @@ test("follow mode and the chip read atBottom at every site", () => {
     /unitChangeRow\(id, c\.dh, c\.cls, c\.fromTail, view3\.stick, atBottom\(content\), content\.scrollHeight, content\.clientHeight\)/,   // the unit-change row's measured bottom (T262n)
     /unitChangeRow\(activeId \|\| "", dh, cls, BOX_FROM_TAIL, v\.stick, atBottom\(c\), c\.scrollHeight, c\.clientHeight\)/,   // the scroller's boxes outside the thread (T262n follow-up)
     /if \(c && v\) v\.stick = atBottom\(c\); \}/,                                                             // a deep-link landing ends follow mode unless it put the reader at the bottom (T386)
+    /if \(navCursor && atBottom\(content\)\) \{/,                                                          // the jump cluster: a landing the scroll clamped at the bottom (2026-09-24)
+    /const bottom = !cur && atBottom\(content\);/,                                                         // …and its reading line at the bottom
   ];
   for (const re of follow) assert.match(RENDER, re, String(re));
-  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 16, "fifteen call sites plus the definition (the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386)");
+  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 18, "seventeen call sites plus the definition (the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24)");
 });
 
 test("only the user's own send reveal keeps the 80 px band", () => {

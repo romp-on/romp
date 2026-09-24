@@ -153,8 +153,8 @@ test("showActive gates the active session on the set, shows the loader with LOAD
     "the no-session branch ends updateStatusline(); updateJumpBtn(); return;");
   // ...and the jump chip yields to the set before it measures: the loader's min-height overflows a short pane, and
   // the measure alone would paint the chip over the loader (a resize or scroll during the load did that before too)
-  assert.match(fn("updateJumpBtn"), /if \(!liveSession\(activeId\)\) \{ jumpBtn\.hidden = true; updateReplyChips\(\); return; \}/,
-    "no live session under the active tab: the chip hides and the reply chips re-read their own gate");
+  assert.match(fn("updateJumpBtn"), /if \(!liveSession\(activeId\)\) \{ jumpBtn\.hidden = true; updateJumpCluster\(\); return; \}/,
+    "no live session under the active tab: the chip hides and the jump cluster re-reads its own gate");
 });
 
 test("upsert computes wasSkeleton beside awaitingFull.delete and routes a just-loaded skeleton to showActive, not appendActive", () => {
@@ -227,7 +227,7 @@ test("every ACTIVE-tab display path reads through liveSession; only name reads a
   for (const r of raw) assert.match(r, /\?\.name|showForkPrompt\(activeId/);
   const live = RENDER.split("liveSession(activeId)").length - 1;
   assert.ok(live >= 17, `the sweep covers the display paths (${live} sites)`);
-  for (const f of ["updateStatusline", "renderBgTasks", "renderNotices", "renderSubHead", "paintScrollMarks", "updateCommentRail", "landNearestMoment", "virtualizeToViewport", "updateJumpBtn", "updateReplyChips"]) {
+  for (const f of ["updateStatusline", "renderBgTasks", "renderNotices", "renderSubHead", "paintScrollMarks", "updateCommentRail", "landNearestMoment", "virtualizeToViewport", "updateJumpBtn", "updateJumpCluster"]) {
     assert.match(fn(f), /liveSession\(activeId\)/, f + " reads the gated session");
   }
   assert.match(fn("renderLiveAsk"), /if \(!activeId \|\| skeletonTabs\.ids\.has\(activeId\) \|\| !liveAsks\.has\(activeId\) \|\| snapView\) \{/,
@@ -266,7 +266,7 @@ test("the strip's repaint gate sees a skeleton: the signature reads renderKind a
 });
 
 // ── run: a switch to a loading tab takes the leaving tab's chips down ─────────────────────────────
-// showActive, updateJumpBtn and updateReplyChips lifted from render.ts (esbuild at run time, the
+// showActive, updateJumpBtn and updateJumpCluster lifted from render.ts (esbuild at run time, the
 // chat-exact-tail-exec.test.ts pattern) and driven over a fake pane whose scroll extent is what its SHOWN children
 // stack to, as a browser's is. The chips refresh only on events (the pane's scroll and resize, a land, an append),
 // and a tab left at the top of a long transcript fires none of them on the switch, so the switch itself has to
@@ -294,7 +294,7 @@ class ChipPane extends ChipEl {
 }
 type ChipHooks = { fulls: string[]; captions: string[] };
 type ChipApi = { showActive: () => void; updateJumpBtn: () => void; sig: () => string;
-                 set: (p: { activeId?: string | null; replyChipSig?: string }) => void };
+                 set: (p: { activeId?: string | null; jumpClusterSig?: string }) => void };
 
 /** A page with two tabs: A, a loaded session whose transcript is `transcript` px tall; B, a skeleton (a stale
  *  pre-outage copy under it with an unread reply on it, its hidden view kept, its name in tabMeta). The pane is
@@ -314,7 +314,7 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
   pane.appendChild(viewB);
   const HOOKS: ChipHooks = { fulls: [], captions: [] };
   const jumpBtn = { hidden: true, offsetHeight: 28, style: {} as Record<string, string> };
-  const replyChips = { hidden: true, style: {} as Record<string, string> };
+  const jumpCluster = { hidden: true, style: {} as Record<string, string> };
   const tabMeta = new Map<string, { name: string; color: null }>([["B", { name: "api", color: null }]]);
   if (opts.awaiting) tabMeta.set(opts.awaiting, { name: "tests", color: null });
   const W = {
@@ -325,16 +325,22 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     tabMeta,
     skeletonTabs: { ids: new Set(["B"]) },
     // B's stale copy carries an unread open reply: with its view kept and a ready thread, the liveSession read is
-    // the ONE clause of updateReplyChips' gate that hides the chips over the skeleton (the read #1226 narrowed)
+    // the ONE clause of updateJumpCluster's gate that hides the cluster (its unread badge with it) over the skeleton
+    // (the read #1226 narrowed, when the badge was the reply chips)
     commentThreads: new Map<string, unknown[]>([["B", [{ tid: "t1", anchorUuid: "22222222-3333-4444-5555-666666666666", status: "open", unread: true }]]]),
-    jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, isProvisionalId, HOOKS,
+    jumpBtn, jumpCluster, atBottomDist, isReplyReady, hostOf, isProvisionalId, HOOKS,
     el: (_tag: string, cls?: string): ChipEl => new ChipEl(cls || "", cls === "tab-loading-wait" ? Math.round(LOADER_VH / 100 * win.innerHeight) : 0),
     rompLoaderInner: (caption: string): ChipEl => { HOOKS.captions.push(caption); return new ChipEl("romp-loader", 0); },
   };
-  const js = requireCjs("esbuild").transformSync(["liveSession", "atBottom", "showActive", "updateJumpBtn", "updateReplyChips"].map(fn).join("\n"), { loader: "ts" }).code;
+  const js = requireCjs("esbuild").transformSync(["liveSession", "atBottom", "showActive", "updateJumpBtn", "updateJumpCluster"].map(fn).join("\n"), { loader: "ts" }).code;
   const prelude = `
-    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
-    let activeId = null, skeletonLoading = null, replyChipSig = "";
+    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, jumpCluster, atBottomDist, isReplyReady, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
+    let activeId = null, skeletonLoading = null, jumpClusterSig = "", navCursor = null, navResume = null, unreadDir = null;
+    // the cluster's measuring half, inert: the switch test is about its gate (a live session's stops are jump-nav.test.ts's)
+    const pendingBuildRaf = null, loadingOlder = new Set(), gapLoading = new Set(), parseGapKey = (k) => ({ sid: k });
+    const eventUnitIndex = () => new Int32Array(0), navStops = () => ({ stops: [], mine: 0 }), readyAround = () => ({ above: null, below: null }), unreadCount = () => 0, unreadNext = () => null, pickNav = () => null, runJump = () => {};
+    const jcMine = { hidden: false }, jcCmt = { hidden: false }, setTip = () => {}, titleWithKey = (t) => t, badgeTip = () => "", badgeAria = () => "", jumpCommand = (m) => "chat." + m;
+    const jcButtons = { prevMine: {}, nextMine: {}, prevComment: {}, nextComment: {}, nextUnread: { hidden: true, querySelector: () => ({}), setAttribute: () => {} } };
     const placeReviveLoader = () => {}, notifyActive = () => {}, renderLedger = () => {}, renderLiveAsk = () => {}, renderBgTasks = () => {}, renderNotices = () => {}, renderSubHead = () => {}, updateStatusline = () => {};
     // the unfocused body's painter and the box's name overlay (T357): inert here, the strip test is about the chips
     const paintEmptyState = () => {}, syncComposerPh = () => {}, order = [];
@@ -346,11 +352,11 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     const requestFullSession = (id, why) => { HOOKS.fulls.push(why + ":" + id); };
   `;
   const epilogue = `
-    return { showActive, updateJumpBtn, sig: () => replyChipSig,
-             set: (p) => { if ("activeId" in p) activeId = p.activeId; if ("replyChipSig" in p) replyChipSig = p.replyChipSig; } };
+    return { showActive, updateJumpBtn, sig: () => jumpClusterSig,
+             set: (p) => { if ("activeId" in p) activeId = p.activeId; if ("jumpClusterSig" in p) jumpClusterSig = p.jumpClusterSig; } };
   `;
   const make = new Function("W", "document", "window", prelude + js + epilogue) as (w: unknown, d: unknown, win: unknown) => ChipApi;
-  return { api: make(W, doc, win), pane, HOOKS, jumpBtn, replyChips, doc };
+  return { api: make(W, doc, win), pane, HOOKS, jumpBtn, jumpCluster, doc };
 }
 
 test("run: switching from a tab left at the top of a long transcript to a loading tab takes both chips down with the loader", () => {
@@ -358,7 +364,7 @@ test("run: switching from a tab left at the top of a long transcript to a loadin
   w.api.set({ activeId: "A" });
   w.api.updateJumpBtn();   // the leaving tab: 5000px of transcript in a 600px pane, the reader at the top
   assert.equal(w.jumpBtn.hidden, false, "the chip shows over the long transcript");
-  w.replyChips.hidden = false; w.api.set({ replyChipSig: "A|1:t1||8" });   // a reply chip painted for that tab by hand (the placement is reply-ready.test.ts's; the lift stops short of it)
+  w.jumpCluster.hidden = false; w.api.set({ jumpClusterSig: "A|8|1|1" });   // a cluster painted for that tab by hand (its stops are jump-nav.test.ts's; the lift stops short of them)
   // the switch (setActive: renderTabs, then showActive) to the skeleton: scrollTop is 0 and stays 0, so no scroll
   // event; the pane's height is unchanged, so no resize; the switch is the only event there is
   w.api.set({ activeId: "B" });
@@ -369,8 +375,8 @@ test("run: switching from a tab left at the top of a long transcript to a loadin
   assert.ok(loader && loader.cls === "tab-loading-wait", "the loader is up");
   assert.equal(w.pane.scrollHeight, 600, "the hidden transcript no longer counts, and the loader fits this pane");
   assert.equal(w.jumpBtn.hidden, true, "no go-to-bottom chip over the loader");
-  assert.equal(w.replyChips.hidden, true, "no reply chip over the loader: B's stale copy has an unread reply and a kept view, and liveSession alone says no");
-  assert.equal(w.api.sig(), "", "the reply chips' signature is cleared, so the landing tab's first paint is not skipped as unchanged");
+  assert.equal(w.jumpCluster.hidden, true, "no jump cluster (nor its unread badge) over the loader: B's stale copy has an unread reply and a kept view, and liveSession alone says no");
+  assert.equal(w.api.sig(), "", "the cluster's signature is cleared, so the landing tab's first paint is not skipped as unchanged");
 });
 
 test("run: the loader itself overflows a short pane; the chip reads the set, not that measure", () => {
@@ -378,11 +384,11 @@ test("run: the loader itself overflows a short pane; the chip reads the set, not
   const w = chipWorld({ clientHeight: 300, innerHeight: 500, transcript: 4980 });
   w.api.set({ activeId: "A" }); w.api.updateJumpBtn();
   assert.equal(w.jumpBtn.hidden, false);
-  w.replyChips.hidden = false; w.api.set({ replyChipSig: "A|1:t1||8" });
+  w.jumpCluster.hidden = false; w.api.set({ jumpClusterSig: "A|8|1|1" });
   w.api.set({ activeId: "B" }); w.api.showActive();
   assert.ok(w.pane.scrollHeight > w.pane.clientHeight + 2, "the loader overflows the pane: a bare measure would show the chip");
   assert.equal(w.jumpBtn.hidden, true, "over a loading tab there is nothing to go to the bottom of");
-  assert.equal(w.replyChips.hidden, true, "no reply chip over the loader");
+  assert.equal(w.jumpCluster.hidden, true, "no jump cluster over the loader");
   w.api.updateJumpBtn();   // a resize or scroll during the load runs the same measure through its own listeners
   assert.equal(w.jumpBtn.hidden, true, "…and keeps it down");
 });
@@ -391,13 +397,13 @@ test("run: the gate reads the skeleton set, not the session map; the last tab cl
   const w = chipWorld({ clientHeight: 300, innerHeight: 500, transcript: 4980 });
   w.api.set({ activeId: "A" }); w.api.updateJumpBtn();
   assert.equal(w.jumpBtn.hidden, false, "a loaded session's long transcript keeps its chip: the gate is the set, and A is not in it");
-  w.replyChips.hidden = false; w.api.set({ replyChipSig: "A|1:t1||8" });
+  w.jumpCluster.hidden = false; w.api.set({ jumpClusterSig: "A|8|1|1" });
   w.api.set({ activeId: null }); w.api.showActive();   // dismissSession's fallback with no tab left
   assert.ok(w.doc.getElementById("empty-state"), "the no-sessions copy is up");
   assert.deepEqual(w.HOOKS.fulls, [], "nothing to ask for");
   assert.deepEqual(w.HOOKS.captions, [], "no loader, so no caption");
   assert.equal(w.jumpBtn.hidden, true, "no chip over the no-sessions copy");
-  assert.equal(w.replyChips.hidden, true, "no reply chip over the no-sessions copy");
+  assert.equal(w.jumpCluster.hidden, true, "no jump cluster over the no-sessions copy");
 });
 
 test("run: a column's own session, listed by the strip but not among its skeletons, is shown loading and asked for by nobody while its full is in flight", () => {

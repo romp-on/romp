@@ -84,10 +84,11 @@ test("render.ts asks for older history only on an upward move, marks each window
     "a second full ask while one is in flight is refused (the empty-id guard, then the latched branch, 2026-09-19) before it can overwrite the pending reason");
 });
 
-test("a window ask carries the navigation's time and kind to its reply; the three direct landings (a notch, a reply chip, a comment tick) arm neither (T366)", () => {
+test("a window ask carries the navigation's time and kind to its reply; the three direct landings (a notch, the jump cluster, a comment tick) arm neither (T366)", () => {
   assert.ok(RENDER.includes("const rec: WindowAsk = { anchor: uuid, nav, named: nav && pendingAnchorKeepY == null, t: nav ? (pendingAnchorT ?? null) : null, kind: nav ? kind : null, origin: null, gap: null, cancelled: false };"), "the ask carries the navigation's time to the reply, and whether it was a click (any anchor landing without a keep offset; the reload restore of the reader's own place arms one)");
   assert.match(RENDER, /markjump: \(elx\) => \{\s*\n\s*const uuid = elx\.dataset\.uuid;\s*\n\s*if \(!uuid \|\| !activeId\) return;\s*\n\s*flashedAnchor = null;\s*\n\s*scrollToAnchor\(uuid\);/, "the notch lands directly");
-  assert.match(RENDER, /replyjump: \(elx\) => \{[\s\S]*?flashedAnchor = null;[^\n]*\n\s*if \(scrollToAnchor\(uuid\)\) \{/, "the reply chip lands directly");
+  assert.match(RENDER, /function landThread\(sid: string, tid: string, uuid: string\): void \{\s*\n\s*flashedAnchor = null;[^\n]*\n\s*if \(scrollToAnchor\(uuid\)\) \{/, "the jump cluster lands a thread directly (the reply chips' landing, folded in)");
+  assert.match(RENDER, /else \{ flashedAnchor = null; scrollToAnchor\(hit\.uuid\); \}/, "…and the reader's own messages the notch's way");
   assert.match(RENDER, /cmtjump: \(elx\) => \{[\s\S]*?flashedAnchor = null;\s*\n\s*scrollToAnchor\(uuid\);/, "the comment tick lands directly");
 });
 

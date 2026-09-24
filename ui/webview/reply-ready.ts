@@ -1,11 +1,10 @@
 // Replies ready (the user 2026-09-08): a reply lands on a comment you scrolled away from, and you forget
-// to come back — the mark's ring and the rail tick say so only where you happen to be looking. Two chips
-// beside the go-to-bottom chip count the unread landed replies whose marks sit wholly ABOVE / BELOW the
-// viewport ("↑ 2 replies unread" / "↓ 1 reply unread"), each present only while its count is > 0; a click
-// lands the NEAREST one in its direction. This module is the PURE half (node-testable, no DOM): the one
-// predicate for "a landed reply waits here", the placement of a mark against the viewport, the per-
-// direction count + nearest pick, and the copy. The DOM wiring lives in render.ts (updateReplyChips),
-// source-pinned by reply-ready.test.ts, the repo convention.
+// to come back — the mark's ring and the rail tick say so only where you happen to be looking. The unread
+// landed replies whose marks sit wholly ABOVE / BELOW the viewport are counted per direction with the NEAREST
+// of each; two chips beside the go-to-bottom chip showed them until 2026-09-24, when they folded into the jump
+// cluster's badge (jump-nav.ts; render.ts readyAround / updateJumpCluster). This module is the PURE half
+// (node-testable, no DOM): the one predicate for "a landed reply waits here", the placement of a mark against
+// the viewport, the per-direction count + nearest pick, and the phrase.
 import type { CommentThread } from "./comments";
 
 export type Dir = "above" | "below";
@@ -76,16 +75,9 @@ export function replyLine(th: Pick<CommentThread, "msgs" | "name" | "exact">): s
   return firstLine(said || th.name || th.exact || "");
 }
 
-// ── copy: the user's own words, one vocabulary for label, tip and aria ────────────────────────────
+// ── copy: the user's own words ────────────────────────────────────────────────────────────────────
 // "reply"/"replies", not "comment": the unread thing is the ANSWER to their comment (the coordinator's
-// refinement, 2026-09-08). The chip's label is this phrase behind the direction chevron.
+// refinement, 2026-09-08). The jump cluster's badge tip reads this phrase (jump-nav.ts badgeTip).
 export function replyWord(n: number): string {
   return n === 1 ? "1 reply unread" : n + " replies unread";
-}
-export function chipLabel(n: number): string { return replyWord(n); }
-export function chipTip(dir: Dir, n: number, line: string): string {
-  return replyWord(n) + " " + dir + (line ? " · nearest: " + line : "");
-}
-export function chipAria(dir: Dir, n: number): string {
-  return replyWord(n) + " " + dir + " — go to the nearest";
 }

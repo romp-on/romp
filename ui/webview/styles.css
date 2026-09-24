@@ -3523,24 +3523,57 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
    sticky at 40% so it stays in view through a tall gap while a page of history is on the wire */
 .tx-gap-glyph { position: sticky; top: 40%; display: flex; align-items: center; justify-content: center; padding: 12px 0; opacity: 0.9; }
 @media (pointer: coarse) { #jump-bottom { width: 64px; height: 32px; } }   /* the phone half: WIDEN for the hit area, never heighten — the compact look is the ask */
-/* replies ready (the user 2026-09-08): two chips stacked ABOVE the jump chip in the SAME slot and dress —
-   "↑ 2 replies unread" / "↓ 1 reply unread" — for the unread landed replies whose marks sit off-screen in
-   that direction (render.ts updateReplyChips places the box by measurement over the jump chip, so the three
-   never overlap). The jump chip's tokens, token for token: the menu card background, the --menu-border
-   hairline, the toast shadow, the pill radius, the 22px height, dim at rest and accent on hover. Text at
-   the seek-note's 12px — the size this bottom-of-pane chrome already wears — in the page font (a button
-   does not inherit it on its own); the chevron is the jump chip's stemless glyph, turned. */
-#reply-chips { position: fixed; left: 14px; z-index: 40; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
-#reply-chips[hidden] { display: none; }
-.reply-chip {
-  height: 22px; border-radius: var(--radius-pill); cursor: pointer; padding: 0 10px 0 6px;
-  display: flex; align-items: center; gap: 4px; font: inherit; font-size: 12px; line-height: 1; white-space: nowrap;
-  background: var(--vscode-menu-background, var(--surface-raised)); color: var(--dim);
+/* THE JUMP CLUSTER (the user 2026-09-24; render.ts updateJumpCluster, jump-nav.ts): one column with the go-to-bottom chip
+   in the pane's bottom-left corner, over the rail gutter. The lower pill steps through the reader's own messages (its
+   chevrons in --you, the blue the rail's turn notches wear), the upper one through the comment threads (in the comment
+   ink the rail's ticks wear), so each pill says which marks it walks by the colour of those marks. The unread-reply badge
+   rides the comment pill's end: the needs-you red the unread tick's halo wears, its own ink on it. It replaced the two
+   "replies unread" chips that stacked here (2026-09-08).
+   Geometry: each pill is the go-to-bottom chip's footprint, 40×22 (two 19px halves and the hairline), so the three read as
+   one column; the phone makes them 64×32 with the chip, halves 31px wide (the chip's phone rule: widen for the hit area).
+   The cluster holds the chip's slot below it (margin-bottom: the chip's height and the 6px stack gap) whether the chip
+   shows or not, so nothing moves under a finger as the chip comes and goes; render.ts sets `bottom` from #content's
+   bottom edge, as it does for the chip, so the composer is never covered. Quiet by default: the glyphs rest at 0.55
+   and light up while the cluster is hovered or holds focus; the phone, which has no hover, rests them brighter. The
+   card is the chip's menu-card dress, token for token. */
+#jump-cluster {
+  position: fixed; left: 14px; z-index: 40;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  margin-bottom: 28px;
+}
+#jump-cluster[hidden], #jump-cluster .jc-group[hidden], #jump-cluster .jc-badge[hidden] { display: none; }   /* author display:flex defeats [hidden] */
+.jc-group {
+  display: flex; align-items: stretch; height: 22px; border-radius: var(--radius-pill); overflow: hidden;
+  background: var(--vscode-menu-background, var(--surface-raised));
   border: 1px solid var(--menu-border); box-shadow: var(--shadow-toast);
 }
-.reply-chip:hover { border-color: var(--accent); color: var(--accent); }
-.reply-chip[hidden] { display: none; }   /* author display:flex defeats [hidden] — the jump chip's own lesson */
-@media (pointer: coarse) { .reply-chip { height: 32px; padding: 0 14px 0 9px; } }   /* the phone half: the jump chip's taller target, same stack */
+.jc-btn {
+  width: 19px; padding: 0; border: 0; background: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.jc-mine .jc-btn { color: var(--you); }
+.jc-cmt .jc-btn { color: var(--cmt-hl-outline); }
+.jc-btn svg { width: 14px; height: 14px; }
+.jc-btn svg, .jc-badge { opacity: 0.55; transition: opacity 120ms ease; }
+#jump-cluster:hover .jc-btn svg, #jump-cluster:focus-within .jc-btn svg, #jump-cluster:hover .jc-badge, #jump-cluster:focus-within .jc-badge { opacity: 1; }
+#jump-cluster .jc-btn:disabled { cursor: default; }
+#jump-cluster .jc-btn:disabled svg { opacity: 0.2; }   /* nothing that way: still there, so the pill never changes shape */
+.jc-btn:hover:not(:disabled) { background: var(--menu-hover); }
+.jc-btn:focus-visible, .jc-badge:focus-visible { outline: 1.5px solid var(--accent); outline-offset: -2px; }
+.jc-badge {
+  min-width: 22px; padding: 0 6px; border: 0; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 600; line-height: 1;
+  background: var(--st-awaiting-bg); color: var(--st-awaiting-fg);
+}
+@media (prefers-reduced-motion: reduce) { .jc-btn svg, .jc-badge { transition: none; } }
+@media (pointer: coarse) {
+  #jump-cluster { margin-bottom: 38px; }   /* the chip's 32px phone height + the gap */
+  .jc-group { height: 32px; }
+  .jc-btn { width: 31px; }
+  .jc-btn svg { width: 16px; height: 16px; }   /* the go-to-bottom chip's glyph size */
+  .jc-badge { min-width: 32px; padding: 0 9px; }
+  .jc-btn svg, .jc-badge { opacity: 0.8; }   /* no hover on a touch screen: rest a step brighter */
+}
 #seek-note .seek-note-x {
   flex: 0 0 auto; border: none; background: none; cursor: pointer; color: var(--dim);
   font-size: 11px; line-height: 1.4; padding: 2px 4px; border-radius: 8px;

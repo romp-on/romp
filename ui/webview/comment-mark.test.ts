@@ -49,10 +49,11 @@ test("unread is the kernel's bit on an open thread, cleared by opening the threa
   assert.match(RENDER, /m\.classList\.toggle\("unread", !!th\.unread && th\.status === "open"\);/);
   assert.match(RENDER, /if \(th\) th\.unread = false;\s*\/\/ optimistic; the kernel's watermark reconciles/);
   assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "commentSeen", id: sid, tid \}\);/);
-  // the reply chips' click never touches it (reply-ready.test.ts pins the handler); the state has ONE clearer
-  const at = RENDER.indexOf("replyjump: (elx) => {");
-  assert.ok(at > 0, "the chip's click handler exists");
-  const click = RENDER.slice(at, RENDER.indexOf("new ResizeObserver(updateReplyChips)", at));
+  // the jump cluster's landing never touches it (the reply chips' did not either; jump-cluster.test.ts pins the handler);
+  // the state has ONE clearer
+  const at = RENDER.indexOf("function landThread(");
+  assert.ok(at > 0, "the cluster's thread landing exists");
+  const click = RENDER.slice(at, RENDER.indexOf("\n}\n", at));
   assert.doesNotMatch(click, /"commentSeen"|\.unread = false/);
 });
 

@@ -1,11 +1,14 @@
 <!-- SYNTHETIC fixture (notes-api demo domain, placeholder ids): a transcript with FOUR comment threads —
      one read (plain yellow, no ring), one unread on screen (yellow + the needs-you dashed ring), one unread
-     scrolled ABOVE the viewport and one unread BELOW — so the two "replies unread" chips stack over the
-     go-to-bottom chip, the rail ticks mark every thread (the unread ones ringed), and the scroll notches mark
-     the user's messages. Static DOM mirroring the builders' output; the script scrolls the pane to the
-     middle turn. Run (dark, then light with --body-class "theme-light chat-theme-yatharth"):
-       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/reply-ready-chat.html \
-           --out /tmp/reply-ready-shots/dark.png --size 720x460 \
+     scrolled ABOVE the viewport and one unread BELOW — so the jump cluster's unread badge counts the two off
+     screen, the rail ticks mark every thread (the unread ones ringed), and the scroll notches mark the user's
+     messages. The cluster sits in the bottom-left corner over the go-to-bottom chip's slot: the comment pill
+     (chevrons in the comment ink, the badge at its end) above the pill for the user's own messages (chevrons in
+     their blue). Static DOM mirroring the builders' output (render.ts updateJumpCluster); the script scrolls
+     the pane to the middle turn. Run (dark, then light with --body-class "theme-light chat-theme-yatharth"; the
+     phone layout by emulating a coarse pointer, which shot.sh does not, so a served shot covers it):
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/jump-cluster-chat.html \
+           --out /tmp/jump-cluster-shots/dark.png --size 720x460 \
            --extra-css 'html,body{height:100%} #content{height:100%;box-sizing:border-box}'
 -->
 <div id="content">
@@ -32,10 +35,17 @@
   <button type="button" class="cmt-tick unread" style="top: 300px" data-act="cmtjump"></button>
   <button type="button" class="cmt-tick unread" style="top: 420px" data-act="cmtjump"></button>
 </div>
-<!-- bottom-left: the two reply chips stacked over the go-to-bottom chip -->
+<!-- bottom-left: the jump cluster over the go-to-bottom chip's slot (render.ts sets both bottoms from the pane's edge) -->
 <button id="jump-bottom" aria-label="go to bottom" style="bottom: 20px"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
-<div id="reply-chips" style="bottom: 48px">
-  <button type="button" class="reply-chip" id="reply-above" data-act="replyjump" data-dir="above" aria-label="1 reply unread above — go to the nearest"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 14.5 12 8.5 18 14.5"/></svg><span class="reply-chip-label">1 reply unread</span></button>
-  <button type="button" class="reply-chip" id="reply-below" data-act="replyjump" data-dir="below" aria-label="1 reply unread below — go to the nearest"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg><span class="reply-chip-label">1 reply unread</span></button>
+<div class="jump-cluster" id="jump-cluster" style="bottom: 20px">
+  <div class="jc-group jc-cmt" role="group" aria-label="Comments">
+    <button type="button" class="jc-btn" data-act="jcjump" data-move="prevComment" aria-label="Previous comment (Ctrl+Alt+Shift+↑)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 14.5 12 8.5 18 14.5"/></svg></button>
+    <button type="button" class="jc-btn" data-act="jcjump" data-move="nextComment" aria-label="Next comment (Ctrl+Alt+Shift+↓)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
+    <button type="button" class="jc-badge" data-act="jcjump" data-move="nextUnread" aria-label="2 replies unread, go to the next one below"><span class="jc-count">2</span></button>
+  </div>
+  <div class="jc-group jc-mine" role="group" aria-label="Your messages">
+    <button type="button" class="jc-btn" data-act="jcjump" data-move="prevMine" aria-label="Your previous message (Ctrl+Alt+↑)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 14.5 12 8.5 18 14.5"/></svg></button>
+    <button type="button" class="jc-btn" data-act="jcjump" data-move="nextMine" aria-label="Your next message (Ctrl+Alt+↓)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
+  </div>
 </div>
 <script>document.getElementById('content').scrollTop = 300;</script>

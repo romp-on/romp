@@ -1,19 +1,16 @@
 // Replies ready (the user 2026-09-08): a reply lands on a comment you scrolled away from and you forget to
-// come back. Two chips stacked over the go-to-bottom chip — "↑ 2 replies unread" / "↓ 1 reply unread" —
-// count the unread landed replies whose marks sit wholly above / below the viewport; a click lands the
-// nearest one in that direction through the chat's own scroll-to-uuid route and does NOT mark it read
-// (opening the thread does, as today). The pure half (reply-ready.ts) is driven behaviorally; the
-// render.ts / CSS wiring is pinned at the source (no jsdom harness for the renderers — the repo
-// convention). Synthetic text only.
+// come back. The unread landed replies whose marks sit wholly above / below the viewport are counted per
+// direction with the nearest of each; a mark on screen counts in neither. Two chips showed those counts until
+// 2026-09-24, when they folded into the jump cluster's badge (jump-nav.ts, jump-cluster.test.ts). This file
+// drives the pure half (reply-ready.ts) behaviorally. Synthetic text only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isReplyReady, placeMark, placeWindowed, readyChips, firstLine, replyLine, replyWord, chipLabel, chipTip, chipAria,
+import { isReplyReady, placeMark, placeWindowed, readyChips, firstLine, replyLine, replyWord,
          WINDOWED_OUT, type ReadyMark } from "./reply-ready";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
-const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 const mark = (tid: string, dir: "above" | "below" | "in", dist: number, line = "q " + tid): ReadyMark =>
   ({ tid, uuid: "u-" + tid, line, dir, dist });
@@ -82,19 +79,11 @@ test("the nearest per direction is the least distance; a rendered mark beats a w
   assert.equal(onlyOut.above?.nearest.tid, "o1", "windowed-out marks order among themselves by units from the window edge");
 });
 
-// ── copy: label, tip, aria ─────────────────────────────────────────────────────────────────────────
-test("the label is the arrow's phrase in the user's words, singular handled — 'reply', never 'comment'", () => {
+// ── copy ──────────────────────────────────────────────────────────────────────────────────────────
+test("the phrase is the user's words, singular handled — 'reply', never 'comment' (the jump cluster's badge tip reads it)", () => {
   assert.equal(replyWord(1), "1 reply unread");
   assert.equal(replyWord(2), "2 replies unread");
-  assert.equal(chipLabel(3), "3 replies unread");
-  assert.doesNotMatch(chipLabel(1) + chipLabel(2), /comment|thread|card|board/, "no romp nouns, and the unread thing is the ANSWER to their comment");
-});
-
-test("the tip says how many wait in that direction and names the nearest by the first line of what you said there", () => {
-  assert.equal(chipTip("above", 2, "keep the old header behind a flag"), "2 replies unread above · nearest: keep the old header behind a flag");
-  assert.equal(chipTip("below", 1, "ping me when CI is green"), "1 reply unread below · nearest: ping me when CI is green");
-  assert.equal(chipTip("below", 1, ""), "1 reply unread below", "no line, no dangling 'nearest:'");
-  assert.equal(chipAria("above", 2), "2 replies unread above — go to the nearest");
+  assert.doesNotMatch(replyWord(1) + replyWord(2), /comment|thread|card|board/, "no romp nouns, and the unread thing is the ANSWER to their comment");
 });
 
 test("firstLine takes the first non-empty line and clips long ones with an ellipsis", () => {
@@ -116,116 +105,5 @@ test("replyLine names the thread by your LAST message in it (what the landed rep
   assert.equal(replyLine({ msgs: [], name: "", exact: "the passage" }), "the passage");
 });
 
-// ── render.ts wiring (source pins) ────────────────────────────────────────────────────────────────
-const BLOCK = RENDER.slice(RENDER.indexOf('const replyChips = el("div", "reply-chips");'), RENDER.indexOf("// The per-view saved spot FOLLOWS the reader"));
-const UPDATE = BLOCK.slice(BLOCK.indexOf("function updateReplyChips(): void {"), BLOCK.indexOf("\n{\n  const c = document.getElementById(\"content\");"));
-const CLICK = BLOCK.slice(BLOCK.indexOf("replyjump: (elx) => {"), BLOCK.indexOf("if (typeof ResizeObserver"));
-
-test("the box lives on BODY, created once, and the two chips update IN PLACE — click-safety is structural", () => {
-  assert.ok(BLOCK.length > 0, "the block is where the test expects it (after the jump chip's wiring)");
-  assert.match(BLOCK, /replyChips\.id = "reply-chips";/);
-  assert.match(BLOCK, /document\.body\.appendChild\(replyChips\);/);
-  assert.match(BLOCK, /const replyAbove = replyChip\("above"\);\s*\n\s*const replyBelow = replyChip\("below"\);/, "two chips, made once");
-  assert.match(BLOCK, /b\.dataset\.act = "replyjump";/);
-  assert.match(BLOCK, /b\.dataset\.dir = dir;/);
-  assert.match(BLOCK, /b\.id = "reply-" \+ dir;/);
-  assert.equal((BLOCK.match(/delegate\(replyChips, \{/g) || []).length, 1, "ONE delegated listener on the stable box");
-  assert.doesNotMatch(UPDATE, /replaceChildren|createElement|innerHTML|appendChild/, "the update never rebuilds a chip — label, tip and target swap in place");
-  assert.match(BLOCK, /b\.dataset\.tid = chip\.nearest\.tid;\s*\n\s*b\.dataset\.uuid = chip\.nearest\.uuid;/,
-    "…the target rides the chip's data-attrs, read at click time");
-});
-
-test("the dress is the jump chip's: setTip for the tooltip, an aria-label, the chevron glyph, the phrase as the label", () => {
-  assert.match(BLOCK, /setTip\(b, chipTip\(dir, chip\.count, chip\.nearest\.line\)\);/, "the one styled tip (never a native title)");
-  assert.match(BLOCK, /b\.setAttribute\("aria-label", chipAria\(dir, chip\.count\)\);/);
-  assert.match(BLOCK, /\.textContent = chipLabel\(chip\.count\);/);
-  assert.match(BLOCK, /"6 14\.5 12 8\.5 18 14\.5" : "6 9\.5 12 15\.5 18 9\.5"/, "the jump chip's stemless chevron, turned up or down");
-  assert.doesNotMatch(BLOCK, /\.title = /, "no native tooltip beside the styled one");
-});
-
-test("counts derive from the kernel's unread set ∩ the active transcript; the viewer and a hidden pane show none", () => {
-  assert.match(UPDATE, /\(commentThreads\.get\(activeId\) \|\| \[\]\)\.filter\(isReplyReady\)/, "the kernel's bit, the mark's own rule");
-  assert.match(UPDATE, /if \(!c \|\| !s \|\| !v \|\| H <= 0 \|\| s\.sub \|\| !ready\.length\) \{ replyChips\.hidden = true; replyChipSig = ""; return; \}/,
-    "no pane / the read-only subagent viewer / nothing unread → no chips");
-  // a rendered mark is placed by its own box (the turn's when the text drifted past re-matching); a windowed-out
-  // anchor by event order against the rendered window — both through the pure placement
-  assert.match(UPDATE, /const node = \(turn\.querySelector\(`mark\.cmt-hl\[data-tid="\$\{cssEscape\(th\.tid\)\}"\]`\) as HTMLElement \| null\) \|\| turn;/);
-  assert.match(UPDATE, /\.\.\.placeMark\(r\.top - cr\.top, r\.bottom - cr\.top, H\)/);
-  assert.match(UPDATE, /\.\.\.placeWindowed\(idx >= 0 \? evUnit\[idx\] : -1, v\.winStart, v\.winEnd \?\? v\.winStart\)/);
-  assert.match(UPDATE, /const \{ above, below \} = readyChips\(marks\);/);
-  assert.match(UPDATE, /replyChips\.hidden = !above && !below;/);
-});
-
-test("every input is an event the chat already listens for — no timers, no polling", () => {
-  assert.doesNotMatch(BLOCK, /setTimeout|setInterval|requestAnimationFrame/, "nothing time-based in the whole block");
-  // the jump chip's own update (scroll, resize, content ResizeObserver, tab switch, append) ends by re-placing the chips
-  assert.match(RENDER, /if \(off\) jumpBtn\.style\.bottom = [^\n]*\n\s*updateReplyChips\(\);/, "updateJumpBtn's tail");
-  assert.match(RENDER, /c\.addEventListener\("scroll", updateJumpBtn, \{ passive: true \}\);/, "…and that update rides the passive scroll listener");
-  // the comments frame and every transcript rebuild re-anchor the marks, then recount (the marks are what gets measured)
-  // (the unread outline boxes are painted between the marks and the recount — T310 — the chips still close the pass)
-  // (a reload's kept comment thread reopens after the chips on both exits — reload-comment.ts, event-based on this very
-  // pass, no timer of its own — so the chips still close the MEASURING work of the pass)
-  assert.match(RENDER, /turn\.classList\.toggle\("cmt-rail-unread", [^\n]*\n\s*\}\s*\n\s*paintCommentOutlines\(sid\);[^\n]*\n[^\n]*\n[^\n]*\n\s*if \(sid === activeId\) updateReplyChips\(\);\s*\n\s*reopenCommentForReload\(sid\);[^\n]*\n\}/, "applyCommentMarks' tail");
-  assert.match(RENDER, /if \(!threads\.length\) \{ paintCommentOutlines\(sid\); if \(sid === activeId\) updateReplyChips\(\); reopenCommentForReload\(sid\); return; \}/, "…and its no-threads early return drops the boxes and the chips");
-  assert.match(BLOCK, /new ResizeObserver\(updateReplyChips\)\.observe\(c\);/, "a pane measuring 0 drops the chips like the jump chip");
-  assert.match(UPDATE, /if \(sig === replyChipSig\) return;/, "a signature skips unchanged paints (pure scrolls do no DOM work)");
-});
-
-test("click = the chat's own scroll-to-uuid landing + one pulse on the mark; the thread is NOT marked read", () => {
-  assert.match(CLICK, /flashedAnchor = null;/, "fresh navigation → landOn's one flash, the tick's and the notch's route");
-  assert.match(CLICK, /if \(scrollToAnchor\(uuid\)\) \{/);
-  assert.match(CLICK, /applyCommentMarks\(activeId\);/, "a re-windowed anchor turn gets its highlight back before the pulse");
-  assert.match(CLICK, /if \(m\) flash\(m\);/, "the mark itself pulses (.romp-acted)");
-  assert.doesNotMatch(CLICK, /"commentSeen"|openCommentPopover\(|\.unread = false/, "reading the reply is opening the thread — the chip only brings you to it");
-  assert.doesNotMatch(CLICK, /scrollTop =|scrollBy|scrollIntoView/, "never pixel arithmetic — the uuid route only");
-});
-
-test("the chips stack OVER the jump chip in its slot: same bottom measure, lifted by the jump chip's real height while it shows", () => {
-  assert.match(UPDATE, /const bottom = Math\.max\(0, window\.innerHeight - cr\.bottom\) \+ 8 \+ \(jumpBtn\.hidden \? 0 : jumpBtn\.offsetHeight \+ 6\);/);
-  assert.match(RENDER, /jumpBtn\.style\.bottom = \(Math\.max\(0, window\.innerHeight - c\.getBoundingClientRect\(\)\.bottom\) \+ 8\) \+ "px";/, "the jump chip's own measure — the same +8");
-  assert.match(UPDATE, /replyChips\.style\.bottom = bottom \+ "px";/);
-  assert.match(CSS, /#reply-chips \{ position: fixed; left: 14px; z-index: 40; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; \}/,
-    "the jump chip's left and z-index; a column, so ↑ sits above ↓");
-});
-
-// ── CSS: the jump chip's dress, token for token ───────────────────────────────────────────────────
-const JUMP = CSS.slice(CSS.indexOf("#jump-bottom {"), CSS.indexOf("#jump-bottom:hover"));
-const CHIP = CSS.slice(CSS.indexOf(".reply-chip {"), CSS.indexOf(".reply-chip:hover"));
-
-test("the reply chip wears #jump-bottom's tokens — background, border, shadow, radius, height, resting colour", () => {
-  for (const tok of ["var(--vscode-menu-background, var(--surface-raised))", "color: var(--dim)", "border: 1px solid var(--menu-border)",
-                     "box-shadow: var(--shadow-toast)", "border-radius: var(--radius-pill)", "height: 22px"]) {
-    assert.ok(JUMP.includes(tok), "jump chip has " + tok);
-    assert.ok(CHIP.includes(tok), "reply chip has " + tok);
-  }
-  assert.match(CSS, /\.reply-chip:hover \{ border-color: var\(--accent\); color: var\(--accent\); \}/, "the same hover");
-  assert.match(CSS, /\.reply-chip\[hidden\] \{ display: none; \}/, "author display:flex defeats [hidden] — the jump chip's lesson");
-  assert.match(CSS, /@media \(pointer: coarse\) \{ \.reply-chip \{ height: 32px;/, "the phone half grows with the jump chip's 32px");
-  assert.doesNotMatch(CHIP, /#[0-9a-fA-F]{3,6}\b/, "tokens only, no raw hex");
-});
-
-test("one type size, reused: the chip's 12px is the seek-note's, the size this bottom-of-pane chrome already wears", () => {
-  assert.match(CHIP, /font: inherit; font-size: 12px;/, "the page font (a button does not inherit it) at the surface's own size");
-  const seek = CSS.slice(CSS.indexOf("#seek-note {"), CSS.indexOf("#seek-note .seek-note-label"));
-  assert.match(seek, /font-size: 12px;/);
-  assert.equal((CHIP.match(/font-size/g) || []).length, 1, "no nested em ladder");
-});
-
-test("both themes resolve every token the chip and the ring read", () => {
-  const dark = CSS.split("body.theme-light {")[0];
-  const light = CSS.split("body.theme-light {")[1].split("\n}")[0];
-  for (const tok of ["--surface-raised", "--dim", "--menu-border", "--shadow-toast", "--radius-pill", "--accent", "--st-awaiting-bg", "--cmt-hl"]) {
-    assert.match(dark, new RegExp(tok.replace(/-/g, "\\-") + ":"), "dark defines " + tok);
-    assert.match(light, new RegExp(tok.replace(/-/g, "\\-") + ":"), "light defines " + tok);
-  }
-});
-
-// ── the fixture keeps the fixed-position story honest ─────────────────────────────────────────────
-test("the ui-verify fixture mirrors the builders class for class (synthetic, notes-api)", () => {
-  const fx = fs.readFileSync(path.resolve(process.cwd(), "..", "tools", "ui-verify", "fixtures", "reply-ready-chat.html"), "utf8");
-  assert.match(fx, /id="reply-chips"/);
-  assert.match(fx, /class="reply-chip" id="reply-above" data-act="replyjump" data-dir="above"/);
-  assert.match(fx, /class="reply-chip-label">1 reply unread</);
-  assert.match(fx, /mark class="cmt-hl unread hl-first hl-last"/);
-  assert.match(fx, /11111111-2222-4333-8444-/, "placeholder ids");
-});
+// The render.ts wiring moved with the chips into the jump cluster (2026-09-24): jump-cluster.test.ts pins the badge's
+// measure (this module's placement and counts), its landing and the unread semantics.
