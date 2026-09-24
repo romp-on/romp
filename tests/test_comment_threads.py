@@ -273,6 +273,11 @@ class ThreadForkInvisibility(unittest.TestCase):
         self.be.fork("fork-x", PARENT, "a1", sid=THREAD)
         self.assertTrue((Path(self.td) / "names" / THREAD).exists())
 
+    def test_a_thread_fork_arms_no_opener_its_first_message_is_framed_at_create(self):
+        self.be.fork("thread-x", PARENT, "a1", sid=THREAD, thread_of=PARENT)
+        reg = json.loads((Path(self.td) / "sdk" / (THREAD + ".json")).read_text())
+        self.assertNotIn("forkOpener", reg)
+
     def test_live_sessions_skips_threads_so_no_tab_is_born(self):
         self.be.fork("thread-x", PARENT, "a1", sid=THREAD, thread_of=PARENT)
         self.assertIn(PARENT, self.be.live_sessions())
@@ -316,11 +321,30 @@ class OpeningMessage(unittest.TestCase):
         body = km._comment_first_message("Cap the delay at two minutes.", "Why two minutes and not five?")
         self.assertIn("> Cap the delay at two minutes.", body)
         self.assertTrue(body.endswith("Why two minutes and not five?"))
-        self.assertTrue(body.startswith(km._COMMENT_FRAME_HEAD))
+        self.assertIn("\n\n" + km._COMMENT_FRAME_HEAD + "\n\n", body)
+
+    def test_the_opener_says_what_the_thread_is_before_the_quote(self):
+        # 2026-09-24: a thread opened with only the quote and the comment took the parent's copied history
+        # (the parent's role and plans) as its own and relaunched the parent's work. The one message sure to be
+        # in the thread's context, its first, now opens by saying what this conversation is.
+        body = km._comment_first_message("Cap the delay at two minutes.", "Why two minutes and not five?")
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD
+                         + "\n\n> Cap the delay at two minutes.\n\nWhy two minutes and not five?")
+        self.assertIn("main conversation carries on separately", km._THREAD_FRAME)
+        self.assertIn("background work", km._THREAD_FRAME)
 
     def test_strip_returns_exactly_the_comment(self):
         body = km._comment_first_message("line one\nline two", "The comment.\n\nWith two paragraphs.")
         self.assertEqual(km._comment_strip_frame(body), "The comment.\n\nWith two paragraphs.")
+
+    def test_strip_reads_a_thread_opened_before_the_identity_line(self):
+        # a thread already on disk keeps its first message as it was written (the history is append-only)
+        old = km._COMMENT_FRAME_HEAD + "\n\n> line one\n\nThe comment."
+        self.assertEqual(km._comment_strip_frame(old), "The comment.")
+
+    def test_strip_takes_the_fork_line_off_a_dispatched_thread(self):
+        self.assertEqual(km._comment_strip_frame(km._FORK_FRAME + "\n\nReview the tracked edits."),
+                         "Review the tracked edits.")
 
     def test_strip_leaves_an_unframed_message_alone(self):
         self.assertEqual(km._comment_strip_frame("plain reply"), "plain reply")
@@ -1369,10 +1393,25 @@ class CommentOps(CommentBase):
         fork = self.be.calls[0]
         self.assertEqual(fork[3], "a1", "inclusive cut — the thread holds the highlighted answer")
         self.assertEqual(fork[5], PARENT, "born as a threadOf fork, never a board session")
-        self.assertTrue(self.be.sent[0][1].startswith(km._COMMENT_FRAME_HEAD))
+        self.assertTrue(self.be.sent[0][1].startswith(km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD),
+                        "the first message opens by saying what this conversation is, then quotes")
+        self.assertIn("> exponential backoff", self.be.sent[0][1])
+        self.assertTrue(self.be.sent[0][1].endswith("Why jitter at all?"))
         row = km._comment_thread(PARENT, tid)
         self.assertEqual(row["status"], "open")
         self.assertEqual(row["anchorUuid"], "a1")
+
+    def test_break_out_sends_nothing_and_leaves_the_opener_as_it_was(self):
+        # break-out promotes the running thread; its first message already said what it is, and a
+        # promotion never rewrites or re-sends anything (the history stays exactly as the model saw it)
+        _, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?")
+        opener = self.be.sent[0][1]
+        self._promotable(tid)
+        self.be.calls.clear()
+        self.assertIsNone(km._comment_promote(PARENT, tid, "sidework"))
+        self.assertNotIn("send", [c[0] for c in self.be.calls], "break-out injects no message")
+        self.assertEqual(len(self.be.sent), 1)
+        self.assertEqual(self.be.sent[0][1], opener)
 
     def _stub(self, name, value):
         self.addCleanup(setattr, km, name, getattr(km, name))
@@ -1768,6 +1807,128 @@ class CommentOps(CommentBase):
             self.assertIn('"%s"' % op, src)
 
 
+class ForkDoorsLeaveTheHistoryToTheCli(CommentBase):
+    """Every door that makes a session from a copy of another (a comment thread, a dispatched thread, the plain
+    fork, and break-out) against the REAL SdkBackend, no CLI: romp rewrites no transcript. The copy is the
+    CLI's, made from the parent's own file (resume + fork_session + the cut), so every message record reaches
+    the fork exactly as the parent's (prompt caching matches on the prefix; newer models refuse an edited
+    history). The parent's background work is kept out by the CLI's source-alive boundary, not by editing
+    anything, and what the new session is rides in its first NEW message (the user 2026-09-24).
+
+    Measured on 2.1.280 against a live fork: every copied message's content is the parent's; the CLI changes
+    only its own bookkeeping fields (slug, promptId, usage zeroed at the compaction seam, neutralizedByFork on
+    refusal-fallback system rows), and the queue-operation rows at the head of a fork's file are the fork's
+    own enqueue of its first message, never copies of the parent's."""
+
+    OPENER = "Please review the tracked edits in this note and reply in the review thread."
+
+    def setUp(self):
+        super().setUp()
+        import sys as _sys
+        import types as _types
+        (jd.STATE / "session-hosts").write_text("off")      # a minted state root pins hosts off (repo CLAUDE.md)
+        if "claude_agent_sdk" not in _sys.modules and not sb.sdk_importable():
+            fake = _types.ModuleType("claude_agent_sdk")
+            fake.HookMatcher = lambda **kw: _types.SimpleNamespace(**kw)
+            _sys.modules["claude_agent_sdk"] = fake
+            self.addCleanup(_sys.modules.pop, "claude_agent_sdk", None)
+        self._stub_sb("_fetch_key_fast_org", lambda key: None)
+        self.rbe = sb.SdkBackend(jd.STATE, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        self.sent = []
+        self.rbe._ensure = lambda sid: _types.SimpleNamespace(
+            enqueue=lambda text, qid=None, qts=None, paths=None: self.sent.append((sid, text)))
+        self.rbe.connect = lambda sid: True
+        self.rbe.spawn("parent", self.cdir, sid=PARENT)
+        self.parent_path = self._write(PARENT, self._parent_records())
+        self.cli_parent = Path(sb.transcript_path(self.cdir, PARENT))   # where the CLI itself would read it
+        self.cli_parent.parent.mkdir(parents=True, exist_ok=True)
+        self.cli_parent.write_bytes(self.parent_path.read_bytes())
+        self.before = self.parent_path.read_bytes()
+        for name, value in (("_sdk_ready", lambda: True), ("_live_map", lambda: {}),
+                            ("_reveal_chat_for", lambda client, msg: None), ("_push_session_now", lambda sid: None),
+                            ("_mark_views_dirty", lambda: None), ("NAMES", jd.NAMES),
+                            ("_sessions", lambda now, window=None, forks=True: [
+                                {"sid": PARENT, "name": "parent", "path": str(self.parent_path), "mtime": self.now}])):
+            self._stub_km(name, value)
+        self._stub_km_attr(km.Sessions, "backend_for", staticmethod(lambda sid: self.rbe))
+        self._stub_km_attr(km.Sessions, "live", staticmethod(lambda: {PARENT: {}}))
+
+    def _stub_km(self, name, value):
+        self.addCleanup(setattr, km, name, getattr(km, name))
+        setattr(km, name, value)
+
+    def _stub_sb(self, name, value):
+        self.addCleanup(setattr, sb, name, getattr(sb, name))
+        setattr(sb, name, value)
+
+    def _stub_km_attr(self, obj, name, value):
+        self.addCleanup(setattr, obj, name, obj.__dict__[name])
+        setattr(obj, name, value)
+
+    def _reg(self, sid):
+        return json.loads((jd.SDKDIR / (sid + ".json")).read_text())
+
+    def _new_sid(self, **want):
+        for f in sorted(jd.SDKDIR.glob("*.json")):
+            r = json.loads(f.read_text())
+            if r.get("forkOf") == PARENT and all(r.get(k) == v for k, v in want.items()):
+                return r["sid"]
+        self.fail("no fork reg")
+
+    def _assert_history_left_to_the_cli(self, sid, cut):
+        kw = self.rbe._options(sb.SdkSession(self.rbe, self._reg(sid)), dict)
+        self.assertEqual((kw.get("resume"), kw.get("fork_session"), kw.get("session_id")), (PARENT, True, sid),
+                         "the CLI copies the parent's own file into the new session")
+        self.assertEqual((kw.get("extra_args") or {}).get("resume-session-at", ""), cut)
+        self.assertTrue(kw["env"][sb.RESUME_SOURCE_ALIVE_ENV].startswith(sid + "|"),
+                        "the parent's background work is kept out by the CLI's boundary, not by an edit")
+        self.assertEqual(self.parent_path.read_bytes(), self.before, "the parent's transcript is untouched")
+        self.assertEqual(self.cli_parent.read_bytes(), self.before)
+        self.assertFalse((self.proj / (sid + ".jsonl")).exists(), "romp writes no transcript for the fork")
+        self.assertFalse(os.path.exists(sb.transcript_path(self.cdir, sid)))
+
+    def test_a_comment_thread(self):
+        err, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why jitter at all?")
+        self.assertIsNone(err)
+        self._assert_history_left_to_the_cli(tid, "a1")
+        self.assertEqual(self.sent, [(tid, km._comment_first_message("exponential backoff", "Why jitter at all?"))])
+        self.assertTrue(self.sent[0][1].startswith(km._THREAD_FRAME))
+
+    def test_a_dispatched_thread(self):
+        res = km._fork_comment_request({"id": PARENT, "text": self.OPENER})
+        self.assertTrue(res.get("ok"), res)
+        self._assert_history_left_to_the_cli(res["forkId"], "")
+        self.assertEqual(self.sent, [(res["forkId"], km._FORK_FRAME + "\n\n" + self.OPENER)])
+
+    def test_the_plain_fork(self):
+        self.assertIsNone(km._fork_session(PARENT, "u2", "api-fork"))
+        sid = self._new_sid(name="api-fork")
+        self._assert_history_left_to_the_cli(sid, "a1")
+        self.assertEqual(self.sent, [], "the eager connect sends nothing: the line waits for the first message")
+        self.assertTrue(self.rbe.send(sid, "Now add pagination.", user=True))
+        self.assertEqual(self.sent, [(sid, km._FORK_FRAME + "\n\nNow add pagination.")])
+
+    def test_break_out(self):
+        err, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?")
+        self.assertIsNone(err)
+        self._assert_history_left_to_the_cli(tid, "a1")      # the fork launch (stamps the CLI boundary)
+        # the CLI's copy, as it would have written it, plus the thread's own exchange; the init spent the flags
+        t = self.now - 200
+        thread_path = self._write(tid, self._parent_records()[:2] + [
+            uline(t, self.sent[0][1], "cu1", parent="a1"), aline(t + 10, "Jitter spreads the retries.", "ca1", "cu1")])
+        self.rbe._update_reg(tid, forkOf="", forkAt="", lastSid=tid)
+        thread_before = thread_path.read_bytes()
+        self.sent.clear()
+        self.assertIsNone(km._comment_promote(PARENT, tid, "sidework"))
+        self.assertEqual(self.sent, [], "break-out injects nothing and re-sends nothing")
+        self.assertEqual(thread_path.read_bytes(), thread_before, "the thread's history, first message included, stands")
+        self.assertEqual(self.parent_path.read_bytes(), self.before)
+        kw = self.rbe._options(sb.SdkSession(self.rbe, self._reg(tid)), dict)
+        self.assertEqual(kw["resume"], tid)
+        self.assertTrue(kw["env"][sb.RESUME_SOURCE_ALIVE_ENV].startswith(tid + "|"),
+                        "the broken-out session still skips the parent's copied history on every connect")
+
+
 class ExchangeLatchReplacedThePushCount(unittest.TestCase):
     """T102 (the user 2026-08-26): the push-count settle (settledPushes / _comment_settle_step) is
     RETIRED — it was a proxy for the real ending event, and it broke both ends: the fork-birth
@@ -1846,9 +2007,12 @@ class ForkCommentRoutes(CommentBase):
         self.assertEqual([c[0] for c in self.be.calls], ["fork", "connect", "send"])
         self.assertEqual(self.be.calls[0][3], "", "TIP fork — no highlighted record on this door")
         self.assertEqual(self.be.calls[0][5], PARENT, "born as a threadOf fork, never a board session")
-        self.assertEqual(self.be.sent[0][1], self.OPENER,
-                         "the caller authored the whole prompt — sent verbatim, never re-framed")
-        self.assertFalse(self.be.sent[0][1].startswith(km._COMMENT_FRAME_HEAD))
+        self.assertEqual(self.be.sent[0][1], km._FORK_FRAME + "\n\n" + self.OPENER,
+                         "the caller authored the whole prompt — sent verbatim behind the line that says what "
+                         "this conversation is (2026-09-24), never re-framed as a quote")
+        self.assertNotIn(km._COMMENT_FRAME_HEAD, self.be.sent[0][1])
+        self.assertEqual(km._comment_strip_frame(self.be.sent[0][1]), self.OPENER,
+                         "the popover shows the caller's prompt alone")
         row = km._comment_thread(PARENT, tid)
         self.assertEqual(row["status"], "open")
         self.assertEqual(row["cutUuid"], "")

@@ -17933,7 +17933,9 @@ def _fork_session_inner(parent_sid, cut_msg_uuid, new_name, now=None, client=Non
     if err:
         return err
     bg, fg = _pick_identity_color()
-    be.fork(nm, parent_sid, cut_uuid, bg, fg, sid=sid)
+    # opener: the first message romp sends the fork opens with _FORK_FRAME (what this conversation is; the
+    # eager connect below starts the CLI with no message, so the line waits for the first one)
+    be.fork(nm, parent_sid, cut_uuid, bg, fg, sid=sid, opener=_FORK_FRAME)
     # the fork inherits the parent's TAGS too (tab groups on tags, the user 2026-09-04) — the same
     # "that conversation, continued elsewhere" contract be.fork applies to mode/effort/model/env —
     # before the direct push below, so the first frame already sections the new tab under its group
@@ -18232,23 +18234,61 @@ def _comment_cut_target(path, sid, anchor_uuid):
 
 _COMMENT_FRAME_HEAD = "About this part of the conversation:"
 
+# WHAT A FORK IS, told to the fork itself in the first message it receives (the user 2026-09-24). A fork
+# holds its parent's whole history, written in the parent's voice (its role, its plans, its background
+# agents), and nothing else in its context says it is not the parent: SessionStart
+# output does not reach a fork cut with --resume-session-at (the CLI runs the hook and drops what it
+# returns, measured on 2.1.280), and the system prompt must stay byte-identical to the parent's or the
+# fork's first turn re-reads the whole history uncached. A comment thread given only the quote and the
+# comment took the inherited history at face value and relaunched the parent's audit. So the one message
+# that is sure to be in context, the NEW one after the copied history, says what this conversation is.
+# Never written into an earlier message: the copied history stays exactly the parent's (prompt caching
+# matches on the prefix, and newer models refuse an edited history). Injected-voice rules apply (the
+# person the agent works for speaking; no romp nouns; tests/test_injected_voice.py scans both).
+# - the THREAD line opens every comment thread on a passage: a side question, answered here;
+# - the FORK line opens a plain fork's first message (armed by be.fork, spent by the backend's send)
+#   and a thread the caller dispatches with its own instructions (the /fork-comment door), which is a
+#   separate line of work rather than a question about a passage.
+_THREAD_FRAME = ("I've split this off from our main conversation to ask about one part of it. The main "
+                 "conversation carries on separately; just answer here, and don't continue its work or "
+                 "pick up its unfinished tasks or background work.")
+_FORK_FRAME = ("I've split this conversation off from the original at this point. The original keeps going "
+               "on its own; carry on from here as a separate line of work, and don't pick up its unfinished "
+               "tasks or background work.")
+
 
 def _comment_first_message(exact, comment):
     """The thread's opening message — romp-authored FRAMING around the user's own words, read by an
     agent that has the conversation up to the highlight and no idea it is being tracked, so it
     speaks as the person it works for quoting the conversation back (test_injected_voice scans it;
-    it must never name romp machinery)."""
+    it must never name romp machinery). It opens with _THREAD_FRAME, what this conversation is,
+    then the quote and the comment."""
     q = "\n".join("> " + ln for ln in str(exact or "").splitlines()).strip() or "> …"
-    return "%s\n\n%s\n\n%s" % (_COMMENT_FRAME_HEAD, q, str(comment or "").strip())
+    return "%s\n\n%s\n\n%s\n\n%s" % (_THREAD_FRAME, _COMMENT_FRAME_HEAD, q, str(comment or "").strip())
+
+
+def _strip_fork_opener(text):
+    """`text` without a leading _FORK_FRAME paragraph, for DISPLAY: the line is written for the fork's agent,
+    and the person reading the chat typed only what follows it. Pure; a message that does not open with the
+    line passes through, and one that is nothing BUT the line is left whole."""
+    if not text or not text.startswith(_FORK_FRAME):
+        return text
+    rest = text[len(_FORK_FRAME):].lstrip()
+    return rest or text
 
 
 def _comment_strip_frame(text):
     """The opening message, shown as the user's COMMENT alone — the framing + quote it was wrapped
     in for the thread's agent already sit in the popover header, so rendering them again would say
-    everything twice."""
-    if not text.startswith(_COMMENT_FRAME_HEAD):
-        return text
-    lines = text.splitlines()
+    everything twice. The identity line (_THREAD_FRAME, or _FORK_FRAME on a dispatched thread) goes with
+    it; a thread opened before that line existed starts at the quote head and strips the same way."""
+    if text.startswith(_THREAD_FRAME):
+        body = text[len(_THREAD_FRAME):].lstrip()
+    else:
+        body = _strip_fork_opener(text)
+    if not body.startswith(_COMMENT_FRAME_HEAD):
+        return body
+    lines = body.splitlines()
     i = 1
     while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
         i += 1
@@ -19111,8 +19151,9 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     designed input for callers with no transcript anchor — the /fork-comment door (the user
     2026-08-31, whose track-changes review comments dispatch onto parallel forks). cut_t is the
     create moment, so the timeline square sits where the thread began. `raw_opener` sends `text`
-    VERBATIM as the opening message — the caller authored the whole prompt (the plugin's thread
-    instructions); the quote frame would bury it under a passage that doesn't exist. `meta`
+    VERBATIM behind the fork line (_FORK_FRAME) as the opening message — the caller authored the whole
+    prompt (the plugin's thread instructions); the quote frame would bury it under a passage that
+    doesn't exist, and without the line the fork reads the parent's history as its own (2026-09-24). `meta`
     ({thread, note} strings) rides the registry row for provenance — the popover shows the row's
     exact/name as usual; nothing kernel-side consumes meta beyond storing it."""
     be = Sessions.backend_for(parent_sid)
@@ -19200,7 +19241,10 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             be.fork(nm, parent_sid, cut, bg=col, fg=(pal.fg_for(col) if col else ""), sid=tsid, thread_of=parent_sid,
                     model=model, effort=effort, fast=fast)
             be.connect(tsid)
-            _user_send(be, tsid, text if raw_opener else _comment_first_message(exact, text))
+            # the first message says what this conversation is (_THREAD_FRAME / _FORK_FRAME, why there): a
+            # dispatched thread's caller-authored prompt rides verbatim BEHIND the fork line
+            _user_send(be, tsid, ("%s\n\n%s" % (_FORK_FRAME, text)) if raw_opener
+                       else _comment_first_message(exact, text))
         except Exception as e:
             with _comments_lock:                       # loud + lossless: no half-born thread row
                 data = _load_comments(parent_sid)
@@ -38194,8 +38238,10 @@ def _cancel_backend_queued(be, sid, idx, md, qid=None):
     except Exception:
         pending = []
     if md:
-        if not (0 <= idx < len(pending)) or _split_followup(pending[idx])[1] != md:
-            idx = next((i for i, q in enumerate(pending) if _split_followup(q)[1] == md), -1)
+        # the bubble's body is the queued text as the chat shows it: a fork's first message without its line
+        _body = lambda q: _split_followup(_strip_fork_opener(q))[1]
+        if not (0 <= idx < len(pending)) or _body(pending[idx]) != md:
+            idx = next((i for i, q in enumerate(pending) if _body(q) == md), -1)
     if not (0 <= idx < len(pending)):
         return _cancel_miss_text(md)
     got = be.unqueue(sid, idx, pending[idx])
@@ -41577,6 +41623,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                         # quote (the enumerated sub-goals) IS the content, not throwaway context.
                         fu_goal = fu_ctx = None
                         if author == "human":
+                            prompt = _strip_fork_opener(prompt)   # a fork's first message: the line was for its agent
                             fu_goal, fu_body, fu, fu_ctx = _split_followup(prompt)
                             if fu:
                                 prompt = fu_body
@@ -42104,7 +42151,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                 # as shown_texts for echo suppression, and a surviving bubble's idx must keep naming its
                 # backend _pending position for cancelQueued.
                 continue
-            goal, body, fu, ctx = _split_followup(t)
+            goal, body, fu, ctx = _split_followup(_strip_fork_opener(t))   # shown as the landed copy will be
             m = {"md": body, "idx": i, "cancelable": cancelable, **_queued_romp_flags(t)}   # idx ↔ the backend's _pending position (cancelQueued)
             if _metas and isinstance(_metas[i], dict):          # the copy's identity and stamp: each rides on its own
                 if _metas[i].get("qid"):                          # (a copy may carry a stamp and no id — third review)

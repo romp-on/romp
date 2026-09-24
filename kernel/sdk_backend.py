@@ -721,6 +721,44 @@ def _alias_label(alias: str) -> str:
     return pretty_model(alias) if (alias.startswith("claude-") or alias in _router_declared()) else alias.capitalize()
 
 
+# The CLI's own contract for "this conversation's source session is still running" (Claude Code 2.1.280,
+# read in the binary and measured with probes on a synthetic transcript, 2026-09-24): `<session id>|<ISO
+# boundary>`. On a resume or fork load the CLI scans the loaded history for background agents and shells with
+# no completion record and tells the model, as a task notification, that each "didn't finish before the
+# previous session ended". A fork's copied history is the PARENT's, and the parent is alive and still running
+# that work, so without the boundary every fork of a session with a background agent in flight was told the
+# parent's agent was ITS lost task, and a comment thread relaunched the parent's audit (2026-09-24). With it,
+# only records stamped after the boundary are scanned: the parent's copied history is skipped, and the fork's
+# own later work is still reported. Nothing in the history changes (the prompt-cache prefix and every message
+# stay byte-identical to the parent's). The session id is the one the CLI runs as for that load (a mismatch
+# drops the filter; no id at all would also skip the CLI's copy of the parent's file-history backups on the
+# fork launch); the CLI keeps the variable out of the environment of anything the session runs.
+RESUME_SOURCE_ALIVE_ENV = "CLAUDE_CODE_RESUME_SOURCE_ALIVE"
+
+
+def _iso_ms(t: float) -> str:
+    """UTC ISO-8601 with milliseconds and a Z, the shape the CLI stamps on transcript records."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".%03dZ" % int((t % 1) * 1000)
+
+
+def fork_source_alive_env(sess, kw: dict, update_reg, now: float | None = None) -> str:
+    """The RESUME_SOURCE_ALIVE_ENV value for this connect, "" for a session that was never a fork. The FORK
+    LAUNCH (fork_session in kw) stamps the boundary: now, before the CLI loads the parent's transcript, so
+    every copied record predates it; persisted as the reg's forkBoundaryAt (a retried launch re-stamps, since
+    it copies the parent afresh). Every later connect of that session re-sends the stored boundary with the
+    session id it resumes as, so a kernel restart or a revive does not report the parent's work either."""
+    if kw.get("fork_session"):
+        sess._fork_boundary = _iso_ms(time.time() if now is None else now)
+        update_reg(sess.sid, forkBoundaryAt=sess._fork_boundary)
+        runs_as = kw.get("session_id") or sess.sid
+    else:
+        runs_as = kw.get("resume") or kw.get("session_id") or sess.sid
+    boundary = getattr(sess, "_fork_boundary", "")
+    if not boundary:
+        return ""
+    return "%s|%s" % (runs_as, boundary)
+
+
 def _is_compact_cmd(text: str) -> bool:
     """True if `text` is a /compact invocation (bare or with custom-summary args) — the CLI interprets it as
     the compaction command whether it comes from the compact button, a parked-op delivery, or the user
@@ -5436,6 +5474,9 @@ class SdkSession:
         # fork sids). A deliberate user fork has no threadOf and bills itself — it IS a session.
         self.thread_of = reg.get("threadOf") or ""
         self._fork_at = reg.get("forkAt") or ""
+        # the CLI's source-alive boundary for a session born as a fork (stamped by the fork launch in _options,
+        # durable, re-sent on every later connect); "" for a session that was never a fork
+        self._fork_boundary = reg.get("forkBoundaryAt") or ""
         # Heal STRANDED pending-switch flags (the user 2026-07-11, who reported the three dots sitting there
         # forever): a /model or /effort switch that was mid-flight when the previous kernel/process
         # died can never be cleared by its in-memory switch path — but the persisted flags keep the
@@ -13860,6 +13901,9 @@ class SdkBackend:
                     kw.setdefault("extra_args", {})["resume-session-at"] = sess._fork_at
         else:
             kw["session_id"] = sess.sid
+        src_alive = fork_source_alive_env(sess, kw, self._update_reg)
+        if src_alive:
+            kw["env"][RESUME_SOURCE_ALIVE_ENV] = src_alive
         # A pending conversation REWIND (the chat's edit-message branch) rides --resume-session-at —
         # the SDK has no typed field for it, so extra_args (the SDK's designed passthrough for exactly
         # this) carries it. ONE-SHOT, event-guarded (rewind_disposition): applied only while the
@@ -14104,7 +14148,7 @@ class SdkBackend:
 
     def fork(self, name: str, parent_sid: str, cut_uuid: str = "", bg: str = "", fg: str = "",
              sid: str | None = None, thread_of: str = "", model: str = "", effort: str = "",
-             fast: str = "") -> str:
+             fast: str = "", opener: str = "") -> str:
         """Mint a NEW session that is a FORK of `parent_sid`'s conversation — up to `cut_uuid` when given
         (a transcript record uuid; empty = the whole conversation), the parent untouched either way (the
         user 2026-08-13). The new session gets its OWN sid, registry, name and identity colour — a fork
@@ -14124,7 +14168,15 @@ class SdkBackend:
         this is not the hidden-running-session failure mode the 2026-08-11 rule removed: every thread is
         visible and reachable right where it was made. Everything else is a normal session: the reg
         keeps its CLI under the boot reconcile's orphan reap, a mid-turn kernel death resumes it, and
-        promote_thread() later turns it into a full board session."""
+        promote_thread() later turns it into a full board session.
+
+        `opener` (the user 2026-09-24): a paragraph the FIRST message this session is sent opens with (the
+        kernel's _FORK_FRAME, what a plain fork is), for a fork whose first turn has no message yet. Kept in
+        the reg as forkOpener and spent by send(); the copied history is never touched, so the line lands in
+        the new message after it. A comment thread passes none: its opening message is framed at create.
+
+        The fork launch also carries the CLI's source-alive boundary (_options, forkBoundaryAt), so the CLI
+        does not report the parent's still-running background work as this session's own lost tasks."""
         parent = read_reg(self.state_dir, parent_sid) or {}
         cwd = parent.get("cwd") or os.path.expanduser("~")
         sid = sid or str(uuid.uuid4())      # the kernel pre-mints it so the judge seeds can precede us
@@ -14163,6 +14215,8 @@ class SdkBackend:
         #   for the SDK path too: live forks work today, but nothing pins that.
         if thread_of:
             reg["threadOf"] = thread_of
+        if opener:
+            reg["forkOpener"] = str(opener)
         if parent.get("model") and parent["model"] != "default":
             reg["model"] = parent["model"]
         # fast rides the fork like model/effort do (the user 2026-08-25: a comment made from an
@@ -14542,6 +14596,7 @@ class SdkBackend:
                     self._live.pop(sid, None)
             self._persist_echoes(sid)                      # the canceled echo leaves the restart mirror too
             self._wake_push()                              # repaint without the echo so it stops reading as sent
+            text = self._rearm_fork_opener(sid, text)      # a fork's first message pulled back: its opening line re-arms
         return text
 
     def queue_recallable(self, sid: str) -> bool:
@@ -14576,6 +14631,7 @@ class SdkBackend:
         the thread, so it rides the attach the user's next message makes, in order; True means accepted, as ever.
         The stand-down refuses the ATTACH, never the message (the commit-13 review's first item: a refusal
         dropped the nudge after its ledger row had said fired)."""
+        opened = False                            # the fork's opening line is taken at most once per send
         if user:
             self._lift_attach_stand_down(sid)     # the user's message is the word that retries a stood-down attach (T315)
         else:
@@ -14585,11 +14641,15 @@ class SdkBackend:
             #   the stand-down, else a stood-down session the user ended kept 'accepting' automatic messages into a dead
             #   reg's mirror (the commit-14 review's second item). Only the explicit flip (kill writes alive=False): a row
             #   with no alive key (an echo mirror alone) and no row at all are _ensure's refusal, as before
-            if self._attach_stand_down_holds(sid, reg) and self._queue_behind_stand_down(sid, text, qid):
-                return True                       # queued behind the stand-down; a lift that raced the check falls through
+            if self._attach_stand_down_holds(sid, reg):
+                text, opened = self._take_fork_opener(sid, text), True
+                if self._queue_behind_stand_down(sid, text, qid):
+                    return True                   # queued behind the stand-down; a lift that raced the check falls through
         s = self._ensure(sid)
         if not s:
             return False
+        if not opened:
+            text = self._take_fork_opener(sid, text)   # taken once the session can take the message, never before
         if _is_compact_cmd(text):
             # Delivering /compact: mark the session compacting NOW (authoritative), covering the gap between
             # this send and the CLI actually starting the turn — so a drive op the pusher's drain checks in
@@ -14641,6 +14701,45 @@ class SdkBackend:
         self._persist_echoes(sid)                            # unlanded echoes survive a kernel restart (reg mirror)
         self._wake_push()
         return True
+
+    def _take_fork_opener(self, sid: str, text: str) -> str:
+        """`text` as the session should receive it: behind the armed opening line (reg forkOpener, fork()'s
+        `opener`) when this is the first message a born-as-a-fork session is sent. Spent here, under the reg lock,
+        so exactly one message carries it, and it lands in that NEW message, after the copied history. A slash
+        command is an instruction to the CLI, not a message to the agent: it passes through and leaves the line
+        armed; a /clear starts a conversation with none of the parent's history in it, so it disarms the line.
+        The spent line is kept as forkOpenerSent, so a message pulled back out of the queue before the CLI took it
+        (unqueue) arms it again instead of losing it. Every other send pays one registry read."""
+        reg = read_reg(self.state_dir, sid)
+        if not reg or not reg.get("forkOpener"):
+            return text
+        slash = (text or "").lstrip().startswith("/")
+        with self._reg_lock:
+            reg = read_reg(self.state_dir, sid)
+            opener = str((reg or {}).get("forkOpener") or "")
+            if not opener or (slash and not _is_clear_cmd(text)):
+                return text
+            reg.pop("forkOpener", None)
+            if not slash:
+                reg["forkOpenerSent"] = opener
+            write_reg(self.state_dir, sid, reg)
+        return text if slash else "%s\n\n%s" % (opener, text)
+
+    def _rearm_fork_opener(self, sid: str, text: str) -> str:
+        """The unqueue half of _take_fork_opener: a cancelled message that carried the spent opening line gives
+        it back (forkOpener again), so the next message the session is sent opens with it. Returns the text
+        without the line, which is what the user typed."""
+        if not (read_reg(self.state_dir, sid) or {}).get("forkOpenerSent"):
+            return text
+        with self._reg_lock:
+            reg = read_reg(self.state_dir, sid)
+            sent = str((reg or {}).get("forkOpenerSent") or "")
+            if not sent or not (text or "").startswith(sent + "\n\n"):
+                return text
+            reg.pop("forkOpenerSent", None)
+            reg["forkOpener"] = sent
+            write_reg(self.state_dir, sid, reg)
+        return text[len(sent) + 2:]
 
     def _transcript_mark(self, sid: str):
         """(byte size, fsid) of the sid's current transcript at this instant — the send-time mark an echo

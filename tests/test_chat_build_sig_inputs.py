@@ -168,6 +168,7 @@ CENSUS = {
     "_stamp_interrupt_causes": ("pure", "over the events"),
     "_stat_key": ("sig", "cleared", "cleared.jsonl's identity, the ledger memo's key beside the set _cleared_ids reads"),
     "_strip_hook_notices": ("pure", "over a text"),
+    "_strip_fork_opener": ("pure", "over a text"),
     "_task_outputs_for": ("sig", "taskout", "the launch record from the transcript's scan; each output file's tail is a taskout dep"),
     "_branch_marker": ("sig", "reg"),   # the fork lineage chip: _thread_reg (the reg) and _name_of, one helper for the whole build and a page
     "_tilde": ("const", "the home directory"),

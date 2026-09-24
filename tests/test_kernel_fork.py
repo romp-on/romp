@@ -153,8 +153,9 @@ class _FakeForkBackend:
     def __init__(self):
         self.events = []
 
-    def fork(self, name, parent_sid, cut_uuid="", bg="", fg="", sid=None):
+    def fork(self, name, parent_sid, cut_uuid="", bg="", fg="", sid=None, opener=""):
         self.events.append(("fork", name, parent_sid, cut_uuid, sid))
+        self.opener = opener
         return sid
 
     def connect(self, sid):
@@ -224,6 +225,16 @@ class ForkSessionOp(unittest.TestCase):
         self.assertIsNone(km._fork_session(PARENT, "", "api-fork"))
         fork = next(e for e in self.be.events if e[0] == "fork")
         self.assertEqual(fork[3], "", "no message uuid → the whole conversation")
+
+    def test_the_fork_door_arms_the_line_that_says_what_a_fork_is(self):
+        # 2026-09-24: a fork holds the parent's whole history in the parent's voice; its first message now
+        # opens by saying it was split off and must leave the original's unfinished work alone. The eager
+        # connect starts the CLI with no message, so the door arms the line for the first one romp sends.
+        self.assertIsNone(km._fork_session(PARENT, "u2", "api-fork"))
+        self.assertEqual(self.be.opener, km._FORK_FRAME)
+        self.assertIn("split this conversation off from the original", km._FORK_FRAME)
+        self.assertIn("don't pick up its unfinished tasks or background work", km._FORK_FRAME)
+        self.assertNotEqual(km._FORK_FRAME, km._THREAD_FRAME, "a fork is not a side question about a passage")
 
     def test_seed_failure_aborts_the_fork(self):
         km._seed_fork_stores = lambda *a: "fork not created — seeding its judge state failed: boom"

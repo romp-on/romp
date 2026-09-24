@@ -558,6 +558,13 @@ class CancelBackendQueued(unittest.TestCase):
         self.assertIsNone(km._cancel_backend_queued(be, SID, 2, "beta"))
         self.assertEqual(be.unqueued, [1], "re-located by body, not the stale index")
 
+    def test_a_forks_first_message_is_found_by_the_body_the_chat_shows(self):
+        # a plain fork's queued first message carries the fork line (_FORK_FRAME) the chat does not show;
+        # the bubble's body is the user's words, and the cancel must still find the copy by it
+        be = _FakeQueueBackend([km._FORK_FRAME + "\n\nNow add pagination.", "beta"])
+        self.assertIsNone(km._cancel_backend_queued(be, SID, 5, "Now add pagination."))
+        self.assertEqual(be.unqueued, [0])
+
     def test_gone_message_returns_the_too_late_text(self):
         be = _FakeQueueBackend(["alpha"])
         err = km._cancel_backend_queued(be, SID, 0, "beta")

@@ -159,6 +159,11 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # the user's own words; the quoting frame around them is romp-authored and scanned here
             "comment thread opener": km._comment_first_message(
                 "Cap the retry delay at two minutes.", "Why two minutes and not five?"),
+            # what a fork is, told to the fork (the user 2026-09-24): the side-question line every thread on a
+            # passage opens with, and the fork line a plain fork's first message and a dispatched thread open with
+            "thread identity line": km._THREAD_FRAME,
+            "fork identity line": km._FORK_FRAME,
+            "plain fork's first message": km._FORK_FRAME + "\n\n" + "Now add pagination to the list endpoint.",
             # the dashboard-edit trace (the user 2026-08-22): the file viewer saved over a file in this
             # session's tree, and the session is told in the person's voice — never edited under silently
             "edit trace": km._edit_trace_body("/TESTDIR/notes-api/README.md"),
@@ -299,12 +304,15 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # never a status ask — bolting a progress question onto it would be noise
             # …and the spend ceiling's message is a STOP order with one question (what was fanning out), not a
             # progress ask: the session is to halt, not to report where things stand
+            # …and the identity lines say what a fork or a thread IS, riding the user's own first message:
+            # telling, not asking
             if name in ("typed follow-up on a summary",
                         "debt reminder (question)", "debt reminder (handoff)",
                         "debt reminder (several)", "comment thread opener", "edit trace",
                         "comment-thread merge", "compaction suggestion", "spend ceiling",
                         "relayed question", "relayed question (procedural why)",
-                        "relayed question (with the conversation)"):
+                        "relayed question (with the conversation)",
+                        "thread identity line", "fork identity line", "plain fork's first message"):
                 #        ^ a housekeeping suggestion, not a progress ask: it elicits nothing; and the relayed
                 #          question is a WORKER's question to the peer that delegated its work, in the worker's
                 #          words, never a progress ask to the user (T334)

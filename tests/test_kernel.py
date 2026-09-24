@@ -571,6 +571,23 @@ class ViewBuilder(unittest.TestCase):
         self.assertTrue(users[-1].get("human"), "a follow-up the user typed is human (blue), not romp")
         self.assertFalse(users[-1].get("romp"), "goal-id alone must NOT flag romp")
 
+    def test_a_forks_first_message_shows_what_the_user_typed(self):
+        # the user 2026-09-24: a plain fork's first message opens with the line that tells the fork what it is
+        # (_FORK_FRAME); that line is for the fork's agent, so the chat shows the user's own words alone
+        recs = [uline(T0, "real prompt", "u1", ps="typed"),
+                aline(T0 + 10, "ok", "a1", "u1", stop="end_turn"),
+                uline(T0 + 100, km._FORK_FRAME + "\n\nNow add pagination to the list endpoint.", "u2", "a1",
+                      ps="typed")]
+        self.tpath.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        km._parse_cache.clear()
+        ev = [e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "user"][-1]
+        self.assertTrue(ev.get("human"))
+        self.assertEqual(ev["md"], "Now add pagination to the list endpoint.")
+        self.assertEqual(km._strip_fork_opener(km._FORK_FRAME), km._FORK_FRAME,
+                         "a message that is nothing but the line is left whole")
+        self.assertEqual(km._strip_fork_opener("text that merely mentions it: " + km._FORK_FRAME),
+                         "text that merely mentions it: " + km._FORK_FRAME, "only a leading line is lifted")
+
     def test_followup_with_screenshots_keeps_the_typed_body_out_of_the_context(self):
         # the user 2026-07-02: a follow-up sent WITH screenshots rendered its typed body inside the gray
         # follow-up CONTEXT and an EMPTY blue bubble. The goal quote carried the image paths, so the
