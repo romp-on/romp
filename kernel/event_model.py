@@ -3134,8 +3134,14 @@ class FileAdapter:
         someone sent (chain_verdicts: _sent_message). A single call's result takes the same link: on the normal chain
         it IS the spine, and when a retry storm's api_error spur takes the spine from the call record, its result
         (which the eclipse probe used to salvage as "eclipsed") is kept as the call's own, "active"."""
-        fr = self.by_uuid.get(fork)
-        hr = self.by_uuid.get(head)
+        return self._batch_link(self.by_uuid.get(fork), self.by_uuid.get(head))
+
+    @staticmethod
+    def _batch_link(fr, hr):
+        """The batch's two designed links between two RECORDS (see _batch_head): `fr` is an assistant record carrying a
+        tool_use and `hr` is the next record of fr's own message (same message id) or a tool_result answering only calls
+        fr carries. Read off the records alone, so the assembly gate asks it of an appended record the graph has not
+        ingested yet (_batch_delta) and the two can never disagree on what a batch is."""
         if fr is None or hr is None or fr.get("type") != "assistant":
             return False
         fmsg = fr.get("message") if isinstance(fr.get("message"), dict) else {}
@@ -3150,6 +3156,27 @@ class FileAdapter:
                        if isinstance(b, dict) and b.get("type") == "tool_result"]
             return bool(answers) and all(a in calls for a in answers)
         return False
+
+    def _batch_delta(self, delta, parent_of, old_leaf):
+        """Whether an appended `delta` whose new leaf does not chain back to `old_leaf` is a PARALLEL TOOL BATCH landing
+        (2026-09-24): every record whose parent lies outside the delta either continues the old leaf or hangs off a
+        record already in the graph by the batch's own link (_batch_link: the next call of that record's message, or a
+        result answering only its calls), and at least one does the latter. `parent_of` is the delta's uuid -> parent map
+        (the gate's). The assembly gate folds such a delta and leaves the ruling to the fold's kept-invariance check; an
+        api_error spur, a rewind, a /clear fork, another message's record or a result for a call its parent does not
+        carry hangs off no such link, and a parent before a restored entry's cut is not in this graph: each still demotes."""
+        seen = False
+        for r in delta:
+            u = r.get("uuid")
+            if not u:
+                continue
+            p = parent_of.get(u)
+            if p in parent_of or (p is not None and p == old_leaf):
+                continue
+            if not self._batch_link(self.by_uuid.get(p), r):
+                return False
+            seen = True
+        return seen
 
     def _sent_message(self, u):
         """Whether record `u` is a message someone sent (a user record carrying no tool_result, not the harness's isMeta
@@ -4790,12 +4817,14 @@ def _membership_of(adapter):
 # divergent:
 #   - candidates / resume links / sdk_human changed, or a pending cut is armed        -> full/bypass
 #   - a non-leaf candidate changed at all, or the leaf did anything but grow          -> full
-#   - the new leaf does not descend from the old leaf through the delta               -> full
+#   - the new leaf does not descend from the old leaf through the delta, unless the
+#     delta is a parallel tool batch landing (FileAdapter._batch_delta)               -> full
 #   - the delta contains: a compact boundary or summary; a uuid already in the graph
 #     or among its recorded dangling parent targets; a promptId already seen; a Skill
 #     tool_use an old payload record already references; an unparseable or
 #     watermark-regressing conversational timestamp                                   -> full
 #   - after the fold's graph recompute, ANY old record's kept-membership changed      -> full
+#     (a batch landing's delta: the restore road first, as its descent demotion took)
 # Postal is the one input with no gate, on the log's own invariant: rows are append-only and
 # resolution is first-wins per id, so an author can only go from marker-missed to resolved — and
 # _asm_heal re-authors exactly those atoms each visit until they resolve.
@@ -5039,13 +5068,28 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
                 return _asm_demote("ts")   # the carry is valid only for a delta sorting at-or-
                 #                            after everything folded (the pre-pass sorts None first)
     # Leaf descent: the new file-leaf must chain back to the old one THROUGH the delta — an
-    # api_error spur re-parent, a rewind, and a /clear fork all fail here. parent_d.pop doubles
+    # api_error spur re-parent, a rewind, and a /clear fork all fail here. walk.pop doubles
     # as the cycle guard; a delta with no uuid-bearing record passes trivially (leaf unmoved).
-    cur, hops = new_leaf, 0
+    # The one shape that fails the walk and still folds is a PARALLEL TOOL BATCH landing
+    # (2026-09-24): each result is parented at its own call, so while the results land the
+    # leaf moves from one call's branch to the next and no chain leads back. The graph keeps
+    # those branches (FileAdapter._batch_head), so a delta hanging off known records only by
+    # the batch's own link (_batch_delta) folds and the kept-invariance check in _asm_fold
+    # rules on it. Before, every result not parented at the current leaf demoted here: a
+    # restore (or a whole parse with no document) and a chat prefix rebuild per result, 15 in
+    # the parse investigation's lab over five batches of three calls. The thread's batch bit
+    # says the delta passed on the batch link, so a kept rejection of it takes the road the
+    # descent gave it (_asm_fold). It is cleared before every walk, so it speaks for this delta
+    # alone: a later delta that descends from the old leaf keeps a kept rejection's own road.
+    _ASM_DEMOTE_TL.batch = False
+    cur, hops, walk = new_leaf, 0, dict(parent_d)
     while cur != old_leaf:
-        if cur is None or cur not in parent_d or hops > len(delta) + 1:
+        if cur is None or cur not in walk or hops > len(delta) + 1:
+            if ad._batch_delta(delta, parent_d, old_leaf):
+                _ASM_DEMOTE_TL.batch = True
+                break
             return _asm_demote("descent")
-        cur = parent_d.pop(cur)
+        cur = walk.pop(cur)
         hops += 1
     return delta, leaf_recs
 
@@ -5115,8 +5159,19 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
     kept = ad.kept_uuids(ad.active_path())
     dset = {r.get("uuid") for r in delta if r.get("uuid")}
     if kept - dset != entry["kept"]:
-        return _asm_demote("kept")   # ancestry moved under an old record — the fold cannot
-        #                              re-emit history; only a full parse can
+        _asm_demote("kept")          # ancestry moved under an old record — the fold cannot
+        #                              re-emit history; a full parse can, and so can a restore
+        if getattr(_ASM_DEMOTE_TL, "batch", False):
+            # A delta the gate passed on the batch link (_batch_delta) is one the leaf descent
+            # demoted before batches folded (2026-09-24), and that demotion took the RESTORE road
+            # when a document stood. Counted under kept, it takes the same road: the restore reads
+            # the document and the tail from its cut, and its chain proof rules on that tail as it
+            # did after the descent. A seeded fuzz of synthetic batches met about two hundred such
+            # rejections (the leaf leaving a spur, a stray record mid-batch); only 44 of them restore
+            # on this road, the ones with a document standing, which the descent had restored. The
+            # rest have no document and parse whole on either road.
+            _ASM_DEMOTE_TL.reason = "descent"
+        return None
     st = entry["st"]
     order = _chrono(ad, kept & dset)
     ad._prepass(order, st)

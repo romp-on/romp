@@ -2491,7 +2491,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   descent, rewrite or nonleaf demotion over a document the memo still holds
   reads none of it, and its checks run per restore as a walk's do), `full` with
   `full:demoted` (an entry the gates demoted, the `g:<reason>` beside it:
-  `descent` when the new leaf does not chain to the old through the delta,
+  `descent` when the new leaf does not chain to the old through the delta
+  (a parallel tool batch's results, each parented at its own call, fold instead;
+  one that then moves an old record's kept membership counts under `kept` and
+  takes the restore road a descent takes),
   `rewrite` when the leaf's record entry was replaced by a from-zero read
   under a new generation, `nonleaf` when a lineage file moved or grew,
   `inputs`, `recs-gone`, `no-leaf-slot`, `empty-graph`, `uuid-known`,
