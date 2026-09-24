@@ -102,7 +102,7 @@ test("kernel: forkSession is a session op; seeding precedes discoverability; the
   // the cut means the same thing the edit/delete rewind means: just before the clicked user message
   assert.match(KERNEL, /cut_uuid, err = _rewind_target\(sess\["path"\], parent_sid, str\(cut_msg_uuid\)\)/);
   // the judge stores are seeded BEFORE be.fork writes the names/ entry (discoverability)
-  assert.match(KERNEL, /err = _seed_fork_stores\(parent_sid, sid, sess\["path"\], cut_uuid\)[\s\S]{0,200}be\.fork\(nm, parent_sid, cut_uuid, bg, fg, sid=sid\)/);
+  assert.match(KERNEL, /err = _seed_fork_stores\(parent_sid, sid, sess\["path"\], cut_uuid\)[\s\S]{0,400}be\.fork\(nm, parent_sid, cut_uuid, bg, fg, sid=sid, opener=_FORK_FRAME\)/);   // the fork's first message carries its identity line (2026-09-24)
   // the backend rides the SDK's designed fork contract, with the new fsid PINNED to the romp sid
   assert.match(BACKEND, /kw\["fork_session"\] = True/);
   assert.match(BACKEND, /"forkOf": parent_sid, "forkAt": cut_uuid or ""/);
