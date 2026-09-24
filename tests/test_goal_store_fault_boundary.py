@@ -2127,8 +2127,9 @@ class ActsUnderAFailedWrite(_World):
         """The round-one verifier of PR 2070: among two concurrent MOVED reads a rule keyed on the memo's identity let the first writer win, so
         a newer parse that finished second was dropped (the newer read parsed three clears, the memo held one, the pane showed one after the
         next fault, where the base kept all three). Neither identity nor a read ticket can order two moved parses of one file, each only a
-        bound on its bytes' version, and a pre-read stat orders parses across WRITES by time, not within one file (the round-one verifier of
-        PR 2144); the parse itself can: the log is append-only within one file, so the longer parse is the newer state.
+        bound on its bytes' version, and a pre-read stat is a lower bound on the bytes a read returns, so it orders nothing by time (the
+        round-two verifier of PR 2144: the read with the older stat held the newer bytes); a rewrite of the path shows as a newer stat with
+        a smaller size, and the parse itself orders the rest: the log is append-only within one file, so the longer parse is the newer state.
         Both orders: the older bytes written first, then the newer parse wins (count 3); the newer written first, then the older parse stands
         down (count 3 too; the base, writing unconditionally, gives 1)."""
         log = jd.STATE / "cleared.jsonl"
@@ -2198,9 +2199,10 @@ class ActsUnderAFailedWrite(_World):
         """The second contributor's post-merge review of PR 2070: the length order assumed a shorter file arrives only through the absent arm,
         which holds only when some read sees the absence. A log removed and recreated shorter between two reads (an atomic rewrite), whose first
         read raced a fault, parsed fewer bytes than the standing set and stood down, and after the next fault the pane served the set from before
-        the removal: the old dismissed count, and Undo for clears the file no longer had. A moved parse whose pre-read stat's write time is newer
-        than the standing key's is a parse of a later write to the path and wins whatever its length (count 1 after the fault; the base: 2). The
-        write time is set by hand a second past the old file's, so the order never rests on the clock's grain."""
+        the removal: the old dismissed count, and Undo for clears the file no longer had. A moved parse whose pre-read stat is newer than the
+        standing key's AND smaller in size is a parse of a rewritten file (an append-only history cannot shrink a file) and wins whatever its
+        length (count 1 after the fault; the base: 2). The write time is set by hand a second past the old file's, so the rewrite's evidence
+        never rests on the clock's grain."""
         log = jd.STATE / "cleared.jsonl"
         one = json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"
         two = one + json.dumps({"id": B + ":g1", "t": 2, "op": "clear"}) + "\n"
@@ -2236,7 +2238,8 @@ class ActsUnderAFailedWrite(_World):
         mirror of the leg above went wrong. The standing set is the log's one clear; a reader takes its pre-read stat and parses; under its parse
         the log is atomically replaced by a LONGER file (two clears) and a build lands it; the first reader's moved parse, of the removed file,
         reached the compare with another inode and WON whatever its length, and after the next fault the pane showed the removed file's one clear
-        where the base showed two. Ordered by the pre-read stat's write time, the removed file's older stat loses (count 2)."""
+        where the base showed two. The newer stat is the standing set's and its size is the larger, so nothing proves a rewrite and the length
+        order keeps the recreated file's two clears (count 2)."""
         log = jd.STATE / "cleared.jsonl"
         one = json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"
         two = one + json.dumps({"id": B + ":g1", "t": 2, "op": "clear"}) + "\n"
@@ -2270,8 +2273,8 @@ class ActsUnderAFailedWrite(_World):
         """The round-one verifier of PR 2144: on ext4 an unlink-and-create reuses the inode two thousand times of two thousand and an in-place
         truncating rewrite keeps it, so a rule that compared inodes saw the same file, fell back to the length order, and the reviewed defect
         (the removed content's set served after the next fault) recurred for those shapes; the write time moved in every measured case. The log
-        truncated and rewritten in place with one clear (the same inode, a newer write time), its first read racing a fault: the shorter parse
-        wins (count 1; the length order alone, and a rule by inode: 2)."""
+        truncated and rewritten in place with one clear (the same inode; a newer stat with a smaller size, which proves the rewrite), its first
+        read racing a fault: the shorter parse wins (count 1; the length order alone, and a rule by inode: 2)."""
         log = jd.STATE / "cleared.jsonl"
         one = json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"
         two = one + json.dumps({"id": B + ":g1", "t": 2, "op": "clear"}) + "\n"
@@ -2300,6 +2303,122 @@ class ActsUnderAFailedWrite(_World):
         with contextlib.redirect_stderr(io.StringIO()):
             f = km.build_feed(NOW, self.live)
         self.assertEqual(f["dismissedCount"], 1, "after the fault the pane shows the file's own clear (before: 2)")
+        log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
+
+    def test_the_read_with_the_older_pre_read_stat_holding_the_newer_bytes_wins_by_length_in_an_append_race(self):
+        """The round-two verifier of PR 2144: a pre-read stat is only a LOWER bound on the bytes a read returns, so within one append-only file
+        the read with the older stat can hold the newer bytes, and a rule that ordered by write time kept two clears for three. Executed as
+        the verifier did: X takes its pre-read stat on one clear; a clear is appended; Y takes its stat, parses two clears, is moved and lands
+        them; another clear lands under Y's parse; X's read returns three clears and is moved. X reaches the compare with the older stat: the
+        sizes grew, so nothing proves a rewrite and the length order keeps X's three (count 3; head two's time order: 2). Write times pinned."""
+        log = jd.STATE / "cleared.jsonl"
+        one = json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"
+        two = one + json.dumps({"id": B + ":g1", "t": 2, "op": "clear"}) + "\n"
+        three = two + json.dumps({"id": P + ":g1", "t": 3, "op": "clear"}) + "\n"
+        bad = b"\xff\xfe\x00 not text\n"
+        reset = lambda: (km._CLEARED_MEMO.__setitem__("slot", None), km._CLEARED_MEMO.__setitem__("landed", None), km._cleared_read_fault.__setitem__(0, ""), km._state_fault_seen.clear(), km._SYNC_NOTICES.clear())
+        log.write_text(one); reset()
+        t0 = os.stat(log).st_mtime_ns
+        real_read = Path.read_text
+        state = {"x": True, "y": True}
+
+        def x_read(q, *a, **kw):
+            if q == log and state["x"]:
+                state["x"] = False
+                log.write_text(two); os.utime(log, ns=(t0 + 10 ** 9, t0 + 10 ** 9))            # a clear appended after X's stat, a second later
+
+                def y_read(q2, *a2, **kw2):
+                    data = real_read(q2, *a2, **kw2)                                            # Y's bytes: two clears
+                    if q2 == log and state["y"]:
+                        state["y"] = False
+                        log.write_text(three); os.utime(log, ns=(t0 + 2 * 10 ** 9, t0 + 2 * 10 ** 9))   # another clear under Y's parse: Y is moved
+                    return data
+                with mock.patch.object(Path, "read_text", y_read):
+                    self.assertEqual(len(km._cleared_ids()), 2, "premise: Y parsed two clears")
+                self.assertEqual(len(km._CLEARED_MEMO["landed"][1]), 2, "premise: Y's moved write landed the two under the newer stat")
+                data = real_read(q, *a, **kw)                                                   # X's bytes: the three, read after both appends
+                log.write_bytes(bad)                                                            # and X is moved too
+                return data
+            return real_read(q, *a, **kw)
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(Path, "read_text", x_read):
+            got = km._cleared_ids()
+        self.assertEqual(len(got), 3, "premise: X parsed three clears under the older stat")
+        self.assertEqual(len(km._CLEARED_MEMO["landed"][1]), 3, "the longer parse stands though its stat is the older (a rule by write time kept Y's two)")
+        with contextlib.redirect_stderr(io.StringIO()):
+            f = km.build_feed(NOW, self.live)
+        self.assertEqual(f["dismissedCount"], 3, "after the fault the pane shows all three (head two: 2)")
+        log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
+
+    def test_the_shorter_parse_under_the_newer_pre_read_stat_loses_to_the_longer_landed_set_in_the_reverse_order(self):
+        """The reverse order of the leg above (the round-two verifier of PR 2144): X's three clears landed first under the OLDER stat, and Y's
+        shorter parse (two clears, read before the third landed) arrives with the NEWER stat. Any rule where a newer stat wins would let it
+        overwrite the longer set; the sizes grew, so nothing proves a rewrite and the length order keeps the three (count 3). X's landing
+        stands in the memo as its write left it: the older stat's key and the three clears; Y's stat and the third append are pinned."""
+        log = jd.STATE / "cleared.jsonl"
+        one = json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"
+        two = one + json.dumps({"id": B + ":g1", "t": 2, "op": "clear"}) + "\n"
+        three = two + json.dumps({"id": P + ":g1", "t": 3, "op": "clear"}) + "\n"
+        bad = b"\xff\xfe\x00 not text\n"
+        log.write_text(one); km._CLEARED_MEMO["slot"] = None; km._cleared_read_fault[0] = ""; km._state_fault_seen.clear(); del km._SYNC_NOTICES[:]
+        t0 = os.stat(log).st_mtime_ns
+        km._CLEARED_MEMO["landed"] = ((str(log),) + km._stat_key(log), {A + ":g1": 1, B + ":g1": 2, P + ":g1": 3}, len(three))   # X's landing: the older stat's key, three clears
+        log.write_text(two); os.utime(log, ns=(t0 + 10 ** 9, t0 + 10 ** 9))                    # the file as Y finds it: two clears, a second later
+        real_read, once = Path.read_text, [True]
+
+        def y_read(q, *a, **kw):
+            data = real_read(q, *a, **kw)                                                       # Y's bytes: two clears
+            if q == log and once[0]:
+                once[0] = False
+                log.write_text(three); os.utime(log, ns=(t0 + 2 * 10 ** 9, t0 + 2 * 10 ** 9))   # the third clear lands under Y's parse: Y is moved
+            return data
+        with mock.patch.object(Path, "read_text", y_read):
+            got = km._cleared_ids()
+        self.assertEqual(len(got), 2, "premise: Y parsed two clears under the newer stat")
+        self.assertEqual(len(km._CLEARED_MEMO["landed"][1]), 3, "the longer landed set stands (a rule where a newer stat wins: Y's two)")
+        with contextlib.redirect_stderr(io.StringIO()):
+            log.write_bytes(bad); km._CLEARED_MEMO["slot"] = None
+            f = km.build_feed(NOW, self.live)
+        self.assertEqual(f["dismissedCount"], 3, "after the fault the pane shows all three")
+        log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
+
+    def test_at_an_equal_pre_read_stat_the_shorter_parse_arriving_second_stands_down(self):
+        """Round two's low on PR 2144: two reads with the SAME pre-read stat, the shorter parse arriving second. X and Y both stat one clear; a
+        clear is appended under Y's parse, so Y holds two, is moved and lands them; X's bytes, read before the append, hold one, and X is moved
+        too. Equal stats prove nothing, so the length order decides: X stands down (count 2)."""
+        log = jd.STATE / "cleared.jsonl"
+        one = json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"
+        two = one + json.dumps({"id": B + ":g1", "t": 2, "op": "clear"}) + "\n"
+        bad = b"\xff\xfe\x00 not text\n"
+        reset = lambda: (km._CLEARED_MEMO.__setitem__("slot", None), km._CLEARED_MEMO.__setitem__("landed", None), km._cleared_read_fault.__setitem__(0, ""), km._state_fault_seen.clear(), km._SYNC_NOTICES.clear())
+        log.write_text(one); reset()
+        t0 = os.stat(log).st_mtime_ns
+        real_read = Path.read_text
+        state = {"x": True, "y": True}
+
+        def x_read(q, *a, **kw):
+            if q == log and state["x"]:
+                state["x"] = False
+                data = real_read(q, *a, **kw)                                                   # X's bytes: one clear, before any append
+
+                def y_read(q2, *a2, **kw2):
+                    if q2 == log and state["y"]:
+                        state["y"] = False
+                        log.write_text(two); os.utime(log, ns=(t0 + 10 ** 9, t0 + 10 ** 9))    # appended after Y's stat, before Y's bytes: Y holds two and is moved
+                    return real_read(q2, *a2, **kw2)
+                with mock.patch.object(Path, "read_text", y_read):
+                    self.assertEqual(len(km._cleared_ids()), 2, "premise: Y parsed two clears under the same pre-read stat as X")
+                self.assertEqual(len(km._CLEARED_MEMO["landed"][1]), 2, "premise: Y's moved write landed the two")
+                self.assertEqual(km._CLEARED_MEMO["landed"][0][1], t0, "premise: Y's pre-read stat is X's, the one clear's write time")
+                return data
+            return real_read(q, *a, **kw)
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(Path, "read_text", x_read):
+            got = km._cleared_ids()
+        self.assertEqual(len(got), 1, "premise: X parsed the one clear")
+        self.assertEqual(len(km._CLEARED_MEMO["landed"][1]), 2, "the shorter parse arriving second at an equal stat stands down")
+        with contextlib.redirect_stderr(io.StringIO()):
+            log.write_bytes(bad); km._CLEARED_MEMO["slot"] = None
+            f = km.build_feed(NOW, self.live)
+        self.assertEqual(f["dismissedCount"], 2, "after the fault the pane shows the two")
         log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
 
     def test_a_read_with_no_pre_read_stat_under_a_standing_fault_ends_no_episode_and_records_the_landed_set(self):
