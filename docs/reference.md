@@ -5498,6 +5498,34 @@ box yourself, and plain text the kernel's own send route carries, is yours and
 still goes through; that is the human channel, by design, not a hole in the
 gate.
 
+## A master default for mail off
+
+`session-flags.json` can carry a master isolation default under the reserved
+key `*`: with `{"*": {"postalServiceOff": true}}` every session's mail is off
+unless the session opts back in. The kernel, the postal bus and the SessionStart
+pointer resolve it the same way: a comment thread's own default first, then the
+session's own mailbox toggle (either value; a `null` counts as unset), then the
+master. Turning a session's mail off always stores `true`, so a later change to
+the master cannot open it; turning it on stores an explicit `false` under an
+isolating master and removes the override otherwise. The master itself is set through the same flag route
+with `*` as the id (`POST /flag` with `{"id": "*", "flag": "postalServiceOff",
+"value": true}`); off removes the key. The reserved id means something only for
+`postalServiceOff`; the notify master is the bell popover or `POST /notify-all`.
+
+A session whose own toggle turns its mail off is left out of `list_agents`,
+working note included. A session only the master isolates is still listed, with
+its branch and working note, marked `(mail off by the master default: not
+reachable)`, so a peer still sees who is working where before editing a shared
+repo; sends to it are refused like any isolated session's. Its mail-off reason is
+`master` rather than `isolation`: every refusal and held-mail line names the
+master and says the lane's mailbox toggle opts the session back in. In the
+Sessions pane these sessions carry no per-row "mail off" chip; one note above the
+list counts them, and the tab hover's Mail row names the master. Either way the
+session's SessionStart pointer is withheld.
+The postal MCP tools and their instructions are still served, to Claude and
+Codex sessions alike. A script's `romp mail send --from <label>` is not
+isolated by the master; the recipient's own mail state still applies.
+
 ## The tags a new session inherits
 
 A session started from another one joins its tags. Forking a session, breaking

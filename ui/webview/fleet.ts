@@ -480,6 +480,8 @@ function render() {
   // swirl, not "no tasks".
   if (!loaded) { emptyShown = false; return; }
   if (pendingHosts.length) list.appendChild(hostLoadStrip());   // leads the list: what is still coming
+  const masterNote = masterMailNote(sessions);
+  if (masterNote) list.appendChild(masterNote);
   const sd = showDone();
   const grouped = isGrouped();
   curFoldMode = foldMode();   // snapshot the sticky Collapse/Expand mode once for this render
@@ -627,8 +629,8 @@ function render() {
       nameInto(nm, s.name, s.sid, curSearch);   // highlight a name match (remote "host:" stays quiet metadata)
       if (s.color?.bg) nm.style.color = s.color.bg;
       head.appendChild(nm);
-      if (s.postalServiceOff) {
-        // T356: a session whose mail is off says so on its row, quietly
+      if (s.postalServiceOff && s.mailOffWhy !== "master") {
+        // T356: a session whose mail is off says so on its row, quietly; the master's sessions share one pane note
         const mo = el("span", "fl-mail-off");
         mo.textContent = (s.mailOffWhy === "unreadable" || s.mailOffWhy === "flags") ? "mail held" : "mail off";
         mo.title = s.mailOffWhy === "unreadable" ? "this session's record cannot be read: mail waits until it is repaired"
@@ -711,6 +713,18 @@ function render() {
     focusedHead = next;
     next?.focus({ preventScroll: true });
   }
+}
+
+// One note above the list for the sessions the master default isolates, instead of a chip on every row: under
+// an isolating master most rows would carry the same chip, and the rows a session opted in stand out by lacking it.
+export const MASTER_MAIL_TIP = "its mail is off by the master default (the * key in session-flags.json): the lane's mailbox toggle opts it back in, or clear the master to open every session";
+function masterMailNote(all: { mailOffWhy?: string }[]): HTMLElement | null {
+  const n = all.filter((s) => s.mailOffWhy === "master").length;
+  if (!n) return null;
+  const note = el("div", "fl-master-mail");
+  note.textContent = "Mail off by the master default for " + n + (n === 1 ? " session" : " sessions");
+  note.title = MASTER_MAIL_TIP;
+  return note;
 }
 
 // The Fleet controls live in a DOCKED bottom bar — its own dedicated rectangle in normal flow (#fleet-foot),

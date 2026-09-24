@@ -209,7 +209,7 @@ class OtherTools(unittest.TestCase):
         with bus({"body": {"agents": []}}):
             ok, text = call("list_agents", {})
         self.assertTrue(ok)
-        self.assertIn("no live", text)
+        self.assertIn("own mailbox is off is not listed", text)
 
     def test_set_working_writes_the_kernels_own_store_without_the_bus(self):
         with bus() as log:
@@ -335,6 +335,31 @@ class ParityWithTheBus(unittest.TestCase):
         self.assertEqual(cb.POSTAL_INSTRUCTIONS.strip().split("\n\n"), theirs)
         self.assertEqual(len(theirs) + 1, len(pm.MCP_INSTRUCTIONS.strip().split("\n\n")),
                          "exactly one paragraph is left out, the Claude Code one")
+
+    def _set_working_both(self, why):
+        saved = (pm._mail_off_why, km._mail_off_why_k)
+        pm._mail_off_why, km._mail_off_why_k = (lambda sid: why), (lambda sid: why)
+        try:
+            theirs = pm._mcp_call("set_working", {"text": "editing the exporter"})
+            with bus():
+                mine = call("set_working", {"text": "editing the exporter"})
+        finally:
+            pm._mail_off_why, km._mail_off_why_k = saved
+        self.assertEqual(mine, (not theirs[1], theirs[0]))
+        return mine[1]
+
+    def test_a_mail_off_callers_note_is_saved_but_not_claimed_seen_by_both_copies(self):
+        self.assertIn("no peer sees it", self._set_working_both("isolation"))
+        self.assertEqual(km._codex_agents_text([], SID), pm.format_agents([], "api", SID))
+
+    def test_a_master_isolated_callers_note_is_published_by_both_copies(self):
+        self.assertIn("Published", self._set_working_both("master"))
+
+    def test_both_listings_mark_a_master_isolated_row_alike(self):
+        rows = [{"id": SID, "name": "api"}, {"id": "b" * 36, "name": "peer", "mailOff": "master", "branch": "dev"}]
+        self.assertEqual(km._codex_agents_text(rows, SID), pm.format_agents(rows, "api", SID))
+        self.assertIn("peer  (mail off by the master default: not reachable) · bbbbbbbb", pm.format_agents(rows, "api", SID))
+        self.assertNotIn("not reachable", pm.format_agents(rows, "api", SID).splitlines()[0])
 
     def test_the_send_sentences_and_wire_payload_match_the_bus_tool(self):
         for args, resp in ((dict(to="web", body="hi", kind="coordinate"), {"ok": True}),

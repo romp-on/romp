@@ -35,13 +35,14 @@ class ResolverBase(unittest.TestCase):
 
     def setUp(self):
         self._saved = {k: getattr(pm, k) for k in
-                       ("all_agents", "self_host", "peers_on", "_postal_off")}
+                       ("all_agents", "self_host", "peers_on", "_postal_off", "_mail_off_why")}
         self._agents = []
         self._isolated = set()
         pm.all_agents = lambda threads=False: list(self._agents)
         pm.self_host = lambda: "TESTHOST"
         pm.peers_on = lambda: True
         pm._postal_off = lambda sid: sid in self._isolated
+        pm._mail_off_why = lambda sid: "isolation" if sid in self._isolated else ""   # a hand toggle, hidden from the listing
         pm.PEER_STATE.clear()
 
     def tearDown(self):

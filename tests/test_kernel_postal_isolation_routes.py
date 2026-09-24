@@ -22,6 +22,7 @@ load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 km = load_source("romp_kernel_isolation", os.path.join(BIN, "romp-kernel"))
+pm = load_source("romp_postal_isolation_twin", os.path.join(BIN, "romp-postal-service"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 
@@ -61,6 +62,132 @@ class PostalIsolated(unittest.TestCase):
             self.assertTrue(km._postal_isolated(SID), key)
         self._flags({})
         self.assertFalse(km._postal_isolated(SID))
+
+    def _raw_flags(self, flags):
+        (km.jd.STATE / "session-flags.json").write_text(json.dumps(flags))
+
+    def test_the_master_key_isolates_a_session_with_no_override(self):
+        # The master default (the user 2026-08-27): sessions a person opened separately are separate work,
+        # so cross-session mail is off unless a session opts in. "*" can never collide with a sid.
+        self._raw_flags({km.POSTAL_ALL_KEY: {"postalServiceOff": True}})
+        self.assertTrue(km._postal_isolated(SID))
+        self.assertTrue(km._postal_isolated("99999999-8888-7777-6666-555555555555"))
+
+    def test_a_session_opt_IN_beats_the_master(self):
+        # most-specific-wins, the notify bell's rule — an explicit False is a real answer, not an absence
+        self._raw_flags({km.POSTAL_ALL_KEY: {"postalServiceOff": True}, SID: {"postalServiceOff": False}})
+        self.assertFalse(km._postal_isolated(SID))
+
+    def test_a_session_override_isolates_with_the_master_absent(self):
+        self._raw_flags({SID: {"postalServiceOff": True}})
+        self.assertTrue(km._postal_isolated(SID))
+
+    def test_no_flags_at_all_leaves_the_postal_service_on(self):
+        self._raw_flags({})
+        self.assertFalse(km._postal_isolated(SID), "romp's shipped default is unchanged — mail works")
+
+    def _stored(self):
+        return json.loads((km.jd.STATE / "session-flags.json").read_text())
+
+    def test_the_setter_opts_a_session_out_of_a_master_isolation(self):
+        # the lane toggle's own write path: False under a master True must STICK as an explicit False
+        self._raw_flags({km.POSTAL_ALL_KEY: {"postalServiceOff": True}})
+        km._set_session_flag(SID, "postalServiceOff", False)
+        self.assertEqual(self._stored()[SID], {"postalServiceOff": False})
+        self.assertFalse(km._postal_isolated(SID))
+        self.assertFalse(km._painted_flag_value(SID, "postalServiceOff"), "the toggle repaints as mail on")
+
+    def test_isolation_is_pinned_so_a_later_master_flip_cannot_open_it(self):
+        self._raw_flags({km.POSTAL_ALL_KEY: {"postalServiceOff": True}, SID: {"postalServiceOff": False}})
+        km._set_session_flag(SID, "postalServiceOff", True)
+        self.assertEqual(self._stored()[SID], {"postalServiceOff": True})
+        km._set_session_flag(km.POSTAL_ALL_KEY, "postalServiceOff", False)
+        self.assertTrue(km._postal_isolated(SID), "the session's last choice was isolate")
+
+    def test_an_opt_in_with_no_isolating_master_stores_nothing(self):
+        self._raw_flags({SID: {"postalServiceOff": True}})
+        km._set_session_flag(SID, "postalServiceOff", False)
+        self.assertNotIn(SID, self._stored())
+        self.assertFalse(km._postal_isolated(SID))
+
+    def test_the_setter_clears_a_legacy_key_so_it_cannot_outvote_the_choice(self):
+        self._raw_flags({SID: {"postalOff": True}})
+        km._set_session_flag(SID, "postalServiceOff", False)
+        self.assertNotIn(SID, self._stored())
+        self.assertFalse(km._postal_isolated(SID))
+
+    def test_the_master_itself_is_set_through_the_same_setter(self):
+        km._set_session_flag(km.POSTAL_ALL_KEY, "postalServiceOff", True)
+        self.assertTrue(km._postal_isolated(SID))
+        km._set_session_flag(km.POSTAL_ALL_KEY, "postalServiceOff", False)
+        self.assertNotIn(km.POSTAL_ALL_KEY, self._stored(), "off is the absent master")
+        self.assertFalse(km._postal_isolated(SID))
+
+    def test_an_opt_in_under_a_non_isolating_master_entry_stores_nothing(self):
+        self._raw_flags({km.POSTAL_ALL_KEY: {"notify": True}})
+        km._set_session_flag(SID, "postalServiceOff", False)
+        self.assertNotIn(SID, self._stored())
+        km._set_session_flag(km.POSTAL_ALL_KEY, "postalServiceOff", True)
+        self.assertTrue(km._postal_isolated(SID))
+
+    def test_the_flag_route_sets_and_clears_the_master_and_takes_an_opt_out(self):
+        route = lambda sid, value: km._state_write_route("/flag", {"id": sid, "flag": "postalServiceOff", "value": value})
+        self.assertEqual(route(km.POSTAL_ALL_KEY, True)[0], 200)
+        self.assertTrue(km._postal_isolated(SID))
+        route(SID, False)
+        self.assertEqual(self._stored()[SID], {"postalServiceOff": False})
+        self.assertFalse(km._postal_isolated(SID))
+        route(SID, True); route(km.POSTAL_ALL_KEY, False)
+        self.assertNotIn(km.POSTAL_ALL_KEY, self._stored())
+
+    def test_the_socket_op_sets_and_clears_the_master_and_takes_an_opt_out(self):
+        client = {"app": "timeline", "wid": "w1", "alive": True, "send": lambda raw: None}
+        op = lambda sid, value: km.Handler._dispatch_ws(
+            None, {"type": "setSessionFlag", "id": sid, "flag": "postalServiceOff", "value": value}, client)
+        op(km.POSTAL_ALL_KEY, True)
+        self.assertTrue(km._postal_isolated(SID))
+        op(SID, False)
+        self.assertEqual(self._stored()[SID], {"postalServiceOff": False})
+        op(SID, True); op(km.POSTAL_ALL_KEY, False)
+        self.assertNotIn(km.POSTAL_ALL_KEY, self._stored())
+
+
+class KernelAndBusAgree(unittest.TestCase):
+    """The kernel's and the bus's isolation readers, fed the same flags file, give the same answer."""
+    OTHER = "99999999-8888-7777-6666-555555555555"
+    SHAPES = [                                                            # (flags, reason for SID, for OTHER)
+        ({}, "", ""),
+        ({"*": {"postalServiceOff": True}}, "master", "master"),
+        ({"*": {"postalServiceOff": False}}, "", ""),
+        ({"*": {"notify": True}}, "", ""),
+        ({"*": {"postalServiceOff": True}, SID: {"postalServiceOff": False}}, "", "master"),
+        ({"*": {"postalServiceOff": True}, SID: {"postalServiceOff": None}}, "master", "master"),
+        ({"*": {"postalServiceOff": True}, SID: {"postalServiceOff": True}}, "isolation", "master"),
+        ({SID: {"postalServiceOff": None, "postalOff": True}}, "isolation", ""),
+        ({SID: {"postalServiceOff": None}}, "", ""),
+        ({SID: {"postalOff": True}}, "isolation", ""),
+        ({SID: {"postalServiceOff": False, "postalOff": True}}, "", ""),
+        ({SID: {"postalServiceOff": True, "postalOff": False}}, "isolation", ""),
+    ]
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.saved = km.jd.STATE, pm.SESSION_FLAGS
+        km.jd.STATE = Path(self.td.name)
+        pm.SESSION_FLAGS = km.jd.STATE / "session-flags.json"
+
+    def tearDown(self):
+        km.jd.STATE, pm.SESSION_FLAGS = self.saved
+        self.td.cleanup()
+
+    def test_every_shape_resolves_as_expected_on_both_sides(self):
+        for shape, *expected in self.SHAPES:
+            pm.SESSION_FLAGS.write_text(json.dumps(shape))
+            pm._FLAGS_LAST[0] = None
+            for sid, want in zip((SID, self.OTHER), expected):
+                with self.subTest(shape=shape, sid=sid):
+                    self.assertEqual((km._mail_off_why_k(sid), pm._mail_off_why(sid)), (want, want))
+                    self.assertEqual((km._postal_isolated(sid), pm._postal_off(sid)), (bool(want), bool(want)))
 
 
 class RouteGates(unittest.TestCase):

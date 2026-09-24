@@ -4135,6 +4135,7 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 /* the thread's mail state (T356): one quiet line under the composer */
 .cmt-note.cmt-mail { opacity: 0.6; font-size: 0.86em; }
 .fl-mail-off { flex: 0 0 auto; font-size: 0.72em; opacity: 0.6; padding: 0 5px; border: 1px solid currentColor; border-radius: 8px; margin-left: 4px; }
+.fl-master-mail { font-size: 0.82em; opacity: 0.7; padding: 4px 10px; }
 /* a thread that became its own session (the user 2026-09-10): nothing in its view grows. The kernel
    ships it with no messages or events, so the .sized quote's flex had nothing beside it to share the
    box's fixed height with — a one-line quote ran hundreds of pixels tall over a void. The quote keeps

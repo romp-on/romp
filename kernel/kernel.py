@@ -4886,8 +4886,9 @@ def _codex_postal_call(tool, sid, name, args):
                                "Pass text='' if you mean to clear your published note.")
             text = str(args.get("text") or "")
             _set_working_note(sid, text)
-            return True, ("Cleared your 'working on' note." if not text.strip()
-                          else "Published — others see: working on '%s'." % text)
+            if not text.strip():
+                return True, "Cleared your 'working on' note."
+            return True, (_CODEX_WORKING_UNSEEN % text if _mail_off_why_k(sid) not in ("", "master") else "Published — others see: working on '%s'." % text)
         if tool == "check_sent":
             status, body, written = _codex_postal_http("GET", "/sent?id=%s" % quote(sid), tool=tool, sid=sid)
             if status != 200:
@@ -4975,12 +4976,18 @@ def _codex_inbox_text(msgs, me_id):
     return "\n".join(out)
 
 
+_CODEX_NO_AGENTS_LISTED = "(no reachable romp sessions; a session whose own mailbox is off is not listed)"   # the bus's NO_AGENTS_LISTED
+_CODEX_MASTER_OFF_TAG = "  (mail off by the master default: not reachable)"   # the bus's MASTER_OFF_TAG
+_CODEX_WORKING_UNSEEN = ("Saved, but your own mail is off, so no peer sees it: working on '%s'. It shows "
+                        "once your mail is back on.")   # the bus's WORKING_UNSEEN
+
+
 def _codex_agents_text(agents, me_id):
     """A Codex session's list_agents result: one line per live session, yours marked by id, a comment thread named
     by its parent, a remote row by host, the short stable id, the branch, and the working-note with the stale flag
     when its session is not working now (a claim from a finished turn is read, never asked about)."""
     if not agents:
-        return "(no live romp sessions)"
+        return _CODEX_NO_AGENTS_LISTED
     lines = []
     for a in agents:
         rid = str(a.get("id") or "")
@@ -4999,7 +5006,8 @@ def _codex_agents_text(agents, me_id):
             st = a.get("state", "")
             stale = "  (idle now — claim may be stale)" if st and st != "working" else ""
             wk = "  — %s%s" % (a["working"], stale)
-        lines.append("  %s%s%s%s%s" % (disp, tag, (" · %s" % short) if short else "", br, wk))
+        off = _CODEX_MASTER_OFF_TAG if a.get("mailOff") == "master" else ""
+        lines.append("  %s%s%s%s%s%s" % (disp, tag, off, (" · %s" % short) if short else "", br, wk))
     return "\n".join(lines)
 
 
@@ -8859,12 +8867,26 @@ def _session_flag_raw(sid, flag):
     return None if v is None else bool(v)
 
 
+def _write_postal_override(flags, value, master):
+    """Store a session's isolation choice as an override on the POSTAL_ALL_KEY master, in place.
+    Isolation is always pinned, so a later master flip cannot open the session; an opt-in is stored
+    only under an isolating master. The legacy postalOff key goes either way."""
+    flags.pop("postalOff", None)
+    master_isolates = isinstance(master, dict) and bool(master.get("postalServiceOff"))
+    if value or master_isolates:
+        flags["postalServiceOff"] = bool(value)
+    else:
+        flags.pop("postalServiceOff", None)
+
+
 def _set_session_flag(sid, flag, value):
     with _flags_lock:                                # read and publish as ONE step (the store's rule, above)
         cur = dict(_session_flags_proved())          # PROVED: a read fault refuses (raises) rather than
         #                                              overwriting every session's flags with a fabricated {}
         f = dict(cur.get(sid)) if isinstance(cur.get(sid), dict) else {}
-        if value:
+        if flag == "postalServiceOff" and sid != POSTAL_ALL_KEY:
+            _write_postal_override(f, value, cur.get(POSTAL_ALL_KEY))
+        elif value:
             f[flag] = True
         else:
             f.pop(flag, None)
@@ -8925,6 +8947,10 @@ def _set_session_flag(sid, flag, value):
 # whose card left the feed are pruned on write (the card is gone; a fresh card is a fresh id), so
 # the file tracks the live feed instead of growing forever.
 NOTIFY_ALL_KEY = "*"
+# The same reserved-key trick in session-flags.json: "*" is not a session id (sids are uuids), so it
+# carries MASTER defaults that per-session entries override. Postal isolation reads it — see
+# _mail_off_why_k. Only ever accessed by an explicit .get, never by iterating the file as sessions.
+POSTAL_ALL_KEY = "*"
 # "*turns" is the SECOND reserved key (2026-09-05): the kernel-wide "also when a turn finishes" switch
 # behind the bell popover. It lives in this file rather than a sibling on purpose — it is read on the
 # same fire path as the master (both gate one push), so one cached read answers both; it rides the
@@ -30352,19 +30378,39 @@ def _reg_unreadable(sid):
     return _thread_reg_read(str(sid))[0] == "unreadable"
 
 
+def _postal_isolation_flag(sid):
+    """Postal isolation for `sid`, most-specific-wins: its own key decides either way, else the MASTER default
+    under POSTAL_ALL_KEY. Isolation is the sane default for many setups, so the master carries it and a session
+    opts back IN with an explicit False. The bus's _mail_off_why resolves it identically over the same file."""
+    own = _postal_own_flag(sid)
+    return own if own is not None else _session_flag(POSTAL_ALL_KEY, "postalServiceOff")
+
+
+def _postal_own_flag(sid):
+    """The session's own isolation key (the legacy one included), or None when it has none and the master decides."""
+    for flag in ("postalServiceOff", "postalOff"):
+        own = _session_flag_raw(sid, flag)
+        if own is not None:
+            return own
+    return None
+
+
 def _mail_off_why_k(sid):
     """Why the session can neither send nor receive mail, the kernel's twin of the bus's _mail_off_why over the same
     two files: "unreadable" (its record cannot be read: the bus holds everything), "thread" (a comment thread not yet
     broken out, _thread_mail_off), "isolation" (the mailbox flag the timeline lane's icon writes, legacy key included),
-    or "" (mail on). Rides the rows as mailOffWhy so the tab hover and the Sessions pane can say which."""
+    "master" (no key of its own, and the master default isolates), or "" (mail on). Rides the rows as mailOffWhy so the tab hover and the Sessions pane can
+    say which."""
     if _reg_unreadable(sid):
         return "unreadable"
     if _thread_mail_off(sid):
         return "thread"
-    iso = _session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff")   # reads the flags (noting a fault)
+    iso = _postal_isolation_flag(sid)                      # reads the flags (noting a fault)
     if _flags_unknown_cold():
         return "flags"                     # the flags cannot be read and none are known: closed under the door's own word
-    return "isolation" if iso else ""
+    if not iso:
+        return ""
+    return "isolation" if _postal_own_flag(sid) is not None else "master"
 
 
 def _flags_unknown_cold():
@@ -30383,7 +30429,7 @@ def _mail_off_fields(sid):
     """The two row fields every listing carries for a session's mailbox, from ONE derivation of the reason (the review of
     T356's follow-ups: the chat row, the thread rows and the Sessions pane ledgers each derived it twice, _postal_isolated
     then _mail_off_why_k, a whole sweep each): postalServiceOff (EFFECTIVE: a comment thread reads off until broken out)
-    and mailOffWhy (thread, isolation, an unreadable record, or "")."""
+    and mailOffWhy (thread, isolation, master, an unreadable record, flags, or "")."""
     why = _mail_off_why_k(sid)
     return {"postalServiceOff": bool(why), "mailOffWhy": why}
 

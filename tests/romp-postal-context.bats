@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 
 # romp-postal-context.sh is a SessionStart hook: in a romp session (one launched with
-# ROMP_SID in its environment) it emits a COMPACT pointer to the postal capability as
-# additionalContext.
+# ROMP_SID in its environment) whose mail is on, it emits a COMPACT pointer to the postal
+# capability as additionalContext.
 # The full norms live in the romp-postal skill (loaded on demand) + the postal MCP
 # tools' own descriptions, so this pointer stays small and re-cheap every turn. It
 # must be silent outside a romp session, and must never fail the turn.
@@ -191,4 +191,120 @@ run_hook() { run bash -c 'printf "%s" "$1" | "$2"' _ "$1" "$HOOK"; }
     ROMP_SID="$SID" run_hook "$(payload "$FSID" startup)"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"additionalContext"'* ]]
+}
+
+# session-flags.json under the state root, written verbatim ($1 the JSON object)
+write_flags() { mkdir -p "$XDG_STATE_HOME/romp"; printf '%s' "$1" > "$XDG_STATE_HOME/romp/session-flags.json"; }
+
+# The mail-off gate: a session whose mail is off is told nothing about peers. Resolved in the bus's
+# _mail_off_why order: a comment thread's default, the session's own isolation key (legacy included),
+# then the "*" master.
+@test "a session isolated by its own flag gets nothing" {
+    write_reg "$FSID"; write_flags "{\"$SID\": {\"postalServiceOff\": true}}"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the master default isolates a session with no key of its own" {
+    write_reg "$FSID"; write_flags '{"*": {"postalServiceOff": true}}'
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a session's explicit opt-in beats a master isolation" {
+    write_reg "$FSID"; write_flags "{\"*\": {\"postalServiceOff\": true}, \"$SID\": {\"postalServiceOff\": false}}"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"additionalContext"'* ]]
+}
+
+@test "the legacy postalOff key still isolates" {
+    write_reg "$FSID"; write_flags "{\"$SID\": {\"postalOff\": true}}"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a comment thread is told nothing until its mail is turned on" {
+    mkdir -p "$XDG_STATE_HOME/romp/sdk"
+    printf '{"sid": "%s", "lastSid": "%s", "threadOf": "%s"}' "$SID" "$FSID" "$OTHER" > "$XDG_STATE_HOME/romp/sdk/$SID.json"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    write_flags "{\"$SID\": {\"threadMail\": true}}"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"additionalContext"'* ]]
+}
+
+@test "a flags file that cannot be read is mail off, as the bus holds mail for it" {
+    write_reg "$FSID"; write_flags 'not json'
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a flags file that is valid JSON but not an object is mail off" {
+    write_reg "$FSID"; write_flags '["not", "an", "object"]'
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a missing flags file the kernel quarantined is mail off, as the bus reads it" {
+    write_reg "$FSID"; mkdir -p "$XDG_STATE_HOME/romp"
+    printf 'torn' > "$XDG_STATE_HOME/romp/session-flags.json.corrupt-20260101T000000Z"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a null isolation key is unset, so the master still isolates" {
+    write_reg "$FSID"; write_flags "{\"*\": {\"postalServiceOff\": true}, \"$SID\": {\"postalServiceOff\": null}}"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a thread's threadMail must be the literal true: 1 keeps it silent" {
+    mkdir -p "$XDG_STATE_HOME/romp/sdk"
+    printf '{"sid": "%s", "lastSid": "%s", "threadOf": "%s"}' "$SID" "$FSID" "$OTHER" > "$XDG_STATE_HOME/romp/sdk/$SID.json"
+    write_flags "{\"$SID\": {\"threadMail\": 1}}"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a fresh spawn with an unreadable reg is mail off, not an ordinary session" {
+    mkdir -p "$XDG_STATE_HOME/romp/sdk"; printf 'not json' > "$XDG_STATE_HOME/romp/sdk/$SID.json"
+    ROMP_SID="$SID" run_hook "$(payload "$SID" startup)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "ROMP_STATE_DIR outranks XDG_STATE_HOME for the flags" {
+    mkdir -p "$TEST_DIR/override"
+    printf '{"*": {"postalServiceOff": true}}' > "$TEST_DIR/override/session-flags.json"
+    ROMP_STATE_DIR="$TEST_DIR/override" ROMP_SID="$SID" run_hook "$(payload "$SID" startup)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "with both own keys set, postalServiceOff decides" {
+    write_reg "$FSID"; write_flags "{\"$SID\": {\"postalServiceOff\": false, \"postalOff\": true}}"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [[ "$output" == *'"additionalContext"'* ]]
+    write_flags "{\"$SID\": {\"postalServiceOff\": true, \"postalOff\": false}}"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a state root that cannot be stat'd is mail off" {
+    printf 'a file, not a directory' > "$TEST_DIR/rootfile"
+    ROMP_STATE_DIR="$TEST_DIR/rootfile/romp" ROMP_SID="$SID" run_hook "$(payload "$SID" startup)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }

@@ -72,6 +72,37 @@ class PostalOff(unittest.TestCase):
         pm.SESSION_FLAGS.write_text("{not valid json")
         self.assertFalse(pm._postal_off(SID), "corrupt again: the last known flags stand (on)")
 
+    def _write_flags(self, flags):
+        pm.SESSION_FLAGS.parent.mkdir(parents=True, exist_ok=True)
+        pm.SESSION_FLAGS.write_text(json.dumps(flags))
+
+    def test_the_master_key_isolates_every_session_with_no_opinion(self):
+        # The master default (the user 2026-08-27): separate sessions a person opened are separate pieces
+        # of work, so cross-session mail is off unless a session opts in. Reserved "*" — never a uuid.
+        self._write_flags({pm.POSTAL_ALL_KEY: {"postalServiceOff": True}})
+        self.assertTrue(pm._postal_off(SID), "a session with no override follows the master")
+        self.assertTrue(pm._postal_off("22222222-3333-4444-5555-666666666666"), "…and so does any other")
+
+    def test_a_session_can_opt_IN_over_a_master_default(self):
+        # most-specific-wins, the notify bell's rule: an explicit False outranks a master True, so a
+        # genuinely collaborating group keeps its mail while everything else stays quiet
+        self._write_flags({pm.POSTAL_ALL_KEY: {"postalServiceOff": True},
+                           SID: {"postalServiceOff": False}})
+        self.assertFalse(pm._postal_off(SID))
+
+    def test_a_session_override_still_isolates_with_the_master_off(self):
+        self._write_flags({pm.POSTAL_ALL_KEY: {"postalServiceOff": False},
+                           SID: {"postalServiceOff": True}})
+        self.assertTrue(pm._postal_off(SID))
+
+    def test_both_readers_spell_the_master_key_alike(self):
+        # Spelling only; tests/test_kernel_postal_isolation_routes.py KernelAndBusAgree pins the answers.
+        self.assertEqual(pm.POSTAL_ALL_KEY, "*")
+        kernel_src = open(os.path.join(BIN, "romp-kernel"), encoding="utf-8").read()
+        self.assertIn('POSTAL_ALL_KEY = "*"', kernel_src)
+        self.assertIn('return own if own is not None else _session_flag(POSTAL_ALL_KEY, "postalServiceOff")', kernel_src,
+                      "the kernel's own reader falls back to the same master default")
+
     def test_read_box_holds_mail_while_isolated(self):
         box = pm.MAILROOT / SID / "new"
         box.mkdir(parents=True, exist_ok=True)
@@ -252,6 +283,83 @@ class ThreadOwnSendRefused(unittest.TestCase):
         self.assertNotEqual(status, 403, "a promoted session sends like any other: %r" % (body,))
 
 
+class ScriptSenderUnderTheMaster(ThreadOwnSendRefused):
+    """A script's `--from` label has no lane to opt in, so the master does not isolate it; the recipient's own
+    mail state still decides."""
+
+    def setUp(self):
+        self._saved = pm._kernel_sessions_checked
+        rows = [{"id": PARENT, "name": "web"}, {"id": SENDER, "name": "api"}]
+        pm._kernel_sessions_checked = lambda threads=False: (rows, True)
+        pm.STATE.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        super().tearDown()
+        for m in (pm.MAILROOT / PARENT / "new").glob("*"):   # the delivered note, which the thread test counts as landed
+            m.unlink()
+
+    def test_a_script_reaches_an_opted_in_session(self):
+        _flags({pm.POSTAL_ALL_KEY: {"postalServiceOff": True}, PARENT: {"postalServiceOff": False}})
+        status, body = self._send(pm.SCRIPT_SENDER_PREFIX + "cron", "cron", "web")
+        self.assertEqual(status, 200, body)
+
+    def test_a_script_to_a_master_isolated_session_gets_the_recipient_refusal(self):
+        _flags({pm.POSTAL_ALL_KEY: {"postalServiceOff": True}})
+        status, body = self._send(pm.SCRIPT_SENDER_PREFIX + "cron", "cron", "api")
+        self.assertEqual(status, 403, body)
+        self.assertNotEqual(body["error"], pm.ISOLATION_SENDER, "the refusal names the recipient, not the script")
+
+    test_the_threads_own_send_is_refused_until_broken_out = None
+
+
+class MasterIsolatedIsListedAndNamed(ThreadOwnSendRefused):
+    """A session only the master isolates is still listed, marked not reachable, so its branch and working note show
+    before a shared repo is edited; a hand-toggled one stays hidden. Every refusal names the master and the way out."""
+    MASTER = {pm.POSTAL_ALL_KEY: {"postalServiceOff": True}, SENDER: {"postalServiceOff": True}}
+
+    def setUp(self):
+        self._saved = pm._kernel_sessions_checked
+        rows = [{"id": PARENT, "name": "web"}, {"id": SENDER, "name": "api"}]
+        pm._kernel_sessions_checked = lambda threads=False: (rows, True)
+        pm.STATE.mkdir(parents=True, exist_ok=True)
+        _flags(self.MASTER)
+
+    def _agents(self):
+        import urllib.request
+        req = urllib.request.Request("http://127.0.0.1:%d/agents?me=web" % self.port,
+                                     headers={"X-Romp-Token": pm.SERVE_TOKEN})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())["agents"]
+
+    def test_the_listing_keeps_the_masters_session_marked_and_hides_the_hand_toggled_one(self):
+        agents = self._agents()
+        self.assertEqual([(a["id"], a.get("mailOff")) for a in agents], [(PARENT, "master")])
+        self.assertIn("web  (mail off by the master default: not reachable)", pm.format_agents(agents, "", ""))
+
+    def test_a_send_from_the_masters_session_names_the_master(self):
+        status, body = self._send(PARENT, "web", "api")
+        self.assertEqual((status, body["error"]), (403, pm.MASTER_SENDER))
+        self.assertIn("master default", pm.MASTER_SENDER); self.assertIn("opts it in", pm.MASTER_SENDER)
+
+    def test_a_send_to_the_masters_session_names_the_master_and_the_way_out(self):
+        _flags({pm.POSTAL_ALL_KEY: {"postalServiceOff": True}, SENDER: {"postalServiceOff": False}})
+        status, body = self._send(SENDER, "api", "web")
+        self.assertEqual(status, 403, body)
+        self.assertIn("master default", body["error"]); self.assertIn("lane's mailbox", body["error"])
+        self.assertIn("final", body["error"])
+
+    def test_held_and_bounce_lines_name_the_master(self):
+        self.assertIn("by the master default", pm._stuck_warn_text({"name": "web"}, PARENT, "hello"))
+        self.assertNotIn("master", pm._stuck_warn_text({"name": "api"}, SENDER, "hello"), "a hand toggle keeps its own line")
+        self.assertIn("master default", pm._isolated_bounce_why([{"id": PARENT, "name": "web"}], "web"))
+        self.assertNotIn("master", pm._isolated_bounce_why([{"id": SENDER, "name": "api"}], "api"))
+
+    def test_the_masters_session_publishes_its_working_note(self):
+        self.assertTrue(pm._listed("master")); self.assertFalse(pm._listed("isolation")); self.assertTrue(pm._listed(""))
+
+    test_the_threads_own_send_is_refused_until_broken_out = None
+
+
 class ThreadMailOffFollowUp(unittest.TestCase):
     """The review's lows on the thread rule: a reg that exists but cannot be read fails CLOSED; the CLI judges the
     caller's own identity before a --from label substitutes a synthetic one; a sender's stuck-mail line for a thread
@@ -354,6 +462,14 @@ class ThreadMailOffFollowUp(unittest.TestCase):
         stuck = pm._stuck_warn_text({"name": "api"}, SENDER, "hello")
         self.assertTrue(stuck.startswith("↩ STILL UNDELIVERED")); self.assertIn("resend", stuck)
 
+    def test_the_stuck_mail_line_says_held_for_an_isolated_session_by_master_or_own_key(self):
+        for flags in ({pm.POSTAL_ALL_KEY: {"postalServiceOff": True}}, {SENDER: {"postalServiceOff": True}}):
+            with self.subTest(flags=flags):
+                _flags(flags)
+                held = pm._stuck_warn_text({"name": "api"}, SENDER, "hello")
+                self.assertTrue(held.startswith("↩ HELD"), held)
+                self.assertIn("mail off", held); self.assertIn("Nothing to resend", held)
+
     def test_an_inbound_bounce_names_the_thread_refusal(self):
         _reg(THREAD, threadOf=PARENT)
         why = pm._isolated_bounce_why([{"id": THREAD, "name": "web-comment-1"}], "web-comment-1")
@@ -389,6 +505,53 @@ class CliJudgesIsolationToo(unittest.TestCase):
             self.assertEqual(pm.ISOLATION_SENDER, pm.ISOLATION_SENDER.strip()); self.assertIn("isolation:", pm.ISOLATION_SENDER)
         finally:
             pm._self_identity, pm.ensure, pm._http = saved
+
+    def test_a_master_isolated_caller_is_stopped_with_the_master_words(self):
+        _flags({pm.POSTAL_ALL_KEY: {"postalServiceOff": True}})
+        import io
+        saved = (pm._self_identity, pm.ensure, pm._http)
+        calls = []
+        try:
+            pm._self_identity = lambda: (SENDER, "api"); pm.ensure = lambda: True; pm._http = lambda *a, **k: calls.append(a) or {}
+            err = io.StringIO(); real = sys.stderr; sys.stderr = err
+            try:
+                rc = pm.cli_send(["web", "a note"])
+            finally:
+                sys.stderr = real
+            self.assertEqual((rc, calls), (1, []))
+            self.assertIn(pm.MASTER_SENDER, err.getvalue())
+        finally:
+            pm._self_identity, pm.ensure, pm._http = saved
+
+
+class ASharedNameWithAMasterIsolatedSession(unittest.TestCase):
+    """Two live sessions under one name, one reachable and one only the master isolates: list_agents shows both, so
+    a send by that name is refused as ambiguous rather than handed to the reachable one."""
+    A, B = "aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbb-1111-2222-3333-444444444444"
+
+    def setUp(self):
+        self._saved = pm._kernel_sessions_checked
+        rows = [{"id": self.A, "name": "alice"}, {"id": self.B, "name": "alice"}, {"id": SENDER, "name": "api"}]
+        pm._kernel_sessions_checked = lambda threads=False: (rows, True)
+
+    def tearDown(self):
+        pm._kernel_sessions_checked = self._saved
+        try:
+            pm.SESSION_FLAGS.unlink()
+        except OSError:
+            pass
+
+    def test_the_send_is_refused_and_names_the_unreachable_candidate(self):
+        _flags({pm.POSTAL_ALL_KEY: {"postalServiceOff": True}, self.B: {"postalServiceOff": False},
+                SENDER: {"postalServiceOff": False}})
+        res = pm.resolve_recipient("alice", SENDER)
+        self.assertEqual((res["kind"], res["status"]), ("error", 409), res)
+        self.assertIn("[aaaaaaaa] (not reachable)", res["error"]); self.assertIn("[bbbbbbbb]", res["error"])
+
+    def test_a_hand_toggled_namesake_stays_out_of_the_choice(self):
+        _flags({self.A: {"postalServiceOff": True}, SENDER: {"postalServiceOff": False}})
+        res = pm.resolve_recipient("alice", SENDER)
+        self.assertEqual((res["kind"], res["agent"]["id"]), ("direct", self.B))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
