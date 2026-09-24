@@ -94,6 +94,8 @@ def turn_texts(sess):
     return "\n".join(out)
 
 
+CYCLE_WALK_LIMIT_SECS = 10
+
 class ResumeForkStitch(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -147,6 +149,74 @@ class ResumeForkStitch(unittest.TestCase):
         rows = [{"t": T0 + 320, "resumeFork": {"from": SID, "to": F2}}]
         sess = parse(self.td.name, rows)
         self.assertIn("review the new pull request", turn_texts(sess))
+
+
+QUEUED_NOTE = {"type": "attachment", "timestamp": iso(T0 + 315), "uuid": "r-att", "parentUuid": None,
+               "attachment": {"type": "queued_command", "prompt": "a queued note"}}
+
+
+def _adapter(fork_records, extra=None, links=None):
+    """A FileAdapter over the anchor, the fork, and any `extra` {fsid: records} files."""
+    files = {SID: ANCHOR_RECORDS, F2: fork_records, **(extra or {})}
+    with tempfile.TemporaryDirectory() as td:
+        paths = {fs: Path(td) / (fs + ".jsonl") for fs in files}
+        for fs, recs in files.items():
+            write_jsonl(paths[fs], recs)
+        leaf = list(paths.values())[-1]
+        return em.FileAdapter([str(pth) for pth in paths.values()], str(leaf),
+                              resume_links=links or {F2: SID})
+
+
+class ContinuedRootStitches(unittest.TestCase):
+    """Only the root the conversation continues from is stitched; the fork's other roots stay roots."""
+
+    def test_the_continued_root_is_stitched_and_the_note_beside_it_is_not(self):
+        adapter = _adapter([QUEUED_NOTE, uline(T0 + 320, NOTICE, "f1", None),
+                            dict(aline(T0 + 330, "A sub-agent's own opening.", "sc1", None), isSidechain=True),
+                            aline(T0 + 380, "Review finished.", "f2", "f1")])
+        self.assertEqual(adapter.parent_of.get("f1"), "u2", "the root the reply chains on")
+        self.assertIsNone(adapter.parent_of.get("r-att"), "a sibling root is not stitched")
+        self.assertIsNone(adapter.parent_of.get("sc1"), "the sidechain root beside the continued root stays parentless")
+        self.assertNotIn("r-att", em._membership_of(adapter)["rewind"], "nobody rewound the note")
+
+    def test_a_note_that_is_still_the_leaf_carries_the_history(self):
+        adapter = _adapter([QUEUED_NOTE])
+        self.assertEqual(adapter.parent_of.get("r-att"), "u2")
+
+    def test_a_parented_attachment_does_not_end_the_opening_run(self):
+        adapter = _adapter([QUEUED_NOTE,
+                            {"type": "attachment", "timestamp": iso(T0 + 316), "uuid": "r-att2",
+                             "parentUuid": "r-att", "attachment": {"type": "skill_listing"}},
+                            uline(T0 + 320, NOTICE, "f1", None),
+                            aline(T0 + 380, "Review finished.", "f2", "f1")])
+        self.assertEqual(adapter.parent_of.get("f1"), "u2", "the pre-cut history stays")
+        rewound = em._membership_of(adapter)["rewind"]
+        self.assertFalse({"r-att", "r-att2"} & set(rewound), "neither attachment reads rewind")
+
+    def test_a_middle_file_holding_only_the_notice_still_chains(self):
+        adapter = _adapter([uline(T0 + 320, NOTICE, "f1", None)],
+                           extra={F3: [uline(T0 + 500, NOTICE, "g1", None),
+                                       aline(T0 + 560, "Chain finish.", "g2", "g1")]},
+                           links={F2: SID, F3: F2})
+        self.assertEqual(adapter.parent_of.get("g1"), "f1")
+        self.assertEqual(adapter.parent_of.get("f1"), "u2", "the walk crosses both restarts")
+
+    def test_a_later_root_in_the_fork_is_a_clear_and_stays_unstitched(self):
+        adapter = _adapter(FORK_RECORDS + [uline(T0 + 600, "start over on the notes-api index", "c1", None),
+                                           aline(T0 + 660, "Starting fresh.", "c2", "c1")])
+        self.assertIsNone(adapter.parent_of.get("c1"), "an in-file /clear root keeps its history dropping")
+        self.assertIn("u1", em._membership_of(adapter)["clear"])
+
+    def test_a_parent_cycle_in_the_fork_ends_the_walk_without_a_stitch(self):
+        import threading
+        built = {}
+        t = threading.Thread(target=lambda: built.setdefault("a", _adapter(
+            [uline(T0 + 320, "loop a", "f1", "f2"), aline(T0 + 380, "loop b", "f2", "f1")])), daemon=True)
+        t.start()
+        t.join(CYCLE_WALK_LIMIT_SECS)
+        self.assertFalse(t.is_alive(), "the walk over a parent cycle ends")   # a hang fails here, not in CI's timeout
+        adapter = built["a"]
+        self.assertEqual((adapter.parent_of.get("f1"), adapter.parent_of.get("f2")), ("f2", "f1"))
 
 
 class ResumeForkStates(unittest.TestCase):

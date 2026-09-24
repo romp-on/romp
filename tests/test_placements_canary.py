@@ -235,7 +235,9 @@ class PlacementIdentityCanary(unittest.TestCase):
         # v15 (2026-09-23, the parallel tool batch keep): this fixture makes no parallel tool calls, so every
         # pinned id and atom is UNCHANGED; the bump seals transcripts that DO carry a batch, whose results of every
         # call but the last rejoin the set (tests/test_parallel_tool_batch.py covers the keep itself).
-        self.assertEqual(jd.PLACEMENTS_V, 15, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=15: "
+        # v16 (the resumed-fork root stitch): this fixture has no resume link, so every pinned id and atom is
+        # UNCHANGED; the bump seals transcripts whose continued root was a non-first root of a resumed file.
+        self.assertEqual(jd.PLACEMENTS_V, 16, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=16: "
                          "re-pin the ids and this version together, in the same commit")
 
 

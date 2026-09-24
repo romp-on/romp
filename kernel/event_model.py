@@ -2888,24 +2888,62 @@ class FileAdapter:
         resumed file's last uuid-bearing record, restoring ONE chain the walk can cross (the
         compaction-stitch precedent above). Only a genuinely fresh head is stitched — an intact
         back-link is never overridden — and a /clear records no lineage, so its history keeps
-        dropping by design."""
+        dropping by design.
+
+        Only the root the conversation CONTINUES from is stitched: the walk climbs parent_of from the
+        leaf, and at each fresh root of a linked file re-points it at the from-file's tail and climbs on
+        (a chain of restarts crosses every file). Another root of the same fork (a queued-note
+        attachment beside the restart notice) stays a root, so it reads "clear", never "rewind", and
+        no goal anchored on it is archived. A root counts only ahead of its file's first parented
+        user or assistant record, so a later in-file /clear keeps its history dropping. Sidechain
+        roots are skipped; a sub-agent branch is its own thread. A seeded file's pre-cut first uuid
+        is stitched outright, for parity with the whole parse: on a restore it is inert, since pre-cut
+        membership comes from the stored verdicts and a tail holding a parentless record refuses the restore."""
         if not self.resume_links:
             return
-        first_of, last_of = {}, {}
+        last_of, openers, seeded = self._resume_fork_ends()
+        for to, head in seeded.items():
+            self._stitch_head(head, last_of.get(self.resume_links.get(to)))
+        u, seen = self.leaf_uuid, set()
+        while u and u not in seen:
+            seen.add(u)
+            parent = self.parent_of.get(u)
+            if parent is None:
+                frm = self.resume_links.get(self.fsid_of.get(u))
+                if frm is None or u not in openers or not self._stitch_head(u, last_of.get(frm)):
+                    return
+                parent = self.parent_of[u]
+            u = parent
+
+    def _resume_fork_ends(self):
+        """(last uuid of each file, the fresh roots ahead of each file's first parented user or
+        assistant record, the seed's pre-cut first uuid of each linked file)."""
+        last_of, openers, seeded, opened = {}, set(), {}, set()
         for fs, ends in ((self.seed or {}).get("file_ends") or {}).items():   # files (or file heads) before the cut
             if ends[0]:
-                first_of[fs] = ends[0]
+                opened.add(fs)
+                if fs in self.resume_links:
+                    seeded[fs] = ends[0]
             if ends[1]:
                 last_of[fs] = ends[1]
-        for u in self.by_uuid:               # insertion order = file read order
+        for u, rec in self.by_uuid.items():  # insertion order = file read order
             fs = self.fsid_of.get(u)
-            if fs not in first_of:
-                first_of[fs] = u
             last_of[fs] = u
-        for to, frm in self.resume_links.items():
-            head, tail = first_of.get(to), last_of.get(frm)
-            if head and tail and head != tail and self.parent_of.get(head) is None:
-                self.parent_of[head] = tail
+            if fs in opened:
+                continue
+            if self.parent_of.get(u) is None:
+                if not (rec or {}).get("isSidechain"):
+                    openers.add(u)
+            elif (rec or {}).get("type") in ("user", "assistant"):
+                opened.add(fs)
+        return last_of, openers, seeded
+
+    def _stitch_head(self, head, tail):
+        """Point the fresh root `head` at `tail`; False when there is nothing to stitch."""
+        if not tail or head == tail or self.parent_of.get(head) is not None:
+            return False
+        self.parent_of[head] = tail
+        return True
 
     def _repair_compaction_stitches(self):
         """Claude Code sometimes writes a compact_boundary whose logicalParentUuid points
@@ -5141,7 +5179,7 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
 # ids and atom uuids. Bodies come back on demand (hydrate). Anything that does not verify is a counted fallback to a
 # whole parse; a compaction landing after the document demotes the tail fold to a whole parse exactly as before, and
 # the next settle writes a new document with the new cut.
-_ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
+_ASM_CKPT_V = 9                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
 #                                       4: a `turns` section over the pre-cut rows (T323 stage 4c: the lazy index)
 #                                       5: lazy markers carry pc (assistant prose chars) and mid (postal message ids); a turn row
 #                                          carries pcs and hT, a segment row w, mids and hp (T358: the per-cycle walkers read scalars).
@@ -5164,6 +5202,8 @@ _ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for
 #                                          records' stored verdict is "a", not "r", and the pre-cut atom rows hold the results a v7 document
 #                                          dropped, so a v7 document restores a history the whole parse no longer builds; refused once
 #                                          (`version`) at the deploy boot and rewritten at the next settle, as v7 was
+#                                       9: a resumed fork's continued root is stitched to the linked file's tail (_stitch_resume_forks):
+#                                          its pre-cut records' verdict is "a", not "c"; refused once (`version`) and rewritten, as v8 was
 _MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() // (32 * 1024)))
 _MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (weakref.ref(LazyAtoms), row): eviction drops the memo, never a field
 #                                       in place. The list is held WEAKLY (measured 2026-09-15): a strong reference here kept every

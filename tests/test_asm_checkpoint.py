@@ -186,10 +186,10 @@ class StringRowsAndRestoreSplit(Harness):
         self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
         return path
 
-    def test_a_written_document_is_version_8_with_string_rows_and_restores_equal(self):
+    def test_a_written_document_is_version_9_with_string_rows_and_restores_equal(self):
         path = self._compacting()
         d = _doc(path)
-        self.assertEqual(d["av"], 8, "version 8: the parallel tool batch keep (version 7: the settled-turn cut, stage one b)")
+        self.assertEqual(d["av"], 9, "version 9: the resumed-fork root stitch (version 8: the parallel tool batch keep)")
         self.assertGreater(len(d["atoms"]), 0)
         self.assertTrue(all(isinstance(r, str) for r in d["atoms"]), "every atom row is a JSON string")
         self.assertTrue(all(isinstance(json.loads(r), dict) for r in d["atoms"]), "each decodes to the row it was")
@@ -209,19 +209,19 @@ class StringRowsAndRestoreSplit(Harness):
         self.assertEqual(em.asm_checkpoint_stats()["fallbacks"].get("rows"), 1, "counted once under `rows`: %s" % em.asm_checkpoint_stats()["fallbacks"])
         self.assertEqual(_strip(tree), self.cold(path))
 
-    def test_the_previous_version_is_refused_once_and_the_next_settle_writes_version_8(self):
-        # the deploy boot of the parallel tool batch keep (2026-09-23; stage one b's was the same road): every version 7
-        # document (stored verdicts that filed a batch's branch as rewound) is refused ONCE under `version` and the settle
-        # that follows the whole parse writes the version 8 document; the boot after restores
+    def test_the_previous_version_is_refused_once_and_the_next_settle_writes_version_9(self):
+        # the deploy boot of the resumed-fork root stitch (the batch keep's was the same road): every version 8 document
+        # (stored verdicts that filed a resumed fork's pre-cut history as cleared) is refused ONCE under `version` and the
+        # settle that follows the whole parse writes the version 9 document; the boot after restores
         path = self._compacting()
         d = _doc(path)
-        d["av"] = 7                                                # the previous version's document: the old verdicts
+        d["av"] = 8                                                # the previous version's document: the old verdicts
         _write_doc(path, d)
         em._ASM_CKPT_STATS["fallbacks"] = {}
         self.fresh(); modes = []; self.parse(path, modes)
         self.assertEqual(modes, ["full"]); self.assertEqual(em.asm_checkpoint_stats()["fallbacks"].get("version"), 1, "the migration boot's road")
         self.assertTrue(self.doc(path), "the settle rewrites it")
-        self.assertEqual(_doc(path)["av"], 8)
+        self.assertEqual(_doc(path)["av"], 9)
         got, modes, n_lazy = self.restored(path)
         self.assertEqual(modes, ["restore"])
         self.assertEqual(em.asm_checkpoint_stats()["fallbacks"].get("version"), 1, "refused once, never again")
@@ -429,6 +429,36 @@ class RestoredEqualsWhole(Harness):
         tree = parse(modes)
         self.assertEqual(modes, ["full"])
         self.assertIn("lineage", em.asm_checkpoint_stats()["fallbacks"])
+
+    def test_a_resumed_fork_with_a_note_ahead_of_its_head_restores_identical(self):
+        """A fresh fork whose file opens with a queued note ahead of the restart head, then compacts: the restore stitches
+        the same root the whole parse's leaf walk does, so the pre-cut history and the note's clear read the same."""
+        d = self.td / "note_fork"; d.mkdir()
+        pa, pb = d / (G.FSID_A + ".jsonl"), d / (G.FSID_B + ".jsonl")
+        note = {"type": "attachment", "timestamp": G.iso(G.T0 + 95), "uuid": "r-note", "parentUuid": None,
+                "attachment": {"type": "queued_command", "prompt": "a queued note"}}
+        head = [dict(r, parentUuid=None) if r["uuid"] == "u2" else r for r in G.scenario_resume_lineage_fileB()]
+        pa.write_text("".join(json.dumps(r) + "\n" for r in G.scenario_resume_lineage_fileA()))
+        pb.write_text("".join(json.dumps(r) + "\n" for r in compacting_variant([note] + head, "note")))
+        states = [{"t": G.T0 + 90, "resumeFork": {"from": G.FSID_A, "to": G.FSID_B}}]
+        cands = [str(pa), str(pb)]
+
+        def parse(modes=None):
+            return em.parse_session(str(pb), rompuuid=SID, name="impl", dir="/TESTDIR", candidate_files=cands, states=states,
+                                    postal_log=[], now=NOW, asm_mode_out=modes)
+        self.fresh(); saved = em._CKPT_DIR_FN; em._CKPT_DIR_FN = None
+        try:
+            whole = _strip(parse())
+        finally:
+            em._CKPT_DIR_FN = saved
+        self.assertIn("first ask before resume", json.dumps(whole), "the whole parse keeps the pre-cut history")
+        self.fresh(); parse()
+        self.assertTrue(self.doc(str(pb)), em.asm_checkpoint_stats())
+        self.fresh(); modes = []
+        tree = parse(modes)
+        self.assertEqual(modes, ["restore"])
+        em.hydrate(tree, SID)
+        self.assertEqual(_strip(tree), whole)
 
     def test_appends_after_the_restore_fold_and_stay_equal(self):
         records, _ = G.SINGLE_FILE["compaction_atom"]

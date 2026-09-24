@@ -515,7 +515,11 @@ JUDGE_FAIL_CAP = 3                       # the same rule for every other retryin
 #                                          consolidator / courier; the
 #                                          planner (PLAN_PARSE_RETRIES) and distiller/briefer (DISTILL_FAIL_CAP)
 #                                          already had their own.
-PLACEMENTS_V = 15                        # placements-identity schema version (plan P2, the user 2026-07-06).
+PLACEMENTS_V = 16                        # placements-identity schema version (plan P2, the user 2026-07-06).
+#                                          v16: a resumed fork's root the conversation continues from is stitched to
+#                                          the linked file's tail (em.FileAdapter._stitch_resume_forks), so pre-cut
+#                                          history that hung off a non-first root and was filed as cleared now parses
+#                                          out. v15's shape, a GROWN atom set. Same seal.
 #                                          v15 (2026-09-23): a parallel tool batch's branch beside the spine is kept
 #                                          (em.FileAdapter._batch_head). The CLI parents each call's result at the record
 #                                          carrying that call, so once the reply chains off the last result, the results of
@@ -4009,7 +4013,8 @@ def tasks_for(fsid, leaf, files, now, done=None):
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())
-        if o.get("key") == key and o.get("capKey") == cap_key and o.get("v") == 10:   # v10 = a parallel tool batch's results parse out, so the segments holding one grow (2026-09-23; with PLACEMENTS_V 15);
+        if o.get("key") == key and o.get("capKey") == cap_key and o.get("v") == 11:   # v11 = a resumed fork's continued root is stitched, so its pre-cut history parses out (with PLACEMENTS_V 16);
+            #                                             v10 = a parallel tool batch's results parse out, so the segments holding one grow (2026-09-23; with PLACEMENTS_V 15);
             #                                             v8 = the harness skill-load wrapper no longer emits a command atom, so the prompt segment grows (T333, 2026-09-11; with PLACEMENTS_V 14);
             #                                             v7 = machine-written triggers key their segment on the anchor uuid, so those seg ids moved (T318, 2026-09-10; with PLACEMENTS_V 13);
             #                                             v6 = absorbed atoms placed at their landing time, so their seg ids moved (T252d, 2026-09-08);
@@ -4034,7 +4039,7 @@ def tasks_for(fsid, leaf, files, now, done=None):
     try:
         PCACHE.mkdir(parents=True, exist_ok=True)
         tmp = cf.with_suffix(".tmp.%d" % os.getpid())
-        tmp.write_text(json.dumps({"key": key, "capKey": cap_key, "v": 10, "tasks": tasks}))
+        tmp.write_text(json.dumps({"key": key, "capKey": cap_key, "v": 11, "tasks": tasks}))
         tmp.rename(cf)
     except Exception:
         pass

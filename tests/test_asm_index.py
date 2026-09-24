@@ -509,7 +509,7 @@ class ScalarWalkers(Restored):
                                                                 em._prose_chars, em.atom_prose_chars, em.postal_mids, em._encoded_mids,
                                                                 em.is_interrupt_record, em._content, em._text_of, em._lazy_of, em.atom_mids,
                                                                 em._machine_written)) + "\n" + em.POSTAL_RE.pattern
-        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (8, "56888f276a"),   # v8: the batch keep moved the
+        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (9, "56888f276a"),   # v9, v8: the stitch and the batch keep moved the
         #                                                                                      stored verdicts, the work rule did not
         #                                                                                      (v7, stage one b: the cut rule;
         #                                                                                      v6, T401 (4): the row format)
