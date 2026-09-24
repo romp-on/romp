@@ -424,6 +424,8 @@ BUILD_SESSION_SITES = {
     "build_episode": "a closed episode's render (path_override: no live merge, no chat tab frame)",
     "_chat_history_page": "one history page of turns [lo, hi) (no live overlays, no chat tab frame)",
     "_dispatch_ws": "the proto-1 loadOlder slice (index clients' history; sends no session frame)",
+    "_file_comment_anchor": "a file comment's anchor, only for a session no tab has built (the pusher's cached build "
+                            "answers otherwise); sends no session frame",
 }
 PUSH_SESSION_NOW_CALLERS = {"_create_sdk_session_inner", "_create_codex_session_inner", "_fork_session_inner", "_comment_promote_inner"}
 

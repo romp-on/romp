@@ -72,6 +72,14 @@ class CommentMerge(unittest.TestCase):
         self.assertEqual(self._row().get("status"), "merged")
         self.assertEqual(self.be.killed, [TSID], "the CLI has nothing left; its work is folded back")
 
+    def test_a_file_threads_handoff_names_the_file(self):
+        with km._comments_lock:
+            data = km._load_comments(PARENT)
+            data["threads"][0]["src"] = "~/notes/a.md"
+            km._save_comments(PARENT, data)
+        self.assertIsNone(km._comment_merge(PARENT, TSID))
+        self.assertIn("~/notes/a.md", self.be.sent[0][1])
+
     def test_a_refused_handoff_reverts_the_latch_and_kills_nothing(self):
         # T315 (the commit-13 review's second item): the merge sent with the default and checked only for an
         # exception, so a parent whose backend refused the handoff was still marked merged and its thread's CLI

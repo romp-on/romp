@@ -89,6 +89,7 @@ import { openFileClick } from "./file-view";                  // a clicked file 
 import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   // where a file or folder click opens: here, or the Files pane (file-route.test.ts, browse-route.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
+import { VIEWER_TO_HOST, HOST_TO_VIEWER } from "./file-view";   // the viewer's Submit and staged notes, over DOM events
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
 import { viewerPathGate } from "./file-view-links";       // the viewer's code-aware path gate, for the chat's fenced blocks (2026-09-12)
 import { isMarkdownUrl } from "./md-links";
@@ -7314,6 +7315,7 @@ function showSelectionMenu(e: MouseEvent) {
   const content = document.getElementById("content");
   const sel = window.getSelection();
   const text = sel ? (mentionCopyText(sel)?.text ?? sel.toString()) : "";   // a chip copies as the @name typed, as Ctrl+C does
+  // Transcript selections only: the file viewer mounts its own menu, on every pane that hosts it.
   if (!content || !sel || !sel.anchorNode || !content.contains(sel.anchorNode) || !text.trim()) return;
   e.preventDefault();
   dismissTabMenu();
@@ -10166,7 +10168,7 @@ function updateCommentRail(): void {
     tick.dataset.tid = t.th.tid;
     tick.dataset.uuid = t.th.anchorUuid;
     tick.style.top = t.y + "px";
-    tick.title = (t.th.name || "comment") + ": click to jump to it";
+    tick.title = (t.th.name || "comment") + (t.th.src ? " on " + t.th.src + ": click to open it" : ": click to jump to it");
     return tick;
   }));
 }
@@ -17456,6 +17458,48 @@ function routeUserMessage(sid: string, text: string, cites: Citation[] | undefin
     data: { sid, key: qid, ts: Date.now(), len: text.length, route: goalCite?.itemId ? "followup" : quoteCites.length ? "quote" : "plain" } });
 }
 
+/** How many staged items a Submit would send for `sid`. A loose chip is a selection, not a note, and waits
+ *  for the words typed about it. */
+function composerPendingCount(sid: string | null): number {
+  return sid ? stagedMsgs.list(sid).length : 0;
+}
+
+/** Tell the file viewer, rendered in this document, what its Submit button would send. */
+function toViewer(detail: Record<string, unknown>): void {
+  window.dispatchEvent(new CustomEvent(HOST_TO_VIEWER, { detail }));
+}
+
+function notifyComposerPending(sid: string | null): void {
+  if (sid) toViewer({ romp: "composerPending", sid, n: composerPendingCount(sid) });
+}
+
+/** Hold a note the file viewer wrote about a passage: the quote and the words about it, as ONE staged
+ *  message, so Submit sends the batch in the order they were written. Nothing leaves the client here —
+ *  that is the point. A note is durable the instant this runs (it rides the drafts into localStorage),
+ *  so the viewer's dialog closes on the spot, an unreachable host costs nothing, and a tmux session
+ *  can take notes at all. Answers with the new pending count so the viewer can paint both. */
+function stageViewerNote(sid: string, text: string, exact: string, src: string | undefined, createId: string): void {
+  const cite = mkQuoteCitation(exact, null, src);
+  stagedMsgs.push(sid, { text, cites: [cite] });
+  if (cite.quote) dropSeededQuote(sid, cite.quote);
+  persistDrafts();
+  if (sid === activeId) renderStagedStrip(sid);
+  notifyComposerPending(sid);   // renderStagedStrip announces too, but only on the pane that HAS a strip
+  toViewer({ romp: "noteStaged", sid, createId });
+}
+
+/** Send the notes staged for `sid`, as the send path releases the staged run. Returns flushStaged's count; 0 means
+ *  the session was unreachable and nothing moved, which the toast says. */
+function submitComposerPending(sid: string): number {
+  if (hostIsDown(sid) || isProvisionalId(sid)) {
+    warnToast("Can't send yet — the session isn't reachable. Your notes stay where they are.");
+    return 0;
+  }
+  const sent = flushStaged(sid);
+  notifyComposerPending(sid);
+  return sent;
+}
+
 /** Release the tab's staged stack as ONE message: stagedPosts (staged-messages.ts, executed by its test)
  *  composes the staged items in stage order and then the typed message, when the send carries one, into
  *  a single body, so one post makes one bubble and one turn. Two kinds of item still go on their own, at
@@ -17479,6 +17523,7 @@ function flushStaged(sid: string, typed?: { text: string; cites?: Citation[]; im
   function renderStagedStripInner(id: string | null, opts?: { reveal?: "last" }): void {
   const strip = document.getElementById("composer-staged");
   if (!strip) return;
+  notifyComposerPending(id);
   // the list's scroll position survives the rebuild: expanding or discarding an item re-renders the
   // strip, and a fresh list would start at the top, away from the item just clicked. The offset is kept
   // under the tab that built the list it is read from (stagedScroll), so a switch never carries one tab's
@@ -17627,6 +17672,7 @@ function renderComposerChips(id: string | null): void { renderComposerChipsInner
 function renderComposerChipsInner(id: string | null): void {
   const strip = document.getElementById("composer-chips");
   if (!strip) return;
+  notifyComposerPending(id);   // the state is already settled by the time a render is asked for
   closeCitePreview();   // the chip is being rebuilt (or removed) → drop any open audit popover for the old chip
   strip.replaceChildren();
   // an EDIT pill outranks a citation chip (beginComposerEdit clears citations; this is the belt-and-braces)
@@ -18019,6 +18065,17 @@ function focusComposer(): void {
 // uuid and no src, a goal chip has an itemId — both are left alone), and ONLY while the composer is
 // empty, so a reply already being typed against the code keeps its quote. Unlike removeCitation this
 // never focuses the composer — the user is in the editor, and yanking focus to the chat would be wrong.
+/** Drop the loose editor chip the selection seeded for `quote`, now staged with its note: left in
+ *  place, Submit would send the passage a second time with no words. Other passages' chips stay. */
+function dropSeededQuote(sid: string, quote: string): void {
+  const list = composerCitations.get(sid);
+  if (!list) return;
+  const kept = list.filter((c) => !(c.src && c.quote === quote));
+  if (kept.length === list.length) return;
+  if (kept.length) composerCitations.set(sid, kept); else composerCitations.delete(sid);
+  if (sid === activeId) renderComposerChips(sid);
+}
+
 function clearEditorCitation(id: string | null): void {
   if (!id) return;
   const list = composerCitations.get(id);
@@ -22352,5 +22409,18 @@ initFileView((m) => vscodeApi?.postMessage(m));
 setFileViewIdentity((id) => {
   const s = sessions.get(id) ?? tabMeta.get(id);
   return s && s.name ? { name: s.name, color: s.color ?? null } : hostStub(id);
+});
+// The file viewer's asks: its Submit runs this document's own send path, so sending the notes a doc produced needs
+// no scroll back to the composer; a note from its box stages here, since a file passage has no place in the
+// conversation to branch from.
+window.addEventListener(VIEWER_TO_HOST, (e: Event) => {
+  const m = (e as CustomEvent).detail || {};
+  if (typeof m.sid !== "string" || !m.sid) return;
+  if (m.romp === "submitComposer") submitComposerPending(m.sid);
+  else if (m.romp === "composerPendingAsk") notifyComposerPending(m.sid);
+  else if (m.romp === "stageNote" && typeof m.text === "string" && m.text.trim()
+           && typeof m.exact === "string" && m.exact.trim() && typeof m.createId === "string") {
+    stageViewerNote(m.sid, m.text, m.exact, typeof m.src === "string" ? m.src : undefined, m.createId);
+  }
 });
 if (vscodeApi) vscodeApi.postMessage({ type: "ready", proto: 2 });   // proto 2: the uuid-anchored chat wire (T323 stage 4b); an older kernel ignores the field and sends index frames

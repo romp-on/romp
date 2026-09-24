@@ -65,7 +65,7 @@ test("the viewer is a singleton MODAL over its pane: ~95% card, dimmed backdrop,
   // the backdrop closes on ITS OWN clicks only — content clicks don't (the lightbox contract)
   assert.match(VIEW, /wrap\.onclick = \(ev\) => \{ if \(ev\.target === wrap\) closeFileView\(\); \};/);
   assert.match(VIEW, /close\.addEventListener\("click", closeFileView\);/);
-  assert.match(VIEW, /if \(e\.key !== "Escape" \|\| !document\.getElementById\("romp-fileview"\)\) return;/);
+  assert.match(VIEW, /if \(e\.key !== "Escape" \|\| e\.defaultPrevented \|\| !document\.getElementById\("romp-fileview"\)\) return;/);
   // the panels treatment on the CHAT sheet: dimmed rgba(0,0,0,0.55) backdrop, the content behind visible
   assert.match(CHAT_CSS, /#romp-fileview \{ position: fixed; inset: 0; z-index: 1200; background: var\(--overlay-dim\);/);
   assert.match(CHAT_CSS, /\.fileview \{ width: 95%; height: 95%;/);

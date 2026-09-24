@@ -104,6 +104,9 @@ function lift(): (hooks: Hooks) => Api {
     const warnToast = (msg) => { H.toasts.push(msg); };
     const ephemeralWarnToast = (msg) => { H.toasts.push(msg); };   // the slice's unreachable-session word is the ephemeral one
     const syncComposerPh = () => {};   // the composer's name overlay re-sync the strip renderer calls on every exit (composer-placeholder.ts): no overlay here
+    const HOST_TO_VIEWER = "romp:host-to-viewer";   // the strip tells the file viewer its count; no viewer listens here
+    const window = { dispatchEvent: () => true };
+    class CustomEvent { constructor(type, init) { this.type = type; this.detail = init && init.detail; } }
   `;
   const epilogue = `return { routeUserMessage, flushStaged, renderStagedStrip, stagedMsgs, stagedOpen, stagedCollapsed, stagedScroll };`;
   return new Function("HOOKS", prelude + js + epilogue) as (hooks: Hooks) => Api;

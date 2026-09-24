@@ -159,6 +159,10 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # the user's own words; the quoting frame around them is romp-authored and scanned here
             "comment thread opener": km._comment_first_message(
                 "Cap the retry delay at two minutes.", "Why two minutes and not five?"),
+            # the same opener for a passage highlighted in a FILE: the frame names the file instead
+            "comment thread opener (file passage)": km._comment_first_message(
+                "Cap the retry delay at two minutes.", "Why two minutes and not five?",
+                src="~/notes-api/docs/retry.md"),
             # the dashboard-edit trace (the user 2026-08-22): the file viewer saved over a file in this
             # session's tree, and the session is told in the person's voice — never edited under silently
             "edit trace": km._edit_trace_body("/TESTDIR/notes-api/README.md"),
@@ -301,7 +305,8 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # progress ask: the session is to halt, not to report where things stand
             if name in ("typed follow-up on a summary",
                         "debt reminder (question)", "debt reminder (handoff)",
-                        "debt reminder (several)", "comment thread opener", "edit trace",
+                        "debt reminder (several)", "comment thread opener",
+                        "comment thread opener (file passage)", "edit trace",
                         "comment-thread merge", "compaction suggestion", "spend ceiling",
                         "relayed question", "relayed question (procedural why)",
                         "relayed question (with the conversation)"):

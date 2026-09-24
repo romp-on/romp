@@ -160,7 +160,8 @@ const BACKEND = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk
 
 test("the selection menu offers Comment, gated on a real transcript turn", () => {
   assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(/);
-  assert.match(UI, /q\?\.uuid && activeId && !isProvisionalId\(activeId\)/);
+  // the session must be real and non-provisional; the ANCHOR is the selected turn's own uuid
+  assert.match(UI, /if \(q\?\.uuid && activeId && !isProvisionalId\(activeId\) && liveSession\(activeId\)\) \{/);
 });
 
 test("marks, badges AND every popover button ride the stable document.body delegate", () => {
@@ -213,7 +214,7 @@ test("create adopts exactly the thread the kernel named — never a guess", () =
   assert.match(UI, /function adoptCommentThread\(sid: string, tid: string\)/);
   assert.match(KERNEL, /"type": "commentCreated", "id": sid, "tid": tid/);
   // the FRAME rides ahead of the ack, so adoption always finds the thread in the map
-  assert.match(KERNEL, /fr = _comments_frame\(sid\)\s*\n\s*if fr:\s*\n\s*client\["send"\]\(json\.dumps\(fr\)\)\s*\n\s*client\["send"\]\(json\.dumps\(\{"type": "commentCreated"/);
+  assert.match(KERNEL, /fr = _comments_frame\(sid\) if with_frame else None\s*\n\s*if fr:\s*\n\s*client\["send"\]\(json\.dumps\(fr\)\)\s*\n\s*client\["send"\]\(json\.dumps\(\{"type": "commentCreated"/);
 });
 
 test("a refused reply hands the words back instead of thinking forever", () => {
@@ -636,12 +637,12 @@ test("a create refused by parse lag holds its mark and retries on the frame even
   const KERNELSRC = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
   assert.match(KERNELSRC, /ANCHOR_LAG_ERR = "that message isn't in the transcript yet; try again in a moment"/);
   assert.match(KERNELSRC, /"transient": err == ANCHOR_LAG_ERR,/);
-  assert.match(KERNELSRC, /else:\s*\n\s*client\["send"\]\(json\.dumps\(\{"type": "warn", "text": err\}\)\)/,
+  assert.match(KERNELSRC, /elif not \(cmt_src and cmt_cid\):\s*\n\s*client\["send"\]\(json\.dumps\(\{"type": "warn", "text": err\}\)\)/,
     "no toast for plumbing the retry makes moot; real refusals stay loud");
   // …and the kernel PARKS the lag-refused create and retries it per pusher cycle (the file it is
   // waiting on is its own): a settled session emits no further frames, so the client-side re-post
   // alone starved — the park covers that; the client's frame-keyed belt covers a restart's lost park
-  assert.match(KERNELSRC, /_parked_creates\.append\(\{"sid": sid, "uuid": str\(msg\["uuid"\]\)/);
+  assert.match(KERNELSRC, /_parked_creates\.append\(\{"sid": sid, "uuid": cmt_uuid/);
   assert.match(KERNELSRC, /def _retry_parked_creates\(\):/);
   assert.match(KERNELSRC, /_retry_parked_creates\(\)   # lag-parked comment creates ride every pusher cycle \(T106\)/);
   assert.match(KERNELSRC, /_PARK_MAX_TRIES = 30/);
@@ -749,7 +750,7 @@ test("the create frame carries the id, and a re-post of the held create is the s
   const sent = commentCreateFrame(held);
   assert.deepEqual(sent, { type: "commentCreate", id: ANCHOR.sid, uuid: "a1", exact: "exponential backoff",
                            text: "why jitter?", name: "why-jitter", model: "claude-opus-5", effort: "high",
-                           fast: "on", color: "#112233", createId: held.createId });
+                           fast: "on", color: "#112233", src: "", createId: held.createId });
   held.tries++;                                                   // a transient nack armed the retry
   assert.deepEqual(commentCreateFrame(held), sent, "a retry is the same gesture: the same id, the same words");
 });

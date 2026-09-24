@@ -325,6 +325,23 @@ class OpeningMessage(unittest.TestCase):
     def test_strip_leaves_an_unframed_message_alone(self):
         self.assertEqual(km._comment_strip_frame("plain reply"), "plain reply")
 
+    def test_a_FILE_passage_names_the_file_in_the_frame(self):
+        # A highlight in the file viewer carries its path, so the thread's agent is told what it is
+        # quoting instead of being pointed at "the conversation" it cannot find the passage in.
+        body = km._comment_first_message("Kept gates:", "Which of these still matter?",
+                                         src="~/notes/decisions.md")
+        self.assertTrue(body.startswith("About this part of ~/notes/decisions.md:"))
+        self.assertIn("> Kept gates:", body)
+        self.assertTrue(body.endswith("Which of these still matter?"))
+
+    def test_an_empty_src_keeps_the_conversation_frame(self):
+        body = km._comment_first_message("a passage", "a comment", src="")
+        self.assertTrue(body.startswith(km._COMMENT_FRAME_HEAD))
+
+    def test_the_file_frame_still_strips_to_the_comment_alone(self):
+        body = km._comment_first_message("a passage", "just my comment", src="~/notes/x.md")
+        self.assertEqual(km._comment_strip_frame(body), "just my comment")
+
 
 # ── the transcript → popover projection ───────────────────────────────────────────────────────────
 
@@ -1374,6 +1391,37 @@ class CommentOps(CommentBase):
         self.assertEqual(row["status"], "open")
         self.assertEqual(row["anchorUuid"], "a1")
 
+    def test_the_row_acks_before_the_fork_so_no_dialog_waits_on_a_spawn(self):
+        """on_row fires on the durable row, ahead of fork/connect/send: the client's ack is not gated
+        on minting a session. A comment that is saved must read as saved."""
+        acked = []
+        self.be.calls.clear()
+        err, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?",
+                                      on_row=lambda t: acked.append((t, [c[0] for c in self.be.calls],
+                                                                     km._comment_thread(PARENT, t))))
+        self.assertIsNone(err)
+        self.assertEqual([t for t, _, _ in acked], [tid], "acked once, with the tid the caller adopts")
+        self.assertEqual(acked[0][1], [], "no backend call had run when the ack went out")
+        self.assertEqual((acked[0][2] or {}).get("status"), "open", "the row was on disk when the ack fired")
+        self.assertEqual([c[0] for c in self.be.calls], ["fork", "connect", "send"], "the spawn still happens")
+        self.assertEqual(km._comment_thread(PARENT, tid)["status"], "open", "the row the ack promised is on disk")
+
+    def test_a_file_threads_path_reaches_the_frame_and_the_timeline_square(self):
+        err, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?", src="docs/retry.md:12")
+        self.assertIsNone(err)
+        row = next(t for t in km._comments_frame(PARENT)["threads"] if t["tid"] == tid)
+        self.assertEqual(row["src"], "docs/retry.md:12")
+        self.assertEqual(next(m for m in km._comment_markers(PARENT) if m["tid"] == tid)["src"], "docs/retry.md:12")
+
+    def test_a_refused_create_acks_nothing(self):
+        """Every refusal a user can provoke sits ABOVE the row write, so on_row stays unfired."""
+        acked = []
+        err, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?", name="no spaces!",
+                                      on_row=acked.append)
+        self.assertTrue(err)
+        self.assertIsNone(tid)
+        self.assertEqual(acked, [])
+
     def _stub(self, name, value):
         self.addCleanup(setattr, km, name, getattr(km, name))
         setattr(km, name, value)
@@ -1963,6 +2011,24 @@ class ForkCommentRoutes(CommentBase):
         self.assertIn('if u.path in ("/fork-comment", "/fork-promote"):', src)
         self.assertIn('res = (_fork_comment_request(b) if u.path == "/fork-comment"', src)
         self.assertIn('return self._send(res.pop("_status", 200), json.dumps(res), "application/json")', src)
+
+
+class FileCommentText(unittest.TestCase):
+    """The file head: capped quote, strip only a framed head, relay names the file."""
+
+    def test_the_opener_caps_the_quoted_passage(self):
+        opener = km._comment_first_message("x" * 5000, "why?", "~/notes/a.md")
+        self.assertLess(len(opener), km.COMMENT_OPENER_QUOTE_CAP + 100)
+
+    def test_only_a_framed_file_head_is_stripped(self):
+        framed = km._comment_first_message("Kept gates:", "still true?", "~/notes/a.md")
+        self.assertEqual(km._comment_strip_frame(framed), "still true?")
+        plain = "About this part of the plan: I think\nwe should cut scope."
+        self.assertEqual(km._comment_strip_frame(plain), plain, "a plain two-line opener keeps its first line")
+
+    def test_a_relay_of_a_file_thread_names_the_file(self):
+        body = km._merge_body("Kept gates:", [{"who": "you", "text": "cut it"}], "~/notes/a.md")
+        self.assertIn("this passage of ~/notes/a.md:", body)
 
 
 if __name__ == "__main__":

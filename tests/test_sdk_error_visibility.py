@@ -181,8 +181,9 @@ class KernelSide(unittest.TestCase):
                 return 1
 
         km._SDK_BOOT_PROBLEMS[:] = [{"seq": 1, "t": 4.0, "text": "the SDK backend could not be built"}]
-        prev = km._sdk_backend
+        prev, prev_seq = km._sdk_backend, km._SDK_PROBLEM_SEQ[0]
         km._sdk_backend = _Be()
+        km._SDK_PROBLEM_SEQ[0] = 1                        # the planted ring's one problem, as _sdk_problem would count it
         try:
             rows = km._sdk_problem_rows()
             self.assertEqual(len(rows), 2)
@@ -190,6 +191,7 @@ class KernelSide(unittest.TestCase):
             self.assertEqual(km._sdk_problem_count(), 2)
         finally:
             km._sdk_backend = prev
+            km._SDK_PROBLEM_SEQ[0] = prev_seq
             km._SDK_BOOT_PROBLEMS.clear()
 
     def test_the_feed_payload_and_its_cache_key_carry_the_problems(self):

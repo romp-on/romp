@@ -4891,7 +4891,16 @@ the composer shows about four staged notes and scrolls for the rest; its caret c
 it to the count. **⏎** sends everything you staged along with whatever is in the box as
 one message, so the session applies the lot in one pass, and you never copy a line out of
 the document by hand. The line in each label is checked against the file at the moment
-you select, so numbers that moved under you are caught rather than quietly carried. When
+you select, so numbers that moved under you are caught rather than quietly carried.
+
+Right-click a selected passage (or press Shift+F10) for the viewer's own menu. In the chat
+pane its first row is **Stage**: a small box takes your words and stages them with the
+passage, the passage is marked, and the title bar counts the notes and shows **Submit**,
+which sends the staged notes without closing the viewer. In the feed pane, which has
+no composer, the row is **Comment**: the words open a comment thread in the file's
+session, anchored at its last message, and the thread shows on the chat's comment rail
+with the file named. A thread that fails to start is removed, and its box reopens with
+your words and the reason; the error center keeps the words too. When
 several sessions work in the same repository, or in worktrees of it, the viewer's title
 bar says which one you opened the file from: a chip with the session's name, in the same
 color as its tab. The title bar's **GitHub ↗** button opens the file on GitHub. While the

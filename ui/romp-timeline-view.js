@@ -7015,7 +7015,9 @@ class TimelinePanel {
     // (against the round message/prompt dots) sits on the lane at the commented message, in the
     // SESSION's own color with the same white border and footprint as a message dot (the user
     // 2026-08-15 — the shape alone says "comment"), dimmed once resolved. Click → the chat at that
-    // message, where the yellow highlight opens the thread.
+    // message, where the yellow highlight opens the thread. A FILE passage's square sits at the comment's
+    // own moment (it quotes no message), and its click lands on the last chat event before it; the
+    // thread opens from the chat's comment rail.
     laneRows.forEach(({ s, i }) => {
       const y = laneY(i);
       (s.comments || []).forEach((c) => {
@@ -7025,7 +7027,9 @@ class TimelinePanel {
           fill: s.color, stroke: PAL().dotRing, 'stroke-width': 0.75,
           opacity: c.status === 'resolved' ? 0.45 : 0.95 });
         sq.style.cursor = 'pointer';
-        const qHtml = () => '<div class="r"><span class="chip" style="background:' + s.color + '"></span><span class="who" style="color:' + s.color + '">' + esc(s.name) + '</span><span class="t">' + clock(c.t) + '</span></div>' + this.body(c.status === 'resolved' ? 'a resolved comment on this message' : 'a comment on this message — click to open it there');
+        const qHtml = () => '<div class="r"><span class="chip" style="background:' + s.color + '"></span><span class="who" style="color:' + s.color + '">' + esc(s.name) + '</span><span class="t">' + clock(c.t) + '</span></div>' + this.body(c.src
+          ? (c.status === 'resolved' ? 'a resolved comment on ' : 'a comment on ') + esc(c.src) + ' — open it from the chat\'s comment rail'
+          : (c.status === 'resolved' ? 'a resolved comment on this message' : 'a comment on this message — click to open it there'));
         const qGrow = (g) => { sq.setAttribute('width', side + g); sq.setAttribute('height', side + g); sq.setAttribute('x', cx - (side + g) / 2); sq.setAttribute('y', y - (side + g) / 2); };
         const qEnter = (e) => { qGrow(3); this.showTip(qHtml(), e); };
         sq.__tlHoverIn = qEnter;
