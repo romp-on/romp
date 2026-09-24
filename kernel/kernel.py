@@ -40195,6 +40195,9 @@ def _echo_overtaken(atom, human_floor):
     return bool(atom.get("_echo_text")) and bool(human_floor) and human_floor > atom.get("t", 0)
 
 
+SENDVIS_DROP_REASONS = ("refused", "stale")   # the echo flags that name why it was dropped
+
+
 def _sendvis_diag(sid):
     """Send-visibility snapshot for /diag/sendvis (the user 2026-07-20): the exact inputs the chat build
     consults to render an in-flight send. When a sent message is invisible, this names the layer that
@@ -40217,9 +40220,15 @@ def _sendvis_diag(sid):
         out["pendingQueued"] = "error: %s" % e
     out["pendingOps"] = [[op[0], (str(op[1])[:120] if len(op) > 1 else None)]
                          for op in (_pending_ops.get(sid) or [])]
+    sdk_flags = out.get("backend") == "sdk"   # the settlement flags are the SDK backend's; other backends' rows carry null
     try:
         out["liveAtoms"] = [{"uuid": a.get("uuid"), "t": a.get("t"),
                              "echo": (a.get("_echo_text") or "")[:120] or None,
+                             # flagged never delivered: overtaken, refused, past the age line, or held by a CLI that died
+                             "dropped": bool(a.get("dropped")) if sdk_flags else None,
+                             "dropReason": next((f for f in SENDVIS_DROP_REASONS if a.get(f)), None) if sdk_flags else None,
+                             # the boot or spawn scan found its record; a landing inside a running session reads False
+                             "landed": bool(a.get("_landed")) if sdk_flags else None,
                              "command": a.get("command") or None}
                             for a in (be.live_atoms(sid) if be else [])]
     except Exception as e:
