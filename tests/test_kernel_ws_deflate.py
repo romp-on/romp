@@ -20,7 +20,10 @@ fell megabytes behind on the feed and was dropped. Pinned here:
   (a deflate bomb is refused within one piece past it), not only what it returns; a plain message is untouched;
 - end to end through the real Handler on a loopback server: both directions on one negotiated socket, a socket
   that offered nothing stays plain, and a kernel-decided end sends a Close frame with its code and logs once;
-- the federated relay, executed: a browser dialing a remote kernel through the hub negotiates with the remote.
+- the federated relay, executed: a browser dialing a remote kernel through the hub negotiates with the remote,
+  which sees every Extensions line the browser sent, in its order, and each on a line of its own, so lines too
+  long to join under the remote's line limit still upgrade through the hub as they do direct, and no more lines
+  than the browser sent, so a request at the remote's header-count limit does too.
 
 Synthetic only: invented frame text, no session data.
 """
@@ -645,6 +648,67 @@ class RelayExecuted(unittest.TestCase):
         b0, payload = _Reader(s, rest).frame()
         self.assertEqual(b0, 0xC1)
         self.assertEqual(inflate(payload).decode("utf-8"), text)
+
+    def test_two_offers_on_two_lines_reach_the_remote_in_their_order(self):
+        # the offer the direct handshake takes is the FIRST acceptable one; the second-line test above puts its offer
+        # last, so a relay that forwarded the last line only, or the lines in reverse, still passed it, and then answered
+        # this pair with the second window through the hub where the direct dial answers the first (post-merge note on
+        # #2132, 2026-09-24)
+        wid = "w-relay-order"
+        status, headers, s, _ = upgrade(self.hub.server_address[1],
+                                        ["permessage-deflate; server_max_window_bits=10", "permessage-deflate; server_max_window_bits=12"],
+                                        path="/remote/gpu1/ws?app=feed&wid=%s&token=%s" % (wid, km.TOKEN))
+        self.socks.append(s)
+        self.assertEqual(status, 101)
+        self.assertEqual(headers.get("sec-websocket-extensions"), ACCEPT + "; server_max_window_bits=10")
+        self.assertEqual(kernel_client(wid).get("deflate"), {"wbits": 10, "bounded": True})
+
+    def test_extension_lines_too_long_to_join_still_reach_the_remote(self):
+        # each line is under the 65,536-byte limit http.client reads a header line with, at the hub and at the remote
+        # alike, and together they are over it: the relay joined them into one forwarded line, which the remote refused
+        # with 431 Line too long where the direct dial upgraded (post-merge note on #2132, 2026-09-24). Invented padding
+        pads = ["x-pad%d; v=%s" % (i, "a" * (30000 - len("x-pad%d; v=" % i))) for i in (1, 2, 3)]
+        offer = pads + ["permessage-deflate; client_max_window_bits"]
+        # the control: dialed direct, the remote takes this request
+        status, headers, s, _ = upgrade(self.remote.server_address[1], offer, wid="w-long-direct")
+        self.socks.append(s)
+        self.assertEqual(status, 101)
+        self.assertEqual(headers.get("sec-websocket-extensions"), ACCEPT)
+        wid = "w-relay-long"
+        status, headers, s, rest = upgrade(self.hub.server_address[1], offer, path="/remote/gpu1/ws?app=feed&wid=%s&token=%s" % (wid, km.TOKEN))
+        self.socks.append(s)
+        self.assertEqual(status, 101, "the request the direct dial upgrades must upgrade through the hub too")
+        self.assertEqual(headers.get("sec-websocket-extensions"), ACCEPT)
+        remote_client = kernel_client(wid)
+        self.assertEqual(remote_client.get("deflate"), {"wbits": 15, "bounded": False})
+        text = big_text()
+        remote_client["send"](text)
+        b0, payload = _Reader(s, rest).frame()
+        self.assertEqual(b0, 0xC1)
+        self.assertEqual(inflate(payload).decode("utf-8"), text)
+
+    def test_no_more_lines_reach_the_remote_than_the_browser_sent(self):
+        # http.client's parse takes at most 99 header lines (it counts the blank line that ends the head against its 100),
+        # at the hub and at the remote alike, and this request sends exactly 99: the upgrade helper's Host line and four
+        # others, then 94 Extensions lines, the offer last. The relay forwards its own Host line in place of the browser's,
+        # the same four, and each Extensions line once, so the remote gets 99 too; a relay that forwarded one line twice
+        # (the branch falling through after the per-line forward and sending the first line again) puts the remote at 100
+        # and gets 431 Too many headers where the direct dial upgrades (2026-09-24). Invented extension names
+        offer = ["x-pad%d" % i for i in range(93)] + ["permessage-deflate; client_max_window_bits"]
+        # the controls, dialed direct: the remote takes these 99 lines and refuses one more, so the request is at the limit
+        status, headers, s, _ = upgrade(self.remote.server_address[1], offer, wid="w-count-direct")
+        self.socks.append(s)
+        self.assertEqual(status, 101)
+        self.assertEqual(headers.get("sec-websocket-extensions"), ACCEPT)
+        status, _, s, _ = upgrade(self.remote.server_address[1], ["x-pad-over"] + offer, wid="w-count-over")
+        self.socks.append(s)
+        self.assertEqual(status, 431, "one line past the 99 the parse takes is refused, or this case no longer sits at the limit")
+        wid = "w-relay-count"
+        status, headers, s, _ = upgrade(self.hub.server_address[1], offer, path="/remote/gpu1/ws?app=feed&wid=%s&token=%s" % (wid, km.TOKEN))
+        self.socks.append(s)
+        self.assertEqual(status, 101, "the request the direct dial upgrades must upgrade through the hub too")
+        self.assertEqual(headers.get("sec-websocket-extensions"), ACCEPT)
+        self.assertEqual(kernel_client(wid).get("deflate"), {"wbits": 15, "bounded": False})
 
 
 if __name__ == "__main__":
