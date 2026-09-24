@@ -2068,7 +2068,7 @@ class ActsUnderAFailedWrite(_World):
                 self.assertEqual(km._CLEARED_STATS["derived"] - derived0, 0, "the moved read took no slot: the next build is served from the slot the interposed build memoized (a moved read taking the slot under its stale key would make the next build derive again)")
         log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
 
-    def test_a_moved_parse_is_kept_as_the_landed_set_only_when_no_read_landed_since_it_began(self):
+    def test_a_moved_parse_is_kept_as_the_landed_set_only_when_no_longer_parse_stands(self):
         """The second contributor's post-merge review of PR 2056: the moved branch's landed write was unconditional, so when a clear appended
         during the nudge walk's parse was derived by a display build BEFORE the walk's post-parse stat, the walk's OLDER parse overwrote the
         build's NEWER landed set, and after the next fault the pane showed the older set (a cleared card back, Undo lit for the wrong stack).
@@ -2193,37 +2193,77 @@ class ActsUnderAFailedWrite(_World):
         self.assertEqual(f["dismissedCount"], 3, "after the next fault the pane shows all three (the base: 1)")
         log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
 
+    def test_a_moved_parse_of_a_log_recreated_shorter_between_two_reads_wins_by_its_inode(self):
+        """The second contributor's post-merge review of PR 2070: the length order assumed a shorter file arrives only through the absent arm,
+        which holds only when some read sees the absence. A log removed and recreated shorter between two reads (an atomic rewrite), whose first
+        read raced a fault, parsed fewer bytes than the standing set and stood down, and after the next fault the pane served the set from before
+        the removal: the old dismissed count, and Undo for clears the file no longer had. A moved parse whose pre-read stat names another inode
+        than the standing key's is a parse of ANOTHER file and wins whatever its length (count 1 after the fault; the base: 2)."""
+        log = jd.STATE / "cleared.jsonl"
+        one = json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"
+        two = one + json.dumps({"id": B + ":g1", "t": 2, "op": "clear"}) + "\n"
+        bad = b"\xff\xfe\x00 not text\n"
+        log.write_text(two); km._CLEARED_MEMO["slot"] = None; km._CLEARED_MEMO["landed"] = None; km._cleared_read_fault[0] = ""
+        km._state_fault_seen.clear(); del km._SYNC_NOTICES[:]
+        km.build_feed(NOW, self.live)                                           # the standing landed set: the two clears of the file as it was
+        old_ino = os.stat(log).st_ino
+        fresh = log.with_name("cleared.jsonl.new"); fresh.write_text(one); os.replace(fresh, log)   # recreated shorter while the old file still stood: another inode, no read between
+        self.assertNotEqual(os.stat(log).st_ino, old_ino, "premise: the recreated log is another inode")
+        real_read, once = Path.read_text, [True]
+
+        def racing_read(q, *a, **kw):
+            data = real_read(q, *a, **kw)
+            if q == log and once[0]:
+                once[0] = False
+                log.write_bytes(bad)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    km.build_feed(NOW, self.live)                               # the new file's first read races a fault: its parse is moved
+            return data
+        with mock.patch.object(Path, "read_text", racing_read):
+            got = km._cleared_ids()
+        self.assertEqual(set(got), {A + ":g1"}, "premise: the read parsed the new file's one clear")
+        self.assertEqual(set(km._CLEARED_MEMO["landed"][1]), {A + ":g1"}, "the new file's parse is the landed set (before: shorter, it stood down and the removed file's two clears stood)")
+        with contextlib.redirect_stderr(io.StringIO()):
+            f = km.build_feed(NOW, self.live)
+        self.assertEqual((f["dismissedCount"], f["canUndoClear"]), (1, True), "after the fault the pane shows the file's own clear (before: 2, the removed file's count and an Undo for a clear it no longer has)")
+        log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
+
     def test_a_read_with_no_pre_read_stat_under_a_standing_fault_ends_no_episode_and_records_the_landed_set(self):
         """The round-one verifier of PR 2070: the failed-stat disjunct was pinned by nothing, since in both racing legs the fault filed during
         the parse routed them through the flag clause. This leg is the disjunct's own: a fault already standing, no flag movement, the pre-read
-        stat failing once (a directory permission flap lifting before the read), then a clean read. It proves nothing about the file's state:
-        the episode stays open and the landed set is recorded under the path-only key (the base ended the episode and recorded nothing)."""
+        stat failing, then a clean read. It proves nothing about the file's state: the episode stays open and the landed set is recorded under
+        the path-only key (the base ended the episode and recorded nothing). Two shapes of the flap (the second contributor's post-merge review
+        of PR 2070): lifting before the read, so the post-parse stat succeeds, which the guard's stat compare routes the same way even without
+        the disjunct; and spanning the read, both stats failing, which only the disjunct routes so (without it the read ends the episode and
+        records nothing). Nothing is asserted about the second failure being consumed: the disjunct short-circuits before the second stat."""
         log = jd.STATE / "cleared.jsonl"
         bell = lambda: [n for n in km._SYNC_NOTICES if "cleared.jsonl" in n["text"]]
-        log.write_bytes(b"\xff\xfe\x00 not text\n"); km._CLEARED_MEMO["slot"] = None; km._CLEARED_MEMO["landed"] = None; km._cleared_read_fault[0] = ""
-        km._state_fault_seen.clear(); del km._SYNC_NOTICES[:]
-        with contextlib.redirect_stderr(io.StringIO()):
-            km.build_feed(NOW, self.live)                                       # the standing fault: the flag holds it, the bell's table its row
-        fault = km._cleared_read_fault[0]
-        self.assertTrue(fault and len(bell()) == 1, "premise: a fault stands")
-        log.write_text(json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"); km._CLEARED_MEMO["slot"] = None   # the file reads again
-        real_stat, once = os.stat, [True]
+        for fails, name in ((1, "the flap lifts before the read"), (2, "the flap spans the read")):
+            with self.subTest(stat=name):
+                log.write_bytes(b"\xff\xfe\x00 not text\n"); km._CLEARED_MEMO["slot"] = None; km._CLEARED_MEMO["landed"] = None; km._cleared_read_fault[0] = ""
+                km._state_fault_seen.clear(); del km._SYNC_NOTICES[:]
+                with contextlib.redirect_stderr(io.StringIO()):
+                    km.build_feed(NOW, self.live)                               # the standing fault: the flag holds it, the bell's table its row
+                fault = km._cleared_read_fault[0]
+                self.assertTrue(fault and len(bell()) == 1, "premise: a fault stands")
+                log.write_text(json.dumps({"id": A + ":g1", "t": 1, "op": "clear"}) + "\n"); km._CLEARED_MEMO["slot"] = None   # the file reads again
+                real_stat, left = os.stat, [fails]
 
-        def failing_stat(q, *a, **kw):
-            if os.fspath(q) == str(log) and once[0]:
-                once[0] = False
-                raise OSError(errno.EACCES, "Permission denied", str(q))       # the pre-read stat fails once; the read itself lands
-            return real_stat(q, *a, **kw)
-        with mock.patch.object(os, "stat", failing_stat):
-            got = km._cleared_ids()
-        self.assertEqual(set(got), {A + ":g1"}, "premise: the read landed")
-        self.assertEqual(km._cleared_read_fault[0], fault, "the episode stays open: a read with no pre-read stat proves nothing (before: it ended it)")
-        self.assertIn(str(log), km._state_fault_seen, "and the bell's row stands")
-        landed = km._CLEARED_MEMO["landed"]
-        self.assertIsNotNone(landed, "the landed set is recorded (before: nothing, the key being None)")
-        self.assertEqual((landed[0], set(landed[1])), ((str(log),), {A + ":g1"}), "under the path-only key")
-        self.assertEqual(set(km._cleared_ids()), {A + ":g1"}, "the next read, with its stat, lands and ends the episode")
-        self.assertEqual(km._cleared_read_fault[0], "")
+                def failing_stat(q, *a, **kw):
+                    if os.fspath(q) == str(log) and left[0] > 0:
+                        left[0] -= 1
+                        raise OSError(errno.EACCES, "Permission denied", str(q))   # the log's stat fails once or twice; the read itself lands
+                    return real_stat(q, *a, **kw)
+                with mock.patch.object(os, "stat", failing_stat):
+                    got = km._cleared_ids()
+                self.assertEqual(set(got), {A + ":g1"}, "premise: the read landed")
+                self.assertEqual(km._cleared_read_fault[0], fault, "the episode stays open: a read with no pre-read stat proves nothing (before: it ended it; without the disjunct the spanning flap ends it too)")
+                self.assertIn(str(log), km._state_fault_seen, "and the bell's row stands")
+                landed = km._CLEARED_MEMO["landed"]
+                self.assertIsNotNone(landed, "the landed set is recorded (before: nothing, the key being None)")
+                self.assertEqual((landed[0], set(landed[1])), ((str(log),), {A + ":g1"}), "under the path-only key")
+                self.assertEqual(set(km._cleared_ids()), {A + ":g1"}, "the next read, with its stat, lands and ends the episode")
+                self.assertEqual(km._cleared_read_fault[0], "")
         log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
 
     def test_a_read_whose_pre_read_stat_failed_proves_nothing_and_ends_no_episode(self):
@@ -2292,9 +2332,13 @@ class ActsUnderAFailedWrite(_World):
         self.assertEqual(set(got), {A + ":g1"}, "premise: the parse was clean")
         self.assertEqual((len(rows()) - n0, len(bell())), (1, 1), "premise: the interposed build filed the fault once")
         self.assertNotEqual(km._cleared_read_fault[0], "", "the flag holds the fault (before: the clean parse with an unmoved stat ended the episode)")
+        log.write_text(log.read_text() + json.dumps({"id": B + ":g1", "t": 2, "op": "clear"}) + "\n")   # a clear appended under the standing fault: the base's clean parse, its stat
+        #                                                                                              unmoved, took the slot, and with the file unmoved too the next build was served
+        #                                                                                              from it, ran no EIO read and filed one row either way (the second contributor's
+        #                                                                                              post-merge review of PR 2070); the appended row misses that slot
         with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(Path, "read_text", eio):
             f = km.build_feed(NOW, self.live)                                   # the same fault at its next occurrence
-        self.assertEqual((len(rows()) - n0, f["dismissedCount"]), (1, 1), "one judge row for one fault (before: two, the episode ended between them), the pane holding the parsed set")
+        self.assertEqual((len(rows()) - n0, f["dismissedCount"]), (1, 1), "one judge row for one fault (before: two, the episode ended between them and the appended row missed the slot the clean parse took), the pane holding the parsed set")
         self.assertEqual(len(bell()), 2, "the bell: the cold row, then the warm row once the parsed set stands as the landed one")
         log.write_text(""); km._CLEARED_MEMO["slot"] = None; km._cleared_ids()
 

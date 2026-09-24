@@ -42719,11 +42719,14 @@ def _cleared_ids_read():
     The episodes (the reader's flag, the bell's table) end on three arms: a landed parse whose post-parse stat and pre-read flag both stand
     where the read found them, a served landed hit, and an absent log. A landed parse takes the SLOT only on that first arm; a set parsed from
     bytes that left the disk before a fault, or while a fault was filed (an EIO on the read moves no stat), ends nothing, since the fault's
-    episode is the newer state, and is kept as the last landed set only when its parsed byte length is at least the standing set's: the log is
-    append-only within an episode (an undo appends a row; a shorter file arrives only through the absent arm, which records length zero), so
-    the longer parse is the newer state, whichever of two racing reads writes first. A served hit whose memoized fault differs from the flag
+    episode is the newer state, and is kept as the last landed set when its parsed byte length is at least the standing set's or its pre-read
+    stat names another inode than the standing set's: the log is append-only within one file (an undo appends a row), so of two parses of one
+    file the longer is the newer state, whichever of two racing moved reads writes first (the settled arm writes unconditionally), and a
+    shorter file is another file, arrived through the absent arm, which records length zero, or through a removal and recreation between two
+    reads that no read saw, which the inode shows. A served hit whose memoized fault differs from the flag
     files the judge row (the third episode ending, a different fault, through the memo hit too). The first contributor's post-merge note on PR
-    2041; the second contributor's post-merge review of PR 2056; the round-one verifier of PR 2070."""
+    2041; the second contributor's post-merge review of PR 2056; the round-one verifier of PR 2070 and the second contributor's post-merge
+    review of it."""
     path = jd.STATE / "cleared.jsonl"
     st = _stat_key(path)
     key = (str(path),) + st if st is not None else None
@@ -42805,12 +42808,18 @@ def _cleared_ids_read():
         # parse stands: a first-ever read that races a fault must not leave the display on the cold arm (the round-one verifier of PR 2056),
         # while an older parse must not overwrite the newer set another read recorded meanwhile (the second contributor's post-merge review of
         # PR 2056: a clear appended during the walk's parse, derived by a build before the walk's post-parse stat, and the walk's write put the
-        # pane back on the older set after the next fault). The version is the PARSE itself: the log is append-only within an episode, so the
+        # pane back on the older set after the next fault). The version is the PARSE itself: the log is append-only within one file, so the
         # longer parse is the newer state, whichever of two racing moved reads writes first (the round-one verifier of PR 2070: a rule keyed on
-        # the memo's identity let the first moved write win and dropped the newer parse); a shorter file arrives only through the absent arm,
-        # which records length zero.
+        # the memo's identity let the first moved write win and dropped the newer parse). A shorter file is ANOTHER file: it arrives through the
+        # absent arm, which records length zero, or through a removal and recreation between two reads that no read saw, which the pre-read
+        # stat's inode shows against the standing key's, so a moved parse of another inode wins whatever its length (the second contributor's
+        # post-merge review of PR 2070: under the length order alone it stood down, and after the next fault the pane served the removed file's
+        # set, its dismissed count and an Undo for clears the file no longer had). Both keys must carry a stat for the inode to speak: the
+        # absent arm and a failed pre-read stat record the path-only shape, which leaves the length order alone.
         standing = _CLEARED_MEMO["landed"]
-        if standing is None or standing[0][0] != str(path) or n >= standing[2]:
+        ino = _key_inode(key)
+        standing_ino = _key_inode(standing[0]) if standing is not None else None
+        if standing is None or standing[0][0] != str(path) or n >= standing[2] or (ino is not None and standing_ino is not None and ino != standing_ino):
             _CLEARED_MEMO["landed"] = (key if key is not None else (str(path),), cur, n)   # the absent arm's path-only key shape when the stat failed
         return cur, ""
     _cleared_read_fault[0] = ""                          # a landed read ends the episode
@@ -50153,6 +50162,12 @@ def _stat_key(p):
         return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
     except OSError:
         return None
+
+
+def _key_inode(key):
+    """The inode in a memo key built as (path,) + _stat_key(path): None for the path-only shape the clears reader's absent and failed-stat
+    arms record, so a compare of two keys' inodes speaks only when both carry a stat."""
+    return key[3] if key is not None and len(key) > 3 else None
 
 
 def _dead_lane_key(sid, path, branch):
