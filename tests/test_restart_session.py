@@ -14,8 +14,8 @@ What this pins, on both sides of the backend seam:
     the registry row is never flipped dead, nothing is killed, no death record is written, and the session
     is live throughout: no surface can paint it dead on the way through. A RUNNING turn is cut — the
     reconnect is armed BEFORE the interrupt, so the arm exists before the interrupted turn's result fires
-    it, and the cut is the polite request alone, once per stop episode, never Stop's signals — while a
-    merely queued one is not cut at all. A dormant row has no process to replace and is simply
+    it, and the cut is the polite request alone, once per stop episode, never Stop's signals, not even when
+    that request fails — while a merely queued one is not cut at all. A dormant row has no process to replace and is simply
     connected. A sid romp has no record of, and a row that is not alive, refuse in words the user reads.
 
   * _restart_session, the door behind the WS restartSession op. It hands the work to the OWNING backend
@@ -28,10 +28,12 @@ Every leg reds at the merge base on the behaviour, not on a missing name: the tw
 so the tests say so through the AttributeError the getattr guards raise as an explicit failure. Synthetic
 fixtures only: a hermetic state root, private placeholder sids, the notes-api demo names.
 """
+import asyncio
 import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from romp_load import load_source
@@ -212,6 +214,142 @@ class RelaunchNeverClimbsTheStopLadder(unittest.TestCase):
         self.s.interrupt()
         self.s.interrupt()
         self.assertEqual(self.signals, ["sigint", "sigkill"])
+
+
+def _timed_out():
+    """No answer within the SDK's timeout: a bare Exception raised from TimeoutError (see _cli_refusal)."""
+    e = Exception("Control request timeout: interrupt")
+    e.__cause__ = TimeoutError()
+    return e
+
+
+def _refused():
+    """The CLI's error answer, which the SDK raises at once as a bare Exception carrying the CLI's text."""
+    return Exception("no current client")
+
+
+def _disconnected():
+    """A client whose CLI connection is gone: the SDK raises its typed CLIConnectionError."""
+    return type("CLIConnectionError", (Exception,), {})("the CLI's stdin is closed")
+
+
+class _FailingControl:
+    """The SDK client as _do_interrupt awaits it: every control request fails, after the gate when one is given
+    (a request still waiting on its answer)."""
+
+    def __init__(self, failure, gate=None):
+        self.failure, self.gate, self.requests = failure, gate, 0
+
+    async def interrupt(self):
+        self.requests += 1
+        if self.gate is not None:
+            await asyncio.get_running_loop().run_in_executor(None, self.gate.wait, 10)
+        raise self.failure()
+
+
+class ARestartWhoseRequestFailsSendsNoSignal(unittest.TestCase):
+    """A Restart's polite request that FAILS sends no signal either (the review of #2138, 2026-09-24). The request
+    ran through _do_interrupt, whose failure branch is Stop's: with a turn in flight it SIGINTs the CLI on that
+    same press and raises the rung to 2. So one Restart of a CLI whose request timed out, was refused, or met a
+    closed connection signaled it, against "never a signal", and if the CLI survived that signal the next Stop
+    sent SIGKILL. The SIGINT makes the installed CLI exit without running a text it has already taken, and with
+    one held the armed reconnect never fires: the session was left with no CLI. The ladder cases above cannot
+    reach that branch, since their loop never runs what it schedules; here a real event loop runs the request,
+    the client fails it the ways the SDK fails, and the signal rung is recorded instead of sent. A shutdown's
+    request, which says nothing about a Restart, still escalates."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.be = _backend(self.d)
+        self.lines = []
+        self.be._log_cb = self.lines.append
+        _reg(self.d)
+        s = self.s = sb.SdkSession(self.be, sb.read_reg(Path(self.d), SID))
+        self.be.sessions[SID] = s
+        s.inflight = 1
+        self.signals = []
+        s._signal_cli = lambda sig, action: self.signals.append(action)
+        s.request_reconnect = lambda defer=True: None      # the arm; RelaunchPrimitive pins its order
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, name="restart-test-loop", daemon=True)
+        self.thread.start()
+        s.loop = self.loop
+        self.addCleanup(self._close_loop)
+
+    def _close_loop(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=10)
+        self.loop.close()
+
+    def _settled(self, failures):
+        """Wait out the requests sent: each has failed and logged, the loop step that failed it has finished, and
+        any signal thread that step started has run."""
+        deadline = time.monotonic() + 10
+        while sum("control request failed" in m for m in self.lines) < failures:
+            if time.monotonic() > deadline:
+                self.fail("the control request never failed; log %r" % self.lines[-6:])
+            time.sleep(0.01)
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0), self.loop).result(timeout=10)
+        for t in threading.enumerate():
+            if t.name == "sdk-intr:web":
+                t.join(timeout=10)
+
+    def _restart_fails(self, failure):
+        self.s.client = _FailingControl(failure)
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._settled(1)
+        self.assertEqual(self.s.client.requests, 1, "the polite request went out")
+        self.assertEqual(self.signals, [], "a Restart never signals, not even when its request fails")
+        self.assertEqual(self.s._intr_level, 1, "the rung stays at the polite one, so Stop's next press is SIGINT")
+        self.assertTrue(any("restart" in m and "no signal" in m for m in self.lines),
+                        "the log says what the failure led to; log %r" % self.lines[-6:])
+
+    def test_a_restart_whose_request_times_out_sends_no_signal(self):
+        self._restart_fails(_timed_out)
+
+    def test_a_restart_whose_request_the_cli_refuses_at_once_sends_no_signal(self):
+        self._restart_fails(_refused)
+
+    def test_a_restart_whose_connection_is_gone_sends_no_signal(self):
+        self._restart_fails(_disconnected)
+
+    def test_stop_after_that_restart_sends_sigint_not_sigkill(self):
+        self.s.client = _FailingControl(_timed_out)
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._settled(1)
+        self.assertTrue(self.be.interrupt(SID))             # Stop: the episode's polite rung is spent
+        self.assertEqual(self.signals, ["sigint"], "Stop climbs from the polite rung: SIGINT before any SIGKILL")
+
+    def test_a_stops_own_failed_request_still_signals_on_that_press(self):
+        # the escalation is Stop's and stays (terminal parity, 2026-07-10): a turn in flight that the polite
+        # channel could not stop gets SIGINT on the same press
+        self.s.client = _FailingControl(_refused)
+        self.assertTrue(self.be.interrupt(SID))
+        self._settled(1)
+        self.assertEqual((self.signals, self.s._intr_level), (["sigint-auto"], 2))
+
+    def test_a_restart_while_a_stops_request_is_pending_leaves_that_stops_escalation_alone(self):
+        # the no-signal rule belongs to the Restart's own request, not to the session: a Restart clicked while
+        # Stop's request waits sends nothing, and that request's failure still escalates on Stop's press
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.s.client = _FailingControl(_timed_out, gate)
+        self.assertTrue(self.be.interrupt(SID))             # Stop: its request goes out and waits
+        self.assertEqual(self.be.relaunch(SID), "")         # Restart: the polite rung is spent, nothing is sent
+        gate.set()                                          # Stop's request times out
+        self._settled(1)
+        self.assertEqual(self.s.client.requests, 1)
+        self.assertEqual(self.signals, ["sigint-auto"])
+
+    def test_a_shutdowns_failed_request_still_signals_since_climb_defaults_to_true(self):
+        # shutdown() schedules _do_interrupt() with no argument, so the default is the whole of what keeps its
+        # failed request escalating: a turn in flight that the polite channel could not stop still gets SIGINT
+        self.s.client = _FailingControl(_refused)
+        self.s.shutdown()
+        self._settled(1)
+        self.assertEqual(self.s.client.requests, 1, "shutdown sent the polite request")
+        self.assertEqual((self.signals, self.s._intr_level), (["sigint-auto"], 2),
+                         "a request that does not say it is a Restart's escalates: climb defaults to True")
 
 
 class _Be:

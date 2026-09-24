@@ -1051,6 +1051,55 @@ class OneFedTextAtATime(unittest.TestCase):
         self.assertEqual([w[0] for w in c.writes], ["first turn", "B mid-turn", "C behind B"], "B once, never twice")
         self.assertEqual(c.writes[2][1], "turn-2")
 
+    def test_a_restart_whose_stop_request_fails_sends_no_signal_and_the_held_text_runs_in_the_old_process(self):
+        """A Restart asks the running turn to stop with the polite request alone (SdkBackend.relaunch). When that
+        request FAILED (here the SDK's timeout), _do_interrupt's failure branch, which is Stop's escalation, still
+        SIGINTed the CLI, and the installed CLI answers SIGINT with the interrupted result and an exit that leaves
+        a text it had taken unrun: the text went back to romp's queue, the armed reconnect (which waits for a turn
+        end with nothing held) never fired, and the session was left with no CLI until the next send (the review
+        of #2138, 2026-09-24). Now the failure only logs: the turn runs to its own end, the old process drains the
+        text it holds, and the relaunch follows that drained turn's result with nothing left to feed the new one."""
+        s, c1 = self.s, self._first_turn()
+        s.enqueue("B mid-turn")
+        self._wait(lambda: len(c1.writes) == 2, "B forwarded")
+
+        async def times_out():
+            raise Exception("Control request timeout: interrupt") from TimeoutError()
+        c1.interrupt = times_out
+        signals = []
+
+        def signal_cli(sig, action):             # what the installed CLI does on SIGINT: the cut result, then exit
+            signals.append(action)
+            self._interrupted_result(c1)
+            self._push(c1, _EOF)
+        s._signal_cli = signal_cli
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._wait(lambda: any("control request failed" in l for l in self.lines), "the stop request failed")
+        self._settle()
+        for t in threading.enumerate():
+            if t.name == "sdk-intr:web":
+                t.join(timeout=10)
+        self.assertEqual(signals, [], "a Restart's failed request sends no signal")
+        self.assertTrue(s.thread.is_alive(), "the old process runs on")
+        self.assertTrue(s._reconnect_when_idle, "the relaunch stays armed for the turn's end")
+        c1.phase = "after-result-1"
+        self._result_frame(c1)                           # the turn ends on its own
+        self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"), "the turn ended with B held")
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "no relaunch while the old process still holds B")
+        c1.phase = "turn-2"
+        self._init(c1)                                   # B's own turn, drained by the old process
+        self._wait(lambda: s._untaken is None and s.inflight == 1, "B drained in the old process")
+        self._result_frame(c1)
+        self._wait(lambda: len(self._Client.instances) == 2 and s.client is self._Client.instances[1],
+                   "the relaunch at the drained turn's result")
+        c2 = self._Client.instances[1]
+        self._settle()
+        self.assertEqual([w[0] for w in c1.writes], ["first turn", "B mid-turn"], "B ran once, in the old process")
+        self.assertEqual(c2.writes, [], "nothing left over for the new process")
+        self.assertEqual(s.pending(), [])
+        self.assertEqual(signals, [])
+
     def test_the_clis_exit_puts_a_held_text_back_at_the_head_of_the_queue_for_the_next_client(self):
         """The one loss event: the CLI's process exits (a crash, a kill, the stop ladder's SIGINT rung, on which
         the installed CLI emits the interrupted result and exits WITHOUT running the queued text). Its queue

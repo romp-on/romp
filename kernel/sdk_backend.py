@@ -6151,7 +6151,7 @@ class SdkSession:
             # signal exists to kill). _do_interrupt sets it again (harmless); the ResultMessage clears it.
             self._interrupted = True
             self.loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(self._do_interrupt()))
+                lambda: asyncio.ensure_future(self._do_interrupt(climb)))
             return True
         self._signal_cli(signal.SIGINT if action == "sigint" else signal.SIGKILL, action)
         return True
@@ -6548,7 +6548,7 @@ class SdkSession:
 
     # ---- async internals (run inside the quarantined loop) ----
 
-    async def _do_interrupt(self):
+    async def _do_interrupt(self, climb=True):
         # ACKNOWLEDGE FIRST, then send the control request. client.interrupt() BLOCKS until the CLI
         # acknowledges the interrupt — and the CLI won't acknowledge until the in-flight model call reaches
         # a boundary, which can take SECONDS mid-stream. Setting _interrupted only AFTER that await meant the
@@ -6573,8 +6573,20 @@ class SdkSession:
             # An idle-session refusal ('no current client') only logs: there may be nothing to stop, and
             # the next press escalates via the ladder anyway. The signal runs on a plain thread so this
             # loop thread never blocks on `ps`.
+            #
+            # That escalation is Stop's. A Restart's request (climb=False, SdkSession.interrupt) that fails
+            # sends nothing and leaves the rung at the polite one (the review of #2138, 2026-09-24): the
+            # auto-SIGINT fired on a Restart's first press whenever its request timed out, was refused or met
+            # a closed connection, and set the rung so the next Stop sent SIGKILL. The installed CLI exits
+            # on SIGINT without running a text it has already taken (_release_hold_at_exit), and with one
+            # held the armed reconnect, which waits for a turn end with nothing held, never fires: the
+            # session was left with no CLI. So the turn runs until it ends and the relaunch follows it;
+            # a Stop from here still climbs, SIGINT first.
             self.backend._log("interrupt (%s): control request failed: %s" % (self.name, e))
-            if self.inflight > 0:
+            if self.inflight > 0 and not climb:
+                self.backend._log("interrupt (%s): a restart sends no signal; the turn runs until it ends, "
+                                  "and Stop still signals it" % self.name, problem=False)
+            elif self.inflight > 0:
                 threading.Thread(target=self._signal_cli, args=(signal.SIGINT, "sigint-auto"),
                                  name=f"sdk-intr:{self.name}", daemon=True).start()
                 with self._lock:
