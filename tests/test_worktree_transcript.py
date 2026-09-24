@@ -145,7 +145,7 @@ class DiscoverFollowsTheRecordedPath(unittest.TestCase):
         src = open(os.path.join(KDIR, "judge.py")).read()
         self.assertIn('_sdk_transcript_path(f.name) or ""', src,
                       "a relocation must bust the discover cache the moment it lands")
-        self.assertIn("os.stat(os.path.dirname(rec)).st_mtime", src,
+        self.assertIn("_mtime_or_none(os.path.dirname(rec))", src,
                       "the recorded file's directory mtime is signed beside the launch dir's")
         sbsrc = open(os.path.join(KDIR, "sdk_backend.py")).read()
         self.assertIn('self.backend._update_reg(self.sid, transcriptPath=str(tp))', sbsrc,

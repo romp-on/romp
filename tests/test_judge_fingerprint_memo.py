@@ -67,8 +67,7 @@ class FingerprintMemoTest(unittest.TestCase):
         self._td = tempfile.mkdtemp()
         jd._rebind_state(Path(self._td))
         jd.PROJECTS = Path(self._td) / "projects"
-        jd._discover_cache["fp"] = None                      # module-globals → reset between tests
-        jd._discover_cache["result"] = None
+        jd._discover_cache.clear()                           # module-globals → reset between tests
         jd._namefp_memo.clear()
         jd._lastsid_memo.clear()
         self.cdir = str(Path(self._td) / "work")
@@ -139,14 +138,16 @@ class FingerprintMemoTest(unittest.TestCase):
                         pm = os.stat(jd._proj_dir(cdir)).st_mtime
                     except OSError:
                         pm = 0
-                rec = jd._sdk_transcript_path(f.name) or ""   # signed like lastSid (2026-08-20)...
+                rec = jd._sdk_transcript_path(f.name) or ""   # signed like lastSid, with its dir's mtime like pm
                 rm = 0
                 if rec:
                     try:
-                        rm = os.stat(os.path.dirname(rec)).st_mtime   # ...and its dir's mtime like pm (review fix)
+                        rm = os.stat(os.path.dirname(rec)).st_mtime
                     except OSError:
                         rm = 0
-                out.append((f.name, mt, pm, jd._sdk_last_sid(f.name) or "", rec, rm))
+                last = jd._sdk_last_sid(f.name) or ""
+                signed = jd._signed_mtime(f.name, rec, last, jd._proj_dir(cdir) if cdir else None)
+                out.append((f.name, mt, pm, last, rec, rm, jd._in_window(signed, int(time.time()))))
             return tuple(out)
 
         (jd.NAMES / OTHER).write_text("%s\t%s" % ("TESTHOST-two", self.cdir))
@@ -179,6 +180,97 @@ class FingerprintMemoTest(unittest.TestCase):
         b = jd._discover_fingerprint()
         self.assertNotEqual(a, b)
         self.assertIn(OTHER, [row[0] for row in b])
+
+    def test_a_woken_dormant_session_re_enters_discover(self):
+        """A session whose transcript aged out of WINDOW and is then touched again must reappear.
+
+        Nothing structural changes when it wakes — no names/ entry moves, no dir entry is added — so the
+        fingerprint held and discover() kept serving the cached list that had already dropped the row.
+        Every surface keyed on it (a comment thread's session lookup among them) then denied the session
+        existed while its transcript sat right there, appended seconds earlier."""
+        anchor = self.proj / (SID + ".jsonl")
+        dormant = time.time() - (jd.WINDOW + 3600)
+        os.utime(anchor, (dormant, dormant))
+        now = int(time.time())
+        self.assertEqual(jd.discover(now), [], "the aged-out session is out of the window")
+        cold = jd._discover_fingerprint()
+        os.utime(anchor, None)                                  # the wake: an append, and nothing else
+        self.assertNotEqual(jd._discover_fingerprint(), cold,
+                            "crossing back into the window moves the fingerprint")
+        self.assertEqual([row[0] for row in jd.discover(now)], [SID],
+                         "...so discover() re-walks and the session is listed again")
+
+    def test_a_woken_RELOCATED_session_re_enters_discover(self):
+        """A session whose CLI recorded a transcript outside the launch dir is read from that record, so
+        its window crossing is signed from the recorded file, not from the launch dir's (absent) one."""
+        moved = Path(self._td) / "projects" / "relocated"
+        moved.mkdir(parents=True, exist_ok=True)
+        recorded = moved / (SID + ".jsonl")
+        (self.proj / (SID + ".jsonl")).unlink()
+        recorded.write_text(json.dumps({"type": "user", "uuid": "u1"}) + "\n")
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        (jd.SDKDIR / (SID + ".json")).write_text(json.dumps({"transcriptPath": str(recorded)}))
+        dormant = time.time() - (jd.WINDOW + 3600)
+        os.utime(recorded, (dormant, dormant))
+        now = int(time.time())
+        self.assertEqual(jd.discover(now), [], "the aged-out recorded transcript is out of the window")
+        os.utime(recorded, None)
+        self.assertEqual([row[0] for row in jd.discover(now)], [SID],
+                         "the recorded file's wake moves the fingerprint, so discover() re-walks")
+
+    def _age_out_and_wake(self, current, *aged):
+        """Age `current` and every `aged` file out of WINDOW, check discover() drops the session, then
+        touch only `current` and return what discover() lists."""
+        dormant = time.time() - (jd.WINDOW + 3600)
+        for path in (current,) + aged:
+            os.utime(path, (dormant, dormant))
+        now = int(time.time())
+        self.assertEqual(jd.discover(now), [], "every transcript is out of the window")
+        os.utime(current, None)
+        return [row[0] for row in jd.discover(now)]
+
+    def test_a_woken_CLEARED_session_re_enters_discover(self):
+        """After a /clear the session reads its lastSid file, so that file's wake is what gets signed."""
+        self._write_transcript(OTHER)
+        cleared = self.proj / (OTHER + ".jsonl")
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        (jd.SDKDIR / (SID + ".json")).write_text(json.dumps({"lastSid": OTHER}))
+        self.assertEqual(self._age_out_and_wake(cleared, self.proj / (SID + ".jsonl")), [SID])
+
+    def test_a_woken_RELOCATED_and_CLEARED_session_re_enters_discover(self):
+        """A relocated session after a /clear reads the lastSid sibling of its recorded file."""
+        moved = Path(self._td) / "projects" / "relocated"
+        moved.mkdir(parents=True, exist_ok=True)
+        recorded, sibling = moved / (SID + ".jsonl"), moved / (OTHER + ".jsonl")
+        for path in (recorded, sibling):
+            path.write_text(json.dumps({"type": "user", "uuid": "u1"}) + "\n")
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        (jd.SDKDIR / (SID + ".json")).write_text(json.dumps({"transcriptPath": str(recorded), "lastSid": OTHER}))
+        self.assertEqual(self._age_out_and_wake(sibling, recorded, self.proj / (SID + ".jsonl")), [SID])
+
+    def test_a_woken_session_with_a_STALE_record_re_enters_discover(self):
+        """A record naming a file that no longer exists falls back to the launch dir's file, as discover() does."""
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        gone = Path(self._td) / "projects" / "gone" / (SID + ".jsonl")
+        (jd.SDKDIR / (SID + ".json")).write_text(json.dumps({"transcriptPath": str(gone)}))
+        self.assertEqual(self._age_out_and_wake(self.proj / (SID + ".jsonl")), [SID])
+
+    def test_a_NUL_in_a_recorded_value_signs_as_absent_and_the_session_stays_listed(self):
+        """Only a corrupt or hand-edited registry carries a NUL; discover must still list the session."""
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        for record in ({"lastSid": OTHER + "\x00"},
+                       {"transcriptPath": str(Path(self._td) / "pro\x00jects" / (SID + ".jsonl"))}):
+            with self.subTest(record=record):
+                (jd.SDKDIR / (SID + ".json")).write_text(json.dumps(record))
+                jd._namefp_memo.clear()
+                self.assertIn(SID, [row[0] for row in jd.discover(int(time.time()))])
+
+    def test_an_append_inside_the_window_still_serves_the_cache(self):
+        """The counterpart: a live session's append must NOT invalidate, or the cache buys nothing."""
+        now = int(time.time())
+        listed = jd.discover(now)
+        os.utime(self.proj / (SID + ".jsonl"), None)
+        self.assertIs(jd.discover(now), listed, "an append inside the window is still a cache hit")
 
     def test_discover_still_serves_its_cached_list(self):
         """End to end: the memo sits UNDER discover()'s cache, so an unchanged namespace still short-circuits."""
