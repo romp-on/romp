@@ -100,6 +100,7 @@ _cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", H
 # the stored Claude logins' registry (T346): a judge call for a session billed to one names that login's helper,
 # and never runs as a login the registry holds refused
 _logins = sys.modules.get("romp_logins") or load_source("romp_logins", HERE / "logins.py")
+gp = sys.modules.get("romp_gitpr") or load_source("romp_gitpr", HERE / "gitpr.py")   # the PR-acting command matcher
 
 HOME     = Path.home()
 STATE    = Path(os.environ.get("ROMP_STATE_DIR")   # per-kernel state root override (plans/multi-kernel.md)
@@ -7541,32 +7542,7 @@ def _goal_work_text(store, seg_by_id, nid, char_cap, subtree=True, marks=None, b
     both earlier and later work, splice FOLLOWUP_DIVIDER between them so the distiller can scope its takeaway
     to the most recent stretch (the follow-up) rather than re-summarizing history the user already saw."""
     nodes = store["nodes"]
-    ids = [nid]
-    if subtree:
-        children = {}
-        for _nid, nd in nodes.items():
-            children.setdefault(nd.get("parentId"), []).append(_nid)
-        stack, ids = [nid], []
-        while stack:
-            x = stack.pop(); ids.append(x); stack.extend(children.get(x, []))
-    seg_ids, seen = [], set()
-    for n in ids:
-        for sid in nodes.get(n, {}).get("trail", []):
-            if sid not in seen:
-                seen.add(sid); seg_ids.append(sid)
-    # PLACEMENT FALLBACK (the user 2026-07-10, the summaryless g596 card): a trail key can orphan for
-    # good — the prompt-run stamps it from the OPTIMISTIC queued echo, and a queued follow-up lands with
-    # different text (the wrapper), so the key's text-hash never matches any parsed segment again (a
-    # restart holding the queue makes the divergence certain). Placements are re-derived against the
-    # LANDED parse every pass, so any placement into this gather's nodes is a second, drift-proof route
-    # to the same history. Always added (dedup below folds the overlap), so an already-orphaned store
-    # heals at read time with no data surgery.
-    idset = set(ids)
-    for k, v in (store.get("placements") or {}).items():
-        if isinstance(v, str) and v in idset and isinstance(k, str):
-            kb = k[:-2] if k.endswith("#p") or k.endswith("#d") else k
-            if kb not in seen:
-                seen.add(kb); seg_ids.append(kb)
+    seg_ids = _goal_seg_ids(store, nid, subtree=subtree)   # trail keys + the placement fallback
     segs = sorted(_segs_for(seg_by_id, seg_ids), key=lambda sg: sg.get("t", 0))   # drift-safe trail resolution
     dedup, uniq = set(), []
     for sg in segs:                                    # a trail key and a placement key can resolve to the SAME
@@ -7585,6 +7561,192 @@ def _goal_work_text(store, seg_by_id, nid, char_cap, subtree=True, marks=None, b
     if len(work) > char_cap:                            # keep the most recent tail (matches the distiller's bound)
         work = "…\n\n" + work[-char_cap:]
     return work
+
+
+def _goal_seg_ids(store, nid, subtree=True):
+    """The recorded segment keys for goal `nid` (plus its subtree unless `subtree` is False) — trail
+    entries first, then the PLACEMENT FALLBACK (the user 2026-07-10, the summaryless g596 card): a trail
+    key can orphan for good — the prompt-run stamps it from the OPTIMISTIC queued echo, and a queued
+    follow-up lands with different text (the wrapper), so the key's text-hash never matches any parsed
+    segment again (a restart holding the queue makes the divergence certain). Placements are re-derived
+    against the LANDED parse every pass, so any placement into this gather's nodes is a second,
+    drift-proof route to the same history. Always added (callers dedup), so an already-orphaned store
+    heals at read time with no data surgery.
+
+    Factored out of _goal_work_text so a second reader (goal_pr_urls) walks the SAME history the
+    distiller sees, rather than a lookalike gather that could drift from it."""
+    nodes = store.get("nodes") or {}
+    ids = [nid]
+    if subtree:
+        children = {}
+        for _nid, nd in nodes.items():
+            children.setdefault(nd.get("parentId"), []).append(_nid)
+        stack, ids = [nid], []
+        while stack:
+            x = stack.pop()
+            ids.append(x)
+            stack.extend(children.get(x, []))
+    seg_ids, seen = [], set()
+    for n in ids:
+        for sid in (nodes.get(n) or {}).get("trail") or []:
+            if sid not in seen:
+                seen.add(sid)
+                seg_ids.append(sid)
+    idset = set(ids)
+    for k, v in (store.get("placements") or {}).items():
+        if isinstance(v, str) and v in idset and isinstance(k, str):
+            kb = k[:-2] if k.endswith("#p") or k.endswith("#d") else k
+            if kb not in seen:
+                seen.add(kb)
+                seg_ids.append(kb)
+    return seg_ids
+
+
+# PR URLs a goal's work produced (the user 2026-08-17: the Outline pane shows each goal's PR and its live
+# state). FULL urls ONLY — a bare "#8123" is ambiguous by construction (the very goal that motivated the
+# feature carried an internal audit id in exactly that shape), and a silently-wrong PR link is worse than
+# no link, the same call _verified_links makes for shortened path tokens. The trailing (?:/|$|\s) lets a
+# /pull/12/files deep link count as PR 12 while rejecting /pull/12x.
+# The trailing guard is a LOOKAHEAD, not a consumed character: a url ending a sentence ("…/pull/9.") has a
+# period after the number, and consuming one excluded char also rejected that period — so a PR named in
+# ordinary prose was silently missed. (?!\w) still rejects /pull/12x while accepting "/files", "." and ")".
+PR_URL_RE = re.compile(r"https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)(?!\w)")
+
+
+# A goal's PR is one it ACTED ON, not one it happened to mention: a segment contributes refs only when it
+# also holds a command that opens or changes a PR, or pushes the branch behind one (gp.is_push_command, the
+# one command reader, shared with the kernel's push counter).
+# Inside such a command a BARE number is unambiguous — `gh pr merge 503` names a PR the way loose prose
+# never can. It is the first positional word after the verb, read within that one simple command (so
+# `&& sleep 30` is another command), past flags and the values of flags that take one (`--title "Fix 3
+# bugs"`). Recorded with an EMPTY owner (the command targets the session's own checkout); skipped when the
+# command carries -R / --repo, which points somewhere else entirely.
+_GH_VALUE_FLAGS = frozenset(("-t", "--title", "-b", "--body", "-F", "--body-file", "-B", "--base", "-H", "--head",
+                             "-l", "--label", "--add-label", "--remove-label", "-a", "--assignee",
+                             "--add-assignee", "--remove-assignee", "-r", "--reviewer", "--add-reviewer",
+                             "--remove-reviewer", "-m", "--milestone", "-p", "--project", "--add-project",
+                             "--remove-project", "--subject", "--match-head-commit", "--author-email", "-c",
+                             "--comment", "-e", "--editor")) | gp.GH_REPO_OPTS
+_PR_NUM_WORD_RE = re.compile(r"^#?(\d{1,7})$")
+
+
+def _bare_pr_num(tokens):
+    """The PR number a PR-acting gh command names by a bare positional word, or None."""
+    act = gp.gh_pr_action(tokens)
+    if act is None or act[2]:
+        return None
+    words, i = act[1], 0
+    while i < len(words):
+        w = words[i]
+        if w.startswith("-"):
+            i += 2 if w in _GH_VALUE_FLAGS else 1
+            continue
+        m = _PR_NUM_WORD_RE.match(w)
+        return int(m.group(1)) if m else None
+    return None
+
+
+def _atom_parts(atom):
+    """(texts, commands) for one atom.
+
+    `texts` is every string a PR url could sit in — assistant prose AND tool_result output. Tool output
+    matters because `gh pr create` prints the new PR's url into exactly that stream, the agent's own
+    receipt, and _unit_text deliberately drops it (it is the captioner's compact signal, never the
+    payload). `commands` are the Bash inputs, which is where having acted is PROVED."""
+    texts, cmds = [], []
+    for b in ((atom.get("message") or {}).get("content") or []):
+        if not isinstance(b, dict):
+            continue
+        t = b.get("type")
+        if t == "text" and isinstance(b.get("text"), str):
+            texts.append(b["text"])
+        elif t == "tool_use":
+            inp = b.get("input") or {}
+            if isinstance(inp, dict) and isinstance(inp.get("command"), str):
+                cmds.append(inp["command"])
+        elif t == "tool_result":
+            c = b.get("content")
+            if isinstance(c, str):
+                texts.append(c)
+            elif isinstance(c, list):
+                texts.extend(x.get("text", "") for x in c if isinstance(x, dict))
+    return texts, cmds
+
+
+_SEG_PR_CACHE = {}   # (segment id, atom count) → tuple of (owner/repo, number)
+
+
+def _seg_pr_refs(seg):
+    """The PR refs ONE segment can claim, scanned once per (id, size).
+
+    Gated on the receipt described above: a segment with no PR-acting command contributes NOTHING, however
+    many numbers its prose names. Given a receipt, every PR the segment names counts — the url in the
+    creation output, one quoted in the surrounding prose, or a bare number inside the command itself.
+
+    Without the memo the judge pass would re-scan a session's whole history every pass, once per node that
+    owns each segment. The ATOM COUNT is part of the key, exactly as `closedSig` fingerprints a turn: an
+    open segment grows while its turn runs, and an id alone would pin the refs to the first scan, so a url
+    printed later in that same segment would never be seen."""
+    ckey = (seg.get("id") or "", len(seg.get("atoms") or []))
+    hit = _SEG_PR_CACHE.get(ckey)
+    if hit is not None:
+        return hit
+    em.hydrate(seg.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a), once per memo miss
+    texts, cmds = [], []
+    for a in (seg.get("atoms") or []):
+        t, c = _atom_parts(a)
+        texts.extend(t)
+        cmds.extend(c)
+    out, got = [], set()
+    if any(gp.is_push_command(c) for c in cmds):
+        for text in texts + cmds:
+            for m in PR_URL_RE.finditer(text):
+                ref = (m.group(1), int(m.group(2)))
+                if ref not in got:
+                    got.add(ref)
+                    out.append(ref)
+        for c in cmds:
+            for tokens in gp.simple_commands(c):
+                num = _bare_pr_num(tokens)
+                ref = ("", num)
+                if num is not None and ref not in got:
+                    got.add(ref)
+                    out.append(ref)
+    if len(_SEG_PR_CACHE) > 50000:          # runaway backstop; one entry per parsed segment size
+        _SEG_PR_CACHE.clear()
+    _SEG_PR_CACHE[ckey] = hit = tuple(out)
+    return hit
+
+
+def _goal_pr_segs(store, seg_by_id, nid, idx=None):
+    """Goal `nid`'s OWN resolved segments, oldest first. Own trail only: the pane rolls a parent's PRs up
+    from the tree it already draws, so mining the subtree here would list every descendant's on every
+    ancestor."""
+    return sorted(_segs_for(seg_by_id, _goal_seg_ids(store, nid, subtree=False), idx),
+                  key=lambda sg: sg.get("t", 0))
+
+
+def goal_pr_refs(store, seg_by_id, nid, idx=None):
+    """[[owner/repo, number]] mined from goal `nid`'s own segments, oldest-first and deduped. Unfiltered
+    by repo: this side has the atoms but not the checkout, so the kernel keeps only the session's own."""
+    return _refs_of(_goal_pr_segs(store, seg_by_id, nid, idx))
+
+
+def _refs_of(segs):
+    """The deduped PR refs of these segments, in order, as JSON-ready lists."""
+    out, got = [], set()
+    for sg in segs:
+        for key in _seg_pr_refs(sg):
+            if key not in got:
+                got.add(key)
+                out.append([key[0], key[1]])
+    return out
+
+
+def _merged_refs(kept, mined):
+    """`kept` refs in their order, then any `mined` ref not already among them."""
+    seen = {tuple(r) for r in kept}
+    return list(kept) + [r for r in mined if tuple(r) not in seen]
 
 
 def _goal_has_recorded_work(store, nid, subtree=True):
@@ -11661,13 +11823,19 @@ def _placement_of(placements, seg_id, live=None):
     return None
 
 
-def _segs_for(seg_by_id, seg_ids):
-    """Resolve recorded trail seg ids against a parse's seg_by_id, timestamp-invariant, preserving order.
-    A trail id written by an earlier pass can carry a different middle t than this parse's id for the same
-    segment (see _seg_key) — a raw `in` silently dropped that segment from the goal's gathered history."""
+def seg_index(seg_by_id):
+    """_seg_key → segment over a parse, built once and passed to _segs_for by a caller resolving many goals."""
     idx = {}
     for k, v in seg_by_id.items():
         idx.setdefault(_seg_key(k), v)
+    return idx
+
+
+def _segs_for(seg_by_id, seg_ids, idx=None):
+    """Resolve recorded trail seg ids against a parse's seg_by_id, timestamp-invariant, preserving order.
+    A trail id written by an earlier pass can carry a different middle t than this parse's id for the same
+    segment (see _seg_key) — a raw `in` silently dropped that segment from the goal's gathered history."""
+    idx = seg_index(seg_by_id) if idx is None else idx
     out = []
     for s in seg_ids:
         seg = seg_by_id.get(s)
@@ -15562,6 +15730,32 @@ def _closed_turns(store):
     return set(store.get("closedTurns") or store.get("sweptTurns", []))
 
 
+def _record_pr_refs(store, seg_by_id):
+    """Stamp every goal's PR refs onto the store for the read side, writing only on a change.
+
+    The contract is END-OF-TURN stamping: the walk builds `seg_by_id` (over every turn of the parse) only
+    on a pass that judges a turn, so a PR opened mid-turn is stamped once a turn ends; None means no turn
+    was judged. After a /clear the parse stops at the new transcript's root, and "not in this parse" is
+    not "has no PR": a goal none of whose segments resolve is left as it was, and one only partly
+    resolved keeps its stored refs beside the ones it mined."""
+    if seg_by_id is None:
+        return False
+    idx = seg_index(seg_by_id)
+    changed = False
+    for nid, nd in (store.get("nodes") or {}).items():
+        ids = _goal_seg_ids(store, nid, subtree=False)
+        segs = _segs_for(seg_by_id, ids, idx)
+        if not segs:
+            continue
+        refs = _refs_of(sorted(segs, key=lambda sg: sg.get("t", 0)))
+        if len(segs) < len(ids):              # some of its recorded work is outside this parse
+            refs = _merged_refs(nd.get("prRefs") or [], refs)
+        if refs != (nd.get("prRefs") or []):
+            nd["prRefs"] = refs or None
+            changed = True
+    return changed
+
+
 def _invalidate_closure(store, session, seg_t):
     """A work-run DONE landed AFTER the closer already classified the turn holding this segment: that
     closure is stale — the closer judged the turn before the verdict existed, so its rollup (bottom-up
@@ -15752,6 +15946,7 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
         swept.add(tid); sig[tid] = fp; did += 1        # remember the size we judged at → detect later growth
     store["closedTurns"] = sorted(swept)
     store["closedSig"] = sig
+    _record_pr_refs(store, seg_by_id)                 # goal → PR refs for the Outline pane's chip, at end of turn
     settled = _session_settled(fsid, path, session, store, now)
     rollup_status(store, settled)
     save_goals(fsid, store)

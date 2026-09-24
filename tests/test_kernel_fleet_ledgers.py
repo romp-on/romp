@@ -28,7 +28,7 @@ class FleetLedgers(unittest.TestCase):
         self.assertIn('if c["app"] in ("feed", "fleet"):', SRC)
 
     def test_ledgers_are_attached_from_chat_sessions(self):
-        self.assertIn('feed["ledgers"] = [{"sid": m["id"]', SRC)
+        self.assertIn('feed["ledgers"] = [_outline_ledger_row(m) for m in chat_sessions]', SRC)
 
     def test_the_fleet_page_connects_as_app_fleet(self):
         self.assertIn('_pane_spin("fleet-list"), _shim("fleet", v)', SRC)

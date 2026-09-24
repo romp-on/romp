@@ -78,7 +78,7 @@ class DoneComputationHonorsAuthority(unittest.TestCase):
         src = inspect.getsource(km._goal_tree_walk)
         self.assertIn("g_agent_open = _agent_open_set(gnodes, gkids)", src)
         self.assertIn("aopen = (nid in g_agent_open) and not clr", src)
-        self.assertIn("_goal_tree_walk(sid, gstore, seg_trig, seg_work, anchors=True)", inspect.getsource(km.build_session), "the ledger takes the shared walk")
+        self.assertIn("_goal_tree_walk(sid, gstore, seg_trig, seg_work, anchors=True, pr_repo=_pr_repo)", inspect.getsource(km.build_session), "the ledger takes the shared walk")
         self.assertIn("_goal_tree_walk(sid, gstore, anchors=False)", inspect.getsource(km._provisional_ledger), "the Outline's provisional row takes the same walk")
         self.assertNotIn("_agent_open_set(", inspect.getsource(km.build_session), "no private done-derivation beside the walk")
 

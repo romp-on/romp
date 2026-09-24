@@ -66,6 +66,7 @@ body.scheme-solarized-dark {
   --rail: rgba(255, 255, 255, 0.12);
 
   --green: #74c991;
+  --pr-open: #54b204; --pr-merged: #b48ce0;   /* the Outline PR chip's open/passing green and merged purple */
   /* every ✓/checkbox in the panel sits on this blue — the DEFAULT session
      identity color (first entry of bin/romp's _palette), per the user 2026-06-11 */
   --check-bg: #1EA1EB;
@@ -267,6 +268,7 @@ body.theme-light {
   --dim: #5D574E;
   --rail: rgba(0, 0, 0, 0.14);
   --green: #3E7D0E;
+  --pr-open: #3E7D0E; --pr-merged: #7A4FB0;   /* the PR chip's glyphs on the light ground, each over 4:1 */
   --check-bg: #C2410C;   /* the ✓ mark is THEMED (T226 ruling, 2026-09-02): every check on every surface
                             wears the theme's own mark — dark keeps the #1EA1EB brand blue, light wears
                             its clay accent (what the timeline's PAL_LIGHT already drew) */

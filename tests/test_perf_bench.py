@@ -65,6 +65,7 @@ EXPECTED_NEUTRALIZED = {
     "km._refresh_remote_prices", "km._warm_fleet_bg", "km._system_notify", "km._push_notify", "km._push_forward",
     "km._badge_push", "romp_kernel_perf_bench.subprocess", "romp_judge.subprocess", "romp_sdk_backend.subprocess",
     "romp_credentials.subprocess",   # loaded by sdk_backend; its credential helper runs as a subprocess (review find, 2026-09-08)
+    "romp_gitpr.subprocess", "gp._kick (counted)",   # the PR chip: its local git reads pass the tripwire, its gh refresh stands down
     "km._atomic_write (shadowed)", "km._read_state_json (shadow overlay)", "km._order_audit_path (shadowed)",
     "em.set_checkpoint_dir (shadowed)",   # the event model's checkpoint directory provider, pointed at the shadow
     "pwd.getpwnam (counted)", "pwd.getpwuid (counted)"}
@@ -400,10 +401,10 @@ class PerfBench(unittest.TestCase):
 
     def test_the_checkout_git_queries_pass_the_tripwire_and_are_counted(self):
         # the sessions' cwd is a checkout, so the chat build's path-link pass runs `git rev-parse` and
-        # `git ls-files` there; the tripwire admits exactly those and counts them (a refusal would have
-        # aborted the run — spawn_attempts stays empty and every row is present). The `remote get-url`
-        # pair is the file-link route's query, which no benched builder reaches: the Tripwire class
-        # below checks its admission in-process.
+        # `git ls-files` there, and the PR chip's repo lookup runs the `remote get-url` pair once per cwd;
+        # the tripwire admits exactly those and counts them (a refusal would have aborted the run —
+        # spawn_attempts stays empty and every row is present). `rev-list`, the chip's ahead-of count, is
+        # admitted too and runs on the push path rather than inside a benched builder.
         out = self._out()
         g = out["git_queries"]
         self.assertFalse(g["answered_as_failure"])
@@ -421,7 +422,8 @@ class PerfBench(unittest.TestCase):
         b = out["benchmarks"]
         for row in ("build_session_cold:22222222", "build_session_emwarm:22222222", "build_session_warm:22222222"):
             self.assertGreaterEqual(b[row]["git_per_build"].get("ls-files", 0), 1.0, "%s: %s" % (row, b[row]["git_per_build"]))
-            self.assertEqual(set(b[row]["git_per_build"]) - {"rev-parse", "ls-files"}, set(), "only admitted queries ran")
+            self.assertEqual(set(b[row]["git_per_build"]) - {"rev-parse", "ls-files", "remote get-url", "rev-list"}, set(),
+                             "only admitted queries ran")
         checkout, plain = b["build_session_cold:11111111"]["git_per_build"], b["build_session_cold:22222222"]["git_per_build"]
         self.assertLess(sum(checkout.values()), sum(plain.values()), "the checkout's answers are cached across the kept samples: %s vs %s" % (checkout, plain))
 
@@ -984,7 +986,8 @@ class Recorders(unittest.TestCase):
                                _read_state_json=lambda path, st=None, expect=None: None,
                                _order_audit_path=lambda: Path(self.state) / "order-audit.jsonl",
                                _refresh_remote_prices=None, _warm_fleet_bg=None, _system_notify=None,
-                               _push_notify=None, _push_forward=None, _badge_push=None)
+                               _push_notify=None, _push_forward=None, _badge_push=None,
+                               gp=SimpleNamespace(_kick=None))
 
     def _guards(self, km):
         """install_guards the way run() calls it: a recorder and a shadow made before the kernel loads, so
@@ -1014,6 +1017,9 @@ class Recorders(unittest.TestCase):
                          [("push", "api: done"), ("push", "api: done"), ("push", "web finished a turn"), ("push", "tests: done"),
                           ("push", "later"), ("system", "romp: api"), ("forward", 1), ("badge", 3)])
         self.assertEqual(len(rec["warm_calls"]), 1, "the background-parse call is counted, not run")
+        km.gp._kick("owner/repo")                       # the chip's two shapes: the repo alone, and with the numbers to check
+        km.gp._kick("owner/repo", (7, 9))
+        self.assertEqual(rec["gh_kicks"], ["owner/repo", "owner/repo"], "the gh refresh is counted, not started")
         # threads started after the guards are counted (the real _warm_fleet_bg would start one per call)
         self.assertEqual(rec["thread_starts"], 0)
         t = threading.Thread(target=lambda: None)

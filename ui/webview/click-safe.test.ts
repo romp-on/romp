@@ -74,6 +74,31 @@ test("Fleet: header / row open + caret fold are DELEGATED to the stable #fleet-l
   assert.match(FLEET, /if \(el\.dataset\.folded === "1"\) \{ expanded\.add\(k\); folded\.delete\(k\); \} else \{ folded\.add\(k\); expanded\.delete\(k\); \}/);
 });
 
+test("Fleet: the PR chip's actions are declared on the node and handled by the #fleet-list delegate", () => {
+  // the chip body folds its detail row, the number opens the PR, the detail row's buttons open and copy
+  assert.match(FLEET, /chip\.dataset\.act = "prfold"; chip\.dataset\.sid = sid; chip\.dataset\.nid = nid;/);
+  assert.match(FLEET, /num\.dataset\.act = "propen"; num\.dataset\.url = pr\.url;/);
+  assert.match(FLEET, /open\.dataset\.act = "propen"; open\.dataset\.url = pr\.url;/);
+  assert.match(FLEET, /copy\.dataset\.act = "prcopy"; copy\.dataset\.num = String\(pr\.num\);/);
+  assert.match(FLEET, /bad\.dataset\.act = "prretry"; bad\.dataset\.sid = sid;/);
+  for (const act of ["prfold", "propen", "prcopy", "prretry"]) assert.match(FLEET, new RegExp("\\n    " + act + ": \\(el\\) =>"), act);
+  assert.match(FLEET, /prretry: \(el\) => \{ if \(el\.dataset\.sid && !el\.dataset\.busy\) \{ markPrRetrying\(el\); vscodeApi\?\.postMessage\(\{ type: "prRetry", id: el\.dataset\.sid \}\); \} \}/);
+  // a post-and-wait control disables and relabels itself until it restores (ui/CLAUDE.md)
+  assert.match(FLEET, /chip\.setAttribute\("aria-disabled", "true"\);\n  chip\.textContent = PR_RETRYING_LABEL;/);
+});
+
+test("Fleet: the PR chips are placed on goal rows and the session head, each with its detail row", () => {
+  assert.match(FLEET, /const chipPlan = goalChip\(s\.prs, byId, n\);/);
+  assert.match(FLEET, /if \(chipPlan\.kind === "one"\) row\.appendChild\(prChip\(s\.sid, n\.id, chipPlan\.prs\[0\]\)\);/);
+  assert.match(FLEET, /else if \(chipPlan\.kind === "rollup"\) row\.appendChild\(prRollup\(s\.sid, n\.id, chipPlan\.prs\)\);/);
+  assert.match(FLEET, /if \(chipPlan\.prs\.length && prOpen\.has\(prKey\(s\.sid, n\.id\)\)\)\s*\n\s*container\.appendChild\(prDetail\(chipPlan\.prs,/);
+  assert.match(FLEET, /if \(hc\.pr\) head\.appendChild\(prChip\(s\.sid, "", hc\.pr\)\);/);
+  assert.match(FLEET, /if \(hc\.err\) head\.appendChild\(prErrChip\(s\.sid, hc\.err\)\);/);
+  assert.match(FLEET, /if \(hc\.pr && prOpen\.has\(prKey\(s\.sid, ""\)\)\) sec\.appendChild\(prDetail\(\[hc\.pr\]/, "the head chip's detail row renders");
+  // the search box matches a goal on a PR it shipped
+  assert.match(FLEET, /\|\| sessionPrs\(s\.prs, node\.prNums\)\.some\(\(pr\) => prMatches\(pr, sq\)\)\);/);
+});
+
 test("Timeline: the EXTERNAL redraws (poll + live-tick) are held under a pressed pointer, NOT user gestures", () => {
   assert.match(TIMELINE, /this\.svg\.addEventListener\('pointerdown', \(\) => \{ this\._pointerHeld = true; \}\);/);
   // the poll update() buffers (reusing the freeze-on-hover _dirtyWhileTip path) instead of relaying out

@@ -12,6 +12,7 @@ export const INTENT_OPS: ReadonlySet<string> = new Set([
   "sendMessage", "askFollowUp", "askText", "addCustomAsk", "sendCommand", "rewindSend",
   // explicit clicks that mutate kernel/session state
   "interrupt", "apiRetry", "rewindDelete",
+  "prRetry",   // the Outline's PR error chip: re-read that session's repo now
   "setModel", "setEffort", "setMode", "setFast", "setAuth",
   "renameSession", "moveSession", "endSession", "reviveSession", "restartSession",
   "nodeOverride", "askClear", "undoClear", "cardMove", "cardNotify", "redistill",

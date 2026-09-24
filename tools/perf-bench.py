@@ -442,22 +442,26 @@ class StateShadow:
 def new_recorder():
     """What the guards see, made before the kernel loads so the census can read it whichever way the run
     ends: refused spawns, suppressed notifications and background parses, refused writes, the tripwires
-    (for their git counters), the name-service lookups, the threads started and the --cwd-map rules'
-    hit counters (install_cwd_map's list, empty without rules)."""
+    (for their git counters), the name-service lookups, the threads started, the PR chip's stood-down gh
+    refreshes and the --cwd-map rules' hit counters (install_cwd_map's list, empty without rules)."""
     return {"spawns": [], "notifications": [], "refused_writes": [], "tripwires": [], "nss": {}, "warm_calls": [],
-            "thread_starts": 0, "cwd_map_hits": []}
+            "thread_starts": 0, "cwd_map_hits": [], "gh_kicks": []}
 
 
 # ── side-effect tripwires ───────────────────────────────────────────────────────────────────────
 class SubprocessTripwire:
     """Stands in for the `subprocess` module inside the loaded romp modules: constants and helpers pass
     through; every spawn raises, except the kernel's read-only local git queries — `git rev-parse` and
-    `git ls-files` (the chat build's path-link pass) and the pair `git remote get-url` (the file-link
-    route; the get-url pair only, never `git remote` at large, whose add/set-url/remove forms rewrite
-    config). Those are counted. With no_git they are answered as failures (the "no git on this box"
-    shape) instead of run, so a strict zero-exec run is possible without replacing any kernel function."""
+    `git ls-files` (the chat build's path-link pass), `git rev-list` (the PR chip's ahead-of counts) and
+    the pair `git remote get-url` (the file-link route and the chip's repo; the get-url pair only, never
+    `git remote` at large, whose add/set-url/remove forms rewrite config). Those are counted. With no_git
+    they are answered as failures (the "no git on this box" shape) instead of run, so a strict zero-exec
+    run is possible without replacing any kernel function.
+
+    The chip's `gh` reads are NOT admitted here: they are a network call, and the guard that stands them
+    down is gp._kick in install_guards, where the rest of the background threads are neutralized."""
     _SPAWN = ("Popen", "run", "call", "check_call", "check_output", "getoutput", "getstatusoutput")
-    _GIT_READ_ONLY = ("rev-parse", "ls-files")          # single-word queries admitted by their subcommand
+    _GIT_READ_ONLY = ("rev-parse", "ls-files", "rev-list")   # single-word queries admitted by their subcommand
     _GIT_READ_ONLY_PAIRS = (("remote", "get-url"),)      # two-word queries admitted only as the whole pair
 
     def __init__(self, real, log, no_git=False):
@@ -522,6 +526,14 @@ def install_guards(km, sbmod, shadow, rec, no_git=False):
     # that cycle would be timed with its frames dropped and the notification count would come up short.
     stub("_refresh_remote_prices", lambda *a, **k: None)            # network fetch thread
     stub("_warm_fleet_bg", lambda *a, **k: rec["warm_calls"].append(time.time()))   # background parse thread; counted
+    # The PR chip's gh refresh: a network call on its own thread, kicked from the push build pass. The cache
+    # reads around it stay live, so the builders time the same code they run in production, minus the network.
+    gp = getattr(km, "gp", None)
+    if gp is not None:
+        if not hasattr(gp, "_kick"):
+            raise BenchError("this kernel's PR module has no _kick; the harness's guard list needs adjusting for this revision")
+        gp._kick = lambda repo, nums=(): rec["gh_kicks"].append(repo)
+        names.append("gp._kick (counted)")
     stub("_system_notify", lambda t, b, *a, **k: rec["notifications"].append(("system", t)))
     stub("_push_notify", lambda t, b, *a, **k: rec["notifications"].append(("push", t)))
     stub("_push_forward", lambda evs, *a, **k: rec["notifications"].append(("forward", len(evs))))
@@ -1018,6 +1030,7 @@ def run(args, state, mirror_of, out, private):
             rule["hits"] = n
         out["notifications_suppressed"] = len(rec["notifications"])
         out["warm_calls_suppressed"] = len(rec["warm_calls"])
+        out["gh_refreshes_suppressed"] = len(rec["gh_kicks"])
         out["thread_starts"] = rec["thread_starts"]
         out["spawn_attempts"] = rec["spawns"]
         out["git_queries"] = {"answered_as_failure": bool(args.no_git), "calls": git_calls_total(rec)}
@@ -1468,9 +1481,11 @@ def render_text(out, profile):
     if cc:
         L.append("caches emptied before each cold build_session sample: kernel %s; event model %s"
                  % (", ".join(cc.get("kernel") or []) or "none", ", ".join(cc.get("event_model") or []) or "none"))
-    L.append("notifications suppressed: %d; background parses suppressed: %d; refused spawns: %d; refused writes: %d; threads started: %d; new threads: %s"
-             % (out.get("notifications_suppressed", 0), out.get("warm_calls_suppressed", 0), len(out.get("spawn_attempts", [])),
-                len(out.get("refused_writes", [])), out.get("thread_starts", 0), out.get("threads_new") or "none"))
+    L.append("notifications suppressed: %d; background parses suppressed: %d; gh refreshes suppressed: %d; refused spawns: %d; "
+             "refused writes: %d; threads started: %d; new threads: %s"
+             % (out.get("notifications_suppressed", 0), out.get("warm_calls_suppressed", 0), out.get("gh_refreshes_suppressed", 0),
+                len(out.get("spawn_attempts", [])), len(out.get("refused_writes", [])), out.get("thread_starts", 0),
+                out.get("threads_new") or "none"))
     if profile and out.get("profiles"):
         for name, p in out["profiles"].items():
             L.append("")

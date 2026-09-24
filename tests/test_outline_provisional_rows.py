@@ -304,7 +304,7 @@ class OutlineProvisionalRows(unittest.TestCase):
             self.assertEqual(bool(got[0].get("provRows")), expect, path)
 
     def test_08_source_pins_the_ledgers_comprehension_survives_the_dial_carries_the_term_for_the_outline_only(self):
-        self.assertIn('feed["ledgers"] = [{"sid": m["id"]', SRC, "the built rows' comprehension stands (tests/test_kernel_fleet_ledgers.py pins it)")
+        self.assertIn('feed["ledgers"] = [_outline_ledger_row(m) for m in chat_sessions]', SRC, "the built rows' comprehension stands (tests/test_kernel_fleet_ledgers.py pins it)")
         self.assertIn('(APP==="fleet"?"&provrows=1":"")', SRC, "the pane shim's dial carries the term for the Outline app only")
         self.assertIn('provrows = (q.get("provrows") or [""])[0] == "1" and app == "fleet"', SRC, "the handshake reads it gated on the app, as skeleton is on chat")
         self.assertNotIn("_any_sessions_pane", SRC, "the gate's condition names the Outline, not the Sessions pane")

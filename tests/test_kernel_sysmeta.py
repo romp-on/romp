@@ -45,10 +45,58 @@ class SessionMeta(unittest.TestCase):
         self.assertEqual(meta["version"], "1.2.3")
         self.assertEqual(meta["permissionMode"], "acceptEdits", "permissionMode comes from the latest USER record")
 
+    def test_counts_push_and_pr_commands_but_not_mere_mentions(self):
+        """pushCount is the event behind re-reading a repo's PR state: a push moves the REMOTE while HEAD
+        and branch stay put, so nothing else in a build pass would notice the checks restarting. A command
+        that merely CONTAINS the words must not count (the user 2026-08-17)."""
+        ids = iter(range(1, 100))
+
+        def bash(cmd):
+            tid = "toolu_%d" % next(ids)
+            return [{"type": "assistant", "cwd": "/work/proj", "version": "1.2.3",
+                     "message": {"role": "assistant", "model": "claude-opus-4-8",
+                                 "content": [{"type": "tool_use", "id": tid, "name": "Bash",
+                                              "input": {"command": cmd}}]}},
+                    {"type": "user", "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}}]
+        recs = [
+            *bash("git push -u fork dev/notes-index"),
+            *bash("gh pr create --draft --title x"),
+            *bash("git status --porcelain"),
+            *bash("grep -rn 'git push' docs/"),
+            {"type": "assistant", "cwd": "/work/proj", "version": "1.2.3",
+             "message": {"role": "assistant", "model": "claude-opus-4-8",
+                         "content": [{"type": "tool_use", "name": "Write",
+                                      "input": {"file_path": "/work/proj/a.py"}}]}},
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write("\n".join(json.dumps(r) for r in recs) + "\n")
+            path = f.name
+        try:
+            km._session_meta_cache.clear()
+            meta = km._session_meta(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(meta["pushCount"], 2, "the push and the gh pr call, not the status or the grep")
+        self.assertEqual(meta["lastEditPath"], "/work/proj/a.py", "the edit scan still works alongside it")
+
+    def test_a_meta_restored_from_an_older_checkpoint_still_counts_pushes(self):
+        """A checkpoint written before pushCount existed restores a five-key meta; the step must add the key
+        rather than raise into its own guard and leave the count missing for good."""
+        old = {"cwd": "/work/proj", "gitBranch": "main", "version": "1.2.3", "permissionMode": "",
+               "lastEditPath": ""}
+        call = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "git push"}}]}}
+        result = {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}}
+        self.assertEqual(km._session_meta_step(old, call).get("pushCount", 0), 0, "still running")
+        self.assertEqual(km._session_meta_step(old, result)["pushCount"], 1, "counted when it lands")
+        self.assertEqual(km._session_meta_step(old, result)["pushCount"], 1, "once")
+
     def test_missing_file_is_empty_not_an_error(self):
         meta = km._session_meta("/no/such/transcript.jsonl")
         self.assertEqual(meta, {"cwd": "", "gitBranch": "", "version": "", "permissionMode": "",
-                                "lastEditPath": ""})
+                                "lastEditPath": "", "pushCount": 0, "pushPending": []})
 
     def test_cache_keys_on_mtime_size(self):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
