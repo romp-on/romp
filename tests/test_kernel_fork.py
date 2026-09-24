@@ -232,8 +232,11 @@ class ForkSessionOp(unittest.TestCase):
         # connect starts the CLI with no message, so the door arms the line for the first one romp sends.
         self.assertIsNone(km._fork_session(PARENT, "u2", "api-fork"))
         self.assertEqual(self.be.opener, km._FORK_FRAME)
-        self.assertIn("split this conversation off from the original", km._FORK_FRAME)
-        self.assertIn("don't pick up its unfinished tasks or background work", km._FORK_FRAME)
+        # the wording the user approved (2026-09-24), pinned verbatim
+        self.assertEqual(km._FORK_FRAME,
+                         "I've split this conversation off from the original at this point. The original keeps "
+                         "going on its own; carry on from here as a separate line of work, and don't pick up its "
+                         "unfinished tasks or background work.")
         self.assertNotEqual(km._FORK_FRAME, km._THREAD_FRAME, "a fork is not a side question about a passage")
 
     def test_seed_failure_aborts_the_fork(self):

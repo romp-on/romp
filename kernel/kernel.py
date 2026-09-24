@@ -18245,13 +18245,14 @@ _COMMENT_FRAME_HEAD = "About this part of the conversation:"
 # Never written into an earlier message: the copied history stays exactly the parent's (prompt caching
 # matches on the prefix, and newer models refuse an edited history). Injected-voice rules apply (the
 # person the agent works for speaking; no romp nouns; tests/test_injected_voice.py scans both).
-# - the THREAD line opens every comment thread on a passage: a side question, answered here;
+# - the THREAD line opens every comment thread on a passage: a side request, dealt with here (it may ask
+#   for an action, not only an answer);
 # - the FORK line opens a plain fork's first message (armed by be.fork, spent by the backend's send)
 #   and a thread the caller dispatches with its own instructions (the /fork-comment door), which is a
 #   separate line of work rather than a question about a passage.
 _THREAD_FRAME = ("I've split this off from our main conversation to ask about one part of it. The main "
-                 "conversation carries on separately; just answer here, and don't continue its work or "
-                 "pick up its unfinished tasks or background work.")
+                 "conversation carries on separately; just deal with what I ask here, and don't continue its "
+                 "work or pick up its unfinished tasks or background work.")
 _FORK_FRAME = ("I've split this conversation off from the original at this point. The original keeps going "
                "on its own; carry on from here as a separate line of work, and don't pick up its unfinished "
                "tasks or background work.")

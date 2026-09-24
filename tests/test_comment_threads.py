@@ -330,8 +330,11 @@ class OpeningMessage(unittest.TestCase):
         body = km._comment_first_message("Cap the delay at two minutes.", "Why two minutes and not five?")
         self.assertEqual(body, km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD
                          + "\n\n> Cap the delay at two minutes.\n\nWhy two minutes and not five?")
-        self.assertIn("main conversation carries on separately", km._THREAD_FRAME)
-        self.assertIn("background work", km._THREAD_FRAME)
+        # the wording the user approved (2026-09-24), pinned verbatim: a thread may act on a request, not only answer
+        self.assertEqual(km._THREAD_FRAME,
+                         "I've split this off from our main conversation to ask about one part of it. The main "
+                         "conversation carries on separately; just deal with what I ask here, and don't continue "
+                         "its work or pick up its unfinished tasks or background work.")
 
     def test_strip_returns_exactly_the_comment(self):
         body = km._comment_first_message("line one\nline two", "The comment.\n\nWith two paragraphs.")
