@@ -243,6 +243,13 @@ body.scheme-solarized-dark {
   --font-prose: var(--sans);
   --font-doc: var(--sans);
   --color-scheme: dark;
+  /* the classic scrollbars' paint (2026-09-25, when the chat's bar, a white alpha, was invisible on the light page): the
+     chat's track, thumb and hovered thumb, and the composer's thin bar. Painted only where the platform draws classic bars;
+     where it overlays, its own bars show (overlay-scrollbars.ts). theme-parity.test.ts holds the light thumb at 3:1. */
+  --scroll-track: rgba(255, 255, 255, 0.04);
+  --scroll-thumb: rgba(255, 255, 255, 0.24);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.36);
+  --scroll-thumb-thin: rgba(255, 255, 255, 0.3);
   --mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   --sans: "Inter", var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, -apple-system, "Segoe UI", sans-serif));
   --fs: var(--vscode-chat-font-size, 13px);
@@ -354,6 +361,12 @@ body.theme-light {
   --font-prose: var(--mono);   /* the user 2026-08-31, off the live preview: the serif read awful — assistant output goes MONO in light */
   --font-doc: var(--sans);     /* a viewed document stays sans: the mono ruling was about chat output */
   --color-scheme: light;
+  /* the page's own ink as the bar: the thumb 3.05:1 over its track (3.11:1 on the page), hovered 4.30:1, the composer's
+     thin bar 3.20:1 in its box */
+  --scroll-track: rgba(31, 30, 29, 0.04);
+  --scroll-thumb: rgba(31, 30, 29, 0.5);
+  --scroll-thumb-hover: rgba(31, 30, 29, 0.62);
+  --scroll-thumb-thin: rgba(31, 30, 29, 0.5);
   --fs: var(--vscode-chat-font-size, 13px);
   /* the --vscode-* stand-ins: inline rules fall back through these (menus, inputs, widget cards) */
   --vscode-editor-background: #F1EAE2;
@@ -389,6 +402,10 @@ html, body {
 }
 body { display: flex; flex-direction: column; overflow-x: hidden; }   /* the chat pane NEVER scrolls
    sideways (the user 2026-08-16) — a wide child is a layout bug to fix, not a scroll to offer */
+/* The platform's own scrollbars and controls are drawn for the theme the page wears (2026-09-25: a dark thumb on the light
+   page, a light one on the dark page). On the BODY, never the root: an iframe whose document's root scheme differs from the
+   iframe element's gets an opaque backdrop, and a lifted panel needs the document transparent (ui/CLAUDE.md). */
+body { color-scheme: var(--color-scheme); }
 /* The whole-pane session-color ring is the CONTRIBUTOR's linkage piece, themed (T122, the user
    2026-08-27, who confirmed there never used to be a thin session-color outline around the chat —
    and there wasn't): Classic renders NO frame, byte-equal to pre-730. History: a 2px frame here
@@ -1002,17 +1019,20 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 /* overflow-x:hidden — never let a wide child scroll the whole pane sideways
    (overflow-y:auto alone makes overflow-x compute to auto, which allowed it) */
 /* overflow-y: scroll (not auto) so the chat scrollbar + its gutter are ALWAYS shown and never
-   auto-hide on the side — and the content doesn't shift when it would appear (the user 2026-06-16). */
+   auto-hide on the side — and the content doesn't shift when it would appear (the user 2026-06-16). That holds where the
+   platform draws classic bars. Where it overlays them (macOS showing scroll bars while scrolling), the platform's own bar
+   shows while the transcript moves and takes no width (the user 2026-09-25, who could not see the styled bar there and
+   wanted the platform's): the styled rules below stand down under html.overlay-scrollbars (overlay-scrollbars.ts). */
 /* The browser's scroll anchoring stays ON here (measured 2026-09-08, T262e): after a scroll that slides the
    virtualization window, the pane's rewindow write keeps the focus unit still and Chrome's anchoring then absorbs
    the LATER layout changes the pane does not compensate (spacer re-measures, late-sizing rows). With
    overflow-anchor: none the visible line drifted 194-246 px after every such scroll on a headless run; with it on,
    0 px on every row. Do not add overflow-anchor: none to #content. */
 #content { flex: 1 1 auto; overflow-y: scroll; overflow-x: hidden; padding: 8px 0 12px; }
-/* a clearly-visible always-on thumb for the chat pane (brighter than the faint global thumb) */
-#content::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.04); }
-#content::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.24); border-radius: 5px; min-height: 36px; }
-#content::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.36); }
+/* a clearly-visible always-on thumb for the chat pane (brighter than the faint global thumb), in each theme's tokens */
+html:not(.overlay-scrollbars) #content::-webkit-scrollbar-track { background: var(--scroll-track); }
+html:not(.overlay-scrollbars) #content::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 5px; min-height: 36px; }
+html:not(.overlay-scrollbars) #content::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 /* The rail time-markers (.time-marker) hang ~45px LEFT of each turn. The column fills the pane
    (var(--chat-col)), so we ALWAYS reserve that left gutter as real padding — otherwise the HH:MM
    timestamps overflow left and get clipped by overflow-x:hidden. Tightened 54→44px (the user 2026-07-05),
@@ -1627,8 +1647,8 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 #composer-input.ph-on::placeholder { color: transparent; }
 /* A box grown past the height cap scrolls — and the scrollbar's TRACK paints square into the rounded
    right corners (the user 2026-07-30, on a multi-line box). A thin bar on a transparent track keeps the
-   corners round; the thumb alone floats inside the box. */
-#composer-input { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.3) transparent; }
+   corners round; the thumb alone floats inside the box. An overlay platform's own bar paints no track at all. */
+html:not(.overlay-scrollbars) #composer-input { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb-thin) transparent; }
 /* TOUCH (the user 2026-07-30): the same row, thumb-sized — rounded squares matching the 40px one-line
    box (down from 44px circles, round 2: they read oversized), send FILLED with the accent like a
    messenger's send, the paperclip on a faint chip fill so both read as buttons. The resting box stays
@@ -3165,9 +3185,11 @@ pre.has-copy:hover .code-copy, .code-copy:focus-visible { opacity: 0.9; }
 .hljs-addition { color: var(--hl-str); }
 .hljs-deletion { color: var(--err); }
 
-/* scrollbars */
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background, rgba(255, 255, 255, 0.12)); border-radius: 5px; }
+/* scrollbars: the page-wide width and faint thumb, for the root's own bar and every element's. Any of these makes the browser
+   draw classic always-on bars in place of a platform's overlay ones, so they stand down under html.overlay-scrollbars
+   (overlay-scrollbars.ts, the user 2026-09-25). The thumb is the editor's slider colour where a host defines one. */
+html:not(.overlay-scrollbars)::-webkit-scrollbar, html:not(.overlay-scrollbars) ::-webkit-scrollbar { width: 10px; height: 10px; }
+html:not(.overlay-scrollbars)::-webkit-scrollbar-thumb, html:not(.overlay-scrollbars) ::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background, var(--scroll-thumb)); border-radius: 5px; }
 
 /* ---------- session picker overlay (colored, Claude-Code-history style) ---------- */
 .picker-overlay {

@@ -32,6 +32,7 @@ import { gridItems, cycleEntries, viaWord, rowRoute, ago, nextSelection, normali
 import { initFileView, openFileView } from "./file-view";
 import { delegate } from "./actions";
 import { applyTheme } from "./theme";
+import { watchOverlayScrollbars } from "./overlay-scrollbars";
 import { loadSettings, installSettingsSync, onExternalSettingsChange } from "./settings";
 import { sessionLabelNodes, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
 import { menuCard, showMenuCard, closeContextMenu } from "./ctx-menu";
@@ -278,6 +279,7 @@ function openRow(i: number): void {
 
 // ── boot ──────────────────────────────────────────────────────────────────────────────────────
 applyTheme(document, loadSettings()); installSettingsSync(); onExternalSettingsChange((st) => applyTheme(document, st));
+watchOverlayScrollbars(document, window);   // styles.css's styled scrollbars stand down where the platform overlays its own
 initFileView((m) => vscodeApi?.postMessage(m));   // the shared viewer's poster: its ops (fileGitLink, saveFile) ride this socket
 setLightboxNav((sid) => { const cur = sel.sid; return listing && cur && sid === cur ? cycleEntries(listing.items, cur) : []; });
 const root = document.getElementById("artifacts-root");

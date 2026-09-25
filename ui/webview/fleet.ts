@@ -7,6 +7,7 @@
 import { delegate, flash } from "./actions";
 import { paintHeld, paintReleased, publishPaneHidden } from "./paint-gate";
 import { applyTheme } from "./theme";
+import { watchOverlayScrollbars } from "./overlay-scrollbars";
 import { loadSettings, installSettingsSync, onExternalSettingsChange } from "./settings";
 import { SessionViews, viewTagUnion } from "./session-views";
 import { lensVisible, surfaceLens } from "./tag-lens";
@@ -856,6 +857,7 @@ listenForFrames(perfFrameHandler("fleet", (m) => vscodeApi?.postMessage(m), (e: 
 }));
 window.addEventListener("storage", (e: StorageEvent) => { if (e.key === "romp:settings") { applyTheme(document, loadSettings()); render(); } });   // theme/colormap change → reskin + recolour
 applyTheme(document, loadSettings());   // the persisted theme applies at boot (2026-08-28)
+watchOverlayScrollbars(document, window);   // styles.css's styled scrollbars stand down where the platform overlays its own
 // VS Code webviews have per-origin storage and never see another pane's `storage` events — gear
 // saves arrive as settingsSync host messages (PR #763 item 3; the raiser re-fires romp:settings,
 // which onExternalSettingsChange below already handles in the browser too)

@@ -24,6 +24,7 @@ import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopP
          centerCmtPop, cmtPopCapPx, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
+import { watchOverlayScrollbars } from "./overlay-scrollbars";
 import { installPostalWash } from "./postal-wash";   // the incoming postal card's tint lightness, measured from the page (T337c)
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
@@ -21783,6 +21784,7 @@ function applyChatScheme(s: RompSettings): void {
 }
 function setupSettings(): void {
   applyChatScheme(settings);   // the persisted pick applies at startup — it survives reloads
+  watchOverlayScrollbars(document, window);   // once: the styled scrollbars stand down where the platform overlays its own
   // renderTabs too: the tab strip reads settings (the context gauge toggle) but rerenderAll only
   // rebuilds the transcript views, so without it a gear change waited for the next kernel push.
   onExternalSettingsChange((s) => { settings = s; applyChatScheme(s); renderTabs(); updateStatusline(); rerenderAll(); refillOpenCommentPop(); });

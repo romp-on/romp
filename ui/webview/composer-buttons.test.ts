@@ -53,8 +53,10 @@ test("a coarse pointer gets 40px rounded squares, matching the 40px one-line box
 });
 
 test("a grown box keeps its rounded right corners: thin scrollbar on a transparent track", () => {
-  // past the height cap the box scrolls, and a default scrollbar TRACK paints square into the corners
-  assert.match(CSS, /#composer-input \{ scrollbar-width: thin; scrollbar-color: rgba\(255, 255, 255, 0\.3\) transparent; \}/);
+  // past the height cap the box scrolls, and a default scrollbar TRACK paints square into the corners; the thumb is a theme
+  // token (the white alpha it wore was invisible in the light theme) and the rule stands down where the platform overlays
+  // its own bars (scrollbar-overlay.test.ts)
+  assert.match(CSS, /html:not\(\.overlay-scrollbars\) #composer-input \{ scrollbar-width: thin; scrollbar-color: var\(--scroll-thumb-thin\) transparent; \}/);
 });
 
 test("on touch, send wears the accent as a FILL and the glyph flips to the on-accent colour", () => {

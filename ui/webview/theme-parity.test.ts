@@ -103,6 +103,12 @@ const PAIRS: Array<[string, string, number]> = [
   ["--hl-title", "--bg", 4.5],
   ["--hl-meta", "--bg", 4.5],
   ["--hl-attr", "--bg", 4.5],
+  // the classic scrollbars (2026-09-25: the chat's thumb was a white alpha, invisible on the light page). A thumb is chrome the
+  // eye hunts for, not text: 2 here holds the dark thumb the chat has always had (2.20:1) from fading further; the light
+  // theme, where the bar went missing, is held to the 3:1 non-text floor over its own track in the test below
+  ["--scroll-thumb", "--bg", 2],
+  ["--scroll-thumb-hover", "--bg", 3],
+  ["--scroll-thumb-thin", "--input-bg", 2],   // the composer's thin bar, inside the box
 ];
 
 test("styles.css: the provisional wash the kind pairs are computed against is the one the sheet paints", () => {
@@ -178,6 +184,25 @@ for (const sheet of ["styles.css", "feed.css"]) {
     }
   });
 }
+
+test("styles.css: the light theme's scrollbar thumbs clear 3:1 over the ground they sit on; the dark ones keep their values", () => {
+  const css = read("styles.css");
+  const dark = props(block(css, ":root {")), light = props(block(css, "body.theme-light {"));
+  // dark resolves byte for byte to the white alphas the chat's bar always wore (only the light theme was broken)
+  assert.equal(dark.get("--scroll-track"), "rgba(255, 255, 255, 0.04)");
+  assert.equal(dark.get("--scroll-thumb"), "rgba(255, 255, 255, 0.24)");
+  assert.equal(dark.get("--scroll-thumb-hover"), "rgba(255, 255, 255, 0.36)");
+  assert.equal(dark.get("--scroll-thumb-thin"), "rgba(255, 255, 255, 0.3)");
+  const page = rgbOf(light.get("--bg")!, [255, 255, 255])!;
+  const track = rgbOf(light.get("--scroll-track")!, page)!;   // the chat thumb sits on its track, the track on the page
+  for (const [tok, ground, floor] of [["--scroll-thumb", track, 3], ["--scroll-thumb-hover", track, 4], ["--scroll-thumb", page, 3]] as const) {
+    const c = contrast(rgbOf(light.get(tok)!, ground)!, ground);
+    assert.ok(c >= floor, `light ${tok} = ${c.toFixed(2)}:1 < ${floor}`);
+  }
+  const input = rgbOf(light.get("--input-bg")!, page)!;   // the composer's box
+  const thin = contrast(rgbOf(light.get("--scroll-thumb-thin")!, input)!, input);
+  assert.ok(thin >= 3, `light --scroll-thumb-thin on --input-bg = ${thin.toFixed(2)}:1 < 3`);
+});
 
 // THE RING HUES, ALL PAIRS PER THEME (the rings-as-widgets change, 2026-09-14; the Needs you magenta, 2026-09-21): the three
 // dashed rings a tab can wear (the two reds, the magenta, the amber) are told apart by colour alone (same shape, same dash,

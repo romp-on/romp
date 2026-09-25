@@ -31,6 +31,7 @@ import { initFileView, openFileView, setFileViewIdentity, hostStub, type FileVie
 import { initFileBrowse, openFileBrowse } from "./file-browse";
 import { delegate } from "./actions";
 import { applyTheme } from "./theme";
+import { watchOverlayScrollbars } from "./overlay-scrollbars";
 import { loadSettings, installSettingsSync, onExternalSettingsChange } from "./settings";
 import { hostNameNodes } from "./host-prefix";
 import { asIdentity, parseRecent, rememberRecent, RECENT_KEY, type RecentFile } from "./files-recent";
@@ -103,6 +104,7 @@ function paint(): void {
 
 // boot
 applyTheme(document, loadSettings());
+watchOverlayScrollbars(document, window);   // styles.css's styled scrollbars stand down where the platform overlays its own
 installSettingsSync();
 onExternalSettingsChange((s) => applyTheme(document, s));
 

@@ -258,6 +258,8 @@ html, body {
   font-family: var(--sans); font-size: var(--fs); line-height: 1.5;
 }
 body { display: flex; flex-direction: column; position: relative; }   /* column flex: #feed-list flexes, #feed-foot docks below it */
+/* the platform's own scrollbars and controls drawn for the page's theme, on the body and never the root (styles.css says why) */
+body { color-scheme: var(--color-scheme); }
 
 /* ---------- header ---------- */
 /* header bar removed per the user — the columns are self-labeling */

@@ -4,6 +4,9 @@
    vars come from each host (the kernel's THEME_CSS in the browser; VS Code natively). */
 html,body{margin:0;padding:0;background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-foreground,#cccccc);}
 :root{--text-muted:#9aa0a6;--text-faint:#6e7681;}#host{width:100%;}
+/* the platform's own scrollbars and controls drawn for the page's theme (the light block re-points it), on the body and never
+   the root: a pane document whose root scheme differs from its iframe element's gets an opaque backdrop */
+body{color-scheme:dark;}
 .romp-tl-top{display:flex;align-items:center;gap:12px;padding:2px 0 8px;flex:0 0 auto;}
 .romp-tl-winlabel{color:var(--text-muted);font-size:12px;min-width:92px;}
 .romp-tl-src{color:var(--text-faint);font-size:11px;margin-left:auto;}
@@ -53,6 +56,7 @@ body.theme-light {
   --tl-hairline: rgba(0,0,0,0.12);
   background: var(--tl-page);
   color: var(--tl-ink);
+  color-scheme: light;
 }
 /* the root wears the page color too — a body shorter than the viewport otherwise shows the html
    rule's dark fallback beneath it (seen in the fixture screenshot, 2026-08-28) */
