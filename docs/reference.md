@@ -4959,8 +4959,9 @@ copy of it.
 ### Stepping through your messages and comments
 
 The arrows in the chat's bottom-left corner form one narrow column above the go-to-bottom chip, which
-keeps its place below them whether it shows or not. The column holds up to three groups, each an up
-arrow, an icon naming what it steps through, and a down arrow. From the top:
+keeps its place below them whether it shows or not. The chip is the column's foot: a short capsule of
+the same width and look, in a neutral grey, one gap below the last group. The column holds up to
+three groups, each an up arrow, an icon naming what it steps through, and a down arrow. From the top:
 
 - **Unread replies** (red, a speech bubble with a dot): the comment threads whose reply you have not
   read yet. The group shows while any thread has one. The red badge on its corner is how many of
@@ -4974,7 +4975,7 @@ the target lies in a part of the conversation the page has not loaded. From the 
 back lands on your last message even when it is on screen. An arrow with nothing that way is dimmed.
 Landing on an unread reply does not mark it read; opening its thread does. The column shows only
 while the conversation is longer than the pane. The arrows rest dim and brighten while the pointer is
-over them or one has focus. On a phone the column stays narrow and the arrows grow taller instead.
+over them or one has focus. On a phone the column and the chip stay narrow and grow taller instead.
 
 The keys, from anywhere in the chat including the message box: **Ctrl+Alt+↑** and **Ctrl+Alt+↓** for
 your messages, **Ctrl+Alt+Shift+↑** and **Ctrl+Alt+Shift+↓** for comments, **Ctrl+Alt+Page Up** and

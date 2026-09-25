@@ -44,22 +44,33 @@ test("the send gate stays byte-intact — the chip is the sanctioned mover, send
 test("the chip wears the menu-card vocabulary and survives [hidden] against its own display:flex", () => {
   // bottom-LEFT (the user 2026-09-03: the centered pill went unnoticed — they were still clicking
   // into the transcript and hitting End), and the border reads through the menu token: the raw
-  // white-alpha it wore vanished on the light page (cream on cream)
+  // white-alpha it wore vanished on the light page (cream on cream). Since 2026-09-25 the dress is
+  // the ONE rule it shares with the jump cluster's capsules (jump-cluster.test.ts pins the rest).
   assert.match(CSS, /#jump-bottom \{\s*\n\s*position: fixed; left: 14px;/);
-  assert.match(CSS, /#jump-bottom \{[\s\S]{0,700}?border: 1px solid var\(--menu-border\);/);
+  assert.match(CSS, /\n#jump-bottom, \.jc-group \{[^}]*border: 1px solid var\(--menu-border\);/);
   assert.match(RENDER, /setTip\(jumpBtn, "go to bottom — then follow new content"\);/,
     "the tooltip says what the user asked it to say, in the one styled tip");
   assert.match(CSS, /#jump-bottom\[hidden\] \{ display: none; \}/);
-  assert.match(CSS, /#jump-bottom:hover \{ border-color: var\(--accent\); color: var\(--accent\); \}/);
-  // the phone target WIDENS, never heightens — the compact pill is the ask (the user 2026-08-31)
-  assert.match(CSS, /@media \(pointer: coarse\) \{ #jump-bottom \{ width: 64px; height: 32px; \} \}/);
+  // hover: the capsule arrows' wash over the chip's own surface and the glyph lit, never a harsh accent edge
+  assert.match(CSS, /#jump-bottom:hover \{ box-shadow: inset 0 0 0 99px var\(--menu-hover\), var\(--shadow-toast\); \}/);
+  assert.doesNotMatch(CSS, /#jump-bottom:hover \{[^}]*border-color/);
+  assert.match(CSS, /#jump-bottom:hover svg, #jump-bottom:focus-visible svg \{ opacity: 1; \}/);
+  assert.match(CSS, /\.jc-btn:focus-visible, #jump-bottom:focus-visible \{ outline: 1\.5px solid var\(--accent\); outline-offset: -2px; \}/, "focus: the arrows' accent ring");
 });
 
-test("a short PILL with a stemless chevron — the circle + full arrow were the user's revision (2026-08-31)", () => {
-  assert.match(CSS, /width: 40px; height: 22px; border-radius: var\(--radius-pill\);/);
-  // the glyph is the chevron alone: one polyline, no <line> stem
-  assert.match(RENDER, /jumpBtn\.innerHTML = [^;]*<polyline points="6 9\.5 12 15\.5 18 9\.5"\/><\/svg>/);
-  assert.doesNotMatch(RENDER, /jumpBtn\.innerHTML = [^;]*<line /);
+test("a short capsule the column's width, with the arrows' own stemless chevron (the user 2026-08-31, then 2026-09-25)", () => {
+  // the width and height are the cluster's tokens: the column's width, and a height of its own (the phone's from height, the arrows' touch size)
+  assert.match(CSS, /#jump-bottom \{[^}]*width: var\(--jc-w\); height: var\(--jc-chip-h\); cursor: pointer; padding: 0;/);
+  assert.match(CSS, /\n#jump-bottom, \.jc-group \{\s*\n\s*border-radius: var\(--radius-pill\);/);
+  assert.doesNotMatch(CSS, /#jump-bottom \{[^}]*width: \d+px/, "no pixel width of its own: it can only be the column's");
+  assert.doesNotMatch(CSS, /@media \(pointer: coarse\) \{ #jump-bottom \{ width:/, "the old phone rule that widened it is gone");
+  // the glyph is the jump cluster's down chevron, from the same builder: one polyline, no <line> stem
+  assert.match(RENDER, /jumpBtn\.innerHTML = jcChevron\(false\);/);
+  const chev = RENDER.slice(RENDER.indexOf("const jcChevron = "), RENDER.indexOf("const jumpBtn = "));
+  assert.ok(chev.length > 0 && RENDER.indexOf("const jcChevron = ") < RENDER.indexOf("jumpBtn.innerHTML"), "the builder is defined before the chip uses it");
+  assert.match(chev, /\(up \? "6 14\.5 12 8\.5 18 14\.5" : "6 9\.5 12 15\.5 18 9\.5"\)/);
+  assert.match(chev, /stroke-width="2"/);
+  assert.doesNotMatch(chev, /<line /);
 });
 
 // ── executed replica: visibility + click + follow ─────────────────────────────────────────────────

@@ -18,10 +18,16 @@ lines long. Asserted in the browser, each move by the deep-link flash landing on
   by click) walks 140 and 145, where none is left below; previous unread by key lands 140; neither marks a thread read;
   the count is the unread replies off screen; the keys for messages and comments do what the buttons do; the api tab,
   whose transcript fits, shows no cluster; on a 390x844 phone all three capsules show, 34px wide with 32x40 chevrons, and
-  the column clears the message box.
+  the column clears the message box. The go-to-bottom chip is the column's foot (the user 2026-09-25, paraphrased: the
+  same width as the column, in its look): shown, it measures the column's width (24 on desktop, 34 on the phone), 30 and 42
+  tall (the phone's 40 inside the hairline, the arrows' touch size), left-aligned, one capsule gap below the column, and
+  the page computes the same surface, hairline, shadow and radius for it as for a capsule, in the dark theme and the
+  light, with the arrows' chevron at their size, stroke and resting glow; scrolled up on the phone, column and chip
+  together sit between the pane's top and the message box.
 With JUMP_SHOTS=<dir> the driver writes the cluster in the dark theme, the light theme and the phone layout (a coarse
-pointer). With JUMP_SHOTS_ONLY=1 it writes the shots after load and stops, for a before shot of an older build. Skips
-LOUDLY without the extension deps or a Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs, invented prose,
+pointer), each also a screen up with the go-to-bottom chip showing (*-up-corner.png). With JUMP_SHOTS_ONLY=1 it writes
+the shots after load and stops, for a before shot of an older build. Skips LOUDLY without the extension deps or a
+Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs, invented prose,
 host TESTHOST)."""
 import json
 import os
@@ -53,6 +59,7 @@ USER_UUID = "11111111-2222-3333-4444-%012d"
 REPLY_UUID = "22222222-3333-4444-5555-%012d"
 THREADS = [("tid-a", 3, "unread"), ("tid-b", 25, "read"), ("tid-d", 90, "resolved"), ("tid-c", 140, "unread"), ("tid-e", 145, "unread")]
 THREAD_SID = "dddddddd-1111-2222-3333-%012d"
+CHIP_H, PHONE_CHIP_H, GAP = 30, 42, 6   # the go-to-bottom chip's height on each layout, and the gap between capsules
 
 
 def _free_port():
@@ -111,6 +118,36 @@ const shoot = async (p, name) => {
   const c = await p.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { l: r.left, b: r.bottom }; });
   await p.screenshot({ path: cfg.shots + "/" + name + "-corner.png", clip: { x: Math.max(0, c.l), y: Math.max(0, c.b - 300), width: 260, height: 300 } });
 };
+// the go-to-bottom chip shows only off the bottom: a screen up puts it beside the column, and its own click brings the view
+// back down (the follow re-entry, so a run that shot this carries on from the bottom as one that did not)
+const scrollUp = async (p) => {
+  await p.evaluate(() => { const c = document.getElementById("content"); c.scrollTop = Math.max(0, c.scrollTop - 600); });
+  await p.waitForSelector("#jump-bottom:not([hidden])", { timeout: 10000 }).catch(() => {});
+  await p.waitForTimeout(400);
+};
+const backDown = async (p) => {
+  await p.click("#jump-bottom").catch(() => {});
+  await p.waitForSelector("#jump-bottom", { state: "hidden", timeout: 10000 }).catch(() => {});
+  await p.waitForTimeout(300);
+};
+// the corner with the column and the chip both in frame, in each theme (the view already scrolled up)
+const upCorner = async (p, prefix, themes) => {
+  if (!cfg.shots) return;
+  fs.mkdirSync(cfg.shots, { recursive: true });
+  await p.mouse.move(300, 60);
+  for (const th of themes) {
+    await p.evaluate((light) => document.body.classList.toggle("theme-light", light), th === "light");
+    await p.waitForTimeout(300);
+    const clip = await p.evaluate(() => {
+      const a = document.getElementById("jump-cluster").getBoundingClientRect(), b = document.getElementById("jump-bottom").getBoundingClientRect();
+      const top = Math.max(0, Math.min(a.top, b.top) - 28);
+      return { x: 0, y: top, width: 240, height: Math.max(a.bottom, b.bottom) + 24 - top };
+    });
+    await p.screenshot({ path: cfg.shots + "/" + prefix + th + "-up-corner.png", clip });
+  }
+  await p.evaluate(() => document.body.classList.remove("theme-light"));
+  await p.waitForTimeout(200);
+};
 const openWeb = async (p) => {   // the web tab is the long one; the strip may open on either (and the phone folds the strip away)
   await p.waitForSelector(`#tabs .tab[data-id="${cfg.sid}"]`, { state: "attached", timeout: 30000 });
   await p.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`).click(), cfg.sid);
@@ -123,10 +160,13 @@ if (cfg.shotsOnly) {
   await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(300);
   await shoot(page, "light");
   await page.evaluate(() => document.body.classList.remove("theme-light"));
+  await scrollUp(page); await upCorner(page, "", ["dark", "light"]);
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   const pp = await phone.newPage(); await pp.goto(cfg.chat); await openWeb(pp);
   await pp.waitForSelector("#content .turn-user", { state: "attached", timeout: 60000 }); await pp.waitForTimeout(4000);
   if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone.png" });
+  await scrollUp(pp); await upCorner(pp, "phone-", ["dark", "light"]);
+  if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone-up.png" });
   fs.writeSync(1, "RESULT:" + JSON.stringify({ shotsOnly: true }) + "\n"); await browser.close(); process.exit(0);
 }
 // every deep-link flash as it lands: the uuid of the turn wearing it (the flash is a 1.6s class; a late wait can miss it)
@@ -152,7 +192,18 @@ const LAYOUT = () => {
            unread: g(".jc-unread"), cmt: g(".jc-cmt"), mine: g(".jc-mine"),
            count: { shown: !cnt.hidden, text: cnt.textContent.trim(), l: cr.left, t: cr.top, r: cr.right, pointer: getComputedStyle(cnt).pointerEvents },
            rect: { l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height }, content: { l: c.left, t: c.top, b: c.bottom },
-           composerTop: kr ? kr.top : null, jump: { hidden: jb.hidden, l: jr.left, t: jr.top, r: jr.right, b: jr.bottom }, chips: !!document.getElementById("reply-chips") };
+           composerTop: kr ? kr.top : null, jump: { hidden: jb.hidden, l: jr.left, t: jr.top, r: jr.right, b: jr.bottom, w: jr.width, h: jr.height },
+           chips: !!document.getElementById("reply-chips") };
+};
+// the go-to-bottom chip's dress beside a capsule's, as the page computes them in the current theme (the chip shown, the
+// pointer elsewhere): the surface, the hairline, the shadow, the radius, and the chevron's size, stroke and resting glow
+const DRESS = () => {
+  const box = (e) => { const s = getComputedStyle(e); return { bg: s.backgroundColor, bw: s.borderTopWidth, bs: s.borderTopStyle, bc: s.borderTopColor, shadow: s.boxShadow, radius: s.borderTopLeftRadius }; };
+  const glyph = (e) => { const r = e.getBoundingClientRect(), pl = e.querySelector("polyline");
+    return { w: r.width, h: r.height, stroke: e.getAttribute("stroke-width"), vb: e.getAttribute("viewBox"), points: pl ? pl.getAttribute("points") : null, opacity: getComputedStyle(e).opacity }; };
+  const jb = document.getElementById("jump-bottom"), g = document.querySelector("#jump-cluster .jc-group:not([hidden])");
+  const down = document.querySelector('#jump-cluster .jc-group:not([hidden]) .jc-btn[data-move^="next"]:not(:disabled) svg');   // a live down arrow (a disabled one rests at 0.2)
+  return { jump: box(jb), group: box(g), jumpGlyph: glyph(jb.querySelector("svg")), arrowGlyph: down ? glyph(down) : null };
 };
 const state = () => page.evaluate(LAYOUT);
 const move = async (name, how, want, ms = 15000) => {
@@ -172,6 +223,7 @@ await shoot(page, "dark");
 await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(300);
 await shoot(page, "light");
 await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(200);
+if (cfg.shots) { await scrollUp(page); await upCorner(page, "", ["dark", "light"]); await backDown(page); }
 out.order = [];
 const readState = (tid) => page.evaluate((t) => { const m = document.querySelector(`mark.cmt-hl[data-tid="${t}"]`); return { unread: m ? m.classList.contains("unread") : null, pop: !!document.getElementById("cmt-pop") }; }, tid);
 const seq = [
@@ -189,6 +241,11 @@ if (Object.values(out.steps).every((s) => s.ok)) {
   out.atLast = await state();   // on reply 145: no unread thread is below it
   out.read145 = await readState("tid-e");
   await page.mouse.move(500, 300);
+  await page.waitForTimeout(200);   // the glyphs' 120ms glow back to rest
+  out.dress = { dark: await page.evaluate(DRESS) };
+  await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(300);
+  out.dress.light = await page.evaluate(DRESS);
+  await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(200);
   await move("prevUnread", "Control+Alt+PageUp", R(140));
   out.read140 = await readState("tid-c");
   await move("prevMine", "Control+Alt+ArrowUp", U(140));
@@ -207,9 +264,17 @@ await pp.waitForSelector("#jump-cluster:not([hidden]) .jc-unread:not([hidden])",
 await pp.waitForTimeout(1500);
 out.phone = await pp.evaluate(LAYOUT);
 out.phone.coarse = await pp.evaluate(() => matchMedia("(pointer: coarse)").matches);
-out.phone.chipW = await pp.evaluate(() => { const jb = document.getElementById("jump-bottom"); const was = jb.hidden; jb.hidden = false; const w = jb.offsetWidth; jb.hidden = was; return w; });
 if (cfg.shots) { await pp.screenshot({ path: cfg.shots + "/phone.png" }); const c = await pp.evaluate(() => document.getElementById("content").getBoundingClientRect().bottom);
   await pp.screenshot({ path: cfg.shots + "/phone-corner.png", clip: { x: 0, y: Math.max(0, c - 440), width: 200, height: 440 + 120 } }); }
+// a screen up on the phone: the chip shows under the column, and the pair must still fit between the pane's top and the message box
+await scrollUp(pp);
+out.phoneUp = await pp.evaluate(LAYOUT);
+out.phoneDress = { dark: await pp.evaluate(DRESS) };
+await pp.evaluate(() => document.body.classList.add("theme-light")); await pp.waitForTimeout(300);
+out.phoneDress.light = await pp.evaluate(DRESS);
+await pp.evaluate(() => document.body.classList.remove("theme-light")); await pp.waitForTimeout(200);
+await upCorner(pp, "phone-", ["dark", "light"]);
+if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone-up.png" });
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -358,7 +423,7 @@ class ServedJumpCluster(unittest.TestCase):
         self.assertEqual(s0["cmt"]["t"] - (s0["unread"]["t"] + s0["unread"]["h"]), 6, "a small gap between capsules")
         self.assertEqual((s0["rect"]["w"], s0["rect"]["h"]), (24, 204), "the column: 24 wide, three capsules 204 tall: %r" % s0["rect"])
         self.assertTrue(s0["jump"]["hidden"], "at the bottom the go-to-bottom chip is down: %r" % s0)
-        self.assertLess(abs(s0["rect"]["b"] - (s0["content"]["b"] - 8 - 22 - 6)), 1, "the chip's slot held below, though the chip is down: %r" % s0)
+        self.assertLess(abs(s0["rect"]["b"] - (s0["content"]["b"] - 8 - CHIP_H - GAP)), 1, "the chip's slot held below, though the chip is down: %r" % s0)
         # the controls: at the bottom nothing of yours, no comment and no unread reply is below
         for m, dis in (("prevMine", False), ("nextMine", True), ("prevComment", False), ("nextComment", True), ("prevUnread", False), ("nextUnread", True)):
             self.assertEqual(s0[m]["disabled"], dis, "%s at the bottom: %r" % (m, s0[m]))
@@ -380,8 +445,16 @@ class ServedJumpCluster(unittest.TestCase):
         self.assertFalse(s1["prevUnread"]["disabled"], s1)
         self.assertFalse(s1["jump"]["hidden"], s1)
         self.assertEqual((s1["rect"]["b"], s1["rect"]["l"]), (s0["rect"]["b"], s0["rect"]["l"]), "the column never moves as the chip comes and goes: %r vs %r" % (s1["rect"], s0["rect"]))
-        self.assertLessEqual(s1["rect"]["b"] + 6, s1["jump"]["t"] + 0.5, "the stack gap above the chip: %r" % s1)
+        self.assertLess(abs(s1["jump"]["t"] - s1["rect"]["b"] - GAP), 0.5, "the chip one capsule gap below the column: %r" % s1)
         self.assertEqual(s1["jump"]["l"], s1["rect"]["l"], "left-aligned with the chip: %r" % s1)
+        # the chip is the column's foot: its width exactly, a short capsule a touch taller than wide
+        self.assertEqual((s1["jump"]["w"], s1["jump"]["h"]), (s1["rect"]["w"], CHIP_H), "the chip: the column's width, %dpx tall: %r" % (CHIP_H, s1))
+        self.assertEqual(s1["jump"]["w"], 24, s1)
+        # one dress in either theme: the page computes the chip's surface, hairline, shadow and radius as a capsule's, and
+        # its chevron is the arrows' own, at their size, stroke and resting glow
+        for theme in ("dark", "light"):
+            self._same_dress(r["dress"][theme], 14, "0.55", theme)
+        self.assertNotEqual(r["dress"]["dark"]["jump"]["bg"], r["dress"]["light"]["jump"]["bg"], "the themes differ, so the match means something: %r" % r["dress"])
         # the unread arrows land a thread without marking it read (opening the thread does)
         self.assertEqual(r["read145"], {"unread": True, "pop": False}, "landing is not reading: %r" % r["read145"])
         self.assertEqual(r["read140"], {"unread": True, "pop": False}, r["read140"])
@@ -395,16 +468,46 @@ class ServedJumpCluster(unittest.TestCase):
         self.assertFalse(ph["hidden"], ph)
         for g in ("unread", "cmt", "mine"):
             self.assertTrue(ph[g]["shown"], "%s capsule on the phone: %r" % (g, ph[g]))
-            self.assertEqual(ph[g]["w"], 34, "the phone column: 34px, under the chip's %d: %r" % (ph["chipW"], ph[g]))
-        self.assertLessEqual(ph["rect"]["w"], ph["chipW"], ph)
+            self.assertEqual(ph[g]["w"], 34, "the phone column: 34px: %r" % ph[g])
         for m in ("prevUnread", "nextUnread", "prevComment", "nextComment", "prevMine", "nextMine"):
             self.assertEqual((ph[m]["w"], ph[m]["h"]), (32, 40), "each chevron 32x40 on the phone: %s %r" % (m, ph[m]))
         self.assertEqual(ph["rect"]["h"], 330, "the phone column: three 106px capsules and two gaps: %r" % ph["rect"])
         self.assertGreaterEqual(ph["rect"]["t"], ph["content"]["t"], "inside the pane: %r" % ph)
         self.assertIsNotNone(ph["composerTop"], ph)
-        self.assertLess(ph["rect"]["b"] + 8 + 32 + 6, ph["composerTop"] + 1, "the column and the chip's slot clear the message box: %r" % ph)
-        self.assertLessEqual(ph["rect"]["b"], ph["content"]["b"] - 8 - 32 - 6 + 1, ph)
-        print("COLUMN desktop %sx%s phone %sx%s phone-top-clearance %.0f" % (s0["rect"]["w"], s0["rect"]["h"], ph["rect"]["w"], ph["rect"]["h"], ph["rect"]["t"] - ph["content"]["t"]))
+        self.assertLess(ph["rect"]["b"] + 8 + PHONE_CHIP_H + GAP, ph["composerTop"] + 1, "the column and the chip's slot clear the message box: %r" % ph)
+        self.assertLessEqual(ph["rect"]["b"], ph["content"]["b"] - 8 - PHONE_CHIP_H - GAP + 1, ph)
+        # a screen up on the phone: the chip shows, the column's width, its touch size from height, one gap below the column,
+        # and column and chip together sit inside the pane, clear of the message box
+        pu = r["phoneUp"]
+        self.assertFalse(pu["jump"]["hidden"], "scrolled up, the chip shows: %r" % pu)
+        self.assertFalse(pu["hidden"], pu)
+        self.assertEqual((pu["jump"]["w"], pu["jump"]["h"]), (pu["rect"]["w"], PHONE_CHIP_H), "the chip on the phone: the column's width, %dpx tall: %r" % (PHONE_CHIP_H, pu))
+        self.assertEqual(pu["jump"]["w"], 34, pu)
+        self.assertGreaterEqual(pu["jump"]["h"] - 2, 40, "at least 40px of touch height inside the hairline, as the arrows: %r" % pu["jump"])
+        self.assertEqual(pu["jump"]["l"], pu["rect"]["l"], "left-aligned with the column: %r" % pu)
+        self.assertLess(abs(pu["jump"]["t"] - pu["rect"]["b"] - GAP), 0.5, "one capsule gap below the column: %r" % pu)
+        self.assertEqual((pu["rect"]["b"], pu["rect"]["h"]), (ph["rect"]["b"], ph["rect"]["h"]), "the column did not move as the chip came up: %r vs %r" % (pu["rect"], ph["rect"]))
+        self.assertGreaterEqual(pu["rect"]["t"], pu["content"]["t"], "the column's top inside the pane: %r" % pu)
+        self.assertLessEqual(pu["jump"]["b"], pu["composerTop"], "the chip clears the message box: %r" % pu)
+        self.assertLessEqual(pu["jump"]["b"], pu["content"]["b"], "…and the pane's bottom edge: %r" % pu)
+        for theme in ("dark", "light"):
+            self._same_dress(r["phoneDress"][theme], 16, "0.8", "phone " + theme)
+        print("COLUMN desktop %sx%s chip %sx%s; phone %sx%s chip %sx%s, top clearance %.0f, message-box clearance %.0f" % (
+            s0["rect"]["w"], s0["rect"]["h"], s1["jump"]["w"], s1["jump"]["h"], ph["rect"]["w"], ph["rect"]["h"], pu["jump"]["w"], pu["jump"]["h"],
+            pu["rect"]["t"] - pu["content"]["t"], pu["composerTop"] - pu["jump"]["b"]))
+
+    def _same_dress(self, d, glyph_px, rest, where):
+        """The go-to-bottom chip and a capsule, as the page computed them: one surface, hairline, shadow and radius, and the
+        chip's chevron the arrows' own at their size, stroke and resting glow."""
+        for k in ("bg", "bw", "bs", "bc", "shadow", "radius"):
+            self.assertEqual(d["jump"][k], d["group"][k], "%s: the chip's %s is the capsule's: %r" % (where, k, d))
+        self.assertEqual(d["jump"]["bw"], "1px", "%s: a hairline: %r" % (where, d["jump"]))
+        jg, ag = d["jumpGlyph"], d["arrowGlyph"]
+        self.assertIsNotNone(ag, "%s: a live down arrow to compare with: %r" % (where, d))
+        self.assertEqual((jg["w"], jg["h"]), (glyph_px, glyph_px), "%s: the chip's chevron at the arrows' %dpx: %r" % (where, glyph_px, d))
+        for k in ("w", "h", "stroke", "vb", "points", "opacity"):
+            self.assertEqual(jg[k], ag[k], "%s: the chip's chevron %s is a down arrow's: %r" % (where, k, d))
+        self.assertEqual(jg["opacity"], rest, "%s: resting, as the arrows rest: %r" % (where, jg))
 
 if __name__ == "__main__":
     unittest.main()

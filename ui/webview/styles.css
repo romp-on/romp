@@ -3500,18 +3500,19 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 #reveal-progress .rp-x:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
 /* jump to newest (the user 2026-08-31): the deliberate way back into follow mode once scrolled-up
-   reading (and the send gate that respects it) has left it. The seek-note's menu-card vocabulary in
-   a circular chip: dim at rest, accent on hover; body-level and fixed, so re-renders never rebuild
-   it; render.ts measures its bottom against #content's edge (the composer growing moves it). Below
-   toasts/seek (60), above the transcript. */
+   reading (and the send gate that respects it) has left it. Since 2026-09-25 it is the foot of the jump
+   cluster's column below (the user, who wanted it the column's width and in the capsules' language): a
+   short capsule exactly the column's width (--jc-w), in the capsules' dress and quiet glyph, neutral ink
+   since it is none of their three kinds; the tokens and the shared rules live in the cluster block.
+   Body-level and fixed, so re-renders never rebuild it; render.ts measures its bottom against #content's
+   edge (the composer growing moves it). Below toasts/seek (60), above the transcript. */
 #jump-bottom {
   position: fixed; left: 14px; z-index: 40;   /* bottom-LEFT (the user 2026-09-03; it sat centered and went unnoticed — they were still clicking in + End) */
-  width: 40px; height: 22px; border-radius: var(--radius-pill); cursor: pointer; padding: 0;   /* a short PILL, wider than tall, hugging the bottom (the user 2026-08-31, revising the circle) */
+  width: var(--jc-w); height: var(--jc-chip-h); cursor: pointer; padding: 0;   /* a short capsule under the column: its width, a touch taller than wide */
   display: flex; align-items: center; justify-content: center;
-  background: var(--vscode-menu-background, var(--surface-raised)); color: var(--dim);
-  border: 1px solid var(--menu-border); box-shadow: var(--shadow-toast);   /* the raw white-alpha border vanished on the light page — cream on cream */
+  color: var(--fg);   /* neutral: the glyph rests at the capsules' 0.55 and lights up on hover, as their arrows do */
 }
-#jump-bottom:hover { border-color: var(--accent); color: var(--accent); }
+#jump-bottom:hover { box-shadow: inset 0 0 0 99px var(--menu-hover), var(--shadow-toast); }   /* the capsule arrows' hover wash, laid over the chip's own surface */
 #jump-bottom[hidden] { display: none; }   /* author display:flex defeats [hidden] — the login-modal lesson */
 /* live updates paused (T323 stage 4b): a proto-2 reader on an older window gets no live delta; the strip says so and
    offers the return. The jump chip's dress: menu-card background, the hairline border, the toast shadow, pill radius. */
@@ -3522,7 +3523,6 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 /* a gap's loading mark is the ONE standard loader (.rl-* below), scaled by .rl-sm; this rule only positions it,
    sticky at 40% so it stays in view through a tall gap while a page of history is on the wire */
 .tx-gap-glyph { position: sticky; top: 40%; display: flex; align-items: center; justify-content: center; padding: 12px 0; opacity: 0.9; }
-@media (pointer: coarse) { #jump-bottom { width: 64px; height: 32px; } }   /* the phone half: WIDEN for the hit area, never heighten — the compact look is the ask */
 /* THE JUMP CLUSTER (the user 2026-09-24; render.ts updateJumpCluster, jump-nav.ts): ONE narrow column above the go-to-bottom
    chip in the pane's bottom-left corner, left-aligned with it, over the rail gutter. Three vertical capsules, each a group
    with its up chevron above its down chevron, 6px apart, so the colours read as three kinds rather than six buttons, top to
@@ -3531,26 +3531,32 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
    messages (--you, the blue the rail's turn notches wear). Between each capsule's chevrons an icon names what it walks
    (a person, a speech bubble, the bubble with a filled dot), in the capsule's colour and not a button. It replaced the
    two "replies unread" chips (2026-09-08).
-   Geometry: 24px wide on desktop (buttons 22×22 inside the hairline, an 18px icon row between them), narrower than the
-   chip's 40, so the column is a thin strip over the gutter; a capsule is 64px tall and three are 204px. The phone keeps
-   the strip thin and gets its touch size from HEIGHT (the user 2026-09-24): 34px wide, buttons 32×40, a 24px icon row,
-   capsules 106px, three 330px, which clears the message box of a 390×844 phone (the served lab measures it). The cluster holds the chip's slot below it
-   (margin-bottom: the chip's height and the 6px stack gap) whether the chip shows or not, so nothing moves under a finger as
-   the chip comes and goes; render.ts sets `bottom` from #content's bottom edge, as it does for the chip, so the composer is
+   Geometry: 24px wide on desktop (buttons 22×22 inside the hairline, an 18px icon row between them), so the column is a
+   thin strip over the gutter; a capsule is 64px tall and three are 204px. The phone keeps the strip thin and gets its touch
+   size from HEIGHT (the user 2026-09-24): 34px wide, buttons 32×40, a 24px icon row, capsules 106px, three 330px. The
+   go-to-bottom chip is the column's foot (the user 2026-09-25): a short capsule exactly the column's width (--jc-w), 24×30
+   on desktop and 34×42 on the phone (32×40 inside the hairline, the arrows' touch size, from height too), the same gap
+   below the last capsule as between capsules (--jc-gap), neutral ink. Column and chip together clear the message box of a
+   390×844 phone (the served lab measures it). The cluster holds the chip's slot below it (margin-bottom: the chip's height
+   and the gap) whether the chip shows or not, so nothing moves under a finger as the chip comes and goes; render.ts sets `bottom` from #content's bottom edge, as it does for the chip, so the composer is
    never covered. The unread count is a small badge on the unread capsule's upper-left corner, over the empty margin left of
    the column, so it widens nothing and covers no button (pointer-events: none). Quiet by default: the glyphs rest at 0.55
-   and light up while the cluster is hovered or holds focus; the phone, which has no hover, rests them brighter. The capsule
-   is the chip's menu-card dress, token for token. */
+   and light up while the cluster is hovered or holds focus; the phone, which has no hover, rests them brighter. The capsules
+   and the chip wear ONE rule: the menu card, the hairline, the toast shadow, the pill radius, token for token in either
+   theme, and the chip's chevron is the arrows' own glyph at their size and stroke, resting and lighting as they do. */
+#jump-cluster, #jump-bottom { --jc-w: 24px; --jc-gap: 6px; --jc-chip-h: 30px; }   /* the column's width, the gap between its capsules, the chip's height */
 #jump-cluster {
   position: fixed; left: 14px; z-index: 40;
-  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
-  margin-bottom: 28px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--jc-gap);
+  margin-bottom: calc(var(--jc-chip-h) + var(--jc-gap));   /* the chip's slot: its height and the gap the capsules keep */
 }
 #jump-cluster[hidden], #jump-cluster .jc-group[hidden], #jump-cluster .jc-count[hidden] { display: none; }   /* author display:flex defeats [hidden] */
-.jc-group {
-  display: flex; flex-direction: column; width: 24px; border-radius: var(--radius-pill); overflow: hidden;
+.jc-group { display: flex; flex-direction: column; width: var(--jc-w); overflow: hidden; }
+/* one dress for every capsule and the go-to-bottom chip under them */
+#jump-bottom, .jc-group {
+  border-radius: var(--radius-pill);
   background: var(--vscode-menu-background, var(--surface-raised));
-  border: 1px solid var(--menu-border); box-shadow: var(--shadow-toast);
+  border: 1px solid var(--menu-border); box-shadow: var(--shadow-toast);   /* the menu token: a raw white-alpha border vanished on the light page, cream on cream */
 }
 .jc-btn {
   height: 22px; padding: 0; border: 0; background: none; cursor: pointer; color: inherit;
@@ -3560,14 +3566,14 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .jc-unread { color: var(--st-awaiting-bg); }
 .jc-mine { color: var(--you); }
 .jc-cmt { color: var(--cmt-hl-outline); }
-.jc-btn svg, .jc-icon svg { width: 14px; height: 14px; }
-.jc-btn svg, .jc-icon svg, .jc-count { opacity: 0.55; transition: opacity 120ms ease; }
+.jc-btn svg, .jc-icon svg, #jump-bottom svg { width: 14px; height: 14px; }
+.jc-btn svg, .jc-icon svg, .jc-count, #jump-bottom svg { opacity: 0.55; transition: opacity 120ms ease; }
 #jump-cluster:hover .jc-btn svg, #jump-cluster:focus-within .jc-btn svg, #jump-cluster:hover .jc-icon svg, #jump-cluster:focus-within .jc-icon svg,
-#jump-cluster:hover .jc-count, #jump-cluster:focus-within .jc-count { opacity: 1; }
+#jump-cluster:hover .jc-count, #jump-cluster:focus-within .jc-count, #jump-bottom:hover svg, #jump-bottom:focus-visible svg { opacity: 1; }
 #jump-cluster .jc-btn:disabled { cursor: default; }
 #jump-cluster .jc-btn:disabled svg { opacity: 0.2; }   /* nothing that way: still there, so the capsule never changes shape */
 .jc-btn:hover:not(:disabled) { background: var(--menu-hover); }
-.jc-btn:focus-visible { outline: 1.5px solid var(--accent); outline-offset: -2px; }
+.jc-btn:focus-visible, #jump-bottom:focus-visible { outline: 1.5px solid var(--accent); outline-offset: -2px; }
 .jc-count {
   position: absolute; top: -6px; left: -9px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
   border-radius: var(--radius-pill); pointer-events: none;
@@ -3576,15 +3582,14 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
   background: var(--st-awaiting-bg); color: var(--st-awaiting-fg);
   box-shadow: 0 0 0 1.5px var(--bg);   /* the unread tick's page-coloured gap, so the badge reads apart from the capsule */
 }
-@media (prefers-reduced-motion: reduce) { .jc-btn svg, .jc-icon svg, .jc-count { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .jc-btn svg, .jc-icon svg, .jc-count, #jump-bottom svg { transition: none; } }
 @media (pointer: coarse) {
-  #jump-cluster { margin-bottom: 38px; }   /* the chip's 32px phone height + the gap */
-  .jc-group { width: 34px; }
+  #jump-cluster, #jump-bottom { --jc-w: 34px; --jc-chip-h: 42px; }   /* the strip stays thin; the chip, like the arrows, gets its touch size from height */
   .jc-btn { height: 40px; }   /* the touch size from height: 32×40 inside the hairline */
   .jc-icon { height: 24px; }
-  .jc-btn svg, .jc-icon svg { width: 16px; height: 16px; }   /* the go-to-bottom chip's glyph size */
+  .jc-btn svg, .jc-icon svg, #jump-bottom svg { width: 16px; height: 16px; }
   .jc-count { min-width: 18px; height: 18px; top: -7px; }
-  .jc-btn svg, .jc-icon svg, .jc-count { opacity: 0.8; }   /* no hover on a touch screen: rest a step brighter */
+  .jc-btn svg, .jc-icon svg, .jc-count, #jump-bottom svg { opacity: 0.8; }   /* no hover on a touch screen: rest a step brighter */
 }
 #seek-note .seek-note-x {
   flex: 0 0 auto; border: none; background: none; cursor: pointer; color: var(--dim);

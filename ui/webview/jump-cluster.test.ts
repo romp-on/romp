@@ -157,35 +157,56 @@ test("each move is a command with a default key, rebindable, and free of every o
 const rule = (sel: string): string => { const at = CSS.indexOf("\n" + sel + " {"); assert.ok(at >= 0, sel); return CSS.slice(at + 1, CSS.indexOf("}", at)); };   // the rule that opens a line
 const coarse = CSS.slice(CSS.indexOf("@media (pointer: coarse) {\n  #jump-cluster"), CSS.indexOf("\n}\n", CSS.indexOf("@media (pointer: coarse) {\n  #jump-cluster")));
 
-test("one narrow column above the go-to-bottom chip: its left, no wider than it, its slot held below, on both layouts", () => {
+// the cluster's geometry tokens, desktop and phone: the column's width, the gap between capsules, the go-to-bottom chip's height
+const tokens = (src: string): Record<string, number> => {
+  const m = src.match(/#jump-cluster, #jump-bottom \{ ([^}]*)\}/);
+  assert.ok(m, "the tokens rule");
+  return Object.fromEntries(Array.from(m![1].matchAll(/--(jc-[a-z-]+): (\d+)px;/g), (t) => [t[1], Number(t[2])]));
+};
+
+test("one narrow column above the go-to-bottom chip: its left, its slot held below, on both layouts", () => {
   const box = rule("#jump-cluster");
   assert.match(box, /position: fixed; left: 14px; z-index: 40;/, "the chip's left and layer");
-  assert.match(box, /display: flex; flex-direction: column;/);
-  const chip = rule("#jump-bottom");
-  const chipH = Number(chip.match(/height: (\d+)px/)![1]), chipW = Number(chip.match(/width: (\d+)px/)![1]);
-  assert.match(box, new RegExp("margin-bottom: " + (chipH + 6) + "px;"), "the chip's height and the stack gap, held whether it shows or not");
+  assert.match(box, /display: flex; flex-direction: column; align-items: flex-start; gap: var\(--jc-gap\);/);
+  assert.match(box, /margin-bottom: calc\(var\(--jc-chip-h\) \+ var\(--jc-gap\)\);/, "the chip's height and the capsules' own gap, held whether it shows or not");
   const group = rule(".jc-group");
-  assert.match(group, /display: flex; flex-direction: column;/, "each capsule stacks up above down");
-  const w = Number(group.match(/width: (\d+)px/)![1]);
-  assert.ok(w <= chipW, "the column is no wider than the chip: " + w + " vs " + chipW);
-  assert.equal(w, 24);
+  assert.match(group, /display: flex; flex-direction: column; width: var\(--jc-w\);/, "each capsule stacks up above down, the column's width");
+  const desk = tokens(CSS);
+  assert.deepEqual(desk, { "jc-w": 24, "jc-gap": 6, "jc-chip-h": 30 }, "24 wide, 6 apart, the chip 30 tall");
   assert.match(rule(".jc-btn"), /height: 22px;/, "desktop buttons 22×22 inside the hairline");
-  // the phone: the strip stays thin; the touch size comes from height
-  const phoneChip = CSS.match(/@media \(pointer: coarse\) \{ #jump-bottom \{ width: (\d+)px; height: (\d+)px; \} \}/)!;
-  assert.match(coarse, new RegExp("#jump-cluster \\{ margin-bottom: " + (Number(phoneChip[2]) + 6) + "px; \\}"));
-  const pw = Number(coarse.match(/\.jc-group \{ width: (\d+)px; \}/)![1]);
+  // the phone: the strip stays thin; the touch size comes from height, for the arrows and the chip alike
+  const phone = tokens(coarse);
+  assert.deepEqual(phone, { "jc-w": 34, "jc-chip-h": 42 }, "34 wide, the chip 42 tall; the gap is the desktop's");
   const ph = Number(coarse.match(/\.jc-btn \{ height: (\d+)px; \}/)![1]);
-  assert.ok(pw <= Number(phoneChip[1]), "no wider than the phone chip");
-  assert.ok(pw - 2 >= Number(phoneChip[2]), "each button at least the chip's phone height across (the touch size): " + (pw - 2));
-  assert.ok(ph > pw - 2, "…and taller than wide: height, not width, gets the touch size");
+  assert.equal(ph, 40, "each arrow 32×40 inside the hairline");
+  assert.ok(ph > phone["jc-w"] - 2, "…taller than wide: height, not width, gets the touch size");
+  assert.ok(phone["jc-chip-h"] - 2 >= 40, "the chip's touch size from height too: at least 40 inside the hairline");
+  assert.ok(phone["jc-chip-h"] > phone["jc-w"] && desk["jc-chip-h"] > desk["jc-w"], "a short capsule, a touch taller than wide, on both layouts");
   assert.match(coarse, /\.jc-icon \{ height: 24px; \}/);
+  assert.doesNotMatch(coarse, /#jump-cluster \{ margin-bottom:|\.jc-group \{ width:/, "the phone restates no geometry the tokens carry");
 });
 
-test("the chip's dress, each capsule in the colour of the rail marks it walks, the count in the unread halo's red", () => {
-  const card = rule(".jc-group");
-  for (const tok of ["var(--vscode-menu-background, var(--surface-raised))", "border: 1px solid var(--menu-border)", "box-shadow: var(--shadow-toast)", "border-radius: var(--radius-pill)"]) {
-    assert.ok(card.includes(tok), "the capsule has " + tok);
-    assert.ok(rule("#jump-bottom").includes(tok), "…as the go-to-bottom chip does");
+test("the go-to-bottom chip is the column's foot: its width, its gap, its dress and its glyph, each from one source", () => {
+  const bare = (r: string): string => r.replace(/\/\*[\s\S]*?\*\//g, "");   // declarations only, never a comment's words
+  const chip = bare(rule("#jump-bottom"));
+  assert.match(chip, /width: var\(--jc-w\); height: var\(--jc-chip-h\);/, "the column's width token, never a pixel width of its own");
+  assert.match(chip, /color: var\(--fg\);/, "neutral ink: it is none of the three kinds");
+  assert.doesNotMatch(chip, /background|border|box-shadow|radius/, "no dress of its own: the shared rule is the only one");
+  assert.doesNotMatch(bare(rule(".jc-group")), /background|border|box-shadow|radius/, "…and the capsule has none of its own either");
+  // the glyph: the arrows' size, resting glow, lit state and phone size, in the same selector lists
+  assert.match(CSS, /\n\.jc-btn svg, \.jc-icon svg, #jump-bottom svg \{ width: 14px; height: 14px; \}/);
+  assert.match(CSS, /\n\.jc-btn svg, \.jc-icon svg, \.jc-count, #jump-bottom svg \{ opacity: 0\.55; transition: opacity 120ms ease; \}/);
+  assert.match(coarse, /\.jc-btn svg, \.jc-icon svg, #jump-bottom svg \{ width: 16px; height: 16px; \}/);
+  assert.match(coarse, /\.jc-btn svg, \.jc-icon svg, \.jc-count, #jump-bottom svg \{ opacity: 0\.8; \}/);
+  assert.match(CSS, /@media \(prefers-reduced-motion: reduce\) \{ \.jc-btn svg, \.jc-icon svg, \.jc-count, #jump-bottom svg \{ transition: none; \} \}/);
+  // the chevron itself: the same builder the capsule arrows use
+  assert.match(RENDER, /jumpBtn\.innerHTML = jcChevron\(false\);/);
+});
+
+test("one dress for the capsules and the chip, each capsule in the colour of the rail marks it walks, the count in the unread halo's red", () => {
+  const card = rule("#jump-bottom, .jc-group");
+  for (const tok of ["background: var(--vscode-menu-background, var(--surface-raised))", "border: 1px solid var(--menu-border)", "box-shadow: var(--shadow-toast)", "border-radius: var(--radius-pill)"]) {
+    assert.ok(card.includes(tok), "the capsules and the go-to-bottom chip share " + tok);
   }
   assert.match(CSS, /\.jc-unread \{ color: var\(--st-awaiting-bg\); \}/, "unread replies: the needs-you red of the unread halo and outline");
   assert.match(CSS, /\.jc-mine \{ color: var\(--you\); \}/, "your messages: the turn notches' blue");
@@ -204,11 +225,11 @@ test("the chip's dress, each capsule in the colour of the rail marks it walks, t
 });
 
 test("quiet until hovered or focused; the phone, with no hover, rests brighter; focus wears the accent", () => {
-  assert.match(CSS, /\.jc-btn svg, \.jc-icon svg, \.jc-count \{ opacity: 0\.55; transition: opacity 120ms ease; \}/);
-  assert.match(CSS, /#jump-cluster:hover \.jc-btn svg, #jump-cluster:focus-within \.jc-btn svg, #jump-cluster:hover \.jc-icon svg, #jump-cluster:focus-within \.jc-icon svg,\s*\n#jump-cluster:hover \.jc-count, #jump-cluster:focus-within \.jc-count \{ opacity: 1; \}/);
+  assert.match(CSS, /\.jc-btn svg, \.jc-icon svg, \.jc-count, #jump-bottom svg \{ opacity: 0\.55; transition: opacity 120ms ease; \}/, "the go-to-bottom chip's glyph rests with them");
+  assert.match(CSS, /#jump-cluster:hover \.jc-btn svg, #jump-cluster:focus-within \.jc-btn svg, #jump-cluster:hover \.jc-icon svg, #jump-cluster:focus-within \.jc-icon svg,\s*\n#jump-cluster:hover \.jc-count, #jump-cluster:focus-within \.jc-count, #jump-bottom:hover svg, #jump-bottom:focus-visible svg \{ opacity: 1; \}/);
   assert.match(CSS, /#jump-cluster \.jc-btn:disabled svg \{ opacity: 0\.2; \}/);
-  assert.match(coarse, /\.jc-btn svg, \.jc-icon svg, \.jc-count \{ opacity: 0\.8; \}/);
-  assert.match(CSS, /\.jc-btn:focus-visible \{ outline: 1\.5px solid var\(--accent\); outline-offset: -2px; \}/);
+  assert.match(coarse, /\.jc-btn svg, \.jc-icon svg, \.jc-count, #jump-bottom svg \{ opacity: 0\.8; \}/);
+  assert.match(CSS, /\.jc-btn:focus-visible, #jump-bottom:focus-visible \{ outline: 1\.5px solid var\(--accent\); outline-offset: -2px; \}/);
   assert.match(CSS, /#jump-cluster\[hidden\], #jump-cluster \.jc-group\[hidden\], #jump-cluster \.jc-count\[hidden\] \{ display: none; \}/, "author display:flex defeats [hidden]");
 });
 
@@ -221,4 +242,8 @@ test("the ui-verify fixture mirrors the builders class for class (synthetic, not
   assert.match(fx, /<span class="jc-icon" aria-hidden="true">/);
   assert.match(fx, /<span class="jc-count"/);
   assert.match(fx, /11111111-2222-4333-8444-/, "placeholder ids");
+  // the chip's chevron is the builder's down chevron, byte for byte
+  const chev = fx.match(/<button id="jump-bottom"[^>]*>(<svg[\s\S]*?<\/svg>)<\/button>/);
+  assert.ok(chev, "the fixture carries the go-to-bottom chip");
+  assert.equal(chev![1], '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg>');
 });

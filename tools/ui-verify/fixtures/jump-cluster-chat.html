@@ -35,8 +35,9 @@
   <button type="button" class="cmt-tick unread" style="top: 300px" data-act="cmtjump"></button>
   <button type="button" class="cmt-tick unread" style="top: 420px" data-act="cmtjump"></button>
 </div>
-<!-- bottom-left: the jump cluster over the go-to-bottom chip's slot (render.ts sets both bottoms from the pane's edge) -->
-<button id="jump-bottom" aria-label="go to bottom" style="bottom: 20px"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
+<!-- bottom-left: the jump cluster over the go-to-bottom chip's slot (render.ts sets both bottoms from the pane's edge); the chip is
+     the column's foot, its width and dress, and its chevron is the arrows' own (render.ts jcChevron(false)) -->
+<button id="jump-bottom" aria-label="go to bottom" style="bottom: 20px"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
 <div class="jump-cluster" id="jump-cluster" style="bottom: 20px">
   <div class="jc-group jc-unread" role="group" aria-label="Unread replies">
     <button type="button" class="jc-btn" data-act="jcjump" data-move="prevUnread" aria-label="Previous unread reply (Ctrl+Alt+PageUp)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 14.5 12 8.5 18 14.5"/></svg></button>

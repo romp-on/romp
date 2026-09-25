@@ -14306,14 +14306,17 @@ if (typeof ResizeObserver === "function") {
 // rebuild it mid-click (the click-safety rule satisfied structurally); the snap itself is the
 // acknowledgment. Anchored to #content's bottom edge by measurement, re-run by the content
 // ResizeObserver below (the composer growing moves that edge) — event-based, no polling.
+// The one stemless chevron, up or down (the full arrow fought the short pill, the user 2026-08-31): this chip's glyph and every
+// jump-cluster arrow's, from one builder, so the chip under the column wears the arrows' own size and stroke (the user 2026-09-25).
+const jcChevron = (up: boolean): string => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"'
+  + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="'
+  + (up ? "6 14.5 12 8.5 18 14.5" : "6 9.5 12 15.5 18 9.5") + '"/></svg>';
 const jumpBtn = document.createElement("button");
 jumpBtn.id = "jump-bottom";
 jumpBtn.setAttribute("aria-label", "go to bottom");
 setTip(jumpBtn, "go to bottom — then follow new content");   // the user 2026-09-03's word for it, in the one styled tip
 jumpBtn.hidden = true;
-jumpBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"'
-  + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-  + '<polyline points="6 9.5 12 15.5 18 9.5"/></svg>';   // stemless chevron — the full arrow fought the short pill (the user 2026-08-31)
+jumpBtn.innerHTML = jcChevron(false);   // the capsule arrows' down chevron; styles.css sizes it with theirs
 function updateJumpBtn(): void {
   const c = document.getElementById("content");
   if (!c || c.clientHeight <= 0) { jumpBtn.hidden = true; return; }   // hidden pane measures 0 — no chip
@@ -14368,9 +14371,6 @@ window.addEventListener("resize", updateJumpBtn);
 const jumpCluster = el("div", "jump-cluster");
 jumpCluster.id = "jump-cluster";
 jumpCluster.hidden = true;
-const jcChevron = (up: boolean): string => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"'
-  + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="'
-  + (up ? "6 14.5 12 8.5 18 14.5" : "6 9.5 12 15.5 18 9.5") + '"/></svg>';   // the go-to-bottom chip's stemless chevron, up or down
 const jcGroup = (cls: string, label: string): HTMLElement => {
   const g = el("div", "jc-group " + cls);
   g.setAttribute("role", "group");
