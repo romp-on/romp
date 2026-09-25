@@ -335,12 +335,14 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
   const js = requireCjs("esbuild").transformSync(["liveSession", "atBottom", "showActive", "updateJumpBtn", "updateJumpCluster"].map(fn).join("\n"), { loader: "ts" }).code;
   const prelude = `
     const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, jumpCluster, atBottomDist, isReplyReady, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
-    let activeId = null, skeletonLoading = null, jumpClusterSig = "", navCursor = null, navResume = null, unreadDir = null;
+    let activeId = null, skeletonLoading = null, jumpClusterSig = "", navCursor = null, navResume = null;
     // the cluster's measuring half, inert: the switch test is about its gate (a live session's stops are jump-nav.test.ts's)
     const pendingBuildRaf = null, loadingOlder = new Set(), gapLoading = new Set(), parseGapKey = (k) => ({ sid: k });
-    const eventUnitIndex = () => new Int32Array(0), navStops = () => ({ stops: [], mine: 0 }), readyAround = () => ({ above: null, below: null }), unreadCount = () => 0, unreadNext = () => null, pickNav = () => null, runJump = () => {};
-    const jcMine = { hidden: false }, jcCmt = { hidden: false }, setTip = () => {}, titleWithKey = (t) => t, badgeTip = () => "", badgeAria = () => "", jumpCommand = (m) => "chat." + m;
-    const jcButtons = { prevMine: {}, nextMine: {}, prevComment: {}, nextComment: {}, nextUnread: { hidden: true, querySelector: () => ({}), setAttribute: () => {} } };
+    const MOVES = ["prevMine", "nextMine", "prevComment", "nextComment", "prevUnread", "nextUnread"];
+    const eventUnitIndex = () => new Int32Array(0), navStops = () => ({ stops: [], mine: 0 }), readyAround = () => ({ above: null, below: null }), unreadCount = () => 0, pickNav = () => null, jumpMove = () => {};
+    const jcMine = { hidden: false }, jcCmt = { hidden: false }, jcUnread = { hidden: false }, jcCount = { hidden: true, setAttribute: () => {} };
+    const setTip = () => {}, countTip = () => "", jumpCommand = (m) => "chat." + m;
+    const jcButtons = { prevMine: {}, nextMine: {}, prevComment: {}, nextComment: {}, prevUnread: {}, nextUnread: {} };
     const placeReviveLoader = () => {}, notifyActive = () => {}, renderLedger = () => {}, renderLiveAsk = () => {}, renderBgTasks = () => {}, renderNotices = () => {}, renderSubHead = () => {}, updateStatusline = () => {};
     // the unfocused body's painter and the box's name overlay (T357): inert here, the strip test is about the chips
     const paintEmptyState = () => {}, syncComposerPh = () => {}, order = [];

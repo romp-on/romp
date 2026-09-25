@@ -31,17 +31,35 @@ test("body-level, created once, updated in place, one delegated listener: click-
   assert.match(BLOCK, /jumpCluster\.id = "jump-cluster";/);
   assert.match(BLOCK, /document\.body\.appendChild\(jumpCluster\);/);
   assert.match(BLOCK, /b\.dataset\.act = "jcjump";\s*\n\s*b\.dataset\.move = move;/, "every control routes by data-act and names its move");
-  for (const m of MOVES) assert.match(BLOCK, new RegExp(m + ': jcBtn\\('), m + " is built once");
+  // three capsules, top to bottom, each built once: up chevron, icon, down chevron
+  assert.match(BLOCK, /const jcUnread = jcGroup\("jc-unread", "Unread replies"\);\s*\n\s*const jcCmt = jcGroup\("jc-cmt", "Comments"\);\s*\n\s*const jcMine = jcGroup\("jc-mine", "Your messages"\);/,
+    "the capsules in the column's order, each with a label naming what it walks");
+  assert.match(BLOCK, /g\.setAttribute\("role", "group"\);\s*\n\s*g\.setAttribute\("aria-label", label\);/);
+  assert.match(BLOCK, /const up = jcBtn\(g, prev, "jc-btn", jcChevron\(true\)\);\s*\n\s*jcIcon\(g, icon\);\s*\n\s*return \[up, jcBtn\(g, next, "jc-btn", jcChevron\(false\)\)\];/, "up, icon, down");
+  assert.match(BLOCK, /jcPair\(jcUnread, "prevUnread", "nextUnread", "unread"\)/);
+  assert.match(BLOCK, /jcPair\(jcCmt, "prevComment", "nextComment", "comment"\)/);
+  assert.match(BLOCK, /jcPair\(jcMine, "prevMine", "nextMine", "mine"\)/);
   assert.equal((BLOCK.match(/delegate\(jumpCluster, \{/g) || []).length, 1, "ONE delegated listener on the stable box");
   assert.doesNotMatch(UPDATE, /replaceChildren|createElement|innerHTML|appendChild/, "the update never rebuilds a control");
   assert.match(UPDATE, /if \(sig === jumpClusterSig\) return;/, "a signature skips unchanged paints");
   assert.doesNotMatch(BLOCK, /setTimeout|setInterval|requestAnimationFrame/, "nothing time-based in the whole block");
 });
 
-test("every move lands through scrollToAnchor; a comment's lands the chips' way and never marks the thread read", () => {
+test("each capsule's icon: the house 16-unit line style, in the capsule's colour, hidden from the pointer and from readers", () => {
+  const icon = BLOCK.slice(BLOCK.indexOf("const jcIcon = "), BLOCK.indexOf("};", BLOCK.indexOf("const jcIcon = ")));
+  assert.match(icon, /i\.setAttribute\("aria-hidden", "true"\);/, "the capsule's label says it in words");
+  assert.match(icon, /'<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" '\s*\n\s*\+ 'stroke-width="1\.4" stroke-linecap="round" stroke-linejoin="round">'/, "ctxIcon's and the notices' line style");
+  assert.match(BLOCK, /mine: '<circle cx="8" cy="5\.2" r="2\.6"\/>/, "a person for your messages");
+  assert.match(BLOCK, /comment: JC_BUBBLE,/, "a speech bubble for comments");
+  assert.match(BLOCK, /unread: JC_BUBBLE \+ '<circle cx="12\.6" cy="3\.4" r="2\.2" fill="currentColor" stroke="none"\/>'/, "the bubble with a filled dot for unread replies");
+  assert.match(CSS, /\.jc-icon \{ height: 18px; display: flex; align-items: center; justify-content: center; pointer-events: none; \}/, "not a button: the chevrons are");
+  assert.match(CSS, /\.jc-btn \{\s*\n\s*height: 22px; padding: 0; border: 0; background: none; cursor: pointer; color: inherit;/, "chevrons and icon take the capsule's colour");
+});
+
+test("every move lands through scrollToAnchor; a thread lands the chips' way and never marks it read", () => {
   assert.match(RUN, /else \{ flashedAnchor = null; scrollToAnchor\(hit\.uuid\); \}/, "your messages: the notch's route, one flash");
-  assert.match(RUN, /if \(kind === "comment" && hit\.tid\) landThread\(sid, hit\.tid, hit\.uuid\);/);
-  assert.match(RUN, /landThread\(sid, nx\.chip\.nearest\.tid, nx\.chip\.nearest\.uuid\);/, "the badge lands its thread the same way");
+  assert.match(RUN, /if \(kind !== "mine" && hit\.tid\) landThread\(sid, hit\.tid, hit\.uuid\);/, "a thread, from either comment capsule");
+  assert.match(RUN, /const kind = move === "prevMine" \|\| move === "nextMine" \? "mine" : move === "prevComment" \|\| move === "nextComment" \? "comment" : "unread";/);
   assert.match(LAND, /flashedAnchor = null;[^\n]*\n\s*if \(scrollToAnchor\(uuid\)\) \{/);
   assert.match(LAND, /applyCommentMarks\(sid\);/, "a re-windowed anchor turn gets its highlight back before the pulse");
   assert.match(LAND, /if \(m\) flash\(m\);/, "the mark itself pulses (.romp-acted)");
@@ -52,15 +70,20 @@ test("every move lands through scrollToAnchor; a comment's lands the chips' way 
   }
 });
 
-test("unread means what the chips meant: the kernel's bit on an open thread, off screen, placed the chips' way", () => {
+test("unread means what the chips meant: the kernel's bit on an open thread; the count off screen, placed the chips' way", () => {
   const ready = fn("readyAround");
   assert.match(ready, /\(commentThreads\.get\(s\.id\) \|\| \[\]\)\.filter\(isReplyReady\)/);
   assert.match(ready, /\.\.\.placeMark\(r\.top - cr\.top, r\.bottom - cr\.top, H\)/, "a rendered mark by its own box against the viewport");
   assert.match(ready, /\.\.\.placeWindowed\(idx >= 0 \? evUnit\[idx\] : -1, v\.winStart, v\.winEnd \?\? v\.winStart\)/);
   assert.match(ready, /return readyChips\(marks\);/);
-  assert.match(UPDATE, /const n = unreadCount\(chips\);/);
-  assert.match(UPDATE, /badge\.hidden = !nx;/, "the badge shows only while a reply waits off screen");
-  assert.match(RUN, /unreadNext\(readyAround\(s, v, c\), unreadDir && unreadDir\.sid === sid \? unreadDir\.dir : null\)/, "the badge continues the last press's direction");
+  assert.match(UPDATE, /const unreadHere = threads\.some\(isReplyReady\);/, "the unread capsule shows while any thread's reply waits");
+  assert.match(UPDATE, /const n = unreadHere \? unreadCount\(readyAround\(s, v, c\)\) : 0;/, "the count: the chips' number");
+  assert.match(UPDATE, /jcUnread\.hidden = !unreadHere;/);
+  assert.match(UPDATE, /jcCount\.hidden = n === 0;/, "every unread thread in view: no number, as the chips hid at 0");
+  // the arrows walk the unread threads, in view or not (jump-nav.test.ts: the one on screen below a landing is next)
+  assert.match(fn("navStops"), /\.filter\(\(t\) => kind === "comment" \|\| isReplyReady\(t\.th\)\)/);
+  assert.doesNotMatch(BLOCK, /unreadNext|unreadDir/, "no direction memory: explicit arrows replaced it");
+  assert.match(BLOCK, /jumpCluster\.appendChild\(jcCount\);/, "the count badge rides the cluster box, over the unread capsule's corner");
 });
 
 test("older history is asked for through the page's own loaders, and the move resumes when it lands", () => {
@@ -95,12 +118,12 @@ test("the events it rides are the chips' events: the go-to-bottom update, applyC
   assert.match(BLOCK, /new ResizeObserver\(updateJumpCluster\)\.observe\(c\);/);
 });
 
-test("quiet by default: shown only while the transcript overflows, each pill only while it has somewhere to go", () => {
+test("quiet by default: shown only while the transcript overflows, each capsule only while it has somewhere to go", () => {
   assert.match(UPDATE, /if \(!c \|\| !s \|\| !v \|\| H <= 0 \|\| s\.sub \|\| c\.scrollHeight <= H \+ 2\) \{ jumpCluster\.hidden = true; jumpClusterSig = ""; return; \}/,
     "no pane, the subagent viewer, or a transcript that fits on screen: no cluster");
   assert.match(UPDATE, /jcMine\.hidden = !mineHere;/);
-  assert.match(UPDATE, /jcCmt\.hidden = !threadsHere;/, "the comment pill only while the session has comment threads");
-  assert.match(UPDATE, /jcButtons\[m\]\.disabled = !able\[m\];/, "a direction with nothing that way is disabled, never removed: the pill keeps its shape");
+  assert.match(UPDATE, /jcCmt\.hidden = !threadsHere;/, "the comment capsule only while the session has comment threads");
+  assert.match(UPDATE, /for \(const m of MOVES\) jcButtons\[m\]\.disabled = !able\[m\];/, "a direction with nothing that way is disabled, never removed: the capsule keeps its shape");
   assert.match(UPDATE, /const bottom = Math\.max\(0, window\.innerHeight - c\.getBoundingClientRect\(\)\.bottom\) \+ 8;/, "the go-to-bottom chip's own measure");
   assert.match(RENDER, /jumpBtn\.style\.bottom = \(Math\.max\(0, window\.innerHeight - c\.getBoundingClientRect\(\)\.bottom\) \+ 8\) \+ "px";/);
 });
@@ -108,7 +131,8 @@ test("quiet by default: shown only while the transcript overflows, each pill onl
 // ── keys ──────────────────────────────────────────────────────────────────────────────────────────
 test("each move is a command with a default key, rebindable, and free of every other binding", () => {
   const want: Record<string, string> = { "chat.prevMine": "Ctrl+Alt+ArrowUp", "chat.nextMine": "Ctrl+Alt+ArrowDown",
-    "chat.prevComment": "Ctrl+Alt+Shift+ArrowUp", "chat.nextComment": "Ctrl+Alt+Shift+ArrowDown", "chat.nextUnread": "Ctrl+Alt+Enter" };
+    "chat.prevComment": "Ctrl+Alt+Shift+ArrowUp", "chat.nextComment": "Ctrl+Alt+Shift+ArrowDown",
+    "chat.prevUnread": "Ctrl+Alt+PageUp", "chat.nextUnread": "Ctrl+Alt+PageDown" };
   for (const [id, chord] of Object.entries(want)) {
     assert.equal(DEFAULT_CHORDS[id], chord, id);
     for (const mac of [false, true]) {
@@ -123,7 +147,7 @@ test("each move is a command with a default key, rebindable, and free of every o
   assert.match(RENDER, /if \(m\.romp === "chatJump"\) \{ if \(\(MOVES as readonly string\[\]\)\.includes\(m\.move\)\) runJump\(m\.move as Move\); return; \}/);
   // with focus in the chat, its own capture handler answers, reading the same overrides per press (the chat.navBack pattern)
   assert.match(BLOCK, /const m = MOVES\.find\(\(mv\) => ch === effectiveChord\(jumpCommand\(mv\), DEFAULT_CHORDS\[jumpCommand\(mv\)\], ov, mac\)\);/);
-  assert.match(BLOCK, /e\.preventDefault\(\); e\.stopPropagation\(\);\s*\n\s*if \(!jumpCluster\.hidden && !jcButtons\[m\]\.hidden && !jcButtons\[m\]\.disabled\) flash\(jcButtons\[m\]\);/, "a key pulses its button, the click's acknowledgement");
+  assert.match(BLOCK, /e\.preventDefault\(\); e\.stopPropagation\(\);\s*\n\s*if \(!jumpCluster\.hidden && !jcButtons\[m\]\.disabled\) flash\(jcButtons\[m\]\);/, "a key pulses its button, the click's acknowledgement");
   // the tooltips name the current key and follow a rebind
   assert.match(BLOCK, /const t = titleWithKey\(MOVE_TITLE\[m\], jumpCommand\(m\)\);/);
   assert.match(BLOCK, /window\.addEventListener\(KEYS_EVENT, dressJumpTips\);/);
@@ -133,56 +157,68 @@ test("each move is a command with a default key, rebindable, and free of every o
 const rule = (sel: string): string => { const at = CSS.indexOf("\n" + sel + " {"); assert.ok(at >= 0, sel); return CSS.slice(at + 1, CSS.indexOf("}", at)); };   // the rule that opens a line
 const coarse = CSS.slice(CSS.indexOf("@media (pointer: coarse) {\n  #jump-cluster"), CSS.indexOf("\n}\n", CSS.indexOf("@media (pointer: coarse) {\n  #jump-cluster")));
 
-test("one column with the go-to-bottom chip: its left, its width, its slot held below, on both layouts", () => {
+test("one narrow column above the go-to-bottom chip: its left, no wider than it, its slot held below, on both layouts", () => {
   const box = rule("#jump-cluster");
   assert.match(box, /position: fixed; left: 14px; z-index: 40;/, "the chip's left and layer");
   assert.match(box, /display: flex; flex-direction: column;/);
   const chip = rule("#jump-bottom");
   const chipH = Number(chip.match(/height: (\d+)px/)![1]), chipW = Number(chip.match(/width: (\d+)px/)![1]);
   assert.match(box, new RegExp("margin-bottom: " + (chipH + 6) + "px;"), "the chip's height and the stack gap, held whether it shows or not");
-  const btnW = Number(rule(".jc-btn").match(/width: (\d+)px/)![1]);
-  assert.equal(2 * btnW + 2, chipW, "a pill's two halves and hairline: the chip's width");
-  assert.match(rule(".jc-group"), new RegExp("height: " + chipH + "px;"), "the chip's height");
-  // the phone: the chip is 64×32 there; the pills follow, halves widened for the hit area
+  const group = rule(".jc-group");
+  assert.match(group, /display: flex; flex-direction: column;/, "each capsule stacks up above down");
+  const w = Number(group.match(/width: (\d+)px/)![1]);
+  assert.ok(w <= chipW, "the column is no wider than the chip: " + w + " vs " + chipW);
+  assert.equal(w, 24);
+  assert.match(rule(".jc-btn"), /height: 22px;/, "desktop buttons 22×22 inside the hairline");
+  // the phone: the strip stays thin; the touch size comes from height
   const phoneChip = CSS.match(/@media \(pointer: coarse\) \{ #jump-bottom \{ width: (\d+)px; height: (\d+)px; \} \}/)!;
   assert.match(coarse, new RegExp("#jump-cluster \\{ margin-bottom: " + (Number(phoneChip[2]) + 6) + "px; \\}"));
-  assert.match(coarse, new RegExp("\\.jc-group \\{ height: " + phoneChip[2] + "px; \\}"));
-  const phoneBtn = Number(coarse.match(/\.jc-btn \{ width: (\d+)px; \}/)![1]);
-  assert.equal(2 * phoneBtn + 2, Number(phoneChip[1]));
+  const pw = Number(coarse.match(/\.jc-group \{ width: (\d+)px; \}/)![1]);
+  const ph = Number(coarse.match(/\.jc-btn \{ height: (\d+)px; \}/)![1]);
+  assert.ok(pw <= Number(phoneChip[1]), "no wider than the phone chip");
+  assert.ok(pw - 2 >= Number(phoneChip[2]), "each button at least the chip's phone height across (the touch size): " + (pw - 2));
+  assert.ok(ph > pw - 2, "…and taller than wide: height, not width, gets the touch size");
+  assert.match(coarse, /\.jc-icon \{ height: 24px; \}/);
 });
 
-test("the chip's card, each pill in the colour of the rail marks it walks, the badge in the unread halo's red", () => {
+test("the chip's dress, each capsule in the colour of the rail marks it walks, the count in the unread halo's red", () => {
   const card = rule(".jc-group");
   for (const tok of ["var(--vscode-menu-background, var(--surface-raised))", "border: 1px solid var(--menu-border)", "box-shadow: var(--shadow-toast)", "border-radius: var(--radius-pill)"]) {
-    assert.ok(card.includes(tok), "the card has " + tok);
+    assert.ok(card.includes(tok), "the capsule has " + tok);
     assert.ok(rule("#jump-bottom").includes(tok), "…as the go-to-bottom chip does");
   }
-  assert.match(CSS, /\.jc-mine \.jc-btn \{ color: var\(--you\); \}/, "your messages: the turn notches' blue");
-  assert.match(CSS, /\.jc-cmt \.jc-btn \{ color: var\(--cmt-hl-outline\); \}/, "comments: the ticks' ink");
-  const badge = rule(".jc-badge");
-  assert.match(badge, /background: var\(--st-awaiting-bg\); color: var\(--st-awaiting-fg\);/, "the needs-you red the unread tick's halo wears");
-  assert.match(badge, /font: inherit; font-size: 12px;/, "the bottom chrome's 12px, the page font");
+  assert.match(CSS, /\.jc-unread \{ color: var\(--st-awaiting-bg\); \}/, "unread replies: the needs-you red of the unread halo and outline");
+  assert.match(CSS, /\.jc-mine \{ color: var\(--you\); \}/, "your messages: the turn notches' blue");
+  assert.match(CSS, /\.jc-cmt \{ color: var\(--cmt-hl-outline\); \}/, "comments: the ticks' ink");
+  const count = rule(".jc-count");
+  assert.match(count, /position: absolute; top: -6px; left: -9px;/, "on the unread capsule's upper-left corner, over the empty margin: the column is not widened");
+  assert.match(count, /pointer-events: none;/, "it covers no button");
+  assert.match(count, /background: var\(--st-awaiting-bg\); color: var\(--st-awaiting-fg\);/);
+  assert.match(count, /font-size: 12px;/, "the bottom chrome's 12px");
+  assert.match(count, /box-shadow: 0 0 0 1\.5px var\(--bg\);/, "the unread tick's page-coloured gap");
   const block = CSS.slice(CSS.indexOf("#jump-cluster {"), CSS.indexOf("#seek-note .seek-note-x {"));
   assert.doesNotMatch(block.replace(/\/\*[\s\S]*?\*\//g, ""), /#[0-9a-fA-F]{3,6}\b/, "tokens only, no raw hex");
   const light = CSS.split("body.theme-light {")[1].split("\n}")[0];
-  for (const tok of ["--you", "--cmt-hl-outline", "--menu-hover", "--accent"]) assert.match(light, new RegExp(tok + ":"), "the light theme defines " + tok);
+  for (const tok of ["--you", "--cmt-hl-outline", "--menu-hover", "--accent", "--bg"]) assert.match(light, new RegExp(tok + ":"), "the light theme defines " + tok);
   assert.match(CSS, /--st-awaiting-bg: #c0392b;--st-awaiting-fg: #ffffff;/, "the status pair, one value in both themes");
 });
 
 test("quiet until hovered or focused; the phone, with no hover, rests brighter; focus wears the accent", () => {
-  assert.match(CSS, /\.jc-btn svg, \.jc-badge \{ opacity: 0\.55; transition: opacity 120ms ease; \}/);
-  assert.match(CSS, /#jump-cluster:hover \.jc-btn svg, #jump-cluster:focus-within \.jc-btn svg, #jump-cluster:hover \.jc-badge, #jump-cluster:focus-within \.jc-badge \{ opacity: 1; \}/);
+  assert.match(CSS, /\.jc-btn svg, \.jc-icon svg, \.jc-count \{ opacity: 0\.55; transition: opacity 120ms ease; \}/);
+  assert.match(CSS, /#jump-cluster:hover \.jc-btn svg, #jump-cluster:focus-within \.jc-btn svg, #jump-cluster:hover \.jc-icon svg, #jump-cluster:focus-within \.jc-icon svg,\s*\n#jump-cluster:hover \.jc-count, #jump-cluster:focus-within \.jc-count \{ opacity: 1; \}/);
   assert.match(CSS, /#jump-cluster \.jc-btn:disabled svg \{ opacity: 0\.2; \}/);
-  assert.match(coarse, /\.jc-btn svg, \.jc-badge \{ opacity: 0\.8; \}/);
-  assert.match(CSS, /\.jc-btn:focus-visible, \.jc-badge:focus-visible \{ outline: 1\.5px solid var\(--accent\); outline-offset: -2px; \}/);
-  assert.match(CSS, /#jump-cluster\[hidden\], #jump-cluster \.jc-group\[hidden\], #jump-cluster \.jc-badge\[hidden\] \{ display: none; \}/, "author display:flex defeats [hidden]");
+  assert.match(coarse, /\.jc-btn svg, \.jc-icon svg, \.jc-count \{ opacity: 0\.8; \}/);
+  assert.match(CSS, /\.jc-btn:focus-visible \{ outline: 1\.5px solid var\(--accent\); outline-offset: -2px; \}/);
+  assert.match(CSS, /#jump-cluster\[hidden\], #jump-cluster \.jc-group\[hidden\], #jump-cluster \.jc-count\[hidden\] \{ display: none; \}/, "author display:flex defeats [hidden]");
 });
 
 test("the ui-verify fixture mirrors the builders class for class (synthetic, notes-api)", () => {
   const fx = read("tools/ui-verify/fixtures/jump-cluster-chat.html");
   assert.match(fx, /<div class="jump-cluster" id="jump-cluster"/);
+  assert.match(fx, /<div class="jc-group jc-unread" role="group" aria-label="Unread replies">/);
   assert.match(fx, /<div class="jc-group jc-cmt" role="group" aria-label="Comments">/);
-  assert.match(fx, /<button type="button" class="jc-badge" data-act="jcjump" data-move="nextUnread"/);
   assert.match(fx, /<div class="jc-group jc-mine" role="group" aria-label="Your messages">/);
+  assert.match(fx, /<span class="jc-icon" aria-hidden="true">/);
+  assert.match(fx, /<span class="jc-count"/);
   assert.match(fx, /11111111-2222-4333-8444-/, "placeholder ids");
 });

@@ -42,10 +42,10 @@ opens on the highlight; a reload brings you back to where you were reading with
 that thread still open, back where you had moved its box, though anything you
 typed and did not send is gone.
 
-Two small pairs of arrows in the chat's bottom-left corner step through your own
-messages and, above them, the comment threads. From the bottom, one step back
-lands on your last message. A red count beside the comment arrows counts the replies
-to your comments you have not read; pressing it goes to the next one.
+A narrow column of arrows in the chat's bottom-left corner steps through, top to
+bottom, the comment threads with a reply you have not read, every comment thread,
+and your own messages. From the bottom, one step back lands on your last message.
+The red count on the top group is how many unread replies are off screen.
 
 Tabs carry the state of their sessions. A tab shows a count dot while its
 session needs you and a red ring while it is stopped, tags group the strip into

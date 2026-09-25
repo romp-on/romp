@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """The chat's jump cluster on the real /chat page (the user 2026-09-24, paraphrased: after new content arrives they lose
 their place and want to get back to their last message and read everything since, and reach comments without hunting on
-the rail). The cluster in the pane's bottom-left corner steps through the reader's own messages and the comment threads,
-and its badge (which replaced the "replies unread" chips) jumps to the next unread reply.
+the rail). One narrow column in the pane's bottom-left corner, three capsules, each its up chevron, an icon and its down
+chevron: the threads with an unread reply (and how many wait off screen; it replaced the "replies unread" chips), every
+comment thread, and the reader's own messages.
 
 A hermetic kernel serves a synthetic chat (the notes-api demo world, session web): 150 exchanges, more than one wire tail
 (250 events), so the page opens holding exchanges 25..149 with the older ones on the server, and renders only the last 80
-units of those (the rest in a spacer). Four comment threads: one on reply 3 (history the page has not loaded; unread), one
-on reply 25 (loaded, outside the rendered window; read), one on reply 90 (resolved), one on reply 140 (unread). A second
-session, api, is two lines long. Asserted in the browser, each move by the deep-link flash landing on the expected turn:
+units of those (the rest in a spacer). Five comment threads: on reply 3 (history the page has not loaded; unread), 25
+(loaded, outside the rendered window; read), 90 (resolved), 140 (unread) and 145 (unread). A second session, api, is two
+lines long. Asserted in the browser, each move by the deep-link flash landing on the expected turn:
+  the column's layout (order, labels, icons, 24px wide, 204px tall, the chip's slot held below, left-aligned with it);
   from the bottom, previous lands on the last message of the reader's own, previous again on the one before, next back;
-  previous comment walks 140, 90 (outside the rendered window), 25 (outside it too); from reply 25, previous message
-  lands on prompt 25 and previous again on prompt 24, which the page did not hold: the move asks for that history
-  through the page's own gap loader and lands once it arrives; previous comment then lands reply 3, fetched by the
-  landing road; the badge counts the unread replies off screen and lands the next one without marking it read; the keys
-  (Ctrl+Alt+Up, Ctrl+Alt+Shift+Up) do what the buttons do; the api tab, whose transcript fits, shows no cluster.
+  previous comment walks 145, 140, 90 and 25 (the last two outside the rendered window); from reply 25, previous message
+  lands on prompt 25 and previous again on prompt 24, which the page did not hold (asked for through the page's own gap
+  loader, landed once it arrived); previous unread lands reply 3, fetched by the landing road; next unread (by key, then
+  by click) walks 140 and 145, where none is left below; previous unread by key lands 140; neither marks a thread read;
+  the count is the unread replies off screen; the keys for messages and comments do what the buttons do; the api tab,
+  whose transcript fits, shows no cluster; on a 390x844 phone all three capsules show, 34px wide with 32x40 chevrons, and
+  the column clears the message box.
 With JUMP_SHOTS=<dir> the driver writes the cluster in the dark theme, the light theme and the phone layout (a coarse
 pointer). With JUMP_SHOTS_ONLY=1 it writes the shots after load and stops, for a before shot of an older build. Skips
 LOUDLY without the extension deps or a Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs, invented prose,
@@ -47,7 +51,7 @@ API = "aaaaaaaa-1111-2222-3333-999999999999"
 N = 150
 USER_UUID = "11111111-2222-3333-4444-%012d"
 REPLY_UUID = "22222222-3333-4444-5555-%012d"
-THREADS = [("tid-a", 3, "unread"), ("tid-b", 25, "read"), ("tid-d", 90, "resolved"), ("tid-c", 140, "unread")]
+THREADS = [("tid-a", 3, "unread"), ("tid-b", 25, "read"), ("tid-d", 90, "resolved"), ("tid-c", 140, "unread"), ("tid-e", 145, "unread")]
 THREAD_SID = "dddddddd-1111-2222-3333-%012d"
 
 
@@ -105,7 +109,7 @@ const shoot = async (p, name) => {
   await p.waitForTimeout(200);
   await p.screenshot({ path: cfg.shots + "/" + name + ".png" });
   const c = await p.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { l: r.left, b: r.bottom }; });
-  await p.screenshot({ path: cfg.shots + "/" + name + "-corner.png", clip: { x: Math.max(0, c.l), y: Math.max(0, c.b - 200), width: 260, height: 200 } });
+  await p.screenshot({ path: cfg.shots + "/" + name + "-corner.png", clip: { x: Math.max(0, c.l), y: Math.max(0, c.b - 300), width: 260, height: 300 } });
 };
 const openWeb = async (p) => {   // the web tab is the long one; the strip may open on either (and the phone folds the strip away)
   await p.waitForSelector(`#tabs .tab[data-id="${cfg.sid}"]`, { state: "attached", timeout: 30000 });
@@ -133,15 +137,24 @@ await page.evaluate(() => {
     if (r.attributeName === "class" && el.classList && el.classList.contains("anchor-flash")) { const t = el.closest(".turn"); window.__flashed.push(t ? t.dataset.uuid : null); }
   } }).observe(document.getElementById("content"), { subtree: true, attributes: true, attributeFilter: ["class"] });
 });
-const state = () => page.evaluate(() => {
+// the column as the page lays it out: each capsule's box, each control's state, the count, the chip below
+const LAYOUT = () => {
   const box = document.getElementById("jump-cluster");
-  const b = (m) => { const e = box.querySelector(`[data-move="${m}"]`); return e ? { hidden: e.hidden || e.offsetParent === null, disabled: !!e.disabled, text: e.textContent.trim(), aria: e.getAttribute("aria-label") } : null; };
+  const b = (m) => { const e = box.querySelector(`[data-move="${m}"]`); return e ? { disabled: !!e.disabled, aria: e.getAttribute("aria-label"), w: e.offsetWidth, h: e.offsetHeight } : null; };
+  const g = (cls) => { const e = box.querySelector(cls); const r = e.getBoundingClientRect(); return { shown: !e.hidden && e.offsetParent !== null, l: r.left, t: r.top, w: r.width, h: r.height, label: e.getAttribute("aria-label"),
+                        icon: !!e.querySelector(".jc-icon svg"), order: Array.from(e.children).map((k) => k.className.split(" ")[0]) }; };
   const r = box.getBoundingClientRect(), c = document.getElementById("content").getBoundingClientRect();
   const jb = document.getElementById("jump-bottom"), jr = jb.getBoundingClientRect();
-  return { hidden: box.hidden, prevMine: b("prevMine"), nextMine: b("nextMine"), prevComment: b("prevComment"), nextComment: b("nextComment"), badge: b("nextUnread"),
-           cmtPill: !box.querySelector(".jc-cmt").hidden, rect: { l: r.left, t: r.top, r: r.right, b: r.bottom }, content: { l: c.left, b: c.bottom },
-           jump: { hidden: jb.hidden, l: jr.left, t: jr.top, r: jr.right, b: jr.bottom }, chips: !!document.getElementById("reply-chips") };
-});
+  const cnt = box.querySelector(".jc-count"), cr = cnt.getBoundingClientRect();
+  const comp = document.getElementById("composer"), kr = comp ? comp.getBoundingClientRect() : null;
+  return { hidden: box.hidden, prevMine: b("prevMine"), nextMine: b("nextMine"), prevComment: b("prevComment"), nextComment: b("nextComment"),
+           prevUnread: b("prevUnread"), nextUnread: b("nextUnread"),
+           unread: g(".jc-unread"), cmt: g(".jc-cmt"), mine: g(".jc-mine"),
+           count: { shown: !cnt.hidden, text: cnt.textContent.trim(), l: cr.left, t: cr.top, r: cr.right, pointer: getComputedStyle(cnt).pointerEvents },
+           rect: { l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height }, content: { l: c.left, t: c.top, b: c.bottom },
+           composerTop: kr ? kr.top : null, jump: { hidden: jb.hidden, l: jr.left, t: jr.top, r: jr.right, b: jr.bottom }, chips: !!document.getElementById("reply-chips") };
+};
+const state = () => page.evaluate(LAYOUT);
 const move = async (name, how, want, ms = 15000) => {
   await page.evaluate(() => { window.__flashed = []; });
   if (how === "click") await page.click(`#jump-cluster [data-move="${name}"]`);
@@ -159,21 +172,25 @@ await shoot(page, "dark");
 await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(300);
 await shoot(page, "light");
 await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(200);
-// your own messages, from the bottom
 out.order = [];
+const readState = (tid) => page.evaluate((t) => { const m = document.querySelector(`mark.cmt-hl[data-tid="${t}"]`); return { unread: m ? m.classList.contains("unread") : null, pop: !!document.getElementById("cmt-pop") }; }, tid);
 const seq = [
+  // your own messages, from the bottom
   ["prevMine", "click", U(149)], ["prevMine", "click", U(148)], ["nextMine", "click", U(149)],
-  ["prevComment", "click", R(140)], ["prevComment", "click", R(90)], ["prevComment", "click", R(25)],
+  // every comment: 145, 140, 90 and 25 (the last two outside the rendered window)
+  ["prevComment", "click", R(145)], ["prevComment", "click", R(140)], ["prevComment", "click", R(90)], ["prevComment", "click", R(25)],
+  // prompt 25, then prompt 24, which the page does not hold: loaded, then landed
   ["prevMine", "click", U(25)], ["prevMine", "click", U(24), 40000],
-  ["prevComment", "click", R(3), 40000],
+  // the unread replies: reply 3 is in history the page has not loaded (outside the loaded window), then down and back up
+  ["prevUnread", "click", R(3), 40000], ["nextUnread", "Control+Alt+PageDown", R(140)], ["nextUnread", "click", R(145)],
 ];
 for (const [m, how, want, ms] of seq) { out.order.push(m + ">" + want.slice(-4)); if (!(await move(m, how, want, ms))) break; }
-out.atOld = await state();
-out.readBefore = await page.evaluate(() => { const m = document.querySelector('mark.cmt-hl[data-tid="tid-c"]'); return m ? m.classList.contains("unread") : null; });
 if (Object.values(out.steps).every((s) => s.ok)) {
-  await move("nextUnread", "click", R(140));
-  out.afterBadge = await page.evaluate(() => { const m = document.querySelector('mark.cmt-hl[data-tid="tid-c"]'); return { unread: m ? m.classList.contains("unread") : null, pop: !!document.getElementById("cmt-pop") }; });
+  out.atLast = await state();   // on reply 145: no unread thread is below it
+  out.read145 = await readState("tid-e");
   await page.mouse.move(500, 300);
+  await move("prevUnread", "Control+Alt+PageUp", R(140));
+  out.read140 = await readState("tid-c");
   await move("prevMine", "Control+Alt+ArrowUp", U(140));
   await move("prevComment", "Control+Alt+Shift+ArrowUp", R(90));
 }
@@ -181,20 +198,18 @@ if (Object.values(out.steps).every((s) => s.ok)) {
 await page.evaluate((sid) => { const t = document.querySelector(`#tabs .tab[data-id="${sid}"]`); if (t) t.click(); }, cfg.api);
 await page.waitForTimeout(1500);
 out.api = await page.evaluate(() => ({ hidden: document.getElementById("jump-cluster").hidden, fits: (() => { const c = document.getElementById("content"); return c.scrollHeight <= c.clientHeight + 2; })() }));
-// the phone layout: a coarse pointer, touch-sized pills in the chip's column
+// the phone layout: a coarse pointer, all three capsules showing (three replies wait unread at the bottom)
 const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
 const pp = await phone.newPage();
 await pp.goto(cfg.chat);
 await openWeb(pp);
-await pp.waitForSelector("#jump-cluster:not([hidden])", { timeout: 60000 }).catch(() => {});
+await pp.waitForSelector("#jump-cluster:not([hidden]) .jc-unread:not([hidden])", { timeout: 60000 }).catch(() => {});
 await pp.waitForTimeout(1500);
-out.phone = await pp.evaluate(() => {
-  const box = document.getElementById("jump-cluster"); const g = box.querySelector(".jc-mine"), b = box.querySelector(".jc-mine .jc-btn");
-  const jb = document.getElementById("jump-bottom");
-  return { hidden: box.hidden, coarse: matchMedia("(pointer: coarse)").matches, pill: { w: g.offsetWidth, h: g.offsetHeight }, btn: { w: b.offsetWidth, h: b.offsetHeight }, chipW: jb.offsetWidth };
-});
+out.phone = await pp.evaluate(LAYOUT);
+out.phone.coarse = await pp.evaluate(() => matchMedia("(pointer: coarse)").matches);
+out.phone.chipW = await pp.evaluate(() => { const jb = document.getElementById("jump-bottom"); const was = jb.hidden; jb.hidden = false; const w = jb.offsetWidth; jb.hidden = was; return w; });
 if (cfg.shots) { await pp.screenshot({ path: cfg.shots + "/phone.png" }); const c = await pp.evaluate(() => document.getElementById("content").getBoundingClientRect().bottom);
-  await pp.screenshot({ path: cfg.shots + "/phone-corner.png", clip: { x: 0, y: Math.max(0, c - 220), width: 220, height: 220 } }); }
+  await pp.screenshot({ path: cfg.shots + "/phone-corner.png", clip: { x: 0, y: Math.max(0, c - 440), width: 200, height: 440 + 120 } }); }
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -328,50 +343,68 @@ class ServedJumpCluster(unittest.TestCase):
         if r.get("shotsOnly"):
             self.skipTest("optional: JUMP_SHOTS_ONLY wrote the screenshots and ran no assertions")
         s0 = r["start"]
-        # at the bottom of a long transcript: the cluster shows in the chip's column above the chip's slot, the old chips are gone
+        # at the bottom of a long transcript: one narrow column of three capsules above the chip's slot, the old chips gone
         self.assertFalse(s0["hidden"], s0)
         self.assertFalse(s0["chips"], "the reply chips are gone: %r" % s0)
-        self.assertFalse(s0["prevMine"]["disabled"], s0)
-        self.assertTrue(s0["nextMine"]["disabled"], "at the bottom nothing of yours is below: %r" % s0)
-        self.assertTrue(s0["cmtPill"], "the session has comment threads: %r" % s0)
-        self.assertFalse(s0["prevComment"]["disabled"], s0)
-        self.assertTrue(s0["nextComment"]["disabled"], s0)
-        self.assertFalse(s0["badge"]["hidden"], "two unread replies wait off screen: %r" % s0)
-        self.assertEqual(s0["badge"]["text"], "2", s0)
-        self.assertEqual(s0["badge"]["aria"], "2 replies unread, go to the next one above", s0)
+        for g, label in (("unread", "Unread replies"), ("cmt", "Comments"), ("mine", "Your messages")):
+            self.assertTrue(s0[g]["shown"], "%s capsule shows: %r" % (g, s0[g]))
+            self.assertEqual(s0[g]["label"], label, "each capsule names what it walks: %r" % s0[g])
+            self.assertTrue(s0[g]["icon"], "an icon between its chevrons: %r" % s0[g])
+            self.assertEqual(s0[g]["order"], ["jc-btn", "jc-icon", "jc-btn"], "up, icon, down: %r" % s0[g])
+            self.assertEqual((s0[g]["l"], s0[g]["w"]), (14, 24), "left-aligned at the chip's 14px, 24px wide: %r" % s0[g])
+            self.assertEqual(s0[g]["h"], 64, "a capsule: two 22px chevrons, an 18px icon row, the hairline: %r" % s0[g])
+        self.assertLess(s0["unread"]["t"], s0["cmt"]["t"], "unread on top")
+        self.assertLess(s0["cmt"]["t"], s0["mine"]["t"], "comments above your messages")
+        self.assertEqual(s0["cmt"]["t"] - (s0["unread"]["t"] + s0["unread"]["h"]), 6, "a small gap between capsules")
+        self.assertEqual((s0["rect"]["w"], s0["rect"]["h"]), (24, 204), "the column: 24 wide, three capsules 204 tall: %r" % s0["rect"])
         self.assertTrue(s0["jump"]["hidden"], "at the bottom the go-to-bottom chip is down: %r" % s0)
-        self.assertEqual(s0["rect"]["l"], s0["content"]["l"] + 14, "the chip's column (its left: 14px): %r" % s0)
         self.assertLess(abs(s0["rect"]["b"] - (s0["content"]["b"] - 8 - 22 - 6)), 1, "the chip's slot held below, though the chip is down: %r" % s0)
+        # the controls: at the bottom nothing of yours, no comment and no unread reply is below
+        for m, dis in (("prevMine", False), ("nextMine", True), ("prevComment", False), ("nextComment", True), ("prevUnread", False), ("nextUnread", True)):
+            self.assertEqual(s0[m]["disabled"], dis, "%s at the bottom: %r" % (m, s0[m]))
+        self.assertEqual(s0["prevUnread"]["aria"], "Previous unread reply (Ctrl+Alt+PageUp)", "the tip names the key: %r" % s0["prevUnread"])
+        self.assertEqual(s0["nextUnread"]["aria"], "Next unread reply (Ctrl+Alt+PageDown)", s0["nextUnread"])
+        # the count: the three unread replies off screen (the chips' number), a badge over the empty margin, never in a finger's way
+        self.assertEqual((s0["count"]["shown"], s0["count"]["text"]), (True, "3"), s0["count"])
+        self.assertLess(s0["count"]["l"], s0["unread"]["l"], "on the capsule's upper-left corner, over the margin: %r" % s0["count"])
+        self.assertLessEqual(s0["count"]["r"], s0["unread"]["l"] + s0["unread"]["w"], "the column is not widened: %r" % s0["count"])
+        self.assertEqual(s0["count"]["pointer"], "none", s0["count"])
         # every move landed its turn (the deep-link flash on the expected uuid), in order
         for name, st in r["steps"].items():
             self.assertTrue(st["ok"], "%s did not land %s: %r (order %r)" % (name, st["want"], st, r["order"]))
             self.assertTrue(st["inView"], "%s: the landed turn is in view: %r" % (name, st))
-        self.assertEqual(len(r["steps"]), 12, "all twelve moves ran: %r" % list(r["steps"]))
-        # prompt 24 was not in the page when its move was pressed (the head gap); the move loaded it and landed
-        u24 = [s for k, s in r["steps"].items() if k.startswith("prevMine:click:") and s["want"].endswith("000024")][0]
-        self.assertTrue(u24["ok"], u24)
-        # at reply 3 the chip is up, and the cluster did not move for it: the chip's slot was held, and they do not overlap
-        s1 = r["atOld"]
+        self.assertEqual(len(r["steps"]), 15, "all fifteen moves ran: %r" % list(r["steps"]))
+        # on reply 145, the last unread thread: none left below, and the chip is up while the column did not move for it
+        s1 = r["atLast"]
+        self.assertTrue(s1["nextUnread"]["disabled"], "no unread reply is left below: %r" % s1["nextUnread"])
+        self.assertFalse(s1["prevUnread"]["disabled"], s1)
         self.assertFalse(s1["jump"]["hidden"], s1)
-        self.assertEqual(s1["rect"], s0["rect"], "the cluster never moves as the chip comes and goes: %r vs %r" % (s1["rect"], s0["rect"]))
+        self.assertEqual((s1["rect"]["b"], s1["rect"]["l"]), (s0["rect"]["b"], s0["rect"]["l"]), "the column never moves as the chip comes and goes: %r vs %r" % (s1["rect"], s0["rect"]))
         self.assertLessEqual(s1["rect"]["b"] + 6, s1["jump"]["t"] + 0.5, "the stack gap above the chip: %r" % s1)
-        self.assertEqual((s1["jump"]["l"], s1["jump"]["r"] - s1["jump"]["l"]), (s1["rect"]["l"], 40), "one column, the chip's 40px: %r" % s1)
-        self.assertTrue(s1["prevComment"]["disabled"] and not s1["nextComment"]["disabled"], "reply 3 is the first comment: %r" % s1)
-        # the badge: reply 3's own unread thread is on screen (counted in neither direction); the one on reply 140 waits below
-        self.assertEqual(s1["badge"]["text"], "1", s1)
-        self.assertEqual(s1["badge"]["aria"], "1 reply unread, go to the next one below", s1)
-        # …and its press landed reply 140 without marking the thread read (opening the thread does)
-        self.assertEqual(r["afterBadge"], {"unread": True, "pop": False}, "the badge brings you to the reply; reading it is opening the thread")
+        self.assertEqual(s1["jump"]["l"], s1["rect"]["l"], "left-aligned with the chip: %r" % s1)
+        # the unread arrows land a thread without marking it read (opening the thread does)
+        self.assertEqual(r["read145"], {"unread": True, "pop": False}, "landing is not reading: %r" % r["read145"])
+        self.assertEqual(r["read140"], {"unread": True, "pop": False}, r["read140"])
         # the api tab: its transcript fits, so no cluster
         self.assertTrue(r["api"]["fits"], r["api"])
         self.assertTrue(r["api"]["hidden"], "no cluster over a transcript that fits: %r" % r["api"])
-        # the phone: a coarse pointer makes the pills the chip's 64x32, halves 31 wide
+        # the phone (390x844, a coarse pointer): all three capsules show, the strip stays thin, the touch size comes from
+        # height, and the column clears the message box
         ph = r["phone"]
         self.assertTrue(ph["coarse"], ph)
         self.assertFalse(ph["hidden"], ph)
-        self.assertEqual(ph["pill"], {"w": 64, "h": 32}, "the go-to-bottom chip's phone size: %r" % ph)
-        self.assertEqual(ph["btn"]["w"], 31, ph)
-
+        for g in ("unread", "cmt", "mine"):
+            self.assertTrue(ph[g]["shown"], "%s capsule on the phone: %r" % (g, ph[g]))
+            self.assertEqual(ph[g]["w"], 34, "the phone column: 34px, under the chip's %d: %r" % (ph["chipW"], ph[g]))
+        self.assertLessEqual(ph["rect"]["w"], ph["chipW"], ph)
+        for m in ("prevUnread", "nextUnread", "prevComment", "nextComment", "prevMine", "nextMine"):
+            self.assertEqual((ph[m]["w"], ph[m]["h"]), (32, 40), "each chevron 32x40 on the phone: %s %r" % (m, ph[m]))
+        self.assertEqual(ph["rect"]["h"], 330, "the phone column: three 106px capsules and two gaps: %r" % ph["rect"])
+        self.assertGreaterEqual(ph["rect"]["t"], ph["content"]["t"], "inside the pane: %r" % ph)
+        self.assertIsNotNone(ph["composerTop"], ph)
+        self.assertLess(ph["rect"]["b"] + 8 + 32 + 6, ph["composerTop"] + 1, "the column and the chip's slot clear the message box: %r" % ph)
+        self.assertLessEqual(ph["rect"]["b"], ph["content"]["b"] - 8 - 32 - 6 + 1, ph)
+        print("COLUMN desktop %sx%s phone %sx%s phone-top-clearance %.0f" % (s0["rect"]["w"], s0["rect"]["h"], ph["rect"]["w"], ph["rect"]["h"], ph["rect"]["t"] - ph["content"]["t"]))
 
 if __name__ == "__main__":
     unittest.main()

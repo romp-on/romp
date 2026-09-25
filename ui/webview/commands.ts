@@ -41,14 +41,18 @@ export const DEFAULT_CHORDS: Record<string, string> = {
   "chat.nextTab": "Ctrl+Alt+ArrowRight",
   "chat.prevTab": "Ctrl+Alt+ArrowLeft",
   // The jump cluster's moves (the user 2026-09-24): the same LITERAL Ctrl+Alt family, turned upright. Left and right step
-  // between sessions, up and down step through the open one: your own messages; with Shift, the comment threads; Enter,
-  // the next unread reply. Alt+Arrow alone is the shell's pane focus, and none of these edits text, so they work from the
-  // composer too. The OS caveats of the session pair apply (GNOME's workspace keys, VoiceOver); the dialog rebinds.
+  // between sessions, up and down step through the open one: your own messages; with Shift, every comment thread; Page
+  // Up and Page Down, the threads with an unread reply (a page is the bigger step, and the unread row is a different job
+  // from the comment row, so it gets a key of its own rather than a third modifier on the arrows). Alt+Arrow alone is the
+  // shell's pane focus, Ctrl+PageUp/PageDown alone the browser's tab switch, and none of these edits text, so they work
+  // from the composer too. The OS caveats of the session pair apply (GNOME's workspace keys, VoiceOver); a Mac laptop
+  // reaches Page Up as Fn+↑; the dialog rebinds.
   "chat.prevMine": "Ctrl+Alt+ArrowUp",
   "chat.nextMine": "Ctrl+Alt+ArrowDown",
   "chat.prevComment": "Ctrl+Alt+Shift+ArrowUp",
   "chat.nextComment": "Ctrl+Alt+Shift+ArrowDown",
-  "chat.nextUnread": "Ctrl+Alt+Enter",
+  "chat.prevUnread": "Ctrl+Alt+PageUp",
+  "chat.nextUnread": "Ctrl+Alt+PageDown",
 };
 
 const commands = new Map<string, PaletteCommand>();

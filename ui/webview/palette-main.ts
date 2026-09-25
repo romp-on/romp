@@ -159,7 +159,7 @@ installMenuEcho();
   // the same bindings, the chat.navBack pattern
   for (const [id, title] of [["chat.prevMine", "Go to your previous message"], ["chat.nextMine", "Go to your next message"],
                              ["chat.prevComment", "Go to the previous comment"], ["chat.nextComment", "Go to the next comment"],
-                             ["chat.nextUnread", "Go to the next unread reply"]] as const) {
+                             ["chat.prevUnread", "Go to the previous unread reply"], ["chat.nextUnread", "Go to the next unread reply"]] as const) {
     registerCommand({ id, title, run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "chatJump", move: id.slice(5) }, "*"); } catch (e) { /* chat not loaded */ } } });
   }
   registerCommand({ id: "log.open", title: "Open the log", run: () => { if (w.__rompOpenErrs) w.__rompOpenErrs(); } });

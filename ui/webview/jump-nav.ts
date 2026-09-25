@@ -1,15 +1,16 @@
 // The chat's JUMP CLUSTER (the user 2026-09-24, paraphrased: after new content arrives they lose their place and want to
 // get back to their last message and read everything since, especially on the phone, and they want comments reachable
-// without hunting on the rail). A small persistent cluster in the chat pane's bottom-left corner steps through the
-// user's OWN messages (previous / next) and the COMMENT threads (previous / next), and carries the unread-reply count as
-// a badge that jumps to the next unread thread; it replaced the two "↑ N replies unread" / "↓ N reply unread" chips.
-// This module is the PURE half (node-tested, no DOM): where a stop sits against the reader's position, which stop a
-// move picks, and which unread thread the badge goes to next, plus the copy. render.ts (updateJumpCluster / runJump)
-// measures the page and lands through scrollToAnchor, the reply chips' and the rail's one landing road.
+// without hunting on the rail). A small persistent cluster in the chat pane's bottom-left corner, three rows: the
+// threads with an UNREAD reply (previous / next, and how many wait off screen; it replaced the two "↑ N replies unread" /
+// "↓ N reply unread" chips), every COMMENT thread (previous / next), and the user's OWN messages (previous / next).
+// Stepping through unread replies is its own job, so it has its own row and arrows (the user, 2026-09-24).
+// This module is the PURE half (node-tested, no DOM): where a stop sits against the reader's position and which stop a
+// move picks, plus the copy. render.ts (updateJumpCluster / runJump) measures the page and lands through
+// scrollToAnchor, the reply chips' and the rail's one landing road.
 import { WINDOWED_OUT, placeWindowed, replyWord, type Dir, type ReadyChip } from "./reply-ready";
 
-export type Move = "prevMine" | "nextMine" | "prevComment" | "nextComment" | "nextUnread";
-export const MOVES: readonly Move[] = ["prevMine", "nextMine", "prevComment", "nextComment", "nextUnread"];
+export type Move = "prevMine" | "nextMine" | "prevComment" | "nextComment" | "prevUnread" | "nextUnread";
+export const MOVES: readonly Move[] = ["prevMine", "nextMine", "prevComment", "nextComment", "prevUnread", "nextUnread"];
 
 /** Where a stop sits against the reader's position: above it (a previous move reaches it), below it (a next move), or
  *  HERE (neither: it is what the reader is on). `dist` orders the stops of one direction, least = nearest. */
@@ -79,18 +80,9 @@ export function pickNav<L>(stops: readonly NavStop<L>[], dir: Dir): NavStop<L> |
   return best;
 }
 
-/** The badge's next unread thread: in the direction the last badge press went while any unread reply waits that way,
- *  else the other way; with no last press, below first (reading on from where the reader is), then above. Continuing
- *  the direction is what walks every unread thread: "nearest" or "below first" on every press can bounce between two
- *  (a press lands one, the one passed is now on the other side and nearer). Null when none is off screen (a thread in
- *  view counts in neither direction, the reply chips' rule, and its ring is already showing). */
-export function unreadNext(chips: { above: ReadyChip | null; below: ReadyChip | null }, last: Dir | null): { dir: Dir; chip: ReadyChip } | null {
-  const order: Dir[] = last === "above" ? ["above", "below"] : last === "below" ? ["below", "above"] : ["below", "above"];
-  for (const d of order) { const c = chips[d]; if (c) return { dir: d, chip: c }; }
-  return null;
-}
-
-/** How many unread replies wait off screen, both directions: the badge's number. */
+/** How many unread replies wait off screen, both directions: the unread row's number, what the old chips counted (a
+ *  thread in view counts in neither direction; its ring is showing). The row's arrows reach every unread thread, in
+ *  view or not: after a landing the next one may sit on screen below it. */
 export function unreadCount(chips: { above: ReadyChip | null; below: ReadyChip | null }): number {
   return (chips.above ? chips.above.count : 0) + (chips.below ? chips.below.count : 0);
 }
@@ -102,12 +94,10 @@ export const MOVE_TITLE: Record<Move, string> = {
   nextMine: "Your next message",
   prevComment: "Previous comment",
   nextComment: "Next comment",
+  prevUnread: "Previous unread reply",
   nextUnread: "Next unread reply",
 };
-/** The badge's tip: how many, and where the next press goes. */
-export function badgeTip(n: number, dir: Dir, line: string): string {
-  return replyWord(n) + " · next one " + dir + (line ? ": " + line : "");
-}
-export function badgeAria(n: number, dir: Dir): string {
-  return replyWord(n) + ", go to the next one " + dir;
+/** The unread count's tip and label: how many wait off screen. */
+export function countTip(n: number): string {
+  return replyWord(n) + " off screen";
 }

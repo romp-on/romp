@@ -4958,23 +4958,29 @@ copy of it.
 
 ### Stepping through your messages and comments
 
-The arrows in the chat's bottom-left corner sit in one column with the go-to-bottom chip,
-which keeps its place below them whether it shows or not. The lower pair, in the blue of your
-messages, steps to your previous or next message; the upper pair, in the comment highlight's
-colour, to the previous or next comment thread. Each step puts its target at the top of the view
-and flashes it, and fetches the history first when the target lies in a part of the conversation
-the page has not loaded. From the bottom, the first step back lands on your last message even
-when it is on screen. An arrow with nothing that way is dimmed. The red count at the end of the
-comment pair is the replies to your comments, not yet read, that sit off screen: each press goes
-to the next one, carrying on in the direction of the last press until none is left that way, and
-it never marks a reply read, which opening its thread does. The column shows only while the
-conversation is longer than the pane, and the comment pair only while the session has comment
-threads. The chevrons rest dim and brighten while the pointer is over them or one has focus.
+The arrows in the chat's bottom-left corner form one narrow column above the go-to-bottom chip, which
+keeps its place below them whether it shows or not. The column holds up to three groups, each an up
+arrow, an icon naming what it steps through, and a down arrow. From the top:
 
-The keys, from anywhere in the chat including the message box: **Ctrl+Alt+↑** and **Ctrl+Alt+↓**
-for your messages, **Ctrl+Alt+Shift+↑** and **Ctrl+Alt+Shift+↓** for comments, **Ctrl+Alt+Enter**
-for the next unread reply (Control+Option on a Mac). Each is a command in the shortcuts dialog and
-can be rebound there; a desktop that binds Ctrl+Alt+arrows for itself takes them before the page.
+- **Unread replies** (red, a speech bubble with a dot): the comment threads whose reply you have not
+  read yet. The group shows while any thread has one. The red badge on its corner is how many of
+  those replies sit off screen; a thread in view is not counted, since its highlight already shows.
+- **Comments** (the comment yellow, a speech bubble): every comment thread, read or not. The group
+  shows while the session has any.
+- **Your messages** (the blue of your messages, a person): the messages you typed.
+
+Each step puts its target at the top of the view and flashes it, and fetches the history first when
+the target lies in a part of the conversation the page has not loaded. From the bottom, the first step
+back lands on your last message even when it is on screen. An arrow with nothing that way is dimmed.
+Landing on an unread reply does not mark it read; opening its thread does. The column shows only
+while the conversation is longer than the pane. The arrows rest dim and brighten while the pointer is
+over them or one has focus. On a phone the column stays narrow and the arrows grow taller instead.
+
+The keys, from anywhere in the chat including the message box: **Ctrl+Alt+↑** and **Ctrl+Alt+↓** for
+your messages, **Ctrl+Alt+Shift+↑** and **Ctrl+Alt+Shift+↓** for comments, **Ctrl+Alt+Page Up** and
+**Ctrl+Alt+Page Down** for unread replies (Control+Option on a Mac, where a laptop reaches Page Up as
+Fn+↑). Each is a command in the shortcuts dialog and can be rebound there; a desktop that binds
+Ctrl+Alt+arrows for itself takes them before the page.
 
 ### A message that has not gone yet
 

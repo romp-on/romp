@@ -1,11 +1,11 @@
 // The jump cluster's target selection (jump-nav.ts), driven by execution: previous / next of the user's own messages from
 // any position (scrolled up, just landed, inside a long reply, at the bottom, after a landing the scroll could not
-// top-align), previous / next comment (two threads on one passage included), the unread badge's next thread in each
-// direction (and a whole walk that visits every unread thread without bouncing), barriers of unloaded history, and
-// nothing to jump to. Synthetic numbers and ids only.
+// top-align), previous / next comment (two threads on one passage included), previous / next unread reply in both
+// directions with none left at the ends, the unread count, barriers of unloaded history, and nothing to jump to.
+// Synthetic numbers and ids only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadNext, unreadCount, badgeTip, badgeAria, MOVE_TITLE, MOVES,
+import { placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, MOVE_TITLE, MOVES,
          HERE_PX, HEAD_DIST, type NavStop } from "./jump-nav";
 import { placeMark, readyChips, WINDOWED_OUT, type ReadyMark } from "./reply-ready";
 
@@ -106,45 +106,74 @@ test("previous / next comment, and two threads on one passage both reachable", (
   assert.equal(pick(t, "above"), "z", "a thread anchored in history the page has not loaded is above everything");
 });
 
-// ── the unread badge ──────────────────────────────────────────────────────────────────────────────
-const chip = (count: number, tid: string) => ({ count, nearest: { tid, uuid: "u-" + tid, line: "q " + tid, dir: "above" as const, dist: 1 } });
+// ── the unread replies' own arrows ────────────────────────────────────────────────────────────────
+// The unread row's arrows walk the threads whose reply waits unread (the kernel's bit on an open thread, filtered in
+// render.ts) with the same placement as every stop: a press lands a thread at the top, so the next press moves on.
+const DOC = 12000;
+const unreadAt: Record<string, number> = { t1: 400, t2: 2600, t3: 5200, t4: 7900, t5: 9100 };
+const unreadStops = (scroll: number, ys: Record<string, number> = unreadAt): NavStop[] => {
+  const bottom = scroll >= DOC - VIEW;
+  return Object.entries(ys).map(([tid, y]) => ({ uuid: tid, tid, place: bottom ? placeRendered(y - scroll, VIEW, 0) : placeRendered(y - scroll, 0) }));
+};
 
-test("the badge goes below first, then above; a last press's direction continues while unread waits that way", () => {
-  const both = { above: chip(2, "a1"), below: chip(1, "b1") };
-  assert.equal(unreadNext(both, null)?.dir, "below", "no last press: read on from here");
-  assert.equal(unreadNext(both, "above")?.dir, "above", "keeps walking up");
-  assert.equal(unreadNext(both, "below")?.dir, "below");
-  assert.equal(unreadNext({ above: chip(1, "a1"), below: null }, "below")?.dir, "above", "nothing left below: turn round");
-  assert.equal(unreadNext({ above: null, below: chip(3, "b2") }, "above")?.chip.nearest.tid, "b2");
-  assert.equal(unreadNext({ above: null, below: null }, null), null, "none off screen: no target (a thread in view shows its own ring)");
-  assert.equal(unreadCount(both), 3);
-  assert.equal(unreadCount({ above: null, below: null }), 0);
+test("next unread from the top walks every unread thread in order, then nothing is left", () => {
+  let scroll = 0;
+  const seen: string[] = [];
+  for (let press = 0; press < 6; press++) {
+    const hit = pickNav(unreadStops(scroll), "below");
+    if (!hit) break;
+    seen.push(hit.uuid);
+    scroll = Math.min(DOC - VIEW, unreadAt[hit.uuid]);   // landed: the thread at the viewport top
+  }
+  assert.deepEqual(seen, ["t1", "t2", "t3", "t4", "t5"]);
+  assert.equal(pickNav(unreadStops(scroll), "below"), null, "past the last unread thread: none left below");
+  assert.equal(pickNav(unreadStops(scroll), "above")?.uuid, "t4", "…and previous goes back one");
 });
 
-test("a walk from the bottom visits every unread thread before any repeats (no bouncing between two)", () => {
-  // a long document with five unread threads; the viewport is VIEW tall; a press lands the target at the viewport top
-  const ys: Record<string, number> = { t1: 400, t2: 2600, t3: 5200, t4: 7900, t5: 9100 };
-  const DOC = 12000;
-  let scroll = DOC - VIEW;                                   // at the bottom
-  let last: "above" | "below" | null = null;
+test("previous unread from the bottom walks them in reverse, then nothing is left", () => {
+  let scroll = DOC - VIEW;   // at the bottom
   const seen: string[] = [];
-  for (let press = 0; press < 5; press++) {
-    const marks: ReadyMark[] = Object.entries(ys).map(([tid, y]) => ({ tid, uuid: "u-" + tid, line: "", ...placeMark(y - scroll, y - scroll + 20, VIEW) }));
-    const next = unreadNext(readyChips(marks), last);
-    assert.ok(next, "press " + press + " has a target");
-    seen.push(next!.chip.nearest.tid);
-    last = next!.dir;
-    scroll = Math.min(DOC - VIEW, ys[next!.chip.nearest.tid]);   // landed: the thread's mark at the top
+  for (let press = 0; press < 6; press++) {
+    const hit = pickNav(unreadStops(scroll), "above");
+    if (!hit) break;
+    seen.push(hit.uuid);
+    scroll = Math.min(DOC - VIEW, unreadAt[hit.uuid]);
   }
-  assert.deepEqual(seen.slice().sort(), ["t1", "t2", "t3", "t4", "t5"], "every unread thread, once each: " + seen.join(","));
+  assert.deepEqual(seen, ["t5", "t4", "t3", "t2", "t1"]);
+  assert.equal(pickNav(unreadStops(scroll), "above"), null, "before the first unread thread: none left above");
+  assert.equal(pickNav(unreadStops(scroll), "below")?.uuid, "t2");
+});
+
+test("an unread thread on screen below the one just landed is still the next one (the count leaves it out; the arrow does not)", () => {
+  // t1 landed at the top; t2 is 300px below it, in view: the count (reply-ready's off-screen rule) would not count it,
+  // but next unread must reach it, or it would be skipped
+  const ys = { t1: 1000, t2: 1300, t3: 6000 };
+  assert.equal(pickNav(unreadStops(1000, ys), "below")?.uuid, "t2");
+  assert.equal(pickNav(unreadStops(1000, ys), "above"), null);
+});
+
+test("no unread reply anywhere: neither arrow has a target", () => {
+  assert.equal(pickNav(unreadStops(3000, {}), "above"), null);
+  assert.equal(pickNav(unreadStops(3000, {}), "below"), null);
+});
+
+test("the count is the unread replies off screen, both directions (the old chips' number)", () => {
+  const chip = (count: number, tid: string) => ({ count, nearest: { tid, uuid: "u-" + tid, line: "q " + tid, dir: "above" as const, dist: 1 } });
+  assert.equal(unreadCount({ above: chip(2, "a1"), below: chip(1, "b1") }), 3);
+  assert.equal(unreadCount({ above: null, below: chip(1, "b1") }), 1);
+  assert.equal(unreadCount({ above: null, below: null }), 0);
+  // the same rule the chips had: a mark in view counts in neither direction
+  const marks: ReadyMark[] = Object.entries({ t1: 400, t2: 2600, t3: 5200 }).map(([tid, y]) => ({ tid, uuid: "u-" + tid, line: "", ...placeMark(y - 2500, y - 2480, VIEW) }));
+  assert.equal(unreadCount(readyChips(marks)), 2, "t2 is on screen: two off screen");
 });
 
 // ── copy ──────────────────────────────────────────────────────────────────────────────────────────
 test("the controls speak the user's words", () => {
-  assert.deepEqual(MOVES, ["prevMine", "nextMine", "prevComment", "nextComment", "nextUnread"]);
+  assert.deepEqual(MOVES, ["prevMine", "nextMine", "prevComment", "nextComment", "prevUnread", "nextUnread"]);
   assert.equal(MOVE_TITLE.prevMine, "Your previous message");
   assert.equal(MOVE_TITLE.nextComment, "Next comment");
-  assert.equal(badgeTip(2, "above", "why the cap?"), "2 replies unread · next one above: why the cap?");
-  assert.equal(badgeTip(1, "below", ""), "1 reply unread · next one below");
-  assert.equal(badgeAria(3, "below"), "3 replies unread, go to the next one below");
+  assert.equal(MOVE_TITLE.prevUnread, "Previous unread reply");
+  assert.equal(MOVE_TITLE.nextUnread, "Next unread reply");
+  assert.equal(countTip(2), "2 replies unread off screen");
+  assert.equal(countTip(1), "1 reply unread off screen");
 });
