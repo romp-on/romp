@@ -58,7 +58,7 @@ class SplitFollowup(unittest.TestCase):
     def test_build_session_applies_it_to_queued_and_landed(self):
         src = inspect.getsource(km.build_session)
         self.assertIn('"kind": "queued", "texts": qmsgs', src, "queued ships per-message md objects")
-        self.assertIn("_split_followup(t)", src, "each queued message is cleaned")
+        self.assertIn("_split_followup(_strip_fork_opener(t))", src, "each queued message is cleaned, fork opener and all")
         self.assertIn("fu_goal, fu_body, fu, fu_ctx = _split_followup(prompt)", src, "landed human turns are cleaned")
         self.assertIn('ev["followUp"] = True', src)
         self.assertIn('ev["fuCtx"] = fu_ctx', src, "landed follow-ups carry the expandable context")
