@@ -820,9 +820,10 @@ through to `install.sh`:
 
 - `ROMP_JUDGE_CONCURRENCY=<1..16>` sets how many judge calls run at once,
   across every tier; the default is 6. The judges read it once, when they
-  load, so set it where the kernel's service sees it (`service.env`, then a
-  restart). A value outside the range is applied at the nearer bound; a value
-  that is not an integer is ignored, with one line on the kernel's stderr. The
+  load, from the environment the manager hands the kernel, so set it in
+  `service.env` and restart the manager (`romp down`, then `romp up`). A value
+  outside the range is applied at the nearer bound; a value that is not an
+  integer is ignored, with one line on the kernel's stderr. The
   same knob is a kernel setting, **Judge concurrency**, the last row of the
   gear's Judges section below the model and effort picks: a pick there
   applies on the judges' next pass with no restart, wins over the variable,
@@ -2107,8 +2108,9 @@ variables bound this:
   only to messages the CLI was holding, never to the queue proper: a message
   still waiting its turn is delivered however long the kernel was down. `0`
   switches the line off, and every unlanded message is re-fed whatever its
-  age. The kernel reads it once, when it starts, so set it where the kernel's
-  service sees it (`service.env`, then a restart).
+  age. The kernel reads it once, when it starts, from the environment the
+  manager hands it, so set it in `service.env` and restart the manager
+  (`romp down`, then `romp up`).
 - `ROMP_KERNEL_HTTP_TIMEOUT_S=<seconds>` is how long `romp send`, `romp
   interrupt` and `romp end` wait for the kernel's answer; the default is `10`.
   A kernel that took the request but answered late (mid-restart, or under
@@ -5586,9 +5588,23 @@ The panes' socket compression is on by default. `ROMP_WS_DEFLATE=0` (exactly
 `0`) declines every pane's offer, so every pane runs plain: the lever if a proxy
 on the way mishandles compressed frames. `ROMP_WS_DEFLATE_LEVEL` sets the level,
 1 to 9 (default 3); a value outside that range is clamped, and one that is not a
-number falls back to 3. The kernel reads both when it starts; they go in
-`service.env` like the other service knobs (see
-[Service environment and credentials](#service-environment-and-credentials)).
+number falls back to 3.
+
+Both go in `service.env` like the other service knobs (see
+[Service environment and credentials](#service-environment-and-credentials)),
+and like them a change takes effect at the next manager restart (`romp down`,
+then `romp up`). `romp refresh` restarts the kernels but not the manager, and
+they keep the values the manager started with, so a proxy tested after an edit
+and a refresh is still tested with the old setting. The dashboard's restart
+button does the same. Either restarts the manager too in one case: under the
+login service, when the manager's own code changed on disk since it started.
+Only the login service hands `service.env` to the manager. A manager started
+any other way (`romp up` with no login service installed,
+`romp up --foreground`, or the `romp-manager ensure` that `romp update <host>`
+and the dashboard's remote restart run on a far host with no manager up) reads
+no `service.env`, and a kernel started with no manager takes no variables from
+it either: each runs with the environment of whatever started it, so export the
+variables there.
 
 ## Reaching romp from a phone: the full Tailscale setup
 

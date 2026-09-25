@@ -140,6 +140,18 @@ class Variable(_Sandbox):
         self.assertEqual(mod.CONCURRENCY, 6, "garbage → the default")
         self.assertEqual(len(err.splitlines()), 1, "…and one stderr line: %r" % err)
 
+    def test_the_reference_says_an_edit_to_the_variable_waits_for_a_manager_restart(self):
+        # The variable is read at judge module load, which happens inside the kernel, from the environment the manager
+        # hands every kernel it spawns; the manager takes service.env only when it starts. The reference said to set
+        # it in service.env "then a restart", which reads as if `romp refresh` (a kernel restart) applied the edit.
+        with open(os.path.join(os.path.dirname(HERE), "docs", "reference.md"), encoding="utf-8") as f:
+            text = f.read()
+        at = text.index("- `ROMP_JUDGE_CONCURRENCY=<1..16>`")
+        doc = " ".join(text[at:text.index("\n\n", at)].split())
+        self.assertIn("from the environment the manager hands the kernel", doc)
+        self.assertIn("restart the manager (`romp down`, then `romp up`)", doc)
+        self.assertNotIn("then a restart", doc, "a kernel restart does not reread service.env")
+
 
 class Setting(_Sandbox):
     def test_setting_is_validated_written_and_read_fresh(self):

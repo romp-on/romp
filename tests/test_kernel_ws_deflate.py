@@ -9,7 +9,9 @@ fell megabytes behind on the feed and was dropped. Pinned here:
 - negotiation: an offer is answered with the extension (no context takeover on either side; a server window
   the offer named echoed, at 15 too), an absent, foreign or malformed offer is not — a malformed window
   value declines rather than 500s — repeated header lines are read together, and the kill switch declines
-  every offer; the environment reads and their defaults (on, level 3, the 1,024-byte floor);
+  every offer; the environment reads and their defaults (on, level 3, the 1,024-byte floor), and the
+  reference's word on when an edit to them applies (at the next manager restart; a kernel restart keeps the
+  values the manager started with);
 - the wire: a message at or over the floor goes compressed with RSV1 set and inflates back to its text, the
   floor exactly where it is documented; a short one, and every message to a client without the extension,
   gets the plain frame it always did, byte for byte; the client's sender thread is what compresses;
@@ -137,6 +139,30 @@ class Env(unittest.TestCase):
         self.assertEqual(km._ws_deflate_env({"ROMP_WS_DEFLATE_LEVEL": "0"}), (True, 1), "clamped to zlib's range")
         self.assertEqual(km._ws_deflate_env({"ROMP_WS_DEFLATE_LEVEL": "12"}), (True, 9))
         self.assertEqual(km._ws_deflate_env({"ROMP_WS_DEFLATE_LEVEL": "abc"}), (True, 3), "a malformed level falls to the default, not a boot failure")
+
+    def test_the_reference_says_an_edit_waits_for_a_manager_restart(self):
+        # The kernel reads both knobs once, at import, from the environment the manager hands every kernel it spawns,
+        # and the manager takes service.env only when it starts. The reference said the kernel read them when IT
+        # started, which read as if `romp refresh` applied an edit to the file; a proxy tested that way was tested
+        # with the old setting (post-merge note on #2127). The paragraph has to name the manager restart and the
+        # command that makes one, the kernel restarts that are not one (a refresh and the dashboard's button, both
+        # through the manager's restartAllOrSelf), the one case a refresh bounces the manager too (supervised, and
+        # its own file changed on disk), and every start outside the login service, which hands the manager no file.
+        with open(os.path.join(os.path.dirname(HERE), "docs", "reference.md"), encoding="utf-8") as f:
+            text = f.read()
+        at = text.index("The panes' socket compression is on by default.")
+        doc = " ".join(text[at:text.index("\n## ", at)].split())
+        self.assertIn("a change takes effect at the next manager restart", doc)
+        self.assertIn("(`romp down`, then `romp up`)", doc, "the one command a user acts on: `romp up` alone restarts nothing")
+        self.assertIn("`romp refresh` restarts the kernels but not the manager", doc)
+        self.assertIn("they keep the values the manager started with", doc)
+        self.assertIn("The dashboard's restart button does the same.", doc)
+        self.assertIn("under the login service, when the manager's own code changed on disk", doc)
+        self.assertIn("Only the login service hands `service.env` to the manager.", doc)
+        self.assertIn("`romp up --foreground`", doc)
+        self.assertIn("`romp-manager ensure`", doc)
+        self.assertIn("reads no `service.env`", doc)
+        self.assertNotIn("The kernel reads both", doc, "a kernel restart does not reread service.env")
 
 
 class Offer(unittest.TestCase):

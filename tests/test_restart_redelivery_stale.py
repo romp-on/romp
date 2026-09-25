@@ -346,6 +346,20 @@ class TheAgeLine(Fixture):
         self.assertNotIn("[romp]", inspect.getsource(sb.dropped_sends_card))
 
 
+class TheReference(unittest.TestCase):
+    def test_the_reference_says_an_edit_to_the_line_waits_for_a_manager_restart(self):
+        # REDELIVER_MAX_AGE_S is read at import, inside the kernel, from the environment the manager hands every kernel
+        # it spawns; the manager takes service.env only when it starts. The reference said to set it in service.env
+        # "then a restart", which reads as if `romp refresh` (a kernel restart) applied the edit.
+        with open(os.path.join(os.path.dirname(HERE), "docs", "reference.md"), encoding="utf-8") as f:
+            text = f.read()
+        at = text.index("- `ROMP_REDELIVER_MAX_AGE_S=<seconds>`")
+        doc = " ".join(text[at:text.index("\n- ", at + 1)].split())
+        self.assertIn("from the environment the manager hands it", doc)
+        self.assertIn("restart the manager (`romp down`, then `romp up`)", doc)
+        self.assertNotIn("then a restart", doc, "a kernel restart does not reread service.env")
+
+
 class TheRefusedFlag(Fixture):
     def test_a_refused_send_is_flagged_and_never_refed(self):
         a = self._echo("a prompt the gate refused", FRESH_T)
