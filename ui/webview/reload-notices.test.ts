@@ -164,7 +164,7 @@ function pageWorld(state: { ask?: "custom" | "text" | null; edit?: boolean; file
     composerCitations: new Map<string, { quote?: string }[]>(), ask: state.ask ?? null,
     composerEdits: new Map<string, { uuid: string; orig: string }>(state.edit ? [[activeId, { uuid: "e1", orig: "the old text" }]] : []),
     composerFiles: new Map<string, string[]>(state.files ? [[activeId, state.files]] : []),
-    staged: [] as [string, unknown][], persists: 0,
+    staged: [] as [string, unknown][], persists: 0, askPaints: 0,
     sessions: new Map<string, { id: string; name: string }>(roster),
     activated: [] as [string, string | undefined][],
     hostDown: !!state.hostDown, posted: [] as { type: string }[],
@@ -176,8 +176,8 @@ type World = ReturnType<typeof pageWorld>;
 type Lifted = { stageComposer: () => void; branchjump: (elx: { dataset: Record<string, string> }) => void; warnToast: (msg: string) => FakeEl;
                 deliver: (sid: string, text: string, attached: string[]) => void };
 
-/** warnToast and ephemeralWarnToast; stageComposer (the composer's staging, whose refusals say a picker is waiting on
- *  the composer, an edit is in progress to a past or a queued message, attachments are on the composer); the branch
+/** warnToast and ephemeralWarnToast; stageComposer (the composer's staging, whose refusals say an edit is in progress
+ *  to a past or a queued message, or attachments are on the composer); the branch
  *  jump's delegated handler (whose refusal says the session is not on this dashboard); the refusing head of the send's
  *  deliver (the disconnected-host branch, whose refusal says the host is disconnected and asks for a re-dial, and the
  *  provisional branch, whose refusal says the tab's session never started), through the first step of a send that
@@ -207,6 +207,7 @@ function liftToastSites(): (w: World) => Lifted {
     const clearBox = () => { ta.value = ""; composerManualH = null; ta.style.height = ""; };   // the composer's one clear path; its menu refreshes are not lifted (composer-mention-pane.test.ts)
     const persistDrafts = () => { W.persists++; };
     const renderStagedStrip = () => {};
+    const setComposerAskMode = () => { W.askPaints++; };   // the box's answer-mode repaint after a stage (stage-over-picker.test.ts executes the real one)
     const sessions = W.sessions;
     const setActive = (sid, cut) => { W.activated.push([sid, cut]); };
     const isProvisionalId = W.isProvisionalId, provisionalId = W.provisionalId, provisionalQueue = W.provisionalQueue;
@@ -241,6 +242,15 @@ test("staging with nothing owning the composer stages: the lifted composer is th
   assert.equal(p.box(), null, "no toast, so no container");
 });
 
+test("staging while a question waits on the composer stages too: no refusal on screen, so none for a reload to replay", () => {
+  const p = page({ ask: "custom" });
+  p.stageComposer();
+  assert.deepEqual(p.W.staged, [["web", { text: "what did the tests say", cites: [] }]]);
+  assert.equal(p.W.ta.value, "", "the composer clears");
+  assert.equal(p.W.askPaints, 1, "and the emptied box is repainted as the question's answer field");
+  assert.equal(p.box(), null, "no toast, so no container");
+});
+
 // The refusals that report a STATE rather than an event, raised through their real code paths. Each puts its toast on
 // screen for the person at the page and refuses the gesture; the reading skips it, because the fresh page shows that
 // state for itself (the picker, the attachments and the roster come back from the kernel and the persisted drafts; the
@@ -250,8 +260,6 @@ test("staging with nothing owning the composer stages: the lifted composer is th
 // fresh page has not got, and its "send again" would post the words as a new message; a provisional tab does not
 // survive a reload, so a replay would name a session the fresh page does not show).
 const STATE_REFUSALS: { name: string; state: Parameters<typeof pageWorld>[0]; raise: (p: Page) => void; text: string; refused: (p: Page) => void }[] = [
-  { name: "staging while a picker waits on the composer", state: { ask: "text" }, raise: (p) => p.stageComposer(),
-    text: "A picker is waiting on this box", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
   { name: "staging while an edit is in progress", state: { edit: true }, raise: (p) => p.stageComposer(),
     text: "An edit replaces a past message", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
   { name: "staging with attachments on the composer", state: { files: ["notes.md"] }, raise: (p) => p.stageComposer(),
@@ -303,7 +311,7 @@ test("render.ts: warnToast hands back its toast, and the refusals about a state 
   assert.equal((RENDER.match(/ephemeralWarnToast\("Can't send yet — the session isn't reachable\. They stay staged\."\);/g) || []).length, 2,
     "the staged sends' refusal at both of its sites (the strip's Send now and the empty send)");
   // the staging refusals (stageComposer) and the branch jump's: states the fresh page shows for itself or no longer has
-  assert.match(RENDER, /if \(composerAnswersAsk\(\)\) \{ ephemeralWarnToast\("A picker is waiting on this box/);
+  assert.doesNotMatch(RENDER, /A picker is waiting on this box/, "a question waiting on the box no longer refuses staging (the user 2026-09-25)");
   assert.match(RENDER, /if \(composerEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("An edit replaces a past message/);
   assert.match(RENDER, /if \(\(composerFiles\.get\(activeId\) \|\| \[\]\)\.length\) \{ ephemeralWarnToast\("Attachments can't be staged/);
   assert.match(RENDER, /if \(!sessions\.get\(sid\)\) \{ ephemeralWarnToast\("That session isn't on this dashboard right now\."\); return; \}/);
@@ -314,7 +322,7 @@ test("render.ts: warnToast hands back its toast, and the refusals about a state 
   // tunnel health (the tab mark, the transcript foot), and the re-dial that makes "re-dialing now" true is posted by
   // the gesture, never by a replay
   assert.match(RENDER, /if \(hostIsDown\(sid\)\) \{\n\s*const host = String\(sid\)\.slice\(0, String\(sid\)\.indexOf\(":"\)\);\n(\s*\/\/[^\n]*\n)*\s*vscodeApi\?\.postMessage\(\{ type: "redial", host \}\);\n(\s*\/\/[^\n]*\n)*\s*ephemeralWarnToast\(host \+ " is disconnected, so this wasn't sent\. It's still in the box/);
-  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 9, "the definition, the two reachability sites and the six state refusals (the queued edit's two went with the in-place editor, T373); the bell toggle's word on the new state is the NOTE twin's (review 2026-09-14), counted below");
+  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 8, "the definition, the two reachability sites and the five state refusals (the queued edit's two went with the in-place editor, T373; the picker's went 2026-09-25, when staging over a question became allowed); the bell toggle's word on the new state is the NOTE twin's (review 2026-09-14), counted below");
   assert.equal((RENDER.match(/ephemeralNoteToast\(/g) || []).length, 2, "the definition and the bell toggle (2026-09-11: a confirmation for a flip whose only other witness is the tab menu's row; a state the fresh page reads from the kernel, so not replayed)");
   // what the nack, the dismissal and the other-tab ack say stays true after the reload, so they ride it unmarked
   assert.match(RENDER, /warnToast\(m\.name \+ " couldn't be saved on the kernel, so it was not attached/);

@@ -73,11 +73,13 @@ type Hooks = {
   persists: number; down: Set<string>; provisional: Set<string>; toasts: string[];
   backend?: string;                                                   // the lifted routeUserMessage reads liveSession(sid)?.status?.backend to gate the /clear flag off for Codex
   isClearCmd: typeof isClearCmd;                                      // the REAL predicate from clear-confirm.ts, so the lift's /clear routing is EXECUTED against it, not an inline mirror
+  liveAsks: Map<string, unknown>;                                     // the sessions waiting on a question: the label reads it ("after you answer")
 };
 type Api = {
   routeUserMessage: (sid: string, text: string, cites: unknown[] | undefined, imgPaths?: string[]) => void;
   flushStaged: (sid: string, typed?: { text: string; cites?: unknown[]; imgPaths?: string[] }) => number;
   renderStagedStrip: (id: string | null, opts?: { reveal?: "last" }) => void;
+  syncStagedLabel: () => void;
   stagedMsgs: StagedStack; stagedOpen: Set<string>; stagedCollapsed: Set<string>; stagedScroll: Map<string, number>;
 };
 
@@ -104,8 +106,9 @@ function lift(): (hooks: Hooks) => Api {
     const warnToast = (msg) => { H.toasts.push(msg); };
     const ephemeralWarnToast = (msg) => { H.toasts.push(msg); };   // the slice's unreachable-session word is the ephemeral one
     const syncComposerPh = () => {};   // the composer's name overlay re-sync the strip renderer calls on every exit (composer-placeholder.ts): no overlay here
+    const liveAsks = H.liveAsks;
   `;
-  const epilogue = `return { routeUserMessage, flushStaged, renderStagedStrip, stagedMsgs, stagedOpen, stagedCollapsed, stagedScroll };`;
+  const epilogue = `return { routeUserMessage, flushStaged, renderStagedStrip, syncStagedLabel, stagedMsgs, stagedOpen, stagedCollapsed, stagedScroll };`;
   return new Function("HOOKS", prelude + js + epilogue) as (hooks: Hooks) => Api;
 }
 
@@ -121,7 +124,7 @@ function world(): { H: Hooks; api: Api; strip: FakeEl; document: FakeDocument } 
   const strip = new FakeEl("div");
   const document: FakeDocument = { activeElement: null, getElementById: (id) => id === "composer-staged" ? strip : null };
   FakeEl.doc = document;
-  const H: Hooks = { FakeEl, document, StagedStack, quoteReplyBody, stagedPosts, mintQid, isClearCmd, posted: [], qids: [], optimistic: [], persists: 0, down: new Set(), provisional: new Set(), toasts: [] };
+  const H: Hooks = { FakeEl, document, StagedStack, quoteReplyBody, stagedPosts, mintQid, isClearCmd, posted: [], qids: [], optimistic: [], persists: 0, down: new Set(), provisional: new Set(), toasts: [], liveAsks: new Map() };
   return { H, api: lift()(H), strip, document };
 }
 const listOf = (strip: FakeEl): FakeEl => { const l = strip.querySelector(".staged-list"); assert.ok(l, "the strip holds a .staged-list"); return l; };
@@ -158,6 +161,54 @@ test("the head is the strip's first child, with the caret, the count and Send no
   assert.deepEqual(bare.children.map((c) => c.className), ["staged-row"]);
   assert.equal(bare.querySelector(".staged-expand")!.textContent, "(click to expand)");
   for (const c of list.children) assert.ok(!c.listeners.dragstart && !c.listeners.dragover && !c.listeners.drop, "no drag and drop on a staged item");
+});
+
+test("while the session waits on a question the label says the staged items go after the answer; the words follow the question in place", () => {
+  const PLAIN = "1 staged — sends with your next message", ASKING = PLAIN + ", after you answer";
+  const { H, api, strip } = world();
+  api.stagedMsgs.push(A, { text: "check the migration notes first", cites: [] });
+  H.liveAsks.set(A, null);                          // a question is up (null: the free-text prompt the panel could not structure)
+  api.renderStagedStrip(A);
+  const lbl = strip.querySelector(".staged-lbl")!, go = strip.querySelector(".staged-go")!;
+  assert.equal(lbl.textContent, ASKING);
+  assert.ok(lbl.title.includes("While a question is waiting on you, they're held until you answer it."), lbl.title);
+  // answered: renderLiveAsk runs on the clear and relabels, rewriting the words on the SAME nodes (a rebuild on every
+  // re-post of a question would drop a press on Send now or a ✕ mid-click)
+  H.liveAsks.delete(A);
+  api.syncStagedLabel();
+  assert.equal(strip.querySelector(".staged-lbl"), lbl, "relabelled in place, not rebuilt");
+  assert.equal(strip.querySelector(".staged-go"), go);
+  assert.equal(lbl.textContent, PLAIN);
+  // another session's question is not this strip's
+  H.liveAsks.set(B, null);
+  api.syncStagedLabel();
+  assert.equal(lbl.textContent, PLAIN, "the strip reads its own session's question");
+  // a new question arrives
+  H.liveAsks.set(A, { kind: "single", options: [] });
+  api.syncStagedLabel();
+  assert.equal(lbl.textContent, ASKING);
+  // a collapsed strip keeps the count line, and it follows the question too
+  strip.querySelector(".staged-caret")!.fire("click");
+  H.liveAsks.delete(A);
+  api.syncStagedLabel();
+  assert.equal(strip.querySelector(".staged-lbl")!.textContent, PLAIN);
+  // nothing staged: no strip, nothing to relabel
+  api.stagedMsgs.takeAll(A);
+  api.renderStagedStrip(A);
+  H.liveAsks.set(A, null);
+  api.syncStagedLabel();
+  assert.equal(strip.style.display, "none");
+  assert.equal(strip.children.length, 0);
+});
+
+test("render.ts: renderLiveAsk relabels the strip before any of its exits, so a question arriving or answered moves the words", () => {
+  const body = RENDER.split("function renderLiveAsk() {")[1].split("\nfunction ")[0];
+  const at = body.indexOf("syncStagedLabel();");
+  assert.ok(at > 0 && at < body.indexOf("return;"), "called ahead of the first return");
+  assert.ok(body.indexOf("const topBefore") < at, "after the scroll origin is read (the label can wrap the head)");
+  // both events reach renderLiveAsk for the open tab: the question's arrival and its clear
+  assert.match(RENDER, /liveAsks\.set\(id, ask\);\n\s*if \(id === activeId\) renderLiveAsk\(\);/);
+  assert.match(RENDER, /if \(liveAsks\.delete\(id\) && id === activeId\) renderLiveAsk\(\);/);
 });
 
 test("the list's place is kept per tab across the rebuild an expand, a discard or a switch triggers; staging reveals the end; an emptied list forgets", () => {

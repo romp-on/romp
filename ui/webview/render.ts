@@ -12288,11 +12288,11 @@ function ensureToastBox(): HTMLElement {
 // staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
 // is still being created (isProvisionalId); the plain send's refusal on a disconnected host (sendComposer's deliver)
 // says the same host is unreachable and that romp is re-dialing it; the send into a tab whose create failed (deliver
-// too) says the session never started; the staging refusals (stageComposer) say a picker is waiting on the composer,
-// an edit of a past message is in progress or attachments are on the composer; the branch jump's
+// too) says the session never started; the staging refusals (stageComposer) say an edit of a past message is in
+// progress or attachments are on the composer; the branch jump's
 // refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for itself (the host
 // mark and the transcript foot, from the kernel's tunnel health, which the page reads afresh into a disconnected set
-// that starts empty; the staged strip; the picker, the attachments and the roster come back from the kernel and the
+// that starts empty; the staged strip; the attachments and the roster come back from the kernel and the
 // persisted drafts, the refused message among them) or no longer has it (a provisional tab, pending or failed, does not
 // survive a reload; composerEdits and the in-place queued editors are in memory alone, so no edit is in progress on a fresh page, and a
 // "send again" there would post the words as a new message), so kept by persistNoticesForReload and shown again by the
@@ -16084,6 +16084,7 @@ function renderLiveAsk() {
   const content = document.getElementById("content");
   const topBefore = content ? content.scrollTop : 0;   // read BEFORE any change below (the re-parent, the card's emptying, the render): a card re-rendered SHORTER under a
                                                        // bottom reader is clamped at the first forced layout, and a read after it names the clamped value as the origin (round three, low 1)
+  syncStagedLabel();   // the staged strip's "after you answer" follows this very event: a question arriving, or answered
   if (!host) return;
   // Keep the picker the LAST child of #content so it sits beneath the active thread even if a thread was
   // appended after it (e.g. switching to a never-seen session while a picker is up).
@@ -17493,6 +17494,25 @@ function flushStaged(sid: string, typed?: { text: string; cites?: Citation[]; im
   return run.length;
 }
 
+// The staged strip's count line. A session waiting on a question takes nothing until the question is answered, so
+// while one is up the staged items go after the answer, and the line says so (the user 2026-09-25).
+function stagedLabel(n: number, asking: boolean): string {
+  return n + " staged — sends with your next message" + (asking ? ", after you answer" : "");
+}
+// …kept current as a question arrives and as it is answered: renderLiveAsk, which both events run, calls this. The
+// words are rewritten in place, never the strip rebuilt: renderLiveAsk also runs on every re-post of the same
+// question, and a rebuild there would drop a press on Send now or a ✕ that was mid-click (ui/CLAUDE.md, click-safe).
+function syncStagedLabel(): void {
+  const strip = document.getElementById("composer-staged");
+  const id = strip?.dataset.sid;
+  const lbl = id ? strip!.querySelector(".staged-lbl") : null;
+  if (!id || !lbl) return;
+  const text = stagedLabel(stagedMsgs.count(id), liveAsks.has(id));
+  if (lbl.textContent === text) return;
+  lbl.textContent = text;
+  syncComposerPh();   // a longer line can wrap the head and move the box's first line (renderStagedStrip's reason)
+}
+
   // every exit path re-places the name overlay: a row above the textarea coming or going moves the box's first line
   // (the user 2026-09-10); the ResizeObserver on #composer is the backstop, this is the exact event
   function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void { renderStagedStripInner(id, opts); syncComposerPh(); }
@@ -17521,9 +17541,10 @@ function flushStaged(sid: string, typed?: { text: string; cites?: Citation[]; im
   caret.setAttribute("aria-expanded", collapsed ? "false" : "true");
   caret.setAttribute("aria-label", collapsed ? "Show the staged messages" : "Hide the staged messages");
   const lbl = el("span", "staged-lbl");
-  lbl.textContent = items.length + " staged — sends with your next message";
+  lbl.textContent = stagedLabel(items.length, liveAsks.has(id));
   lbl.title = "⌘⏎ (or Ctrl+⏎) stages what you've typed, quote chips and all, without sending. "
     + "A plain send releases them as one message, in order, with your new message last; a card follow-up or a slash command goes on its own, in its place. "
+    + "While a question is waiting on you, they're held until you answer it. "
     + "Send now releases them alone.";
   const toggleCollapse = (ev: Event) => {
     ev.stopPropagation();
@@ -20762,17 +20783,19 @@ function setupComposer() {
   // button (the user 2026-06-17). Trims, remembers for a Ctrl+C restore, clears the box.
   // ⌘/Ctrl+⏎ — STAGE the box instead of sending (the user 2026-08-15): the text and its citation
   // chips move to the staged strip, the box clears, focus stays for the next highlight-and-comment.
-  // The states that already own the box refuse loudly rather than staging a lie: a picker answer
-  // answers NOW or sends normally; an edit replaces a past message, or a queued one; attachments ride a
-  // normal send.
+  // Two states that already own the box refuse loudly rather than staging a lie: an edit replaces a past
+  // message, or a queued one; attachments ride a normal send.
   // Each refusal reports a state, not an event, so it does not ride a reload (ephemeralWarnToast).
+  // A question picker waiting on the box is NOT one of them (the user 2026-09-25): ⌘⏎ is an explicit "hold this",
+  // so it stages whether the draft began before the question arrived or after. The emptied box is the question's
+  // answer field again, and the staged items wait through the answer, never inside it (sendComposer's askRoute
+  // leaves them): they go with the next ordinary message or Send now, after the answer.
   const stageComposer = () => {
     if (!activeId) return;
     const typed = ta.value.trim();
     // context stages ALONE (the user 2026-08-23): select a passage, ⌘⏎ with an empty box, repeat —
     // then one typed message flushes the whole run. Nothing at all → nothing to stage.
     if (!typed && !(composerCitations.get(activeId) || []).some((c) => c.quote)) return;
-    if (composerAnswersAsk()) { ephemeralWarnToast("A picker is waiting on this box — answer it, or send normally."); return; }
     if (composerEdits.has(activeId)) { ephemeralWarnToast("An edit replaces a past message — send it normally."); return; }
     if ((composerFiles.get(activeId) || []).length) { ephemeralWarnToast("Attachments can't be staged — send them with a normal message."); return; }
     stagedMsgs.push(activeId, { text: typed, cites: (composerCitations.get(activeId) || []).slice() });
@@ -20781,11 +20804,15 @@ function setupComposer() {
     clearBox();
     persistDrafts();
     renderStagedStrip(activeId, { reveal: "last" });   // the new item is the one event that moves the list: show it
+    // the draft's stamp is gone, so a waiting question re-takes the empty box: repaint its tint and placeholder (a draft
+    // begun before the question had them off, and clearBox sets the value without the input event that repaints)
+    setComposerAskMode();
   };
   const sendComposer = (opts?: { pastShipGate?: boolean }) => {
     const typed = ta.value.trim();
     if (!activeId) return;
-    // an empty plain send with a staged stack = "go": release what's held, nothing new to add
+    // an empty plain send with a staged stack = "go": release what's held, nothing new to add. With a question
+    // waiting too, they still go as ordinary messages, which the session takes after the question is answered
     if (!typed && !(composerFiles.get(activeId) || []).length && stagedMsgs.count(activeId)) {
       if (hostIsDown(activeId) || isProvisionalId(activeId)) {
         ephemeralWarnToast("Can't send yet — the session isn't reachable. They stay staged.");
@@ -20851,6 +20878,8 @@ function setupComposer() {
     // AskUserQuestion Type-something slot (single submits, multi adds a checked row + you Submit); "text"
     // answers a raw free-text prompt. A picker WITHOUT free text (permission Allow/Deny, plan review) returns
     // null here, so the box keeps its normal send — the controls just stay in view alongside it.
+    // A staged stack stays held through the answer (the user 2026-09-25): the answer is the typed words alone, and
+    // this returns before deliver's flushStaged, so the staged items go with the next ordinary message, after it.
     const askRoute = typed ? composerAnswersAsk() : null;
     if (askRoute) {
       if (askRoute === "custom") addCustomLiveAsk(typed); else sendTextLiveAsk(typed);
