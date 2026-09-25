@@ -4829,12 +4829,26 @@ _TS_REPAIRED_SEEN = set()    # record uuids already counted in ts-repair — dis
 
 
 _ASM_DEMOTE_TL = threading.local()   # the calling thread's last demotion reason: what _assemble reads to pick the road after it
-_ASM_RESTORE_AFTER_DEMOTE = ("descent", "rewrite", "nonleaf", "reseat")   # the demotions the document still stands for (T402): the
-#                                   tail moved (a spur, a rewind, a fork), the leaf's record entry was replaced, a lineage file moved; the
-#                                   load's own checks refuse a document that no longer fits. `reseat` (2026-09-24) is a whole entry whose
-#                                   own document now stands (asm_checkpoint_write): re-seated on it, the folds after walk the tail alone.
-#                                   Every other reason (a new boundary or summary in the tail, a prompt id, a skill link, a stamp out of
-#                                   order, ...) keeps the whole parse.
+_ASM_RESTORE_AFTER_DEMOTE = ("descent", "rewrite", "nonleaf", "reseat", "boundary", "summary")   # the demotions the document
+#                                   still stands for (T402): the tail moved (a spur, a rewind, a fork), the leaf's record entry was
+#                                   replaced, a lineage file moved, or a compaction landed in the tail (its boundary or its summary,
+#                                   2026-09-24: the fold cannot carry one, but the restore parses the tail whole from the cut,
+#                                   compaction included, as every boot over a document does; sent to the whole parse instead, each
+#                                   compaction re-read the transcript, 0.6 to 1.7 s at 150 to 184 MB measured, the settle then
+#                                   rewrote the document for 2.3 to 2.7 s more, and the next parse re-seated the new whole entry on
+#                                   it). `reseat` (2026-09-24) is a
+#                                   whole entry whose own document now stands (asm_checkpoint_write): re-seated on it, the folds after
+#                                   walk the tail alone. The load's own checks and the chain proof refuse a document that no longer
+#                                   fits (a boundary anchored before the cut, say). Every other reason (a prompt id, a skill link, a
+#                                   stamp out of order, ...) keeps the whole parse, and the gates file a compaction's reason only
+#                                   after every record in the delta has met them, so a compaction never carries such a record onto
+#                                   the restore road. A compaction restores only while the tail past the standing cut is under the
+#                                   churn bound's share (_asm_compaction_under_share); past it the compaction parses whole, so the
+#                                   settle writes a later cut. Nor does a compaction restore a whole entry whose postal author still
+#                                   waits on the log, or any entry whose document was written while one waited, whether it wrote
+#                                   that document and has healed since or was restored from it (_assemble): the writer's own test for
+#                                   its re-seat mark.
+_ASM_COMPACTION_DEMOTES = ("boundary", "summary")   # the compaction's two reasons: the restore road takes them under the share only
 
 
 def _asm_demote(reason):
@@ -4845,6 +4859,31 @@ def _asm_demote(reason):
     _asm_stat(k)
     _ASM_DEMOTE_TL.reason = reason
     return None
+
+
+def _asm_compaction_under_share(entry, leaf_path):
+    """Whether a compaction's demotion may take the restore road: True while the leaf's bytes past the standing document's cut,
+    times _ASM_TAIL_SHARE, are still under that document's pre-cut bytes, False once they have reached them. A restored entry
+    carries the cut it came from (docPre, docCutOff), a whole entry the one it wrote (docCut). None when there is nothing to
+    measure: a whole entry that wrote no document (a session under the first document's floor, a settle that declined its
+    write, a compaction before the settle ran) or a leaf the stat cannot read. The caller parses whole on None as on False, but
+    counts only False as past the share, so the counter holds only compactions that had a document to restore from. The churn
+    bound this keeps (review of 2026-09-24): a restored entry writes no document, and the fold's own share gate reads
+    only the atoms-only restore and a re-seated entry, so while every compaction restored nothing moved the cut of the
+    lazy-index entry a boot restores, and the tail every later restore and boot reads grew for the session's life (34 MB
+    past the cut after four compactions at 150 to 184 MB, the boot's restore doubled); a compaction past the share now
+    parses whole, as every compaction did before, and the settle after it writes a later cut."""
+    if entry.get("docPre") is not None:
+        pre, cut_off = entry["docPre"], entry.get("docCutOff")
+    elif entry.get("docCut") is not None:
+        pre, cut_off = entry["docCut"][1], entry["docCut"][4]
+    else:
+        return None
+    try:
+        tail = os.stat(leaf_path).st_size - int(cut_off or 0)
+    except OSError:
+        return None
+    return tail * _ASM_TAIL_SHARE < max(1, int(pre))
 
 
 def _asm_key_lock(key):
@@ -4947,10 +4986,12 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
     if entry.get("docPre") is not None and (entry.get("prefix") or entry.get("reseated")):
         # a RESTORED entry: its cut advances only through a whole parse (the pre-cut records are lazy rows, not in hand), so
         # when the tail past the document's cut has grown to the share the entry is demoted here and the settle that follows
-        # the whole parse writes the new cut (stage one b's churn bound; a compaction in the tail demotes below as before).
-        # A RE-SEATED entry (2026-09-24) is held to it whatever its document's form: the whole entry it replaced carried this
-        # bound in the writer, and a turns-section restore leaves `prefix` empty, so the test on `prefix` alone would freeze
-        # the re-seated leaf's cut for the rest of the process
+        # the whole parse writes the new cut (stage one b's churn bound; a compaction in the tail demotes below and restores from
+        # the same document while the tail is under the share, 2026-09-24: _asm_compaction_under_share; at the share this gate
+        # files tailShare first, and the compaction parses whole under that reason). A RE-SEATED entry (2026-09-24) is held to
+        # it whatever its document's form: the whole entry it replaced carried this bound in the writer, and a turns-section
+        # restore leaves `prefix` empty, so the test on `prefix` alone would freeze the re-seated leaf's cut for the rest of the
+        # process
         try:
             tail_now = os.stat(leaf_path).st_size - int(entry.get("docCutOff") or 0)
         except OSError:
@@ -4999,6 +5040,7 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
     if old_leaf is None:
         return _asm_demote("empty-graph")
     parent_d, new_leaf = {}, old_leaf
+    compaction = None      # the delta's compaction reason, filed only once every record has met the other gates (below)
     for r in delta:
         t, u = r.get("type"), r.get("uuid")
         if u:
@@ -5011,10 +5053,10 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             parent_d[u] = None if p == u else p
             new_leaf = u
         if t == "system" and r.get("subtype") == "compact_boundary":
-            return _asm_demote("boundary")   # sets the pre-pass's compaction gate and can re-seat adoptions
+            compaction = compaction or "boundary"   # sets the pre-pass's compaction gate and can re-seat adoptions
         if r.get("isCompactSummary") is True:
-            return _asm_demote("summary")    # attaches to its boundary and arms the restore dedup in the
-            #                                  chronological pre-pass (the summary, not the boundary, 2026-09-19)
+            compaction = compaction or "summary"    # attaches to its boundary and arms the restore dedup in the
+            #                                         chronological pre-pass (the summary, not the boundary, 2026-09-19)
         if t == "user" and r.get("promptId") and r["promptId"] in ad.prompt_ids:
             # A repeated promptId is ROUTINE — every record of a turn wears its prompt's id, so
             # tool results repeat it on nearly every append (measured: this gate, unshaped,
@@ -5038,6 +5080,14 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             if ts is None or ts < max_ppt:
                 return _asm_demote("ts")   # the carry is valid only for a delta sorting at-or-
                 #                            after everything folded (the pre-pass sorts None first)
+    if compaction is not None:
+        # A compaction demotes the fold, and its demotion falls to the restore road, which parses the tail from the document's
+        # cut and proves only that the tail chains onto the document. So the reason is filed only here, after the whole delta:
+        # a record past the compaction that the fold refuses for its own reason (a stamp before the records folded, a Skill call
+        # a pre-cut payload names, a uuid a pre-cut record named as its parent, a re-classifying prompt id) demoted above for that
+        # reason and keeps its whole parse (review of 2026-09-24: returning at the compaction masked them, and the restore served
+        # a tree a cold parse does not build, at every later boot as well)
+        return _asm_demote(compaction)
     # Leaf descent: the new file-leaf must chain back to the old one THROUGH the delta — an
     # api_error spur re-parent, a rewind, and a /clear fork all fail here. parent_d.pop doubles
     # as the cycle guard; a delta with no uuid-bearing record passes trivially (leaf unmoved).
@@ -5147,8 +5197,9 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
 # from the cut's byte offset only, parses that tail through a FileAdapter seeded with the pre-cut graph facts and the
 # carried emit state, and proves the pre-cut part identical to the whole parse's by a sha1 over its turn ids, segment
 # ids and atom uuids. Bodies come back on demand (hydrate). Anything that does not verify is a counted fallback to a
-# whole parse; a compaction landing after the document demotes the tail fold to a whole parse exactly as before, and
-# the next settle writes a new document with the new cut.
+# whole parse; a compaction landing after the document demotes the tail fold to the restore road, whose tail parse from
+# the cut takes the compaction in, while the tail is under the churn bound's share (2026-09-24; past the share, and until
+# then always, a whole parse, after which the next settle writes a new cut).
 _ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
 #                                       4: a `turns` section over the pre-cut rows (T323 stage 4c: the lazy index)
 #                                       5: lazy markers carry pc (assistant prose chars) and mid (postal message ids); a turn row
@@ -6209,8 +6260,9 @@ _ASM_TAIL_SHARE = 8                   # the churn bound (stage one b): a standin
 #                                       grown to ONE EIGHTH of the pre-cut bytes (each rewrite is a whole parse, so a share bounds the
 #                                       rewrites over a leaf's life to a logarithm of its growth while the tail every cold parse still
 #                                       decodes stays under an eighth of the documented part; the eighth is the machine's own cap share,
-#                                       the share a capped job's CPU and memory quota take, never a literal chosen for this file), or
-#                                       when a compaction landed past the cut (the boundary changes what the tail is)
+#                                       the share a capped job's CPU and memory quota take, never a literal chosen for this file); a
+#                                       compaction past the cut restores from the standing document while the tail is under the share
+#                                       and parses whole once it has reached it, so the settle writes a later cut (2026-09-24)
 
 
 def _tree_key(tree):
@@ -6222,7 +6274,7 @@ def _tree_key(tree):
 
 def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle"):
     """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
-    entry, an entry restored from a document (its cut stands until a compaction moves it), no compaction boundary in
+    entry, an entry restored from a document (its cut stands until a whole parse replaces the entry), no compaction boundary in
     the tree (the whole file would be the tail), a cut that would not split the chronological order the fold's gate
     needs (garbled stamps), or a document past the cap; each counted under asmCheckpoint.skipped, and appended to
     `reason_out` when a list is given (the converge pass reads its refusal there; T376 review). `who` names the caller
@@ -6272,8 +6324,10 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                                                           or entry.get("docNoTurns") == _tree_key(tree)):
             # this entry's pre-cut part has not moved (a fold appends after the cut); a document written without a tree is
             # written again once one is given, one whose tree yielded no section is not, for that tree (review low 4). The cut
-            # ADVANCES (a rewrite) only under the churn bound: a compaction landed past the standing cut, or the tail past it
-            # has grown to the share (_ASM_TAIL_SHARE); otherwise the standing document stands
+            # ADVANCES (a rewrite) only under the churn bound: more boundaries than the standing cut counted, or the tail past it
+            # has grown to the share (_ASM_TAIL_SHARE); otherwise the standing document stands. A compaction landing past the cut
+            # replaces this entry either way (the fold cannot carry one): under the share with a restored entry, which writes
+            # nothing, past it with a fresh whole entry, which writes its own cut (2026-09-24)
             if standing is None or standing[0] == cut_uuid:
                 return _skip("written")
             try:
@@ -6651,6 +6705,15 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
                "carry": _carry_encode(st), "identity": identity, "t": time.time(), "tipChildless": bool(tip_childless)}
+        _pst = entry.get("st") or {}
+        doc["postalWait"] = bool(_pst.get("postal_miss_rec") or _pst.get("postal_miss_att"))   # a postal author waits on the log
+        #                                               (the test the re-seat mark below makes): the document carries the provisional
+        #                                               author and no heal state, so a compaction on an entry restored from it, or on
+        #                                               this entry after its heal (docPostalWait, below), parses whole, where the
+        #                                               whole entry heals the author once the log catches up (_assemble, 2026-09-24).
+        #                                               Written either way: a document with no such key was written before the
+        #                                               writer recorded the wait, and the restore counts it as one written while an
+        #                                               author waited (_asm_restore_inner, 2026-09-25)
         try:
             doc["atoms"] = [json.dumps(r_, separators=(",", ":")) for r_ in pre_atoms]   # the rows first: the same guard
             text = json.dumps(doc, separators=(",", ":"))
@@ -6665,6 +6728,12 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             tmp.write_bytes(data)
             _t_write = time.monotonic()                   # the window's edge: a refusal stamped before this was against the document
             os.replace(tmp, cp)                           #  the replace retires (popped below); one stamped after it stands
+            entry["docPostalWait"] = bool(doc.get("postalWait"))   # the document on disk from here: a compaction on this WHOLE
+            #                                                        entry parses whole while it carries a provisional postal author,
+            #                                                        even once the entry's own heal has retired the miss, since the
+            #                                                        restore would read this document, not the healed entry; kept
+            #                                                        before the sidecar write, so a sidecar that fails (the `write`
+            #                                                        skip) leaves no stale record (_assemble, 2026-09-25)
             meta = cp.with_name(cp.name + ".meta")            # {"av", "path"}: what the boot sweep reads, never the document
             _asm_retire_refusal_mark(meta)                    # a refusedStanding mark for the cut this write replaces is history
             mtmp = meta.with_name(meta.name + ".%d.tmp" % os.getpid())
@@ -7241,9 +7310,16 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
                  "docCutOff": int(((doc["files"].get(Path(leaf_path).stem) or {}).get("cut") or [0])[0]),
                  "path": str(leaf_path)}                   # as handed: the reader's key for the same leaf
         #        docPre: the pre-cut bytes over the lineage; docCutOff: the leaf's cut offset. The fold's gate demotes this entry
-        #        to a whole parse when the tail past the cut reaches the share (tailShare), so the settle rewrites the cut
+        #        to a whole parse when the tail past the cut reaches the share (tailShare), so the settle rewrites the cut; a
+        #        compaction's road reads the same two (_asm_compaction_under_share, 2026-09-24)
         if reseated:
             entry["reseated"] = True
+        if doc.get("postalWait", True):
+            entry["docPostalWait"] = True                      # its writer's entry had a postal author waiting on the log, or the
+            #                                                    document predates the key and may have had one: a compaction on this
+            #                                                    entry parses whole (_assemble, 2026-09-24), for such a document until
+            #                                                    a settle rewrites it with the key, as the one after that whole parse
+            #                                                    does (2026-09-25)
     except Exception as e:                                     # noqa: BLE001 — a document the code cannot use is a fallback
         _asm_ckpt_note(leaf_path, "restore", repr(e)[:120]); return None
     _LAZY_FILES[str(rompuuid)] = _source_files(doc["files"])
@@ -7487,11 +7563,30 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                     gone = _ASM_CACHE.pop(key, None)
                 _asm_release(gone)                # ...and its index's memo goes with it
                 # A demoted entry falls to the RESTORE road before the whole parse (T402): for a descent (the delta does not
-                # chain the new leaf to the old: an api_error spur, a rewind, a /clear fork in the tail), a rewrite or a moved
-                # lineage file, the document still stands for the pre-cut part and its own load checks refuse it when it does
-                # not fit; the tail read from the cut covers the moved leaf. The first instrumented boot (T398) paid two whole
-                # parses under g:descent inside the auto-nudge tick where a restore would have read the tail.
+                # chain the new leaf to the old: an api_error spur, a rewind, a /clear fork in the tail), a rewrite, a moved
+                # lineage file or a compaction in the tail (2026-09-24), the document still stands for the pre-cut part and its
+                # own load checks refuse it when it does not fit; the tail read from the cut covers the moved leaf and the
+                # compaction. The first instrumented boot (T398) paid two whole parses under g:descent inside the auto-nudge tick
+                # where a restore would have read the tail.
                 _why = getattr(_ASM_DEMOTE_TL, "reason", None)
+                if _CKPT_DIR_FN is not None and _why in _ASM_COMPACTION_DEMOTES:
+                    _under = _asm_compaction_under_share(entry, leaf_path)
+                    if _under is False:
+                        _asm_stat("restore:pastShare")    # a compaction with the tail past the churn bound's share: the whole parse
+                        _why = None                       #  below, and the settle after it writes a later cut (2026-09-24)
+                    elif _under is None:
+                        _why = None                       # no document to measure: the whole parse, counted as it always was
+                    elif entry.get("docPostalWait") or (entry.get("docPre") is None and ((entry.get("st") or {}).get("postal_miss_rec")
+                                                                                          or (entry.get("st") or {}).get("postal_miss_att"))):
+                        # a postal author waits on the log, the test the writer's re-seat mark makes (asm_checkpoint_write): in
+                        # a WHOLE entry's heal state, or in the writer's entry when it wrote the document this entry wrote or was
+                        # restored from (its `postalWait`, kept as docPostalWait on both: a whole entry that healed after writing
+                        # still wrote a document carrying the provisional author; a document written before the key existed
+                        # counts as written while an author waited, 2026-09-25). The document carries it and no heal state,
+                        # so the restored entry would serve that author until the next whole parse, where the whole entry heals
+                        # it once the log catches up. The whole parse, counted as it always was (2026-09-24). A restored entry's
+                        # own heal state is its tail's, which the restore parses again
+                        _why = None
                 if _CKPT_DIR_FN is not None and _why in _ASM_RESTORE_AFTER_DEMOTE:
                     # every restore over a document, this one and the boot's, first asks whether the tail CHAINS onto it
                     # (_tail_chains_onto_the_document); a rewind into the pre-cut interior, a /clear fork, a system spur

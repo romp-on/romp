@@ -215,9 +215,11 @@ class AssemblyRoadCounters(Harness):
         #   (e: a3 has no pre-cut child here, so a first child cannot move the active branch; with a pre-cut child it refuses:
         #    the tip-fork test below)
         "p1_no_parent_key": (lambda t0: [{k: v for k, v in G.uline(t0 + 700, "no parent key", "u_nk").items() if k != "parentUuid"}], "whole"),
-        # p4, r7 and q never reach the demotion leg's restore: a summary in the delta trips the gates' own summary demotion
-        # (whole, as before) and a sidechain delta that leaves the main line's leaf in place folds without any demotion; the
-        # chain rule meets them at the BOOT restore (the boot leg below), where p4 and r7 refuse and q restores
+        # p4, r7 and q never reach the demotion leg's restore: a summary in the delta trips the gates' own summary demotion,
+        # and since 2026-09-24 that demotion falls to the restore only while the tail past the cut is under the churn bound's
+        # share, which this small file's tail is past (whole, restore:pastShare), and a sidechain delta that leaves the main
+        # line's leaf in place folds without any demotion; the chain rule meets them at the BOOT restore (the boot leg below),
+        # where p4 and r7 refuse and q restores
         "p4_summary_parented_into_the_interior": (lambda t0: [G.compact_summary_line(t0 + 700, "s9", "a1")], "summary"),
         "r7_sidechain_parented_into_the_interior": (lambda t0: [dict(G.uline(t0 + 700, "a side ask", "sc1", "a1"), isSidechain=True),
                                                                 G.uline(t0 + 710, "then the main line", "u6", "a5")], "fold"),
@@ -262,6 +264,12 @@ class AssemblyRoadCounters(Harness):
             self.assertEqual(parse.get("fold"), 1, "%s: no gate demotes this delta: the fold road, as before: %s" % (name, parse))
         else:
             self.assertEqual(parse.get("full:demoted"), 1, "%s: the gates' own %s demotion parses whole: %s" % (name, road, parse))
+            if road in ("boundary", "summary"):
+                # a compaction's demotion falls to the restore only while the tail past the cut is under the churn bound's share
+                # of the pre-cut bytes (2026-09-24); the five-shape file's pre-cut part is three short turns and its tail is past
+                # the share, so the restore is declined before any proof
+                self.assertEqual((parse.get("restore:pastShare"), parse.get("restore", 0), parse.get("restore:chainRefused", 0)), (1, 0, 0),
+                                 "%s: the restore declined for the share: %s" % (name, parse))
         self.assertEqual(tree, self._cold(path, cands), "%s: the tree equals a cold whole parse" % name)
 
     def test_a_restore_over_a_document_stands_only_when_the_tail_chains_onto_it(self):
@@ -364,8 +372,9 @@ class AssemblyRoadCounters(Harness):
         re-anchored into the pre-cut interior (a rewind before compacting) or onto an unknown uuid restored at the next boot over
         a document it invalidated. The boundary's effective parent is resolved as the parse resolves it and must be in the tail
         or the proven tip; an ordinary boundary onto a tail record restores. On the descent road every boundary in the delta
-        takes the gates' own boundary demotion (whole) and never the restore; the rule meets these shapes at boot and through
-        the seeded readers."""
+        takes the gates' own boundary demotion and parses whole: since 2026-09-24 that demotion falls to the restore only while
+        the tail past the cut is under the churn bound's share, and this small file's tail is past it (restore:pastShare); the
+        rule meets these shapes at boot and through the seeded readers."""
         for name, (tail, boot_road) in self.BOUNDARY_SHAPES.items():
             with self.subTest(shape=name, road="descent"):
                 path, t0 = self._documented("tailb-" + name)

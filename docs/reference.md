@@ -1555,7 +1555,9 @@ landed and whose next turn exists, or the turn that holds the last compaction
 boundary, whichever is later; before that only the boundary's turn, so a
 session that never compacted had no document. A standing document is
 rewritten with a later cut only when the tail past its cut has grown to an
-eighth of the pre-cut bytes or a compaction landed past it, and a session's
+eighth of the pre-cut bytes (a compaction landing past the cut before then
+restores from the standing document; one landing after it parses whole, and
+the settle writes the later cut), and a session's
 FIRST document waits until its pre-cut part holds an eighth of the fold cap,
 1 MB by default (`ROMP_CKPT_FIRST_DOC_KB` sets it, 0 turns it off), since below
 that a whole parse costs milliseconds and, with uniform turns, the share bound
@@ -1602,16 +1604,29 @@ after it walk the tail alone instead of the whole history, and the chat renders
 from the cut; the tail share then demotes the re-seated entry to the whole
 parse that lets the settle advance the cut, and the entry stays held to the
 share through a restore after a descent (an api_error spur, a rewind in the
-tail). An entry whose document's tail already meets the share, whose leaf's
-document a restore just refused, or whose history still holds a postal
-author waiting on the log, stays whole, and its document is rewritten only
-once the tail reaches the share or a compaction lands. Such an entry loses
-the churn bound at a descent, deliberately: the restore that serves it after
-the descent carries no bound, as every restore did before, so its cut waits
-for the next whole parse; held to the share, an entry kept whole for an open
-turn's tail would parse the history whole again at every descent.
-A compaction after the document demotes to a
-whole parse as before, and the next settle writes a new document; a rewrite
+tail) or a compaction. An entry whose document's tail already meets the share,
+whose leaf's document a restore just refused, or whose history still holds a
+postal author waiting on the log, stays whole, and its document is rewritten
+only once the tail reaches the share or a compaction parses whole. Such an
+entry loses the churn bound at a descent or a compaction's restore,
+deliberately: the restore that serves it carries no bound, as every restore
+did before, so its cut waits for the next whole parse (a compaction once the
+tail has reached the share is one); held to the share, an entry kept whole for
+an open turn's tail would parse the history whole again at every descent.
+A compaction after the document restores from it, the tail read from the cut
+taking the compaction in, while the tail past the cut is under an eighth of
+the pre-cut bytes and nothing else in the same write parses whole for its own
+reason (a stamp before the records already read, a Skill call or a uuid a
+pre-cut record names, a command wrapper under a pre-cut prompt id); once the
+tail has reached that share the compaction
+parses whole and the next settle writes a new document. A compaction on a
+whole entry whose postal author still waits on the log parses whole too, for
+the reason the writer does not re-seat such an entry, and so does one on any
+entry whose document was written while an author waited, whether the entry
+wrote that document (and has healed since) or was restored from it (the
+document says so, `postalWait`; one written before that field existed counts
+as written while an author waited): the document carries the provisional
+author, and only a whole parse corrects it once the log catches up; a rewrite
 under the cut's guard, a shrunk or moved file, another session, other inputs,
 a wrong version, a corrupt or unprovable document, or a document past 16 MB
 each mean a whole parse, counted per reason in `/perf` and said once. The
@@ -2413,7 +2428,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   The row also carries `parse`, the assembly's road counters at
   the first cycle's end (T398): `serve`, `fold`, `restore` (with
   `restore:afterDemote`, the restores taken over an entry the gates demoted
-  instead of a whole parse, and `restore:chainRefused`, a document that stood
+  instead of a whole parse, `restore:pastShare`, a compaction whose tail past
+  the cut had reached an eighth of the pre-cut bytes, parsed whole so the
+  settle writes a later cut (an entry the churn gate already holds to that
+  share, a re-seated one or one restored without a `turns` section, is
+  demoted by the gate before the compaction is read and counts under
+  `g:tailShare` instead; a compaction on an entry with no document to
+  measure, a session under the first document's floor say, or one under the
+  share whose postal author waits on the log or whose document was written
+  while one waited or before documents recorded the wait, parses whole as it
+  always did and counts only under its `g:` reason and `full:demoted`), and
+  `restore:chainRefused`, a document that stood
   but whose leaf tail does not chain onto it: every tail record bearing a
   uuid or a parentUuid key must REACH, through its parent chain within the
   tail, the pre-cut spine tip, and only when the document's `tipChildless` bit says the writer proved,

@@ -267,10 +267,10 @@ class DroppedEntries(T.Harness):
         ix = em._ASM_CACHE[self.key(path)]["index"]
         self.assertIs(ix, la._index)
         wi, wl = weakref.ref(ix), weakref.ref(la)
-        t1 = self.after(recs, 100)                                 # a compaction landing in the tail after the document: the
-        with open(path, "a") as f:                                 #  entry is stale and demotes to a whole parse
-            f.write(json.dumps(G.compact_line(t1, "b_new", recs[-1].get("uuid"))) + "\n")
-            f.write(json.dumps(G.compact_summary_line(t1 + 1, "s_new", "b_new")) + "\n")
+        t1 = self.after(recs, -100)                                # a record stamped before the fold's watermark (g:ts): the entry
+        with open(path, "a") as f:                                 #  is stale and demotes to a whole parse (the demotion this pins;
+            #                                                        a compaction, its vehicle until 2026-09-24, now restores)
+            f.write(json.dumps(G.uline(t1, "a line stamped before the last reply", "u_late", recs[-1].get("uuid"))) + "\n")
         modes = []
         self.parse(path, modes)
         self.assertEqual(modes, ["full"])

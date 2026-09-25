@@ -5,7 +5,8 @@ carried emit state and the pre-cut graph facts; a fresh process verifies it, reb
 reads the leaf from the cut's byte offset only, parses that tail through a seeded adapter and proves the prefix by a
 hash of its ids. Pinned here over every golden scenario that holds a compaction: the restored tree, hydrated, equals
 the whole parse's byte for byte (turn ids, segment ids, atom uuids and bodies); folds after the restore keep equal;
-a compaction landing after the document demotes to a whole parse; a rewrite under the cut's guard, a wrong version, a
+a compaction landing after the document restores from it while the tail past the cut is under the churn bound's share, and
+parses whole once the tail has reached it (2026-09-24); a rewrite under the cut's guard, a wrong version, a
 moved session and a corrupt document each fall back loudly, counted; a body read before hydration is loud; the bytes
 the restore reads are the document, the cut's guard and the tail. Synthetic transcripts only (the golden builders)."""
 import contextlib
@@ -449,7 +450,10 @@ class RestoredEqualsWhole(Harness):
         self.assertEqual(modes, ["fold"], "the appended records folded onto the restored entry")
         self.assertEqual(_strip(tree), self.cold(path))
 
-    def test_a_compaction_after_the_document_demotes_to_a_whole_parse(self):
+    def test_a_compaction_after_the_document_parses_whole_once_the_tail_has_reached_the_share(self):
+        # 2026-09-24: a compaction's demotion falls to the restore road only while the tail past the cut is under the churn bound's
+        # share of the pre-cut bytes (tests/test_asm_compaction_restore.py pins the restore on a long session); this scenario's
+        # pre-cut part is one short turn, so its tail is past the share and the compaction parses whole, as it always had
         records, _ = G.SINGLE_FILE["compaction_atom"]
         recs = records()
         path = self.write("compaction_atom", recs)
@@ -461,9 +465,15 @@ class RestoredEqualsWhole(Harness):
         with open(path, "a") as f:
             f.write(json.dumps(b) + "\n")
             f.write(json.dumps(G.compact_summary_line(t1 + 1, "s_new", "b_new")) + "\n")
+        d = _doc(path)
+        pre = sum(int(f["size"]) if f.get("skip") else int((f.get("cut") or [0])[0]) for f in d["files"].values())
+        tail = os.path.getsize(path) - int(((d["files"].get(Path(path).stem) or {}).get("cut") or [0])[0])
+        self.assertGreaterEqual(tail * em._ASM_TAIL_SHARE, pre, "the scenario's tail past its cut is at the share")
+        n0 = em._ASM_STATS.get("restore:pastShare", 0)
         modes = []
         tree = self.parse(path, modes)
-        self.assertEqual(modes, ["full"], "a new boundary in the tail demotes to a whole parse, as before")
+        self.assertEqual(modes, ["full"], "a new boundary in a tail at the share demotes to a whole parse")
+        self.assertEqual(em._ASM_STATS.get("restore:pastShare", 0) - n0, 1, "the restore is declined for the share: %s" % em._ASM_STATS)
         self.assertEqual(_strip(tree), self.cold(path))
 
 
@@ -1190,11 +1200,13 @@ class SettledCut(Harness):
                 proven.append(label)
         self.assertEqual(len(proven), len(shapes) + 1, "every shape ran to its verdict over a settled-turn cut: %s" % proven)
 
-    def test_the_standing_document_holds_until_the_tail_reaches_the_share_or_a_compaction_lands(self):
+    def test_the_standing_document_holds_until_the_tail_reaches_the_share_and_a_compaction_restores_from_it(self):
         """Correction 2, the churn bound: with the entry standing (no restart), a settled turn appended past the cut leaves
         the document as it is (the tail is under an eighth of the pre-cut bytes; since 2026-09-24 the parse after the write
         re-seats the entry on the document, so the writer finds it `restored`); once the tail past the standing cut reaches
-        the share the settle rewrites the document with a later cut; a compaction landing past the cut rewrites at once."""
+        the share the settle rewrites the document with a later cut; a compaction landing past the cut while the tail is under
+        the share restores from the standing document, which stands (2026-09-24; it had parsed whole and been rewritten at
+        once; a compaction whose tail has reached the share still parses whole: tests/test_asm_compaction_restore.py)."""
         base = compacting_variant([G.uline(NOW - 3600, "hello " * 2000, "u1", None), G.aline(NOW - 3595, "hi " * 4000, "a1", "u1", stop="end_turn")], "churn")
         recs = base + _turns_after(base, "churn", 2)
         path, whole, wrote = self._written_and_equal("churn", recs)
@@ -1225,13 +1237,19 @@ class SettledCut(Harness):
         self.assertGreater(len(d1["records"]), n0, "the cut advanced")
         got, modes, _n = self.restored(path)
         self.assertEqual((modes, got), (["restore"], self.cold(path)))
-        # a compaction landing past the cut rewrites at once, whatever the tail's share
+        # a compaction landing past the cut restores from the standing document, which stands (moved 2026-09-24: the boundary's
+        # demotion now falls to the restore road; it had taken a whole parse, and the settle after it rewrote at once)
         self.fresh(); self.parse(path); self.assertFalse(self.doc(path)); n1 = len(_doc(path)["records"])
         recs = compacting_variant(recs, "late")
         pp.write_text("".join(json.dumps(r) + "\n" for r in recs))
-        self.parse(path); em._ASM_CKPT_STATS["skipped"] = {}
-        self.assertTrue(self.doc(path), "a compaction past the cut: rewritten (%s)" % em.asm_checkpoint_stats()["skipped"])
-        self.assertGreater(len(_doc(path)["records"]), n1)
+        pre1 = sum(int((f.get("cut") or [0])[0]) for f in d1["files"].values())
+        self.assertLess((os.path.getsize(path) - pre1) * em._ASM_TAIL_SHARE, pre1, "the compaction lands with the tail under the share")
+        modes = []
+        self.parse(path, modes); em._ASM_CKPT_STATS["skipped"] = {}
+        self.assertEqual(modes, ["restore"], "a compaction past the cut: restored from the standing document")
+        self.assertFalse(self.doc(path))
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"restored": 1}, "%s" % em.asm_checkpoint_stats()["skipped"])
+        self.assertEqual(len(_doc(path)["records"]), n1, "the document is the one written before")
         got, modes, _n = self.restored(path)
         self.assertEqual((modes, got), (["restore"], self.cold(path)))
 
