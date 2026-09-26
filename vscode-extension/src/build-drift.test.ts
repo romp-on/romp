@@ -25,10 +25,17 @@ function slice(start: string, end: string): string {
   return EXT.slice(a, b);
 }
 
-test("esbuild bakes a build stamp into the extension bundle", () => {
+test("esbuild bakes a build stamp into the extension bundle, and stamps every output's mtime with it", () => {
   // epoch SECONDS — the same clock as the kernel's dist token (newest dist/*.js mtime), so the two
-  // compare directly with no unit conversion.
-  assert.match(ESBUILD, /define:\s*\{\s*__ROMP_BUILD__:\s*String\(Math\.floor\(Date\.now\(\) \/ 1000\)\)\s*\}/);
+  // compare directly with no unit conversion. ONE clock reading for the whole build, taken at its start:
+  // its whole second is the define, and the reading in full is set as the mtime of each staged output
+  // before its rename, so a fresh build's dv equals its own stamp rather than the second its outputs landed
+  // (one or two later — every build used to warn about itself), and a source saved in the same second
+  // before the build began reads older than dist, not newer (src/esbuild-build-stamp.test.ts drives both).
+  assert.match(ESBUILD, /const BUILD_START_MS = Date\.now\(\);\nconst BUILD_STAMP = Math\.floor\(BUILD_START_MS \/ 1000\);/);
+  assert.match(ESBUILD, /define:\s*\{\s*__ROMP_BUILD__:\s*String\(BUILD_STAMP\)\s*\}/);
+  assert.ok(ESBUILD.includes("async function buildAll(configs, startMs = BUILD_START_MS)"), "buildAll takes the start, the module's by default");
+  assert.ok(ESBUILD.includes("fs.utimesSync(tmp, startMs / 1000, startMs / 1000);"), "each staged output is stamped before the rename carries it to the served name");
 });
 
 test("the extension compares keepalive dv against the stamp and prompts once", () => {

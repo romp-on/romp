@@ -2401,6 +2401,20 @@ def _dist_ver():
         return 0
 
 
+def _dist_newest_mtime():
+    """The newest dist/*.js mtime with its fraction: what _dist_converge_check compares the sources' mtimes
+    against. _dist_ver is this in whole seconds, the unit the cache token and the extension's build stamp
+    share, but the whole second is the wrong unit for source-vs-dist: esbuild.js sets every output's mtime
+    to the build's START (its whole second is the stamp it bakes), and a source saved in that same second
+    before the build began (a checkout, then the converge's rebuild at once) read NEWER than the
+    rounded-down token, so a current dist was rebuilt once more, announced, and its dv lifted over the VSIX
+    just installed from it (an adversarial review, 2026-09-26). 0.0 when dist is missing."""
+    try:
+        return max(p.stat().st_mtime for p in DIST.glob("*.js"))
+    except (ValueError, OSError):
+        return 0.0
+
+
 def _sw_version():
     """The build string the push worker bakes into its acks (`v` in POST /push/ack, kept as the ledger row's
     swVersion), so the trail says which worker build acked a push. The kernel's short sha plus the dist token: a
@@ -10758,13 +10772,14 @@ def _dist_converge_check():
     update MODE: serving bundles that match one's own checkout is correctness, not update policy.
     One rebuild attempt per distinct source state (the in-memory latch): a failure stays visible in its
     notice and on stderr, retries on the next source change or the next boot — never a 5-minute storm.
-    The ROMP_DIST_DIR seam disables it: a redirected dist is the test's own to control."""
+    The ROMP_DIST_DIR seam disables it: a redirected dist is the test's own to control. The compare is
+    fractional on both sides (_dist_newest_mtime), not against the whole-second token: see there."""
     if _update_checks_off():
         return                                        # a hermetic kernel: the loop's third check stands down with the other two
     if os.environ.get("ROMP_DIST_DIR"):
         return
     newest = _dist_src_newest()
-    if not newest or newest <= _dist_ver():
+    if not newest or newest <= _dist_newest_mtime():
         return
     if newest == _DIST_CONVERGE_TRIED[0]:
         return

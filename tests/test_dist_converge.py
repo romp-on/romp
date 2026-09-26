@@ -6,6 +6,7 @@ checkout == running == origin, so `dv` stayed equal to every open page's LOADEDV
 the reload banner). _dist_converge_check runs at boot and every drift pass: dist older than the
 checkout's UI sources → one in-place rebuild per distinct source state, an ok notice on success and
 a LOUD one on failure — never a silent stale serve, never a retry storm. All fixtures SYNTHETIC."""
+import math
 import os
 import tempfile
 import time
@@ -91,6 +92,23 @@ class DistConverge(unittest.TestCase):
         km._dist_converge_check()
         km._dist_converge_check()
         self.assertEqual(len(self.rebuilds), 1, "the rebuilt dist is newer than the sources — settled")
+
+    def test_a_source_saved_in_the_same_second_before_the_build_began_is_not_newer(self):
+        # esbuild.js stamps every output with the build's START, fraction and all. A checkout followed at once by
+        # the converge's rebuild puts the sources and that start in ONE second, the sources first; compared
+        # against the whole-second token (_dist_ver rounds down) they read newer, and a current dist was rebuilt
+        # once more, announced, and its dv lifted over the VSIX just installed from it (2026-09-26).
+        start = math.floor(time.time() - 100) + 0.75            # the build began at .75 of a second, 100 s ago
+        (km.DIST / "feed.js").write_text("built at start"); os.utime(km.DIST / "feed.js", (start, start))
+        (km.UI / "feed.ts").write_text("saved just before"); os.utime(km.UI / "feed.ts", (start - 0.25, start - 0.25))
+        self.assertGreater(km._dist_src_newest(), km._dist_ver(), "against the whole-second token the source reads newer")
+        km._dist_converge_check()
+        self.assertEqual(self.rebuilds, [], "a source saved before the build began was built: not stale")
+        self.assertEqual(self.notices, [])
+        # saved AFTER the build began, in the same second: it may not have been read, and it IS rebuilt
+        os.utime(km.UI / "feed.ts", (start + 0.2, start + 0.2))
+        km._dist_converge_check()
+        self.assertEqual(len(self.rebuilds), 1)
 
     def test_the_lab_seam_stands_the_converge_down(self):
         self._dist(age=100); self._src(age=50)

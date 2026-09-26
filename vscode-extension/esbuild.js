@@ -9,6 +9,28 @@ const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
 const tests = process.argv.includes("--tests");
 
+// The build's clock reading, taken ONCE when the script loads, before any source is read. Two things come of
+// it. BUILD_STAMP, its whole second, is baked into the extension bundle as __ROMP_BUILD__: the kernel's dist
+// token (`dv` on every keepalive; _dist_ver in kernel/kernel.py) is the newest dist/*.js mtime in whole
+// seconds, and the extension prompts "a newer romp build" when a dv is ABOVE its own __ROMP_BUILD__. And in
+// buildAll every output's mtime is set to the reading, in full, so a fresh build's dv EQUALS its stamp, and
+// only a later build's is above it.
+// Before, the define was this reading and the outputs kept the second they landed, one or two later for the
+// webview bundles, so every fresh build's dv was above its own stamp and the VSIX install.sh had just produced
+// warned about itself in every window; running install.sh again reproduced it (the user 2026-09-26: an
+// install baked 1790407780 and dist read 1790407781). Stamping the outputs, rather than reading the clock
+// after the writes (the define is baked before them) or allowing the prompt a tolerance (a guess at how long
+// a build takes), keeps the comparison exact.
+// The reading in full, not its whole second (an adversarial review, 2026-09-26): the kernel's source-vs-dist
+// staleness checks (_ensure_bundles at boot, _dist_converge_check on every drift pass) compare fractional
+// source mtimes against dist, and a dist rounded down to the second read OLDER than a source saved in that
+// same second before the build began (a checkout, then the converge's rebuild at once), so a current build
+// was rebuilt once more, announced, and its dv lifted over the VSIX just installed from it. The START rather
+// than the end: a source saved while the build ran may or may not have been read, and reading newer than
+// dist, it is rebuilt, where an end stamp read it older and served it stale until the next edit.
+const BUILD_START_MS = Date.now();
+const BUILD_STAMP = Math.floor(BUILD_START_MS / 1000);
+
 /** @type {import('esbuild').BuildOptions} */
 const extension = {
   entryPoints: ["src/extension.ts"],
@@ -18,10 +40,10 @@ const extension = {
   target: "node18",
   outfile: "dist/extension.js",
   external: ["vscode", "bufferutil", "utf-8-validate"],   // ws optional native addons
-  // Bundle build stamp (epoch seconds — the same clock as the kernel's dist token). The extension
-  // compares it against the `dv` on kernel keepalives to raise the "newer romp build" prompt when the
-  // installed VSIX predates a rebuild of the shared webview sources.
-  define: { __ROMP_BUILD__: String(Math.floor(Date.now() / 1000)) },
+  // The build stamp (BUILD_STAMP above; the same clock as the kernel's dist token). The extension compares
+  // it against the `dv` on kernel keepalives to raise the "newer romp build" prompt when the installed VSIX
+  // predates a rebuild of the shared webview sources.
+  define: { __ROMP_BUILD__: String(BUILD_STAMP) },
   sourcemap: !production,
   minify: production,
   logLevel: "info",
@@ -166,7 +188,7 @@ function removeStaleStaging(dir) {
   }
 }
 
-async function buildAll(configs) {
+async function buildAll(configs, startMs = BUILD_START_MS) {
   const results = [];
   for (const cfg of configs) results.push(await esbuild.build({ ...cfg, write: false }));
   const outputs = results.flatMap((r) => r.outputFiles);
@@ -180,6 +202,11 @@ async function buildAll(configs) {
       const tmp = stagingPath(f.path, staged.length);
       fs.writeFileSync(tmp, f.contents);
       staged.push(tmp);
+      // Every output's mtime is the build's start (BUILD_START_MS above), set on the STAGED file: the rename
+      // carries it over unchanged, so no reader of the served name ever sees a later time. Set after the
+      // rename, it would leave a window in which the kernel's stat reads the write time and a keepalive
+      // carries a dv above the stamp, and the extension prompts once per window and never re-checks.
+      fs.utimesSync(tmp, startMs / 1000, startMs / 1000);
     }
     outputs.forEach((f, i) => fs.renameSync(staged[i], f.path));
   } catch (e) {
@@ -266,7 +293,7 @@ async function main() {
 // Exported for the tests: src/esbuild-build.test.ts and its siblings drive buildAll and failureSummary against
 // synthetic entries and stub the real configs' entry points. The build runs only when this file is the script
 // (`node esbuild.js`), never on require.
-module.exports = { buildAll, failureSummary, extension, webview, testBuild };
+module.exports = { buildAll, failureSummary, extension, webview, testBuild, BUILD_START_MS, BUILD_STAMP };
 
 if (require.main === module) {
   main().catch((e) => {

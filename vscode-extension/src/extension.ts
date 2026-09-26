@@ -57,7 +57,10 @@ function serveToken(): string {
 
 // Build-drift banner (the user 2026-07-13, who wanted a banner when anything gets out of sync).
 // __ROMP_BUILD__ is baked by esbuild.js at bundle time (epoch seconds); every kernel keepalive carries
-// `dv`, the kernel's current dist token (newest dist/*.js mtime, same clock). dv newer than this bundle
+// `dv`, the kernel's current dist token (newest dist/*.js mtime, same clock). esbuild.js sets every output's
+// mtime to the build's start, whose whole second is the stamp it bakes, so the build this bundle came from
+// has dv == BUILD_STAMP exactly and only a LATER build's dv is above it (before that, the outputs carried
+// the second they landed, one or two after the stamp, and every fresh build warned about itself). dv newer than this bundle
 // means the shared webview sources were rebuilt after this VSIX was packaged — the panes are rendering
 // live kernel payloads with outdated code. Prompt ONCE per window; a webview reload can't fix it (the
 // code is baked into the on-disk VSIX), so unlike the browser's Reload the prompt offers a real
