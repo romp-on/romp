@@ -1188,7 +1188,10 @@ class _PerfStats:
         memos["convergeDeclined"] = _CONVERGE_DECLINED[0]   # converges that asked no restart because this kernel was leaving
         memos["sessionsListing"] = {"built": _SESSIONS_LISTING["built"], "served": _SESSIONS_LISTING["served"],
                                     "requestBuilt": _SESSIONS_LISTING["requestBuilt"], "faultBuilt": _SESSIONS_LISTING["faultBuilt"],
-                                    "missBy": dict(_SESSIONS_LISTING["missBy"])}
+                                    "missBy": dict(_SESSIONS_LISTING["missBy"]),
+                                    # the shared request build (2026-09-28): builds, callers joined to one in flight, served
+                                    # its kept rows, refused at the waiter cap, given up at their deadline, and the waiters now
+                                    "requestShared": dict(_SESSIONS_REQUEST_BUILD.stats, waiting=_SESSIONS_REQUEST_BUILD.waiting)}
         memos["nudgeWalk"] = dict(_NUDGE_WALK_STATS)   # the walk's parse gate: looks, skipped and paid parses, cold ones, the
         #                                                yield's deferrals, memos refused as unbounded or clock-due (T401 (2))
         memos["cleared"] = dict(_CLEARED_STATS)       # the clear set: parsed once per file state, served while it stands (2026-09-09)
@@ -29296,6 +29299,110 @@ _SESSIONS_LISTING = {"key": None, "rows": None, "json": None, "threads": None, "
 #                      (plans/sessions-route-from-the-cycle.md): the rows built once per change by the pusher's cycle under an
 #                      exact key, served from memory to every request; `missBy` names the key input that moved
 
+# The REQUEST's own build of the listing (no cycle has built it yet, or the cycle's last build failed) is shared: one build at
+# a time for every caller, its result reused briefly, a bounded number of callers waiting on it (_SharedBuild). Before this each
+# request built for itself, and on a restart's reload window, when one build took about 16 s, the postal bus's abandoned 6 s
+# fetches piled up about 1,360 connections on about 1,500 threads, each still building, and the bus's liveness checks failed
+# (2026-09-28). The numbers:
+_SESSIONS_REQUEST_REUSE_S = 1.5      # a request build's rows serve later requests this long after it lands. A clock only here:
+#                                      the request path holds no key (the key reads every row's compacting pair and the transcript
+#                                      sweep, about the build's own cost), and the event that supersedes it, the cycle's keyed
+#                                      build landing, drops it at once (_sessions_listing_refresh)
+_SESSIONS_REQUEST_WAITERS_MAX = 32   # callers allowed to wait on a build in flight; the next is answered 503 at once
+_SESSIONS_REQUEST_WAIT_S = 9.0       # how long one caller waits before a 503: under the longest caller's own cap (bin/romp's
+#                                      10 s curl; the postal bus gives up at 6 s, reading a 503 and its timeout alike as "the
+#                                      kernel did not answer"), so the route's threads number at most 1 + 32, each back within 9 s
+_sessions_request_clock = time.monotonic   # the reuse window's clock (a module name, so a test moves it)
+
+
+class _ListingUnavailable(Exception):
+    """The shared request build could not answer this caller: `reason` "busy" (the waiter cap was full) or "timeout" (the
+    build ran past the caller's wait). The route answers 503 with Retry-After; the build itself carries on and its rows serve
+    the retry."""
+
+    def __init__(self, reason, text):
+        super().__init__(text)
+        self.reason = reason
+
+
+class _SharedBuild:
+    """One build at a time for any number of callers (a single flight), its result reused for a short window, and a cap on
+    how many callers may wait for it. get(build, …) returns (value, built_here): a kept result younger than `reuse_s` is
+    served; else a caller finding no build in flight runs `build` on its own thread (the leader) and keeps what it returns;
+    a caller finding one in flight waits for it, up to `wait_s`, unless `waiters_max` callers already are, and is served the
+    same value (or re-raises the same exception). A caller that joins a build started before it arrived is served that
+    build's rows: that is the sharing. Only the leader's thread computes, and it always finishes: an abandoned request leaves
+    a waiter that gives up at its deadline, never a second build."""
+
+    def __init__(self):
+        self._cv = threading.Condition(threading.Lock())
+        self._flight = None          # the build in progress: {"done", "value", "error"}
+        self._kept = None            # (value, landed_at on the caller's clock): the last build's result
+        self.waiting = 0
+        self.stats = {"built": 0, "joined": 0, "reused": 0, "busy": 0, "timedOut": 0, "failed": 0, "peakWaiting": 0}
+
+    def reset(self):
+        with self._cv:
+            self._kept = None
+            self.stats = dict.fromkeys(self.stats, 0)
+            self.stats["peakWaiting"] = self.waiting
+
+    def drop(self):
+        """Forget the kept result (the event that supersedes it has happened); a build in flight still serves its waiters."""
+        with self._cv:
+            self._kept = None
+
+    def get(self, build, reuse_s, waiters_max, wait_s, clock):
+        with self._cv:
+            kept = self._kept
+            if kept is not None and clock() - kept[1] < reuse_s:
+                self.stats["reused"] += 1
+                return kept[0], False
+            fl = self._flight
+            if fl is None:
+                fl = self._flight = {"done": False, "value": None, "error": None}
+            else:
+                if self.waiting >= waiters_max:
+                    self.stats["busy"] += 1
+                    raise _ListingUnavailable("busy", "the session list is being built and %d requests are already waiting "
+                                                      "for it; try again in a moment" % self.waiting)
+                self.waiting += 1
+                self.stats["peakWaiting"] = max(self.stats["peakWaiting"], self.waiting)
+                try:
+                    deadline = time.monotonic() + wait_s
+                    while not fl["done"]:
+                        left = deadline - time.monotonic()
+                        if left <= 0:
+                            self.stats["timedOut"] += 1
+                            raise _ListingUnavailable("timeout", "the session list took longer than %.0f s to build; it is "
+                                                                 "still building, try again in a moment" % wait_s)
+                        self._cv.wait(left)
+                finally:
+                    self.waiting -= 1
+                self.stats["joined"] += 1
+                if fl["error"] is not None:
+                    raise fl["error"]
+                return fl["value"], False
+        try:                                              # the leader: build outside the lock, then hand the result to every waiter
+            value = build()
+        except BaseException as e:
+            with self._cv:
+                fl["done"], fl["error"] = True, e
+                self._flight = None
+                self.stats["failed"] += 1
+                self._cv.notify_all()
+            raise
+        with self._cv:
+            fl["done"], fl["value"] = True, value
+            self._flight = None
+            self._kept = (value, clock())
+            self.stats["built"] += 1
+            self._cv.notify_all()
+        return value, True
+
+
+_SESSIONS_REQUEST_BUILD = _SharedBuild()
+
 
 def _reg_rev():
     """The SDK registry's ROWS revision (kernel/sdk_backend.py REG_ROWS_REV: moved by a write that changes one of the fields
@@ -29314,6 +29421,7 @@ def _sessions_listing_reset():
     per test must drop what an earlier build kept)."""
     _SESSIONS_LISTING.update({"key": None, "rows": None, "json": None, "threads": None, "threadsKey": None, "fault": None,
                               "built": 0, "served": 0, "requestBuilt": 0, "faultBuilt": 0, "missBy": {}})
+    _SESSIONS_REQUEST_BUILD.reset()
 
 
 def _sessions_listing_key(live_map, names):
@@ -29468,22 +29576,27 @@ def _sessions_listing_refresh(now, live_map):
         _live_scope.listing_pairs = None
     _SESSIONS_LISTING.update({"key": key, "rows": rows, "json": body, "fault": None, "built": _SESSIONS_LISTING["built"] + 1})
     _SESSIONS_LISTING["missBy"][why] = _SESSIONS_LISTING["missBy"].get(why, 0) + 1   # the thread rows keep their own key (below)
+    _SESSIONS_REQUEST_BUILD.drop()                        # the keyed listing supersedes any request build, whatever its age
 
 
 def _sessions_listing_serve(threads=False):
-    """The route's read: the kept JSON (a cycle old at most), or one build when no cycle has run yet (kept under no key, so
-    the first cycle rebuilds it under its own). `threads`: the comment-thread rows appended, kept apart under the registry
-    revision and the parents' comments stores (a thread's editable name lives there)."""
+    """The route's read: the kept JSON (a cycle old at most); or, when no cycle has built it yet or the cycle's last build
+    failed (the kept listing may then be stale), a request build shared by every caller (_SharedBuild: one build at a time,
+    reused for _SESSIONS_REQUEST_REUSE_S, dropped the moment the cycle's keyed build lands, at most _SESSIONS_REQUEST_WAITERS_MAX
+    callers waiting on it for at most _SESSIONS_REQUEST_WAIT_S). Raises _ListingUnavailable when this caller cannot be served
+    by it (the route's 503). `threads`: the comment-thread rows appended, kept apart under the registry revision and the
+    parents' comments stores (a thread's editable name lives there)."""
     L = _SESSIONS_LISTING
-    if L["json"] is None:
-        rows = _session_rows()
-        L.update({"rows": rows, "json": json.dumps(rows), "requestBuilt": L["requestBuilt"] + 1})
     L["served"] += 1
-    if L["fault"] is not None:                                     # the cycle's build failed since the kept listing: it may be
-        body = json.dumps(_session_rows())                         #  stale, so this request builds for itself, as the base did
-        L["faultBuilt"] += 1
+    if L["json"] is not None and L["fault"] is None:
+        body = L["json"]                                           # the cycle's keyed listing: never on a clock
     else:
-        body = L["json"]
+        fault = L["fault"] is not None                             # counted apart: before the first cycle, or while its build fails
+        body, built = _SESSIONS_REQUEST_BUILD.get(lambda: json.dumps(_session_rows()), _SESSIONS_REQUEST_REUSE_S,
+                                                  _SESSIONS_REQUEST_WAITERS_MAX, _SESSIONS_REQUEST_WAIT_S,
+                                                  _sessions_request_clock)
+        if built:
+            L["faultBuilt" if fault else "requestBuilt"] += 1
     if not threads:
         return body
     tkey = _thread_rows_key()
@@ -71149,8 +71262,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(_token_analytics(int(time.time()), w)),
                                   "application/json", cache="no-cache")
             if p == "/sessions":                              # unified romp session list (every backend) for external tools (the Obsidian plugin, the postal bus)
-                body = _sessions_listing_serve(threads=(q.get("threads") or [""])[0] == "1")   # the cycle's kept rows (a cycle old at
-                return self._send(200, body, "application/json", cache="no-cache")           #  most); ?threads=1 appends the thread rows
+                try:
+                    body = _sessions_listing_serve(threads=(q.get("threads") or [""])[0] == "1")   # the cycle's kept rows (a cycle old
+                except _ListingUnavailable as e:                                                  #  at most); ?threads=1 appends the thread rows
+                    # the shared request build (no cycle yet, or its build failing) could not take this caller: said at once, and
+                    # the build carries on for the retry (2026-09-28: callers each building piled up ~1,500 threads)
+                    return self._send(503, json.dumps({"ok": False, "retryable": True, "error": str(e)}), "application/json",
+                                      cache="no-cache", headers={"Retry-After": "1"})
+                return self._send(200, body, "application/json", cache="no-cache")
             if p == "/sessions/by-fsid":
                 # ONE live session's (or comment thread's) row by any transcript id it has owned — the postal
                 # bus's self-identity join for a session whose environment still carries a pre-/clear id

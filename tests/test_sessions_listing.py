@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -589,6 +590,170 @@ class OneListingPerChange(_Listing):
                     if marks.search(window) and "def write_reg" not in "\n".join(lines[max(0, i - 12):i + 1]):
                         offenders.append("%s:%d" % (f.relative_to(root), i + 1))
         self.assertEqual(offenders, [], "registry files written or removed outside write_reg")
+
+
+class RequestBuildsAreShared(_Listing):
+    """The two paths where a REQUEST builds the listing itself (no cycle has built it yet, which is the whole of a restart's
+    reload window, or the cycle's last build failed) share one build across every caller, reuse it briefly, and hold a
+    bounded number of callers waiting for it. Before this each request built for itself: a build that took about 16 s while
+    a restarted kernel reloaded its transcripts piled up about 1,360 abandoned connections on about 1,500 threads (the
+    postal bus gives up after 6 s and retries; the kernel kept computing every abandoned request), and the bus's liveness
+    checks failed (2026-09-28). The cycle's keyed listing is untouched: it never expires on a clock."""
+
+    def _gated_builder(self):
+        """A row builder that blocks until the test opens the gate: builds counted, `entered` set on the first."""
+        builds, entered, gate = [], threading.Event(), threading.Event()
+        real = km._session_rows_from
+
+        def slow(live_map):
+            builds.append(1)
+            entered.set()
+            gate.wait(20)
+            return real(live_map)
+        km._session_rows_from = slow
+        self.addCleanup(setattr, km, "_session_rows_from", real)
+        self.addCleanup(gate.set)                    # never leave a build parked past the test
+        return builds, entered, gate
+
+    @staticmethod
+    def _waiting():
+        sh = getattr(km, "_SESSIONS_REQUEST_BUILD", None)
+        return sh.waiting if sh is not None else 0
+
+    @staticmethod
+    def _until(pred, timeout):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and not pred():
+            time.sleep(0.01)
+        return pred()
+
+    def test_concurrent_requests_before_the_first_cycle_share_one_build(self):
+        builds, entered, gate = self._gated_builder()
+        bodies, errors = [], []
+
+        def call():
+            try:
+                bodies.append(km._sessions_listing_serve())
+            except Exception as e:                   # noqa: BLE001 (the assertion names it)
+                errors.append(e)
+        ts = [threading.Thread(target=call, daemon=True) for _ in range(8)]
+        for t in ts:
+            t.start()
+        self._until(lambda: len(builds) + self._waiting() >= 8, 5)   # every caller is building or waiting on a build
+        gate.set()
+        for t in ts:
+            t.join(10)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(bodies), 8, "every caller was answered")
+        self.assertEqual(len(builds), 1, "eight concurrent callers, one build (the base built once per caller)")
+        self.assertEqual(len(set(bodies)), 1, "and all eight were served the same bytes")
+        self.assertEqual({r["id"] for r in json.loads(bodies[0])}, {SID, SID2})
+
+    def test_a_request_built_listing_older_than_the_reuse_window_is_rebuilt(self):
+        builds = []
+        name, real = self._count_builds(builds)
+        self.addCleanup(setattr, km, name, real)
+        now = [1000.0]
+        with mock.patch.object(km, "_sessions_request_clock", lambda: now[0], create=True):
+            self._body()
+            self.row[SID]["state"] = "working"
+            now[0] += 0.5
+            inside = self._body()
+            self.assertEqual(len(builds), 1, "inside the reuse window the kept request build serves")
+            self.assertEqual(next(r for r in inside if r["id"] == SID)["state"], "waiting")
+            now[0] += 5.0
+            past = self._body()
+        self.assertEqual(len(builds), 2, "past the window, with still no cycle, a request rebuilds (the base served its first "
+                                         "build until a cycle ran, however long that took)")
+        self.assertEqual(next(r for r in past if r["id"] == SID)["state"], "working", "and the rebuilt rows carry the change")
+
+    def test_the_cycle_listing_is_never_rebuilt_on_the_clock(self):
+        """The plan's rule (plans/sessions-route-from-the-cycle.md): where the inputs are known, the key decides, not a clock."""
+        self._cycle()
+        builds = []
+        name, real = self._count_builds(builds)
+        self.addCleanup(setattr, km, name, real)
+        now = [1000.0]
+        with mock.patch.object(km, "_sessions_request_clock", lambda: now[0], create=True):
+            a = self._body()
+            now[0] += 3600.0
+            b = self._body()
+        self.assertEqual(builds, [], "the cycle's keyed listing serves from memory at any age")
+        self.assertEqual(a, b)
+
+    def test_waiters_past_the_cap_are_refused_at_once_and_waiters_give_up_at_their_deadline(self):
+        builds, entered, gate = self._gated_builder()
+        outcomes = []
+
+        def call():
+            t0 = time.monotonic()
+            try:
+                km._sessions_listing_serve()
+                outcomes.append(("ok", time.monotonic() - t0))
+            except Exception as e:                   # noqa: BLE001
+                outcomes.append((getattr(e, "reason", type(e).__name__), time.monotonic() - t0))
+        with mock.patch.object(km, "_SESSIONS_REQUEST_WAITERS_MAX", 3, create=True), \
+                mock.patch.object(km, "_SESSIONS_REQUEST_WAIT_S", 0.5, create=True):
+            leader = threading.Thread(target=km._sessions_listing_serve, daemon=True)
+            leader.start()
+            self.assertTrue(entered.wait(5), "the leader's build started")
+            ts = [threading.Thread(target=call, daemon=True) for _ in range(12)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(5)
+            stuck = [t for t in ts if t.is_alive()]
+            gate.set()
+            leader.join(10)
+        self.assertEqual(stuck, [], "every request returned while the build still ran (the base held each in a build of its own)")
+        kinds = [k for k, _ in outcomes]
+        self.assertEqual(kinds.count("busy"), 9, "past the cap of 3 waiters, refused: %r" % outcomes)
+        self.assertEqual(kinds.count("timeout"), 3, "the 3 waiters gave up at their deadline: %r" % outcomes)
+        self.assertTrue(all(s < 0.4 for k, s in outcomes if k == "busy"), "a refusal is immediate: %r" % outcomes)
+        self.assertEqual(len(builds), 1, "one build for all thirteen callers")
+        self.assertLessEqual(km._SESSIONS_REQUEST_BUILD.stats["peakWaiting"], 3)
+
+    def test_many_simultaneous_requests_are_all_answered_with_a_bounded_number_waiting(self):
+        """Through the real Handler: forty simultaneous GET /sessions while one build runs. Every one is answered inside the
+        waiter deadline, never held for the build's length, and those the cap turns away get a 503 with Retry-After (the
+        postal bus reads any non-200 as 'the kernel did not answer', the same as its own 6 s timeout, only sooner)."""
+        builds, entered, gate = self._gated_builder()
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        results = []
+
+        def get():
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=4)
+            try:
+                c.request("GET", "/sessions", headers={"X-Romp-Token": km.TOKEN})
+                resp = c.getresponse()
+                results.append((resp.status, resp.getheader("Retry-After"), resp.read().decode()))
+            except Exception as e:                   # noqa: BLE001 (a client timeout: the request was held)
+                results.append((None, None, type(e).__name__))
+            finally:
+                c.close()
+        with mock.patch.object(km, "_SESSIONS_REQUEST_WAITERS_MAX", 4, create=True), \
+                mock.patch.object(km, "_SESSIONS_REQUEST_WAIT_S", 0.5, create=True):
+            leader = threading.Thread(target=km._sessions_listing_serve, daemon=True)
+            leader.start()
+            self.assertTrue(entered.wait(5), "the leader's build started")
+            ts = [threading.Thread(target=get, daemon=True) for _ in range(40)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(8)
+            gate.set()
+            leader.join(10)
+        self.assertEqual(len(results), 40)
+        self.assertEqual([r for r in results if r[0] != 503], [], "every request was answered 503 while the build ran, "
+                         "none held for the build (the base held all forty): %r" % results[:3])
+        self.assertTrue(all(r[1] == "1" for r in results), "each 503 carries Retry-After")
+        body = json.loads(results[0][2])
+        self.assertEqual((body["ok"], body["retryable"]), (False, True))
+        self.assertLessEqual(km._SESSIONS_REQUEST_BUILD.stats["peakWaiting"], 4, "never more than the cap waiting at once")
+        self.assertEqual(len(builds), 1)
 
 
 if __name__ == "__main__":

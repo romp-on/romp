@@ -2902,10 +2902,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   boots on; either way a `main-converge-declined` row stands in the
   restart-audit ledger where a second sigterm used to); `sessionsListing` is
   the kept GET /sessions listing (`built` by the pusher's cycle when its key
-  moved, `served` to requests from memory, `requestBuilt` once before the first
-  cycle, `faultBuilt` per request while a cycle's build failed and the kept
-  listing may be stale, `missBy` the key input that moved: rows, names, notes
-  or registry); `nudgeWalk` is the auto-nudge walk's
+  moved, `served` to requests from memory, `requestBuilt` by a request before
+  the first cycle, `faultBuilt` by a request while a cycle's build failed and
+  the kept listing may be stale, `missBy` the key input that moved: rows, names,
+  notes or registry, and `requestShared` the one build those requests share:
+  `built`, `joined` by a caller that waited for a build in flight, `reused` by
+  one served a build that landed under 1.5 s before, `busy` for a caller
+  answered 503 because 32 were already waiting, `timedOut` for one answered 503
+  after waiting 9 s, `failed`, `peakWaiting` and `waiting`); `nudgeWalk` is the auto-nudge walk's
   parse gate (T401): `looks`, `skippedParses` (a session whose files are
   unchanged since its last completed look and whose clock legs, noted by that
   look with the instant each could flip, have not come due; the skip repeats
