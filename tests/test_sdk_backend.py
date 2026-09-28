@@ -5897,5 +5897,368 @@ class KillDuringRevive(unittest.TestCase):
         self.assertFalse(s.thread.is_alive(), "the stand-in CLI thread kept running after the kill")
 
 
+class _Opts:
+    """ClaudeAgentOptions' shape for _options: whatever the backend passes, as attributes."""
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class AliasResolvedAtTheCliHandOff(unittest.TestCase):
+    """The kernel resolves a bare family alias to its family's newest catalog version (kernel _resolve_model_alias,
+    the user 2026-09-28: `--model opus` on the CLI ran Opus 5 a week after 5.5 shipped); the backend hands the CLI
+    THAT id — at connect (--model) and at a live switch (set_model's control request) — while every stored layer
+    keeps the alias (floating, never a pin). A refusal of the resolved id is filed (the durable version block, the
+    kernel's memo hook) and the alias goes to the CLI verbatim, its own resolution, so the family click still
+    lands. The hooks are fakes here, set on the backend INSTANCE as the kernel sets the real ones (_sdk_locked)."""
+    VERSION_400 = ('API error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Claude Code '
+                   '2.1.270 does not support this model; version 2.1.280 or newer is required. Run claude update"}}')
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory(); self.d = self.td.name
+        self.be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
+        self.refused = []
+        self.table = {"opus": "claude-opus-9-9", "opus[1m]": "claude-opus-9-9[1m]", "fable": "claude-fable-9-9"}
+        self.be.resolve_model = lambda v: self.table.get(v, v)
+        self.be.on_resolved_model_refused = lambda mid: self.refused.append(mid)
+        self._sdk_mod, self._sdk_installed = _sdk_module_for_the_road_pins()   # _options imports HookMatcher from it
+
+    def tearDown(self):
+        if self._sdk_installed:
+            sys.modules.pop("claude_agent_sdk", None)
+        self.td.cleanup()
+
+    def _live(self, client, model="Opus 5", prior=None):
+        sid = self.be.spawn("m", self.d)
+        if prior:
+            self.assertTrue(self.be.set_model(sid, prior))     # a dormant pick: the reg's model, the session's accepted baseline
+        sess = sb.SdkSession(self.be, sb.read_reg(self.d, sid))
+        sess.model = model
+        sess.client = client
+        self.be.sessions[sid] = sess
+        scheduled = []
+        sess.set_model_live = lambda model, prev=None: scheduled.append((model, prev))   # the loop hop, stubbed
+        return sid, sess, scheduled
+
+    def test_connect_hands_the_cli_the_resolved_id_while_the_reg_keeps_the_alias(self):
+        sid = self.be.spawn("m", self.d)
+        self.assertTrue(self.be.set_model(sid, "opus"))                  # dormant: applies at the next connect
+        reg = sb.read_reg(self.d, sid)
+        self.assertEqual(reg["model"], "opus", "stored floating: every connect re-resolves")
+        self.assertEqual(reg["liveModel"], "Opus 9.9", "the dormant badge names the version the alias runs")
+        sess = sb.SdkSession(self.be, reg)
+        self.be.sessions[sid] = sess
+        opts = self.be._options(sess, _Opts)
+        self.assertEqual(opts.model, "claude-opus-9-9")
+        self.assertEqual(sess.chosen_model, "opus")
+        self.assertEqual(sess._model_resolved, "claude-opus-9-9", "what the CLI saw, for a refusal to be filed against")
+        sess.chosen_model = "claude-opus-4-8"                             # an explicit pin goes verbatim
+        self.assertEqual(self.be._options(sess, _Opts).model, "claude-opus-4-8")
+        self.assertEqual(sess._model_resolved, "")
+
+    def test_a_live_switch_hands_the_cli_the_resolved_id_and_shows_the_dots_until_it_lands(self):
+        calls = []
+
+        class _Client:
+            async def set_model(self, model=None):
+                calls.append(model)
+
+            async def get_context_usage(self):
+                return {"percentage": 3, "model": "claude-opus-9-9"}
+        sid, sess, scheduled = self._live(_Client())
+        self.assertTrue(self.be.set_model(sid, "opus"))
+        self.assertEqual(sess._model_pending, "opus", "Opus 5 does not reflect an alias that now runs 9.9: the dots show")
+        self.assertTrue(sb.read_reg(self.d, sid)["modelPending"])
+        asyncio.run(sess._do_set_model(*scheduled[0]))
+        self.assertEqual(calls, ["claude-opus-9-9"], "the CLI was handed the resolved id, never the alias")
+        self.assertEqual(sb.read_reg(self.d, sid)["model"], "opus", "the reg keeps the alias")
+        self.assertEqual(sb.read_sdk_defaults(self.d).get("model"), "opus", "so does the seed for new sessions")
+        self.assertEqual(sess.chosen_model, "opus")
+        self.assertEqual(sess._model_pending, "", "the CLI's own name resolved the switch")
+        self.assertEqual(self.refused, [])
+
+    def test_an_alias_the_live_name_already_reflects_in_that_version_is_no_switch(self):
+        class _Client:
+            async def set_model(self, model=None):
+                pass
+
+            async def get_context_usage(self):
+                return {"percentage": 3, "model": "claude-opus-9-9"}
+        sid, sess, scheduled = self._live(_Client(), model="Opus 9.9")
+        self.assertTrue(self.be.set_model(sid, "opus"))
+        self.assertEqual(sess._model_pending, "", "already on the version the alias runs: no dots")
+
+    def test_a_refused_resolved_id_is_filed_and_the_alias_goes_to_the_cli_verbatim(self):
+        calls = []
+        text = self.VERSION_400
+
+        class _Client:
+            async def set_model(self, model=None):
+                calls.append(model)
+                if model == "claude-opus-9-9":
+                    raise Exception(text)                 # the SDK's shape for a CLI error response (_cli_refusal)
+
+            async def get_context_usage(self):
+                return {"percentage": 3, "model": "claude-opus-5"}
+        sid, sess, scheduled = self._live(_Client())
+        self.assertTrue(self.be.set_model(sid, "opus"))
+        asyncio.run(sess._do_set_model(*scheduled[0]))
+        self.assertEqual(calls, ["claude-opus-9-9", "opus"], "the resolved id first; on its refusal, the bare alias")
+        blocks = json.loads(open(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE)).read())
+        self.assertEqual(blocks["claude-opus-9-9"]["needs"], "2.1.280", "the version block, durable (T222)")
+        self.assertEqual(self.refused, [], "a MINIMUM-VERSION refusal is the block's alone: the kernel reads it against the "
+                                           "installed binary, and a memo would outlive the upgrade until the next restart")
+        reg = sb.read_reg(self.d, sid)
+        self.assertEqual(reg["model"], "opus", "the pick STANDS: the alias landed")
+        self.assertEqual(sess.chosen_model, "opus")
+        self.assertEqual(sess._model_accepted, "opus")
+        self.assertEqual(sess._model_resolved, "", "the CLI saw the alias in the end")
+        self.assertEqual([p["text"] for p in self.be.problems()], [], "no ring: the family click landed on what the CLI serves")
+
+    def test_a_refusal_of_the_alias_itself_still_reverts_and_rings(self):
+        calls = []
+        text = self.VERSION_400
+
+        class _Client:
+            async def set_model(self, model=None):
+                calls.append(model)
+                raise Exception(text if model == "claude-opus-9-9" else "Unknown model: %s" % model)
+
+            async def get_context_usage(self):
+                return {"percentage": 3, "model": "claude-fable-5-1"}
+        sid, sess, scheduled = self._live(_Client(), model="Fable 5.1", prior="fable")   # fable: not in the table, verbatim
+        self.assertTrue(self.be.set_model(sid, "opus"))
+        asyncio.run(sess._do_set_model(*scheduled[0]))
+        self.assertEqual(calls, ["claude-opus-9-9", "opus"])
+        self.assertIn("claude-opus-9-9", json.loads(open(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE)).read()), "filed as a version block")
+        self.assertEqual(sb.read_reg(self.d, sid)["model"], "fable", "both refused: the revert of the pick, as before")
+        self.assertEqual(sess.chosen_model, "fable")
+        probs = [p["text"] for p in self.be.problems()]
+        self.assertEqual(len(probs), 1, "loud, as any refusal of the pick itself: %r" % probs)
+        self.assertIn("opus", probs[0])
+
+    def test_a_lost_answer_on_the_resolved_id_is_not_a_refusal(self):
+        calls = []
+
+        class _Client:
+            async def set_model(self, model=None):
+                calls.append(model)
+                raise Exception("Control request timeout: set_model") from TimeoutError()   # no verdict on the value
+
+            async def get_context_usage(self):
+                return {"percentage": 3, "model": "claude-opus-5"}
+        sid, sess, scheduled = self._live(_Client())
+        self.assertTrue(self.be.set_model(sid, "opus"))
+        asyncio.run(sess._do_set_model(*scheduled[0]))
+        self.assertEqual(calls, ["claude-opus-9-9"], "no alias retry: nothing was ruled on")
+        self.assertEqual(self.refused, [], "nothing filed")
+        self.assertEqual(sess.chosen_model, "opus", "the pick stands, as a lost answer leaves it")
+
+    def test_a_late_refusal_never_undoes_a_newer_pick(self):
+        # pick Opus (its resolved request is out), pick Sonnet (lands), then Opus's request comes back refused: the
+        # alias retry must not send `opus` over the Sonnet the user chose since (an adversarial review, 2026-09-28)
+        calls = []
+        text = self.VERSION_400
+
+        class _Client:
+            async def set_model(self, model=None):
+                calls.append(model)
+                if model == "claude-opus-9-9":
+                    await asyncio.sleep(0.05)             # the slow refusal
+                    raise Exception(text)
+
+            async def get_context_usage(self):
+                return {"percentage": 3, "model": "claude-sonnet-5"}
+        sid, sess, scheduled = self._live(_Client(), model="Fable 5.1", prior="fable")
+        self.assertTrue(self.be.set_model(sid, "opus"))
+        self.assertTrue(self.be.set_model(sid, "sonnet"))    # sonnet: not in the table, goes verbatim
+
+        async def drive():
+            a = asyncio.ensure_future(sess._do_set_model(*scheduled[0]))
+            b = asyncio.ensure_future(sess._do_set_model(*scheduled[1]))
+            await asyncio.gather(a, b)
+        asyncio.run(drive())
+        self.assertEqual(calls, ["claude-opus-9-9", "sonnet"], "no `opus` after the refusal: Sonnet owns the session")
+        blocks = json.loads(open(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE)).read())
+        self.assertIn("claude-opus-9-9", blocks, "the refusal is still filed — the id WAS refused")
+        self.assertEqual(sess.chosen_model, "sonnet")
+        self.assertEqual(sess._model_accepted, "sonnet")
+        self.assertEqual(sb.read_reg(self.d, sid)["model"], "sonnet")
+
+    def test_a_first_turn_rejection_of_the_resolved_id_files_it_and_moves_the_connection_to_the_next_resolution(self):
+        # a connect handed --model the resolved id; the API does not serve it to this account, and the CLI settles the
+        # turn with its own sentence. The stored alias must not sit on that id at every connect (P1 of the review).
+        class _Err:
+            def __init__(self, text, error="invalid_request", model="claude-opus-9-9"):
+                self.content, self.error, self.model = [_TextBlock(text)], error, model
+
+        class _Sys:
+            pass
+        sid, sess, scheduled = self._live(object(), prior="opus")
+        self.assertEqual(self.be._options(sess, _Opts).model, "claude-opus-9-9")     # the connect's hand-off: 9.9
+        self.assertEqual((sess._model_handed, sess._handed_from), ("claude-opus-9-9", "opus"))
+        sess._on_message(_Err("There's an issue with the selected model (claude-opus-9-9). It may not exist or "
+                              "you may not have access to it."), _Err, _ResultMessage, _Sys)
+        self.assertEqual(self.refused, ["claude-opus-9-9"], "the CLI's unrecognized-model settle files the id")
+        self.assertEqual(scheduled, [("opus", None)], "the connection is switched: the alias, resolved afresh past the memo")
+        self.assertEqual(sess._model_handed, "")
+        self.assertEqual(sess.chosen_model, "opus", "the stored alias stands")
+        # the minimum-version shape (which names no id: the message's own model attribute is the match) files the
+        # durable block — and only the block; the kernel reads it against the installed binary
+        self.be._options(sess, _Opts); scheduled.clear(); self.refused.clear()
+        sess._on_message(_Err("API Error: 400 " + self.VERSION_400), _Err, _ResultMessage, _Sys)
+        self.assertEqual(self.refused, [])
+        blocks = json.loads(open(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE)).read())
+        self.assertEqual(blocks["claude-opus-9-9"]["needs"], "2.1.280")
+        self.assertEqual(scheduled, [("opus", None)], "switched all the same: the alias resolves past the block")
+
+    def test_a_rejection_is_filed_against_the_id_the_connection_runs_never_a_newer_picks_resolution(self):
+        # P1 of the closing review: a pick of another family updated the latest resolution before its request reached
+        # the CLI; the OLD turn's settle rejects the model the connection actually ran — that is the id filed, and the
+        # connection is not switched behind the newer pick's back
+        class _Err:
+            def __init__(self, text, error="invalid_request", model="claude-opus-9-9", parent=None):
+                self.content, self.error, self.model, self.parent_tool_use_id = [_TextBlock(text)], error, model, parent
+
+        class _Sys:
+            pass
+        sid, sess, scheduled = self._live(object(), prior="opus")
+        self.be._options(sess, _Opts)                                             # runs claude-opus-9-9 for opus
+        self.assertTrue(self.be.set_model(sid, "fable"))                          # the newer pick: resolves to fable-9-9
+        self.assertEqual(sess._model_resolved, "claude-fable-9-9")
+        self.assertEqual(len(scheduled), 1)
+        sess._on_message(_Err("There's an issue with the selected model (claude-opus-9-9)."), _Err, _ResultMessage, _Sys)
+        self.assertEqual(self.refused, ["claude-opus-9-9"], "the model the turn RAN, not the newer pick's resolution")
+        self.assertEqual(len(scheduled), 1, "no second switch: the fable pick owns the session")
+        self.assertEqual(sess.chosen_model, "fable")
+        # the durable VERSION block is attributed the same way (the closing review's last item): a minimum-version settle
+        # of the Opus turn, its text naming no id and the message's model the one it ran, blocks Opus 9.9 — never the
+        # pending Fable pick's resolution; and a sidechain's minimum-version settle blocks nothing
+        self.be._options(sess, _Opts)                                             # runs fable-9-9 now (the pick landed)
+        sess.chosen_model = "opus"; self.be._options(sess, _Opts)                 # …then opus → 9.9 again
+        self.assertTrue(self.be.set_model(sid, "fable"))                          # a newer pick pending: _model_resolved = fable-9-9
+        self.assertEqual(sess._model_resolved, "claude-fable-9-9")
+        self.assertEqual(sess._model_handed, "claude-opus-9-9")
+        sess._on_message(_Err("API Error: 400 " + self.VERSION_400, model="claude-opus-9-9"), _Err, _ResultMessage, _Sys)
+        blocks = json.loads(open(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE)).read())
+        self.assertIn("claude-opus-9-9", blocks, "the block names the model the turn ran")
+        self.assertNotIn("claude-fable-9-9", blocks, "never the newer pick's resolution")
+        os.remove(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE))
+        sess.chosen_model = "opus"; self.be._options(sess, _Opts)
+        sess._on_message(_Err("API Error: 400 " + self.VERSION_400, model="claude-opus-9-9", parent="t1"), _Err, _ResultMessage, _Sys)
+        self.assertFalse(os.path.exists(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE)), "a sidechain's settle blocks nothing")
+        sess._on_message(_Err("API Error: 400 " + self.VERSION_400, model="<synthetic>"), _Err, _ResultMessage, _Sys)
+        blocks = json.loads(open(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE)).read())
+        self.assertIn("claude-opus-9-9", blocks, "a message whose model field names no id (<synthetic>) still files against the handed id")
+        # a settle NAMING another id than the one handed says nothing about it
+        self.refused.clear(); self.be._options(sess, _Opts)
+        sess.chosen_model = "opus"; self.be._options(sess, _Opts)                 # back on opus → 9.9
+        sess._on_message(_Err("There's an issue with the selected model (claude-sonnet-1-0)."), _Err, _ResultMessage, _Sys)
+        self.assertEqual(self.refused, [], "names another model: not this connection's resolution")
+        self.assertEqual(sess._model_handed, "claude-opus-9-9")
+        # a SUBAGENT's own error settle (a sidechain message) is its model's, never the parent's
+        sess._on_message(_Err("There's an issue with the selected model (claude-opus-9-9).", parent="t1"), _Err, _ResultMessage, _Sys)
+        self.assertEqual(self.refused, [], "a sidechain settle files nothing against the parent")
+        self.assertEqual(sess._model_handed, "claude-opus-9-9")
+
+    def test_the_rejection_names_the_id_it_rejects(self):
+        self.assertEqual(sb._rejected_model_in("There's an issue with the selected model (claude-opus-9-9). It may not"), "claude-opus-9-9")
+        self.assertEqual(sb._rejected_model_in('{"type":"not_found_error","message":"model: claude-opus-9-9"}'), "claude-opus-9-9")
+        self.assertEqual(sb._rejected_model_in("Unknown model: claude-opus-9-9[1m]"), "claude-opus-9-9", "untagged")
+        self.assertEqual(sb._rejected_model_in("… or newer is required. model sent to the API: claude-opus-5-5"), "claude-opus-5-5")
+        self.assertEqual(sb._rejected_model_in(self.VERSION_400), "", "the minimum-version sentence names none")
+        self.assertEqual(sb._rejected_model_in(""), "")
+
+    def test_a_settle_that_says_nothing_about_the_model_files_nothing_and_switches_nothing(self):
+        class _Err:
+            def __init__(self, text, error="server_error", model="claude-opus-9-9"):
+                self.content, self.error, self.model = [_TextBlock(text)], error, model
+
+        class _Sys:
+            pass
+        sid, sess, scheduled = self._live(object(), prior="opus")
+        self.be._options(sess, _Opts)
+        for text in ("API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+                     "API Error: 429 rate_limit_error: This request would exceed your account's rate limit",
+                     "Control request timeout: set_model"):
+            sess._on_message(_Err(text), _Err, _ResultMessage, _Sys)
+        self.assertEqual(self.refused, [], "a 529, a rate limit, a timeout: no verdict on the id")
+        self.assertEqual(scheduled, [])
+        self.assertEqual(sess._model_handed, "claude-opus-9-9", "the connection keeps its resolution")
+        # and an explicit PIN that fails is not the alias's business: nothing resolved, nothing filed here
+        sess.chosen_model = "claude-opus-9-9"; self.be._options(sess, _Opts)
+        self.assertEqual(sess._model_handed, "")
+        sess._on_message(_Err("There's an issue with the selected model (claude-opus-9-9)."), _Err, _ResultMessage, _Sys)
+        self.assertEqual(self.refused, [], "a pin's rejection is the existing revert road's, not the resolver's")
+
+    def test_a_tagged_alias_files_its_refusal_against_the_version(self):
+        calls = []
+        text = self.VERSION_400
+
+        class _Client:
+            async def set_model(self, model=None):
+                calls.append(model)
+                if model == "claude-opus-9-9[1m]":
+                    raise Exception("Unknown model: %s" % model)     # the control channel's refusal: the memo's shape
+
+            async def get_context_usage(self):
+                return {"percentage": 3, "model": "claude-opus-5"}
+        sid, sess, scheduled = self._live(_Client())
+        self.assertTrue(self.be.set_model(sid, "opus[1m]"))
+        asyncio.run(sess._do_set_model(*scheduled[0]))
+        self.assertEqual(calls, ["claude-opus-9-9[1m]", "opus[1m]"])
+        self.assertEqual(self.refused, ["claude-opus-9-9"], "untagged: the version was refused, whatever the connection's tag")
+        self.assertFalse(os.path.exists(os.path.join(self.d, sb.CLI_MODEL_BLOCKS_FILE)), "not a version refusal: no block")
+        self.assertEqual(sess._model_handed, "", "the alias landed: the connection runs no resolved id")
+
+    def test_a_launch_that_names_the_rejection_files_it_and_any_other_launch_failure_does_not(self):
+        sid = self.be.spawn("m", self.d)
+        self.assertTrue(self.be.set_model(sid, "opus"))
+        sess = sb.SdkSession(self.be, sb.read_reg(self.d, sid))
+        self.be._options(sess, _Opts)
+        self.be._record_launch_error(sess, Exception("claude exited: There's an issue with the selected model (claude-opus-9-9)."))
+        self.assertEqual(self.refused, ["claude-opus-9-9"])
+        self.assertEqual(sess._model_handed, "")
+        self.be._options(sess, _Opts); self.refused.clear()
+        self.be._record_launch_error(sess, Exception("spawn ENOENT: /bin/true"))
+        self.assertEqual(self.refused, [], "a launch failure that says nothing about the id files nothing")
+        self.assertEqual(sess._model_handed, "claude-opus-9-9")
+        self.be._record_launch_error(sess, Exception("There's an issue with the selected model (claude-sonnet-1-0)."))
+        self.assertEqual(self.refused, [], "names another id: not this connect's hand-off")
+
+    def test_the_rejection_classifier_reads_only_the_four_shapes(self):
+        yes = [self.VERSION_400,
+               "There's an issue with the selected model (claude-opus-9-9). It may not exist or you may not have access to it.",
+               'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-opus-9-9"}}',
+               "Unknown model: claude-opus-9-9"]
+        no = ['API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+              "API Error: 429 rate_limit_error", "Control request timeout: set_model", "",
+              'API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"tool: foo"}}',
+              "There's an issue with the selected tool"]
+        for t in yes:
+            self.assertTrue(sb._model_rejection(t), t)
+        for t in no:
+            self.assertFalse(sb._model_rejection(t), t)
+        self.assertEqual(sb._untag("claude-opus-9-9[1m]"), "claude-opus-9-9")
+        self.assertEqual(sb._untag(" opus "), "opus")
+        self.assertEqual(sb._untag(None), "")
+
+    def test_without_the_hook_every_value_goes_verbatim(self):
+        del self.be.resolve_model
+        sid = self.be.spawn("m", self.d)
+        sess = sb.SdkSession(self.be, sb.read_reg(self.d, sid))
+        sess.chosen_model = "opus"
+        self.assertEqual(self.be._options(sess, _Opts).model, "opus")
+        self.assertEqual(sess._cli_model("opus"), "opus")
+        self.assertEqual(sess._model_resolved, "")
+
+    def test_a_raising_hook_hands_the_value_verbatim_and_says_so(self):
+        def boom(v):
+            raise RuntimeError("catalog on fire")
+        self.be.resolve_model = boom
+        sid = self.be.spawn("m", self.d)
+        sess = sb.SdkSession(self.be, sb.read_reg(self.d, sid))
+        self.assertEqual(sess._cli_model("opus"), "opus")
+        self.assertTrue(any("catalog on fire" in p["text"] for p in self.be.problems()), "loud, never a silent verbatim")
+
 if __name__ == "__main__":
     unittest.main()

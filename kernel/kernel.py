@@ -3690,17 +3690,72 @@ def _catalog_public_status():
             "lastError": _catalog_status["lastError"], "added": list(_catalog_status["added"])}
 
 
+def _version_tuple(v):
+    """(2, 1, 280) for '2.1.280', '2.1.280 (Claude Code)' or 'v2.1.280'; () for anything without a dotted number."""
+    m = re.search(r"\d+(?:\.\d+)+", str(v or ""))
+    return tuple(int(x) for x in m.group(0).split(".")) if m else ()
+
+
+_CLI_VERSION_CACHE = {}   # (bin path, size, mtime_ns) -> version tuple or None: one `--version` per installed binary
+_CLAUDE_VERSION_RE = re.compile(r"(\d+(?:\.\d+)+)\s*\(Claude Code\)")   # `claude --version`: "2.1.280 (Claude Code)"
+
+
+def _installed_cli_version():
+    """The version of the Claude Code binary this kernel launches sessions with (_claude_bin), as a tuple, or
+    None when it cannot be read (no binary, a binary that does not answer `--version` in time). Probed once per
+    binary — keyed on its path, size and mtime — so an upgrade on disk is seen at the next read and a
+    steady binary costs one subprocess per kernel life. Read by _cli_model_blocks to let a minimum-version
+    block go once the binary meets the minimum."""
+    path = _claude_bin()
+    try:
+        st = os.stat(path)
+        key = (path, st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+    if key in _CLI_VERSION_CACHE:
+        return _CLI_VERSION_CACHE[key]
+    ver = None
+    try:
+        r = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=15)
+        # Claude Code's own line, "2.1.280 (Claude Code)", and nothing else: the seam can point at another binary (the
+        # tests' /bin/false answers "false (GNU coreutils) 9.4", which read as a version past every block)
+        m = _CLAUDE_VERSION_RE.search((r.stdout or "") + "\n" + (r.stderr or ""))
+        ver = _version_tuple(m.group(1)) or None if m else None
+    except Exception:
+        ver = None
+    _CLI_VERSION_CACHE.clear()          # one binary at a time: an upgrade replaces the entry rather than growing the map
+    _CLI_VERSION_CACHE[key] = ver
+    return ver
+
+
 def _cli_model_blocks():
     """{model id: {needs, cli, t}} — versions the INSTALLED CLI refused by minimum version, written by
     the SDK backend from the CLI's own error at the first attempt (sdk_backend.note_cli_model_block)
     and cleared by the first real reply on that model. The catalog can list ids newer than the CLI
     (the API is the source; the CLI gates by version), so the refusal is surfaced on the version row
-    the moment it is known rather than only at pick time (T222)."""
+    the moment it is known rather than only at pick time (T222).
+
+    A block whose `needs` the installed binary now meets is NOT returned (an adversarial review, 2026-09-28): the
+    family alias resolves past a blocked version (_family_newest_servable), so once the alias stopped trying it the
+    reply that would clear the block never came, and a CLI upgrade could not restore "Latest" to the version it had
+    been refused on. The block stays on disk — an old CLI process still running refuses the same way and re-files it
+    harmlessly — and is read against _installed_cli_version each time; an unreadable version keeps every block."""
     try:
         d = json.loads((jd.STATE / "cli-model-blocks.json").read_text())
-        return d if isinstance(d, dict) else {}
+        if not isinstance(d, dict):
+            return {}
     except Exception:
         return {}
+    have = _installed_cli_version()
+    if not have:
+        return d
+    out = {}
+    for mid, b in d.items():
+        needs = _version_tuple((b or {}).get("needs")) if isinstance(b, dict) else ()
+        if needs and needs <= have:
+            continue                                 # the binary on disk meets the minimum: the block has lapsed
+        out[mid] = b
+    return out
 
 
 def _with_cli_block(version, blocks):
@@ -3845,6 +3900,77 @@ def _versions_catalog(learned=None):
     return out
 
 
+# ── the family alias, resolved by the KERNEL (the user 2026-09-28: "don't rely on the lagging opus alias") ──
+# A bare family click and the version submenu's Latest row send the ALIAS (opus), and until now the CLI resolved
+# it: a week after Opus 5.5 shipped, `--model opus` on Claude Code 2.1.280 still ran claude-opus-5, while this
+# kernel's own catalog (the Models API cache) listed 5.5 as the family's newest, so "Latest" was not the latest.
+# The alias stays the STORED value (the reg, sdk-defaults, the pick memory: floating, never a pin); what changes is
+# the id the SDK backend hands the CLI for it, at connect (--model) and at a live switch (set_model): the family's
+# newest version, catalog and learned rows alike (_versions_catalog), skipping an id the installed CLI refused by
+# minimum version (cli-model-blocks.json, T222) or refused live in this kernel's life (_resolved_refused, filed by
+# the backend's on_resolved_model_refused hook). No candidate left → the alias itself, the CLI's own resolution, as
+# before. A [1m]-style context tag rides along (opus[1m] → claude-opus-5-5[1m]). /models names each family's
+# resolution (`resolves`) so a picker can say what a family click runs.
+_resolved_refused = set()   # version ids the CLI refused when handed for an alias, this kernel life (event-keyed, no clock)
+_resolved_refused_lock = threading.Lock()
+
+
+def _family_newest_servable(fam, catalog=None, blocks=None):
+    """The newest version id of `fam` the CLI can be handed for its alias (see the note above), or None when every
+    listed version is refused. `catalog` and `blocks` let the /models route reuse the reads it already made."""
+    rows = (catalog if catalog is not None else _versions_catalog()).get(fam) or []
+    # a block or a memo filed under a [1m]-tagged id is a refusal of the VERSION: read them untagged, as the rows are
+    blocked = {_model_id_clean(k) for k in (blocks if blocks is not None else _cli_model_blocks())}
+    with _resolved_refused_lock:
+        refused = set(_resolved_refused)
+    for r in rows:                                   # newest first: _versions_catalog's one ordering rule
+        mid = r.get("value")
+        if mid and mid not in blocked and mid not in refused:
+            return mid
+    return None
+
+
+def _resolve_model_alias(value, catalog=None, blocks=None):
+    """The id the CLI is handed for a stored model value: a bare family alias, with or without a [1m]-style tag,
+    becomes its family's newest servable version (_family_newest_servable), the tag re-attached; anything else —
+    a full id, 'default', '', a gateway id, an unknown string — passes through verbatim. The SDK backend's
+    resolve_model hook (SdkSession._cli_model)."""
+    v = str(value or "")
+    fam = _model_id_clean(v)
+    if fam not in _MODEL_VALUES:
+        return v
+    newest = _family_newest_servable(fam, catalog, blocks)
+    if not newest:
+        return v
+    tm = re.search(r"\[[^\]]*\]$", v.strip())
+    return newest + (tm.group(0) if tm else "")
+
+
+def _family_resolutions(catalog=None, blocks=None):
+    """{family: the id its bare alias resolves to now, or None} — the /models `resolves` field, so a picker can
+    name the version a family click or its Latest row will run instead of an alias whose resolution the CLI may
+    lag by a release."""
+    return {fam: _family_newest_servable(fam, catalog, blocks) for fam in _MODEL_VALUES}
+
+
+def _note_resolved_model_refused(mid):
+    """The SDK backend's on_resolved_model_refused hook: the CLI ANSWERED a set_model of the id the kernel resolved
+    a family alias to with an error — a version newer than that running binary, a model the account cannot use.
+    Remember the id for this kernel's life so the alias resolves past it (the next newest, else the alias itself)
+    and tell every picker its family's `resolves` moved. A version block the refusal text names is ALSO recorded
+    durably by the backend (sdk_backend.note_cli_model_block); this memo covers the refusals that name none."""
+    mid = _model_id_clean(mid)                   # untagged: claude-opus-5-5[1m] refused is claude-opus-5-5 refused
+    if not mid:
+        return
+    with _resolved_refused_lock:
+        if mid in _resolved_refused:
+            return
+        _resolved_refused.add(mid)
+    sys.stderr.write("model alias: the CLI refused %s, the id its family's alias resolved to; the alias resolves "
+                     "past it for the rest of this kernel's life\n" % mid)
+    _models_changed()
+
+
 def _version_family(value, learned=None):
     """The family a VERSION id belongs to — a catalog id (the seed table, or one the Models API fetch
     added to it), or one a session's CLI has reported (learned) — and '' for anything else: a family
@@ -3947,7 +4073,7 @@ def _note_model_pick(value):
 
 def _forget_model_pick(fam, only=None):
     """Drop a family's remembered pin, so /models falls back to the alias and a family click follows the
-    CLI's newest again — the version submenu's "Latest" row, an explicit user gesture carried as
+    catalog's newest again (_resolve_model_alias) — the version submenu's "Latest" row, an explicit user gesture carried as
     `floating` on the set op. Merges into the RAW file like _note_model_pick (other families' pins,
     vouched-for or not, stay); a family with no pin is a no-op. `only` drops the pin only while it still
     holds that exact id — the refusal path's compare-and-swap, so a late refusal never drops a NEWER pin
@@ -19872,6 +19998,14 @@ def _sdk_locked():
             # a version the CLI REFUSED must leave the pick memory too: the backend rules on the CLI's
             # answer, the kernel owns model-picks.json — the same wiring shape
             type(_sdk_backend).on_model_refused = staticmethod(_model_pick_refused)
+            # the family alias is resolved by the KERNEL, not the CLI (the user 2026-09-28): the backend asks for
+            # the id to hand the CLI at connect and at a live switch (SdkSession._cli_model), and reports a
+            # resolved id the CLI refused so the alias resolves past it. On the INSTANCE, not the class: the
+            # backend reads them off itself (instance, then class), and a class-level hook set by a kernel loaded
+            # into a test process reached every SdkBackend a backend test built beside it, handing their fake
+            # CLIs resolved ids where the tests read the alias
+            _sdk_backend.resolve_model = _resolve_model_alias
+            _sdk_backend.on_resolved_model_refused = _note_resolved_model_refused
             # The judge parses the SAME cut world the display parse does (jd._PENDING_CUT_FN): during
             # an armed bare rollback the planner must not see — and mint from — the deleted tail.
             # getattr-guarded like every other backend probe (a test fake without the affordance
@@ -38592,10 +38726,11 @@ def _set_model_or_park(be, sid, value, floating=False):
     """Apply a model change now — or park it in the sid's FIFO op queue while the session compacts. Either
     way, the pick is ACCEPTED now: stamp the shared pending signal (_mark_model_pending) so chat + timeline
     both show switching-dots immediately, from whichever surface the click came from (the user 2026-07-03).
-    `value` is a family alias (a bare family click — the CLI resolves it live) or an explicit version id
-    (a submenu pick, remembered as the family's pin); both ride to the backend verbatim. `floating` is the
+    `value` is a family alias (a bare family click — stored as is, and resolved to the family's newest catalog
+    version at the CLI hand-off, _resolve_model_alias, since 2026-09-28) or an explicit version id (a submenu
+    pick, remembered as the family's pin); both ride to the backend verbatim. `floating` is the
     version submenu's "Latest" row: the value is a family alias AND the family's remembered pin is
-    forgotten, so the family follows the CLI's newest again — the one picker gesture back from a pin (the
+    forgotten, so the family follows the catalog's newest again — the one picker gesture back from a pin (the
     family row sends the pin, the version rows pin, and a typed bare alias leaves the memory alone by
     design). Meaningless on a non-alias value. Returns True when the pick PARKED, False when it fired now, and None
     when the pick was REFUSED: the session is ending (_park_op_locked's latch, the third review, 2026-09-21), or the
@@ -71290,6 +71425,9 @@ class Handler(BaseHTTPRequestHandler):
                 # (sdk_backend.note_cli_model_block) and cleared by the first real reply on that
                 # model — so every picker shows the reason before the next pick, not only after it
                 _blocks = _cli_model_blocks()
+                # what each family's bare alias RESOLVES to at the CLI hand-off (_resolve_model_alias, the user
+                # 2026-09-28): the version a family click or its Latest row runs, so the pickers can name it
+                _resolves = _family_resolutions(_cat, _blocks)
                 # the codex section rides along untinted: what a CODEX session's pickers offer
                 # (docs/codex.md) — models from the app-server's own list via the backend (the
                 # authoritative source; [] until the backend runs, so no picker ever shows another
@@ -71335,7 +71473,8 @@ class Handler(BaseHTTPRequestHandler):
                                      tone=_model_tone(c["value"]),
                                      versions=[_with_cli_block(dict(v), _blocks)
                                                for v in _cat.get(c["value"]) or []],
-                                     default=_picks.get(c["value"]) or c["value"])
+                                     default=_picks.get(c["value"]) or c["value"],
+                                     resolves=_resolves.get(c["value"]))
                                 for c in MODEL_CHOICES],
                      "efforts": [dict(c, color=_effort_color(c["value"], _stops), tone=_effort_tone(c["value"]))
                                  for c in EFFORT_CHOICES],

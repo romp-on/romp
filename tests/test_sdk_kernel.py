@@ -309,7 +309,8 @@ class KernelWiring(unittest.TestCase):
     def test_the_floating_flag_clears_the_pin_from_both_picker_doors(self):
         # the submenu's "Latest" row: the chat/comment pickers post setModel with `floating`, the
         # timeline lane menu sends its "/model X" command with the same flag — both forget the
-        # family's remembered pin and send the alias, so the family follows the CLI's newest again.
+        # family's remembered pin and send the alias, so the family follows the catalog's newest again (the kernel
+        # resolves the alias at the CLI hand-off since 2026-09-28).
         # A plain alias (no flag) keeps leaving the memory alone.
         picks = km.jd.STATE / km.MODEL_PICKS_FILE_NAME
         picks.unlink(missing_ok=True)

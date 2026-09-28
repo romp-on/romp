@@ -135,7 +135,7 @@ class PickMemory(unittest.TestCase):
         km._set_model_or_park(be, sid, "claude-sonnet-4-6")
         self.assertEqual(km._model_picks(), {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-4-6"})
         km._set_model_or_park(be, sid, "opus", floating=True)
-        self.assertEqual(be.calls[-1], "opus", "the alias rides to the backend — the CLI resolves it live")
+        self.assertEqual(be.calls[-1], "opus", "the alias rides to the backend verbatim — resolved at the CLI hand-off (SdkSession._cli_model)")
         self.assertEqual(km._model_picks(), {"sonnet": "claude-sonnet-4-6"}, "only THAT family's pin is forgotten")
         # the flag means nothing on a non-alias value: a version id with it pins as usual, and a
         # floating alias with no pin to clear is a plain alias send
@@ -753,6 +753,156 @@ class RoutedContextTag(unittest.TestCase):
         self.assertTrue(km._vouched_model("claude-fable-5-1[1m]"))
         self.assertFalse(km._vouched_model("fable[2m]x"), "a tag is a trailing [..] only")
         self.assertFalse(km._vouched_model("opsu[1m]"))
+
+
+class AliasResolution(_ModelsServer):
+    """The family alias is resolved by the KERNEL (the user 2026-09-28: "don't rely on the lagging opus alias"). A bare
+    family click and the version submenu's Latest row send `opus`, and the CLI's own resolution lagged a release:
+    `--model opus` on Claude Code 2.1.280 ran claude-opus-5 a week after 5.5 shipped, while this kernel's catalog
+    listed 5.5. The SDK backend now asks _resolve_model_alias for the id to hand the CLI (at connect and at a live
+    switch), the stored layers keep the alias (floating, never a pin), and /models names each family's resolution
+    (`resolves`) so the pickers can say what a family click runs. Synthetic: a made-up claude-opus-9-9."""
+
+    def setUp(self):
+        super().setUp()
+        self._table = {fam: [dict(v) for v in vs] for fam, vs in km.MODEL_VERSIONS.items()}
+        km._resolved_refused.clear()
+
+    def tearDown(self):
+        km._apply_model_catalog(self._table, "seed")     # the running table, as this test found it
+        km._resolved_refused.clear()
+        super().tearDown()
+
+    def _grow(self, *ids):
+        km._apply_model_catalog(km.merge_model_catalog(km._MODEL_SEED, [{"id": i} for i in ids]), "api")
+
+    def test_a_bare_alias_resolves_to_its_familys_newest_catalog_version(self):
+        self._grow("claude-opus-9-9")
+        self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-9-9")
+        self.assertEqual(km._resolve_model_alias("opus[1m]"), "claude-opus-9-9[1m]", "the context tag rides along")
+        self.assertEqual(km._resolve_model_alias(" Opus "), "claude-opus-9-9", "read as _model_id_clean reads a pick")
+        self.assertEqual(km._resolve_model_alias("fable"), km.MODEL_VERSIONS["fable"][0]["value"], "the seed's own head when nothing grew")
+
+    def test_everything_but_a_family_alias_passes_verbatim(self):
+        self._grow("claude-opus-9-9")
+        for v in ("claude-opus-5", "claude-opus-9-9", "claude-opus-5[1m]", "default", "", "gpt-6-astra", "nonsense", None):
+            self.assertEqual(km._resolve_model_alias(v), str(v or ""), repr(v))
+
+    def test_a_version_the_installed_cli_refused_is_skipped_for_the_next_newest(self):
+        self._grow("claude-opus-9-9")
+        (jd.STATE / "cli-model-blocks.json").write_text(json.dumps(
+            {"claude-opus-9-9": {"needs": "9.9.9", "cli": "2.1.280", "t": 1}}))     # T222's durable version block
+        self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-5", "the next newest")
+        km._note_resolved_model_refused("claude-opus-5")                          # a live refusal, this kernel life
+        self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-4-8", "skipped too")
+
+    def test_every_candidate_refused_falls_back_to_the_alias_itself(self):
+        blocks = {v["value"]: {"needs": "9", "cli": "1", "t": 1} for v in km.MODEL_VERSIONS["haiku"]}
+        (jd.STATE / "cli-model-blocks.json").write_text(json.dumps(blocks))
+        self.assertEqual(km._resolve_model_alias("haiku"), "haiku", "the CLI's own resolution, as before")
+        self.assertEqual(km._resolve_model_alias("haiku[1m]"), "haiku[1m]")
+
+    def test_a_tagged_refusal_is_a_refusal_of_the_version(self):
+        # the backend files what the CLI saw: for opus[1m] that is claude-opus-9-9[1m] (an adversarial review,
+        # 2026-09-28: filed tagged, neither store ever matched the untagged rows, and every connect retried the id)
+        self._grow("claude-opus-9-9")
+        km._note_resolved_model_refused("claude-opus-9-9[1m]")
+        self.assertIn("claude-opus-9-9", km._resolved_refused, "stored untagged")
+        self.assertEqual(km._resolve_model_alias("opus[1m]"), "claude-opus-5[1m]", "skipped, tag kept")
+        self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-5", "skipped for the bare alias too")
+        km._resolved_refused.clear()
+        (jd.STATE / "cli-model-blocks.json").write_text(json.dumps(
+            {"claude-opus-9-9[1m]": {"needs": "9.9.9", "cli": "2.1.280", "t": 1}}))    # a block a tagged id left behind
+        self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-5", "a tagged block key reads as the version")
+
+    def test_a_version_block_the_installed_cli_now_meets_has_lapsed(self):
+        # T222's block is filed by the CLI that refused; once the binary on disk meets the minimum it named, the block
+        # must let go — the alias resolves past a blocked version, so the reply that used to clear it never comes
+        # (an adversarial review, 2026-09-28). An unreadable binary version keeps every block.
+        self._grow("claude-opus-9-9")
+        (jd.STATE / "cli-model-blocks.json").write_text(json.dumps(
+            {"claude-opus-9-9": {"needs": "2.1.280", "cli": "2.1.270", "t": 1}}))
+        probe = km._installed_cli_version
+        try:
+            km._installed_cli_version = lambda: (2, 1, 279)
+            self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-5", "the binary is still short: blocked")
+            rows = {m["value"]: m for m in self._models()["models"]}
+            self.assertIn("needs CLI", rows["opus"]["versions"][0]["label"])
+            km._installed_cli_version = lambda: (2, 1, 280)
+            self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-9-9", "the binary meets the minimum: the block lapsed")
+            rows = {m["value"]: m for m in self._models()["models"]}
+            self.assertEqual(rows["opus"]["versions"][0]["label"], "Opus 9.9", "and the row no longer says needs")
+            self.assertEqual(rows["opus"]["resolves"], "claude-opus-9-9")
+            km._installed_cli_version = lambda: None
+            self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-5", "unknown binary version: every block stands")
+        finally:
+            km._installed_cli_version = probe
+
+    def test_the_installed_cli_version_is_read_once_per_binary(self):
+        self.assertEqual(km._version_tuple("2.1.280 (Claude Code)"), (2, 1, 280))
+        self.assertEqual(km._version_tuple("v9.0"), (9, 0))
+        self.assertEqual(km._version_tuple("no number here"), ())
+        fake = Path(self.td.name) / "claude-fake"
+        fake.write_text("#!/bin/sh\necho '2.1.280 (Claude Code)'\n"); fake.chmod(0o755)
+        saved = os.environ.get("ROMP_CLAUDE_BIN")
+        try:
+            os.environ["ROMP_CLAUDE_BIN"] = str(fake); km._CLI_VERSION_CACHE.clear()
+            self.assertEqual(km._installed_cli_version(), (2, 1, 280))
+            fake.chmod(0o000)                                          # unrunnable now; the same stat → the cached answer
+            self.assertEqual(km._installed_cli_version(), (2, 1, 280), "one probe per binary")
+            fake.chmod(0o755); fake.write_text("#!/bin/sh\necho 'nothing'\n")   # a new binary (its stat moved): probed again
+            self.assertIsNone(km._installed_cli_version(), "an upgrade on disk is read at the next call")
+            os.environ["ROMP_CLAUDE_BIN"] = "/bin/false"; km._CLI_VERSION_CACHE.clear()
+            self.assertIsNone(km._installed_cli_version(), "another binary's version line (coreutils' 'false 9.4') is not Claude Code's")
+            fake.write_text("#!/bin/sh\necho 'Claude Code'\n"); os.environ["ROMP_CLAUDE_BIN"] = str(fake); km._CLI_VERSION_CACHE.clear()
+            self.assertIsNone(km._installed_cli_version(), "no number: unknown")
+            os.environ["ROMP_CLAUDE_BIN"] = str(Path(self.td.name) / "absent"); km._CLI_VERSION_CACHE.clear()
+            self.assertIsNone(km._installed_cli_version())
+        finally:
+            km._CLI_VERSION_CACHE.clear()
+            if saved is None:
+                os.environ.pop("ROMP_CLAUDE_BIN", None)
+            else:
+                os.environ["ROMP_CLAUDE_BIN"] = saved
+
+    def test_a_version_a_running_sessions_cli_reports_counts(self):
+        # a learned row (reg.liveModelId under STATE/sdk) is the catalog's live lookahead: the alias reaches it
+        (jd.STATE / "sdk").mkdir(parents=True, exist_ok=True)
+        (jd.STATE / "sdk" / "11111111-2222-3333-4444-555555555555.json").write_text(
+            json.dumps({"sid": "11111111-2222-3333-4444-555555555555", "liveModelId": "claude-opus-9-9"}))
+        self.assertEqual(km._resolve_model_alias("opus"), "claude-opus-9-9")
+
+    def test_models_names_what_each_family_resolves_to_and_the_family_click_still_sends_the_alias(self):
+        self._grow("claude-opus-9-9")
+        rows = {m["value"]: m for m in self._models()["models"]}
+        self.assertEqual(rows["opus"]["resolves"], "claude-opus-9-9")
+        self.assertEqual(rows["opus"]["default"], "opus", "floating: the click sends the alias, the kernel resolves it")
+        for fam in km._MODEL_VALUES:
+            self.assertEqual(rows[fam]["resolves"], km._resolve_model_alias(fam), fam)
+
+    def test_a_pin_is_the_default_while_resolves_still_names_the_newest(self):
+        self._grow("claude-opus-9-9")
+        km._note_model_pick("claude-opus-4-8")
+        rows = {m["value"]: m for m in self._models()["models"]}
+        self.assertEqual(rows["opus"]["default"], "claude-opus-4-8", "the family click runs the pin")
+        self.assertEqual(rows["opus"]["resolves"], "claude-opus-9-9", "what its Latest row would run")
+
+    def test_a_blocked_newest_moves_resolves_on_the_route_too(self):
+        self._grow("claude-opus-9-9")
+        (jd.STATE / "cli-model-blocks.json").write_text(json.dumps(
+            {"claude-opus-9-9": {"needs": "9.9.9", "cli": "2.1.280", "t": 1}}))
+        rows = {m["value"]: m for m in self._models()["models"]}
+        self.assertEqual(rows["opus"]["resolves"], "claude-opus-5")
+        self.assertIn("needs CLI", rows["opus"]["versions"][0]["label"], "the refused row still says why, as before")
+
+    def test_the_refusal_memo_tells_every_picker_once(self):
+        rev0 = km._models_rev[0]
+        km._note_resolved_model_refused("claude-opus-5")
+        self.assertEqual(km._models_rev[0], rev0 + 1, "a models frame: the pickers re-read `resolves`")
+        km._note_resolved_model_refused("claude-opus-5")
+        self.assertEqual(km._models_rev[0], rev0 + 1, "the same id again moves nothing")
+        km._note_resolved_model_refused("")
+        self.assertEqual(km._models_rev[0], rev0 + 1, "an empty id is no refusal")
 
 
 if __name__ == "__main__":

@@ -134,6 +134,13 @@ CALLBACK_ALLOW = {
     ("SdkBackend", "postal_restore", "_bus_restore_mail"): "a POST to the local postal bus",
     ("SdkBackend", "rewind_resolved_cb", "_on_rewind_resolved"): "archives or restores held goals in the goal store at a rewind's "
                                                                  "outcome and logs through the judge; no session parse, build or hydrate",
+    ("SdkBackend", "resolve_model", "_resolve_model_alias"): "a family alias → its newest servable version (2026-09-28): reads the "
+                                                             "in-memory version table, the reg scan's cached liveModelIds, the CLI "
+                                                             "block file and a once-per-binary `claude --version`; no session parse, "
+                                                             "build or hydrate",
+    ("SdkBackend", "on_resolved_model_refused", "_note_resolved_model_refused"): "adds the refused id to a kernel-life set and sends "
+                                                                                 "the models frame (a _send_to_app per app, the notify "
+                                                                                 "row's own call); no session parse, build or hydrate",
 }
 # The backend constructors' positional parameters, so a callable passed by position is keyed by its parameter's name.
 CTOR_POSITIONALS = {"SdkBackend": ("state_dir", "claude_bin", "notify"), "CodexBackend": ("state_dir",)}

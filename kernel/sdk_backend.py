@@ -1481,6 +1481,53 @@ CLI_MODEL_BLOCKS_FILE = "cli-model-blocks.json"
 # different error can never be misfiled as a version block.
 _CLI_MIN_VERSION_RE = re.compile(
     r"Claude Code (\S+) does not support this model; version (\S+) or newer is required")
+# The shapes in which the CLI or the API REJECT a model id outright — the only texts a resolved alias's fallback
+# (SdkSession._on_message's error settle, _do_set_model's alias retry, _record_launch_error) may read as a verdict on
+# the id; a 529, a rate limit, a dead transport is none of these and files nothing. Each verified live:
+#   - the minimum-version block above (2.1.221 vs claude-fable-5-1, 2026-09-01; 2.1.270 vs claude-opus-5-5, 2026-09-26);
+#   - the CLI's own settle for an id the API does not serve this account ("[claude-code:unrecognized_model]" on
+#     stderr, this sentence as the turn's reply — `claude -p --model claude-opus-9-9`, 2.1.280, 2026-09-28);
+#   - the raw API not_found for a model (the message is "model: <id>");
+#   - the CLI's control-channel refusal of a set_model ("Unknown model: <id>").
+_MODEL_REJECTION_RES = (
+    _CLI_MIN_VERSION_RE,
+    re.compile(r"There's an issue with the selected model \("),
+    re.compile(r'"not_found_error"[^}]*"message"\s*:\s*"model: '),
+    re.compile(r"\bUnknown model\b"),
+)
+
+
+def _model_rejection(text) -> bool:
+    """Is `text` a definitive rejection of a model id (_MODEL_REJECTION_RES), rather than a failure that says nothing
+    about the id? The fallback from a kernel-resolved alias reads only this."""
+    t = str(text or "")
+    return any(r.search(t) for r in _MODEL_REJECTION_RES)
+
+
+_REJECTED_MODEL_RES = (
+    re.compile(r"selected model \(([^)\s]+)\)"),          # the CLI's unrecognized-model settle
+    re.compile(r'"message"\s*:\s*"model: ([^"\s]+)'),       # the API's not_found
+    re.compile(r"\bUnknown model:? ([^\s,;]+)"),             # the control channel's refusal
+    re.compile(r"model sent to the API: ([^\s,;]+)"),        # the SDK's own tail on the minimum-version 400 (seen 2026-09-26)
+)
+
+
+def _rejected_model_in(text) -> str:
+    """The model id a rejection text NAMES, untagged, or "" when it names none (the minimum-version 400's own
+    sentence does not). A rejection is filed against a resolved id only when the text names that id or none: a
+    turn that ran on one model must never blacklist a newer pick's resolution (an adversarial review, 2026-09-28)."""
+    t = str(text or "")
+    for r in _REJECTED_MODEL_RES:
+        m = r.search(t)
+        if m:
+            return _untag(m.group(1).rstrip(".)\"'"))
+    return ""
+
+
+def _untag(mid) -> str:
+    """The id without a trailing [1m]-style context tag: a refusal of claude-opus-5-5[1m] is a refusal of the
+    VERSION, and the kernel's resolver (which skips refused versions) reads untagged ids."""
+    return re.sub(r"\[[^\]]*\]$", "", str(mid or "").strip())
 
 
 def _assistant_text(msg) -> str:
@@ -5569,6 +5616,12 @@ class SdkSession:
         # write it too — and is ruled per WRITE, by token, in SdkBackend._seed_write_*: no per-session
         # view of that layer exists here on purpose (see _seed_write_refused). Under self._lock.
         self._model_accepted = reg.get("model")
+        self._model_resolved = ""                    # the id the kernel last resolved a bare alias to (_cli_model): the
+        #                                              latest resolution, possibly still in flight; "" when the value went verbatim
+        self._model_handed = ""                      # the resolved id THIS connection was handed and runs (--model at connect,
+        #                                              a live switch that landed): what a first-turn rejection is filed against
+        self._handed_from = ""                       # the stored value that resolution was made from (the alias), so a later
+        #                                              pick of something else stops the settle from switching the connection
         self._model_pending = ""                     # target ALIAS while a /model switch is resolving: the badge shows
         #   animated dots until the LIVE model actually reflects the pick (the user 2026-07-03: a switch stamped the
         #   chosen alias but left liveModel stale, and model_label PREFERS liveModel → the badge kept the OLD name).
@@ -6189,6 +6242,54 @@ class SdkSession:
             self.backend._log("interrupt (%s): CLI pid %d already gone" % (self.name, pid))
         self.backend._poke()
 
+    def _cli_model(self, value):
+        """The id the CLI is handed for a stored model value: a bare family alias resolves to its family's newest
+        catalog version through the kernel's resolve_model hook (2026-09-28: `--model opus` on the CLI still ran
+        Opus 5 a week after 5.5 shipped, so "Latest" lagged the kernel's own catalog); anything else, and a backend
+        with no hook (the ABC, a test fake), passes verbatim. The stored layers keep the alias — this is the
+        hand-off only. Records the resolution on the session (_model_resolved) so a refusal can be filed against
+        the id the CLI actually saw, and returns the id."""
+        v = value or ""
+        hook = getattr(self.backend, "resolve_model", None)   # the kernel sets it on the backend instance
+        out = v
+        if hook and v and v != "default":
+            try:
+                out = str(hook(v) or v)
+            except Exception as e:
+                self.backend._log("model resolve (%s -> %s): %s — handing the CLI the value verbatim"
+                                  % (self.name, v, e), problem=True)
+                out = v
+        self._model_resolved = out if out != v else ""
+        return out
+
+    def _resolved_model_refused(self, target, e):
+        """A set_model of the id the kernel resolved a family alias to came back refused: file it where the
+        resolution reads — the durable version block when the CLI's text names one (note_cli_model_block: the
+        catalog can list ids newer than the running binary), and the kernel's kernel-life memo either way
+        (on_resolved_model_refused) — and say so on the log, not the ring: the alias is about to go to the CLI
+        verbatim, so the family click still lands on what the CLI serves for the family."""
+        mid = _untag(target)                      # the VERSION is what was refused; the tag is the connection's
+        versioned = False
+        try:
+            versioned = bool(note_cli_model_block(self.backend.state_dir, mid, str(e)))
+        except Exception:
+            pass
+        # A MINIMUM-VERSION refusal lives in the durable block alone: the kernel reads that block against the installed
+        # CLI's version and lets it go once the binary meets the minimum (kernel _cli_model_blocks). Filed in the
+        # kernel-life memo too, one old CLI process's refusal would have hidden the version from every family pick on
+        # the box until the next kernel restart, upgrade or no (an adversarial review, 2026-09-28). Every other
+        # rejection (an id this account cannot use) is the memo's.
+        hook = None if versioned else getattr(self.backend, "on_resolved_model_refused", None)
+        if hook:
+            try:
+                hook(mid)
+            except Exception as e2:
+                self.backend._log("resolved-model refusal memo (%s): %s" % (self.name, e2), problem=True)
+        self.backend._log("model (%s): the CLI refused %s, the id the kernel resolved the alias to (%s: %s) — filed %s; "
+                          "the alias resolves past it" % (self.name, target, type(e).__name__, str(e)[:160],
+                                                          "as a version block" if versioned else "for this kernel's life"),
+                          problem=False)
+
     def set_model_live(self, model, prev=None):
         """Change the model on a CONNECTED session via the SDK control channel. No-op if not yet
         connected — _options applies chosen_model on connect instead. `prev` is what set_model wrote
@@ -6591,8 +6692,38 @@ class SdkSession:
             self.backend._poke()
 
     async def _do_set_model(self, model, prev=None):
+        # the id the CLI is handed: a bare alias resolved by the kernel (_cli_model); None (the account default) as is
+        target = self._cli_model(model) if model else model
+        landed = target
         try:
-            await self.client.set_model(model)
+            try:
+                await self.client.set_model(target)
+            except Exception as e1:
+                # The CLI refused the id the kernel resolved the alias to — a version newer than THIS running
+                # binary (an older process than the one on disk), a model this account cannot use. The user asked
+                # for the FAMILY, not that id: file the refusal (_resolved_model_refused: a version block durably,
+                # the id for this kernel's life, so the alias resolves past it everywhere) and hand the CLI the
+                # bare alias, its own resolution — what the family click gave before the kernel resolved it. A
+                # refusal of THAT falls to the handling below, as any refusal did.
+                if target == model or not _cli_refusal(e1):
+                    raise
+                self._resolved_model_refused(target, e1)
+                self._model_resolved = ""
+                # …but only while THIS pick still owns the session (an adversarial review, 2026-09-28): a newer pick
+                # whose request already landed must not be undone by this one's late refusal. With `prev` the owner
+                # is the value set_model wrote (`picked`); without it (the error settle's own fallback, below) the
+                # value this request carried. Superseded with `prev`, the handling below stands the request down
+                # as it does any superseded refusal; without `prev` there is nothing to unwind, so stand down here.
+                with self._lock:
+                    owns = self.chosen_model == (prev.get("picked") if prev is not None else model)
+                if not owns:
+                    if prev is None:
+                        self.backend._log("set_model (%s): the alias's fallback was refused after a newer pick (%s) — "
+                                          "standing down" % (self.name, self.chosen_model or "the account default"), problem=False)
+                        return
+                    raise
+                await self.client.set_model(model)
+                landed = model
         except Exception as e:
             # The mode path's rule (_do_set_mode, T139), applied to models: set_model PERSISTED its value
             # before the CLI accepted it — sdk-defaults.json (the seed for every future session), the reg
@@ -6679,6 +6810,10 @@ class SdkSession:
             if prev is not None:
                 self._model_accept(prev.get("picked"))   # the verdict that moves the accepted state
                 self.backend._seed_write_settled(prev.get("tok"))
+            # what THIS connection now runs for the stored value: a resolved id (a rejection at the next turn is filed
+            # against it) or nothing (the value went verbatim, or the alias fallback landed)
+            self._model_handed = landed if (landed and landed != model) else ""
+            self._handed_from = model or ""
         # Pull the real new name NOW rather than waiting for the next turn's assistant message — an idle
         # session the user switched but doesn't drive again would otherwise sit on the switching-dots
         # indefinitely (the user 2026-07-03). get_context_usage reports the current model, so this
@@ -8912,19 +9047,51 @@ class SdkSession:
                 if self.retrying and self.retry_count:
                     append_retry_gave_up(self.backend.state_dir, self.sid, self.retry_count,
                                          kind=str(msg.error))
-                # the installed CLI refusing a model by MINIMUM VERSION is worth remembering for every
-                # picker (T222): the model catalog can list ids newer than the binary
-                try:
-                    note_cli_model_block(self.backend.state_dir, self.chosen_model or self.model,
-                                         _assistant_text(msg))
-                except Exception:
-                    pass
+                # The installed CLI refusing a model by MINIMUM VERSION is worth remembering for every picker (T222: the
+                # model catalog can list ids newer than the binary) — filed against the id this turn RAN, with the same
+                # attribution as the fallback below (an adversarial review, 2026-09-28, twice): the resolved id THIS
+                # connection was handed (_model_handed) for a family alias, else the stored pin — never the latest
+                # resolution (_model_resolved: a newer pick's, updated before its request reached the CLI), and only when
+                # the text or the message's own `model` names that id or names none ("<synthetic>", a pretty name, an empty
+                # field name none); a subagent's own error settle (parent_tool_use_id) is its model's, never the parent's.
+                text = _assistant_text(msg)
+                handed = getattr(self, "_model_handed", "")   # getattr: a stand-in session built without __init__ (tests) has no slot
+                fits = False
+                if not getattr(msg, "parent_tool_use_id", None):
+                    named = _rejected_model_in(text) or _untag(getattr(msg, "model", "") or "")
+                    if not named.startswith("claude-"):
+                        named = ""
+                    ran = _untag(handed or getattr(self, "chosen_model", "") or getattr(self, "model", ""))
+                    fits = bool(ran) and (not named or named == ran or named.startswith(ran + "-"))
+                    if fits:
+                        try:
+                            note_cli_model_block(self.backend.state_dir, ran, text)
+                        except Exception:
+                            pass
+                # The turn settled on a REJECTION of the model (_model_rejection: the version block, the CLI's
+                # unrecognized-model settle, the API's not-found — never a 529 or a rate limit) while this connection
+                # runs an id the kernel resolved a family alias to (--model at connect, _cli_model): the user asked for
+                # the family, not that id. File it (the memo, so the alias resolves past it everywhere; the block
+                # above when the text names a version) and switch THIS connection to the alias's next resolution —
+                # the next candidate, else the alias itself — but only while the stored value is still the alias that
+                # resolution came from: a pick of something else since owns the session, and its own request is what
+                # moves it. Without this, a stored alias sat on the rejected version at every connect. Bounded: each
+                # rejection drops one candidate from a finite list, and the alias verbatim is the floor, where the
+                # CLI's own resolution decides.
+                if handed and fits and _model_rejection(text):
+                    self._resolved_model_refused(handed, Exception(text[:300]))
+                    self._model_handed = ""
+                    if getattr(self, "_model_resolved", "") == handed:
+                        self._model_resolved = ""
+                    if self.chosen_model and self.chosen_model == getattr(self, "_handed_from", ""):
+                        self.set_model_live(self.chosen_model)
             elif self.retrying and self.retry_count:   # first real output after a storm → durable recovery marker
                 append_retry_recovered(self.backend.state_dir, self.sid, self.retry_count)
             if not getattr(msg, "error", None):
                 # a real reply on a model proves the CLI serves it — its block (if any) lifts on the event
                 try:
-                    for _mid in {str(getattr(msg, "model", None) or ""), str(self.chosen_model or "")}:
+                    for _mid in {str(getattr(msg, "model", None) or ""), str(self.chosen_model or ""),
+                                 str(getattr(self, "_model_resolved", "") or ""), str(getattr(self, "_model_handed", "") or "")}:
                         if "claude" in _mid.lower():
                             clear_cli_model_block(self.backend.state_dir, _mid)
                 except Exception:
@@ -13845,7 +14012,13 @@ class SdkBackend:
             except OSError as e:
                 self._log("system-prompt append unreadable (%s) — sessions start WITHOUT it: %s" % (self.append_prompt_path, e))
         if sess.chosen_model and sess.chosen_model != "default":
-            kw["model"] = sess.chosen_model    # keep the picked model across a reconnect (runtime set_model is per-connection)
+            # keep the picked model across a reconnect (runtime set_model is per-connection); a bare family alias
+            # goes to the CLI as the id the kernel resolves it to (SdkSession._cli_model), the reg keeping the alias
+            resolve = getattr(sess, "_cli_model", None)
+            kw["model"] = resolve(sess.chosen_model) if resolve else sess.chosen_model
+            if resolve:                        # what THIS connection runs for the stored value (the settle's attribution)
+                sess._model_handed = kw["model"] if kw["model"] != sess.chosen_model else ""
+                sess._handed_from = sess.chosen_model
         if sess.resume_sid:
             kw["resume"] = sess.resume_sid
             if sess._fork_of:
@@ -16061,7 +16234,12 @@ class SdkBackend:
                 # a turn in the new model kept showing the OLD name. Now the pick marks pending; _do_set_model
                 # pulls the real name, which clears it (and the dormant/never-driven trap can't happen — the
                 # refresh resolves an idle session, and _on_session_gone resolves a thread that exits mid-switch).
-                already = _model_reflects_alias(s.model, value)
+                # the switch has ALREADY taken effect only if the live name reflects the value and, for an alias the
+                # kernel resolves (_cli_model), names that very version: `opus` on a session running Opus 5 is not
+                # "already" when the alias now resolves to Opus 5.5 (2026-09-28) — the dots show until it lands
+                resolved = s._cli_model(value) if value not in ("", "default") else value
+                already = _model_reflects_alias(s.model, value) and (
+                    resolved == value or pretty_model(resolved).lower() == (s.model or "").lower())
                 s._model_pending = "" if already else value
                 pending = bool(s._model_pending)
                 s._upgrade_retry = None        # a pick of the user's own supersedes the retry after a downgrade (2026-09-17)
@@ -16079,7 +16257,14 @@ class SdkBackend:
             # DORMANT (no live thread): no turn is coming to report a real name, so resolve to the chosen
             # alias's best-effort label immediately — never leave the badge on a stale liveModel or trapped
             # on dots. The value applies for real on the next connect (chosen_model → _options).
-            self._update_reg(sid, model=value, liveModel=_alias_label(value), modelPending=False)
+            # …named by the version the alias resolves to when the kernel resolves one (resolve_model), else the alias
+            hook = getattr(self, "resolve_model", None)
+            try:
+                resolved = str(hook(value) or value) if (hook and value not in ("", "default")) else value
+            except Exception:
+                resolved = value
+            label = pretty_model(resolved) if resolved != value else _alias_label(value)
+            self._update_reg(sid, model=value, liveModel=label, modelPending=False)
             self._update_reg(sid, fallbackCause="", fallbackCategory="", servedModel="")   # a dormant pick starts the mark over too
         # the acknowledging chip — live OR dormant (see _ack_cmd_chip)
         self._ack_cmd_chip(sid, "/model", "/model " + value, s.resume_sid if s else reg.get("lastSid"))
@@ -17725,6 +17910,19 @@ class SdkBackend:
             self._update_reg(sess.sid, launchError=rec)
         except Exception:
             self._log("record launch error (%s): %s" % (sess.name, traceback.format_exc()))
+        # a launch that died NAMING a rejection of the model this connect was handed for a family alias (the kernel's
+        # resolution, _cli_model) files that rejection, so the next connect resolves past it (2026-09-28); any other
+        # launch failure says nothing about the id and files nothing
+        handed = getattr(sess, "_model_handed", "")
+        blob = "%s\n%s" % (exc, tail)
+        named = _rejected_model_in(blob)
+        if handed and _model_rejection(blob) and (not named or named == _untag(handed)):
+            try:
+                sess._resolved_model_refused(handed, exc)
+            finally:
+                sess._model_handed = ""
+                if getattr(sess, "_model_resolved", "") == handed:
+                    sess._model_resolved = ""
         self._log("session %s: claude CLI failed to start%s — %s"
                   % (sess.name, " (account usage limit)" if rec["limit"] else "", text))
         # The FULL captured stderr to the log, once, at the failure. The card gets one truncated line

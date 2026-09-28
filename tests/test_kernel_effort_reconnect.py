@@ -78,7 +78,7 @@ class EffortReconnect(unittest.TestCase):
                     'self._update_reg(sid, fast=(value == "on"), fastOff=(value == "off"), fastRuleRefused="", liveFast=value)',   # + the explicit Slow and the switch's refusal memory (2026-09-17)
                     'self._update_reg(sid, name=new_name,',   # + the rename ping rides the same locked RMW when owed (2026-08-24/25)
                     'self._update_reg(sid, model=value, modelPending=pending)',   # the live model write
-                    'self._update_reg(sid, model=value, liveModel=_alias_label(value), modelPending=False)'):
+                    'self._update_reg(sid, model=value, liveModel=label, modelPending=False)'):   # the dormant write; `label` names the version a resolved alias runs (2026-09-28)
             self.assertIn(pin, BACKEND_SRC)
 
     def test_backend_clears_the_pending_flag_when_the_reconnect_lands(self):

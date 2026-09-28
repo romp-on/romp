@@ -57,7 +57,7 @@ test("the gear's version rows mark a learned version as new, like the chat and t
 test("the gear's version submenu opens with a Latest row that sends the bare family alias", () => {
   // the session pickers' floating gesture, on the judge tiers too: a tier set to a version stays
   // there until picked off it, and the family row sends the remembered pin — Latest is the row that
-  // sends the alias itself, so the tier follows the CLI's newest again
+  // sends the alias itself, so the tier follows the family's newest again
   assert.match(GEAR, /latest\.appendChild\(document\.createTextNode\('Latest'\)\)/);
   assert.match(GEAR, /latest\.addEventListener\('click', function \(e2\) \{ e2\.stopPropagation\(\); pick\(fam\.value\); \}\)/);
   assert.match(GEAR, /sub\.appendChild\(latest\);[\s\S]{0,300}versions\.forEach\(function \(v\)/, "heads the submenu, ahead of the versions");

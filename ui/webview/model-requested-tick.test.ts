@@ -47,7 +47,9 @@ test("the requested row carries a permanent one-line sub-line: the tooltip's gis
   assert.equal(requestedModelSub(fb({ category: "bio" })), "requested · blocked by safety classifiers (bio) · retrying every 10 min");
   assert.equal(requestedModelSub(fb({ cause: "", retry: { on: true, everyMin: 10, armed: false, nextIn: null, attempts: 0 } })), "requested · not answering; Opus 5 is · auto-retry on");
   assert.equal(requestedModelSub(fb({ retry: { on: false, everyMin: 10, armed: false, nextIn: null, attempts: 0 } })), "requested · blocked by safety classifiers · auto-retry off");
-  assert.match(RENDER, /const rsub = el\("div", "meta-item-sub"\);\s*\n\s*rsub\.textContent = requestedModelSub\(fb\);/, "the family row's sub-line, the menu vocabulary");
+  // the family row's explanation is its own sub-line div after the row's version line (2026-09-28: the family row names
+  // the version it runs), so the requested row is `requested`, the narrowed fb, in the same vocabulary
+  assert.match(RENDER, /const rsub = el\("div", "meta-item-sub"\);\s*\n\s*rsub\.textContent = requestedModelSub\(requested\);/, "the family row's sub-line, the menu vocabulary");
   assert.match(RENDER, /const vsub = el\("div", "meta-item-sub"\);\s*\n\s*vsub\.textContent = requestedModelSub\(fb\);/, "the version row's");
   assert.match(RENDER, /lsub\.textContent = requestedModelSub\(fb\) \+ " — " \+ lsub\.textContent;/, "Latest keeps its own line after the gist");
 });
@@ -63,7 +65,7 @@ test("the requested row is found by family alias, by pick id and by version labe
 
 test("the picker wires the mark on the family row and the version row, never over the current one, with the tooltip as title", () => {
   assert.match(RENDER, /const fb = kind === "model" \? \(s\.status\.modelFallback \|\| null\) : null;/);
-  assert.match(RENDER, /if \(fb && !item\.classList\.contains\("current"\) && isRequestedFamily\(fb, c\.value\)\) \{\s*\n\s*item\.classList\.add\("requested"\);\s*\n\s*setTip\(item, requestedModelTip\(fb\)\);/,
+  assert.match(RENDER, /const requested = fb && !item\.classList\.contains\("current"\) && isRequestedFamily\(fb, c\.value\) \? fb : null;\s*\n\s*if \(requested\) \{\s*\n\s*item\.classList\.add\("requested"\);\s*\n\s*setTip\(item, requestedModelTip\(requested\)\);/,
     "the one tooltip treatment (tip.ts setTip): hover and focus alike, above the menu");
   assert.match(RENDER, /if \(fb && !cur && isRequestedVersion\(fb, v\)\) \{\s*\n\s*row\.classList\.add\("requested"\);[^\n]*\n\s*rowTip = requestedModelTip\(fb\);/);
   assert.match(RENDER, /rowTip = rowTip \? rowTip \+ "\\n" \+ note : note;/, "a requested learned version keeps its explanation beside the learned note");

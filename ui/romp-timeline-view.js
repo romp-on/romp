@@ -1204,6 +1204,24 @@ function isCurrentMeta(kind, s, value) {
   if (kind === 'effort') return cur === v;
   return !!v && (cur === v || cur.startsWith(v + ' '));
 }
+// The label of the version a FAMILY row runs when clicked (the user 2026-09-28): its pin (the kernel's /models `default`,
+// a version id) else the version the kernel resolves the bare alias to (`resolves`); '' for a one-version family or an
+// older kernel without the field. The chat menu's familyRunsLabel (render.ts) is the twin; family-runs-label.test.ts pins them.
+function familyRunsLabel(c) {
+  const versions = c.versions || [];
+  if (versions.length < 2) return '';
+  const pinned = !!c.default && c.default !== c.value;
+  const id = pinned ? c.default : c.resolves;
+  const v = id ? versions.find((x) => x.value === id) : undefined;
+  if (!v) return '';
+  return pinned ? v.label + ' \u00b7 pinned' : v.label;
+}
+// The label of the version the family's ALIAS resolves to now — what the submenu's Latest row runs; '' when the kernel
+// names none. The chat menu's twin likewise.
+function latestVersionLabel(c) {
+  const v = c.resolves ? (c.versions || []).find((x) => x.value === c.resolves) : undefined;
+  return v ? v.label : '';
+}
 
 // rounded orthogonal path through waypoints (message connectors)
 function roundedPath(pts, r) {
@@ -3411,6 +3429,15 @@ class TimelinePanel {
       const item = menu.createDiv({ text: c.label });
       item.setAttribute('style', 'padding:4px 22px 4px 8px;border-radius:4px;cursor:pointer;position:relative;white-space:nowrap;display:flex;align-items:center;');
       item.setAttribute('tabindex', '0');
+      // what a click on a FAMILY row runs, as a permanent sub-line (the user 2026-09-28): its pin, else the version the
+      // kernel resolves the alias to (/models `resolves`) — the chat's familyRunsLabel twin, in the requested-model
+      // sub-line's inlined treatment (this pane may live in a foreign document)
+      const runs = kind === 'model' ? familyRunsLabel(c) : '';
+      if (runs) {
+        item.setAttribute('style', item.getAttribute('style') + 'flex-direction:column;align-items:flex-start;');
+        const vsub = item.createDiv({ text: runs });
+        vsub.setAttribute('style', 'font-size:0.82em;opacity:0.6;');
+      }
       if (cur) { const ck = item.createSpan({ text: '✓' }); ck.setAttribute('style', MENU_CHECK_STYLE); }
       // the REQUESTED model wears the yellow ✓ while an automatic fallback answers instead (the user 2026-09-17);
       // the row's title says why and whether romp is retrying (the kernel's modelFallback on the lane's row)
@@ -3443,7 +3470,8 @@ class TimelinePanel {
         latest.setAttribute('style', 'padding:4px 22px 4px 8px;border-radius:4px;cursor:pointer;position:relative;white-space:nowrap;');
         latest.setAttribute('tabindex', '0');
         latest.createDiv({ text: 'Latest' });
-        const lsub = latest.createDiv({ text: pinned ? 'unpins — follows the newest ' + c.label : 'follows the newest ' + c.label });
+        const now = latestVersionLabel(c);   // the version the alias resolves to now (kernel /models `resolves`, 2026-09-28)
+        const lsub = latest.createDiv({ text: (pinned ? 'unpins — follows the newest ' : 'follows the newest ') + c.label + (now ? ' — ' + now + ' now' : '') });
         lsub.setAttribute('style', 'font-size:0.82em;opacity:0.6;');
         if (!pinned && cur) { const ck = latest.createSpan({ text: '✓' }); ck.setAttribute('style', MENU_CHECK_STYLE); }
         else if (fb && !(fb.pickValue || '').toLowerCase().startsWith('claude-') && isRequestedFamily(fb, c.value)) {

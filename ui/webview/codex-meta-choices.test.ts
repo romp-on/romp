@@ -307,6 +307,8 @@ function liftMenu(opts: { thread?: { th: unknown; status: any }; vscodeApi?: { p
     slice("function metaChoices(kind: MetaKind, st: Status): MetaChoice[] {"),
     slice("function el(tag: string, cls?: string): HTMLElement {"),
     slice("function isCurrentMeta(kind: MetaKind, st: Status, value: string): boolean {"),   // the real ✓ rule (by value): a row order the tests move must never lose it
+    slice("function familyRunsLabel(c: MetaChoice): string {"),      // the family row's sub-line (2026-09-28): what a click runs
+    slice("function latestVersionLabel(c: MetaChoice): string {"),   // …and the Latest row's tail; both read the lifted rows' fields
     sliceMod("export function metaDots(): HTMLElement {"),   // the dots live in status-controls.ts (T415 part two)
     slice("const MODEL_CHOICES: {", "function loadModelChoices(): void {"),
     "const META_CHOICES = {model: MODEL_CHOICES, effort: EFFORT_CHOICES}; const CODEX_MODE_CHOICES = [];",

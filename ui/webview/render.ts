@@ -16456,9 +16456,11 @@ function elapsedMs(sinceMs: number | null): string {
 // label; `sdkOnly` drops the entry on a backend that cannot apply it (Codex).
 interface MetaChoice { label: string; value: string; sub?: string; sdkOnly?: boolean; color?: number[] | null;
   model?: string; isDefault?: boolean; efforts?: MetaChoice[];
-  versions?: { label: string; value: string; learned?: boolean }[]; default?: string }   // model families only (the
+  versions?: { label: string; value: string; learned?: boolean }[]; default?: string;
+  resolves?: string | null }   // model families only (the
   // user 2026-08-25). `default` is the family's remembered version pin, else the family ALIAS; `learned`
-  // marks a version the catalog lacks — a running session's CLI reported it (kernel /models).
+  // marks a version the catalog lacks — a running session's CLI reported it (kernel /models); `resolves` is
+  // the version the bare alias RUNS now — the kernel resolves the alias at the CLI hand-off (2026-09-28).
 // Model + effort choices come from the kernel's /models — the ONE list shared with the timeline lanes and the
 // judge-tier settings (the user 2026-07-02, who wanted one shared code path, not hardcoded in multiple places), so
 // the client holds no model literals (mirrors paletteColors above). Populated in place on load so META_CHOICES
@@ -16548,6 +16550,26 @@ function modelChoiceLabel(value: string): { label: string; color?: number[] | nu
     if (v) return { label: v.label, color: c.color };
   }
   return { label: value };
+}
+// The label of the version a FAMILY row runs when clicked (the user 2026-09-28: "Opus 5.5 displays"): its pinned
+// version when the family carries a pin (the kernel's /models `default`, a version id), else the version the kernel
+// resolves the bare alias to (`resolves`: the catalog's newest the CLI has not refused). "" when neither names a
+// listed version — a one-version family (no submenu, nothing to say), an older kernel without the field — and the
+// row stays bare, as before. The timeline lane menu's familyRunsLabel is the twin (family-runs-label.test.ts).
+function familyRunsLabel(c: MetaChoice): string {
+  const versions = c.versions || [];
+  if (versions.length < 2) return "";
+  const pinned = !!c.default && c.default !== c.value;
+  const id = pinned ? c.default : c.resolves;
+  const v = id ? versions.find((x) => x.value === id) : undefined;
+  if (!v) return "";
+  return pinned ? v.label + " \u00b7 pinned" : v.label;
+}
+// The label of the version the family's ALIAS resolves to now — what the submenu's Latest row runs; "" when the
+// kernel names none (it hands the CLI the alias, whose own resolution decides). The timeline menu's twin likewise.
+function latestVersionLabel(c: MetaChoice): string {
+  const v = c.resolves ? (c.versions || []).find((x) => x.value === c.resolves) : undefined;
+  return v ? v.label : "";
 }
 
 
@@ -16793,21 +16815,17 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
     const rowIco = kind === "mode" ? el("span", "meta-ico mode-ico") : null;
     if (rowIco) rowIco.innerHTML = modeIconSvg(c.value);
     if (kind === "mode" && riskyMode(c.value)) item.classList.add("mode-risky");
+    // what a click on a FAMILY row runs, as its sub-line (the user 2026-09-28: "Opus 5.5 displays"): the family's
+    // pin, else the version the kernel resolves the bare alias to (/models `resolves`) — named where the family is
+    // picked, instead of an alias whose resolution the CLI lagged by a release (opus ran Opus 5 a week after 5.5)
+    const subText = c.sub || (kind === "model" ? familyRunsLabel(c as MetaChoice) : "");
     // the REQUESTED model wears a yellow tick while a fallback answers instead (the user 2026-09-17): romp knows the
     // pick and the live model differ and says why, and whether it is retrying, in the tooltip
     const fb = kind === "model" ? (s.status.modelFallback || null) : null;
-    if (fb && !item.classList.contains("current") && isRequestedFamily(fb, c.value)) {
+    const requested = fb && !item.classList.contains("current") && isRequestedFamily(fb, c.value) ? fb : null;
+    if (requested) {
       item.classList.add("requested");
-      setTip(item, requestedModelTip(fb));   // the one tooltip treatment (tip.ts): hover AND focus, above the menu
-      if (!c.sub) {                          // a bare-text row grows the sub-lined shape the mode rows wear
-        const label = item.textContent || c.label;
-        item.textContent = "";
-        const head = el("div"); head.textContent = label;
-        item.appendChild(head);
-      }
-      const rsub = el("div", "meta-item-sub");
-      rsub.textContent = requestedModelSub(fb);
-      item.appendChild(rsub);
+      setTip(item, requestedModelTip(requested));   // the one tooltip treatment (tip.ts): hover AND focus, above the menu
     }
     // model/effort rows wear THEIR OWN rank color (the user 2026-08-31: a picker whose rows are
     // all default-gray codes nothing) — the same /models-fed color+tone the badges use
@@ -16815,14 +16833,23 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
       const rowTint = nonClassicChoiceTone(c as { color?: number[] | null; tone?: number[] | null });
       if (rowTint) item.style.color = `rgb(${rowTint.join(",")})`;
     }
-    if (c.sub) {
+    if (subText || requested) {
+      // the sub-lined shape the mode rows wear: the head carries the label, each sub-line its own div — the
+      // family's version first, then the requested-model explanation (a bare-text row grows the shape for it)
       const head = el("div");
       if (rowIco) head.appendChild(rowIco);
       head.appendChild(document.createTextNode(c.label));
-      const sub = el("div", "meta-item-sub");
-      sub.textContent = c.sub;
       item.appendChild(head);
-      item.appendChild(sub);
+      if (subText) {
+        const sub = el("div", "meta-item-sub");
+        sub.textContent = subText;
+        item.appendChild(sub);
+      }
+      if (requested) {
+        const rsub = el("div", "meta-item-sub");
+        rsub.textContent = requestedModelSub(requested);
+        item.appendChild(rsub);
+      }
     } else if (rowIco) {
       item.appendChild(rowIco);
       item.appendChild(document.createTextNode(c.label));
@@ -16852,7 +16879,8 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
       const lhead = el("div");
       lhead.textContent = "Latest";
       const lsub = el("div", "meta-item-sub");
-      lsub.textContent = pinned ? "unpins — follows the newest " + c.label : "follows the newest " + c.label;
+      const now = latestVersionLabel(c);   // the version the alias resolves to now (kernel /models `resolves`, 2026-09-28)
+      lsub.textContent = (pinned ? "unpins — follows the newest " : "follows the newest ") + c.label + (now ? " — " + now + " now" : "");
       latest.append(lhead, lsub);
       if (fb && !latest.classList.contains("current") && !(fb.pickValue || "").toLowerCase().startsWith("claude-") && isRequestedFamily(fb, c.value)) {
         latest.classList.add("requested");   // an alias pick IS the floating family: Latest is its row in the submenu

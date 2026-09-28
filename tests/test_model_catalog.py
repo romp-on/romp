@@ -600,7 +600,10 @@ class CliBlocks(unittest.TestCase):
 
     def test_the_stream_hook_is_wired_at_the_error_settle(self):
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).read()
-        self.assertIn("note_cli_model_block(self.backend.state_dir, self.chosen_model or self.model,", src)
+        # the id the CLI SAW: a bare alias is resolved at the hand-off (SdkSession._cli_model, 2026-09-28), so the block
+        # is filed against that version, never against `opus`
+        self.assertIn("note_cli_model_block(self.backend.state_dir, ran, text)", src)
+        self.assertIn('ran = _untag(handed or getattr(self, "chosen_model", "") or getattr(self, "model", ""))', src)
         self.assertIn("clear_cli_model_block(self.backend.state_dir, _mid)", src)
 
 
