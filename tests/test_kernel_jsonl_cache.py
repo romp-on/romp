@@ -32,6 +32,12 @@ em = load_source("romp_event_model_jsonl_cache",
                       os.path.join(BIN, "romp-event-model"))
 
 
+def _w(file_bytes):
+    """An entry's weight for `file_bytes` of a file: its resident estimate since 2026-09-28
+    (tests/test_record_cache_resident_weight.py)."""
+    return int(file_bytes * em.RECORD_CACHE_RESIDENT_PER_FILE_BYTE)
+
+
 def _write_jsonl(path, n, start=0):
     with open(path, "w") as f:
         for i in range(start, start + n):
@@ -201,7 +207,7 @@ class RecordCacheByteBudget(unittest.TestCase):
     def test_the_budget_evicts_the_least_recently_used_and_a_hot_file_survives(self):
         hot = self._file("hot.jsonl", 40)
         em._read_jsonl_incremental(hot)
-        one = os.path.getsize(hot)
+        one = em._entry_weight(em._JSONL_CACHE[hot])             # one such file's weight (its resident estimate, 2026-09-28)
         em._JSONL_CACHE_BUDGET_BYTES = int(one * 3.5)            # room for three such files, not four
         cold = [self._file("cold%d.jsonl" % i, 40) for i in range(6)]
         for c in cold:
@@ -235,7 +241,7 @@ class RecordCacheByteBudget(unittest.TestCase):
         with open(path, "a") as f:
             for i in range(10, 20): f.write(json.dumps({"uuid": "u%d" % i, "type": "user"}) + "\n")
         em._read_jsonl_incremental(path)
-        self.assertEqual(em._JSONL_CACHE_BYTES[0], os.path.getsize(path)); self.assertGreater(em._JSONL_CACHE_BYTES[0], w1)
+        self.assertEqual(em._JSONL_CACHE_BYTES[0], _w(os.path.getsize(path))); self.assertGreater(em._JSONL_CACHE_BYTES[0], w1)
         os.unlink(path)
         em._read_jsonl_incremental(path)                          # an absent file pops its entry: the ledger follows
         self.assertEqual(em._JSONL_CACHE_BYTES[0], 0); self.assertTrue(self._ledger_ok())
@@ -276,7 +282,7 @@ class DropAfterQuiescentFold(unittest.TestCase):
         self.assertIn(fresh, em._JSONL_CACHE, "no policy, no drop")
         st = em.record_cache_stats()
         self.assertEqual(st["dropped"], 1); self.assertGreater(st["droppedBytes"], 0)
-        self.assertEqual(em._JSONL_CACHE_BYTES[0], os.path.getsize(fresh), "the ledger followed the drop")
+        self.assertEqual(em._JSONL_CACHE_BYTES[0], _w(os.path.getsize(fresh)), "the ledger followed the drop")
         # the dropped file folds again: one re-read, the same answer, no double-count in the cursor
         n = len(self.scans)
         self.assertEqual(self._fold(cache, old, drop_after="quiescent")["n"], 30)
@@ -357,14 +363,15 @@ class WholeReadsByCaller(unittest.TestCase):
 
 class RecordCacheDefaultBudget(unittest.TestCase):
     """The budget shipped at 1 GiB (2026-09-11) and sat below a 50-session working set: every build re-read whole transcripts
-    (14.9 GB in 3.5 min, 132 s pusher cycles). The default is a quarter of the machine's memory, never under 4 GiB."""
+    (14.9 GB in 3.5 min, 132 s pusher cycles). The default is a quarter of the machine's memory in the entries' resident
+    estimate, never under 4 GiB and never over 64 GiB (2026-09-28; tests/test_record_cache_resident_weight.py)."""
 
-    def test_half_of_the_machine(self):
+    def test_a_quarter_of_the_machine(self):
         text = "MemTotal:       123634396 kB\nMemFree:        1 kB\n"
-        self.assertEqual(em._record_cache_default_budget_bytes(text), int(123634396 * 1024 * 0.5))
+        self.assertEqual(em._record_cache_default_budget_bytes(text), int(123634396 * 1024 * 0.25))
 
     def test_never_under_four_gib(self):
-        self.assertEqual(em._record_cache_default_budget_bytes("MemTotal:  8000000 kB\n"), 4 * 1024 ** 3, "half of 8 GB is the floor")
+        self.assertEqual(em._record_cache_default_budget_bytes("MemTotal:  8000000 kB\n"), 4 * 1024 ** 3, "a quarter of 8 GB is under the floor")
         self.assertEqual(em._record_cache_default_budget_bytes("garbage"), 4 * 1024 ** 3, "no MemTotal: the floor")
 
     def test_the_environment_sets_it_outright(self):

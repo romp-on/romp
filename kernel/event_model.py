@@ -655,19 +655,32 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache. What is not needed until looked at
 # (subagent transcripts) leaves through drop_after="quiescent" folds instead; the budget is the backstop, not the
 # mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright.
+# Counted in MEMORY since 2026-09-28, not file bytes. The "about 1.7" above was an estimate; measured through RSS in a fresh
+# process, this reader holds about 3 bytes per file byte (live transcripts of 14, 287 and 599 MiB: 2.66, 3.07, 3.05; the
+# postal log's flatter rows 1.54, a captions log's tiny ones 3.82). So a budget of half of MemTotal in FILE bytes (about
+# 126 GiB on a 252 GiB devbox) let the cache hold about three times the machine's memory: it never evicted, and the kernel
+# held every file it had ever read. Each entry now weighs its file bytes times RECORD_CACHE_RESIDENT_PER_FILE_BYTE, and the
+# default is a quarter of MemTotal, never under the floor and never over RECORD_CACHE_BUDGET_CAP_BYTES. The cap is not set
+# lower on purpose: the budget must stay above the live working set or it thrashes (the 1 GiB lesson above), and on that
+# devbox the 28 live sessions' current transcripts alone were 13.8 GiB on disk, about 41 GiB weighed (2026-09-28). A
+# working set past the cap is not a budget problem; the remedy is holding a large transcript's tail only, not a smaller cap.
 RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3
-RECORD_CACHE_BUDGET_FRACTION = 0.5
+RECORD_CACHE_BUDGET_FRACTION = 0.25
+RECORD_CACHE_BUDGET_CAP_BYTES = 64 * 1024 ** 3
+RECORD_CACHE_RESIDENT_PER_FILE_BYTE = 3.0
 
 
 def _record_cache_default_budget_bytes(meminfo_text=None):
-    """Half of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB; the floor alone when the file
-    is unreadable (macOS, a container without procfs)."""
+    """A quarter of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB and capped at 64 GiB, in the
+    entries' resident estimate (_entry_weight); the floor alone when the file is unreadable (macOS, a container
+    without procfs)."""
     try:
         text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
         for line in text.splitlines():
             if line.startswith("MemTotal:"):
                 kb = int(line.split()[1])
-                return max(RECORD_CACHE_BUDGET_FLOOR_BYTES, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
+                return min(RECORD_CACHE_BUDGET_CAP_BYTES,
+                           max(RECORD_CACHE_BUDGET_FLOOR_BYTES, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION)))
     except Exception:
         pass
     return RECORD_CACHE_BUDGET_FLOOR_BYTES
@@ -692,7 +705,9 @@ _DROP_AFTER_QUIESCENT_S = float(os.environ.get("ROMP_RECORD_CACHE_DROP_QUIESCENT
 
 
 def _entry_weight(ent) -> int:
-    """The bytes an entry holds, the unit the byte budget and recordCache.bytes count: a whole entry (base 0) the
+    """The memory an entry holds, estimated, the unit the byte budget and recordCache.bytes count: the FILE bytes whose
+    records it holds times RECORD_CACHE_RESIDENT_PER_FILE_BYTE (2026-09-28; the weight was the file bytes alone, a third
+    of what the records take). The file bytes it holds: a whole entry (base 0) the
     file's size; a TAIL entry (base > 0, the records past a checkpoint's cut) the file's size less the offset its
     FIRST held record sits at, offs[0], and nothing while it holds no record (a checkpoint's bare cut before its
     first read, a tail of blank lines); a tail that holds records but carries no offsets to say where they start
@@ -706,11 +721,14 @@ def _entry_weight(ent) -> int:
     try:
         size, base = int(ent[1]), int(ent[5])
         if base <= 0:
-            return size
-        offs = ent[7] if len(ent) > 7 else None
-        if offs:
-            return max(0, size - int(offs[0]))
-        return size if (len(ent) > 4 and ent[4]) else 0
+            held = size
+        else:
+            offs = ent[7] if len(ent) > 7 else None
+            if offs:
+                held = max(0, size - int(offs[0]))
+            else:
+                held = size if (len(ent) > 4 and ent[4]) else 0
+        return int(held * RECORD_CACHE_RESIDENT_PER_FILE_BYTE)
     except Exception:
         return 0
 
@@ -1807,9 +1825,10 @@ def _read_jsonl_incremental(path, on_fail=None):
     failure the caller may count and log (fold_records passes it through as on("fail")). The answer is []
     either way. This is the WHOLE-file read: a tail entry a checkpoint restored is upgraded to the whole file
     first (T323 stage 3); fold_records reads the entry itself through _read_jsonl_entry with tail_ok."""
-    ent = _read_jsonl_entry(path, on_fail=on_fail, tail_ok=bool(getattr(_TAIL_OK, "flag", False)))
-    _LAST_ENTRY.ent = ent
-    return ent[4] if ent is not None else []
+    fold = bool(getattr(_TAIL_OK, "flag", False))
+    ent = _read_jsonl_entry(path, on_fail=on_fail, tail_ok=fold)
+    _LAST_ENTRY.ent = ent if fold else None       # only a fold's read parks its entry, for the pin it makes next, which
+    return ent[4] if ent is not None else []      #  releases it (_pinned_entry); a plain read leaves nothing held
 
 
 _TAIL_OK = threading.local()      # .flag: the calling fold accepts a tail entry (set by fold_records around its read)
@@ -1875,7 +1894,9 @@ def register_whole_read_passthrough(*fns):
     """Register functions the whole-read attribution walks past (the parse family a walker reaches the reader through)."""
     for fn in fns:
         _WHOLE_READ_PASSTHROUGH.add(fn.__code__)
-_LAST_ENTRY = threading.local()   # .ent: the entry the last _read_jsonl_incremental on this thread served
+_LAST_ENTRY = threading.local()   # .ent: the entry a fold's read (_tail_read) on this thread was served, until its pin takes it.
+#                                   It was set by every read and kept until the thread's next one, so each long-lived thread
+#                                   held its last entry alive outside the budget, evicted or not, whatever its size (2026-09-28)
 
 
 _READ_STRIPES = [threading.RLock() for _ in range(64)]   # per-path serialization of the reads that pull bytes: two threads
@@ -2288,8 +2309,10 @@ def _pinned_entry(key, recs):
     """The shared reader's cache entry for `key` if it still describes the read that returned `recs` (its
     records list IS `recs`), None when the reader holds nothing for the path, _UNPINNED when another thread
     has advanced the entry past that read. The entry the reader served on this thread is checked first
-    (T323 stage 3: an entry evicted from the cache between the read and the pin still describes the read)."""
+    (T323 stage 3: an entry evicted from the cache between the read and the pin still describes the read). The handle
+    is taken, not read: once pinned, the entry lives as long as the fold holds it and no longer (2026-09-28)."""
     last = getattr(_LAST_ENTRY, "ent", None)
+    _LAST_ENTRY.ent = None
     if last is not None and last[4] is recs:
         return last
     with _JSONL_CACHE_LOCK:

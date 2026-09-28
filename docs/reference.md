@@ -2610,7 +2610,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `ROMP_PERF_STACKS` set (a debugging aid for a served test on a runner
   nobody can log into) or when the request says `?stacks=1` (`romp perf
   stacks`, T401); `null` otherwise.
-- `recordCache`: the reader's record cache (the JSONL records held in memory):
+- `recordCache`: the reader's record cache (the JSONL records held in memory).
+  Its byte figures (`bytes`, `budgetBytes`, `evictedBytes`, `droppedBytes`)
+  are estimated resident bytes: each entry weighs the file bytes whose records
+  it holds times 3, the measured cost of parsed records. The budget defaults to
+  a quarter of the machine's memory, at least 4 GiB and at most 64 GiB, and
+  `ROMP_RECORD_CACHE_BUDGET_MB` sets it outright. A budget below the working
+  set shows as `budgetEvictions` and `wholeReads` climbing together. The keys:
   `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
   `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
   quiescence drop), `released` (every pop that removed an entry, whatever the
