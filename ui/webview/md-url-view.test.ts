@@ -151,7 +151,7 @@ test("URL mode chrome: host/dir/ dimmed (not a browse link) + basename; Open ↗
   // ✕ and Esc close through the shared closeFileView
   assert.match(URL_FN, /el\("button", "fileview-btn fileview-close"\)/);
   assert.match(URL_FN, /close\.addEventListener\("click", closeFileView\);/);
-  assert.match(URL_FN, /if \(e\.key !== "Escape" \|\| !document\.getElementById\("romp-fileview"\)\) return;/);
+  assert.match(URL_FN, /if \(e\.key !== "Escape" \|\| e\.defaultPrevented \|\| !document\.getElementById\("romp-fileview"\)\) return;/);
   // the same modal shell: the id every open/closed check targets, backdrop click closes, body class
   assert.match(URL_FN, /wrap\.id = "romp-fileview";/);
   assert.match(URL_FN, /wrap\.onclick = \(ev\) => \{ if \(ev\.target === wrap\) closeFileView\(\); \};/);

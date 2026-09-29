@@ -72,6 +72,7 @@ type Hooks = {
   optimistic: { sid: string; text: string; imgPaths?: string[]; clear?: boolean }[];   // every registerOptimistic call (clear: a /clear that ends at its boundary)
   persists: number; down: Set<string>; provisional: Set<string>; toasts: string[];
   backend?: string;                                                   // the lifted routeUserMessage reads liveSession(sid)?.status?.backend to gate the /clear flag off for Codex
+  activeId: string | null;                                            // the tab the strip shows (render.ts activeId)
   isClearCmd: typeof isClearCmd;                                      // the REAL predicate from clear-confirm.ts, so the lift's /clear routing is EXECUTED against it, not an inline mirror
 };
 type Api = {
@@ -90,6 +91,8 @@ function lift(): (hooks: Hooks) => Api {
   const js = requireCjs("esbuild").transformSync(RENDER.slice(a, b), { loader: "ts" }).code;
   const prelude = `
     const H = HOOKS;
+    let activeId = H.activeId ?? null;   // the tab the strip shows; a test moves it through H.activeId
+    Object.defineProperty(H, "activeId", { get: () => activeId, set: (v) => { activeId = v; } });
     const el = (tag, cls) => new H.FakeEl(tag, cls);
     const document = H.document;
     const stagedMsgs = new H.StagedStack();
@@ -104,6 +107,9 @@ function lift(): (hooks: Hooks) => Api {
     const warnToast = (msg) => { H.toasts.push(msg); };
     const ephemeralWarnToast = (msg) => { H.toasts.push(msg); };   // the slice's unreachable-session word is the ephemeral one
     const syncComposerPh = () => {};   // the composer's name overlay re-sync the strip renderer calls on every exit (composer-placeholder.ts): no overlay here
+    const HOST_TO_VIEWER = "romp:host-to-viewer";   // the strip tells the file viewer its count; no viewer listens here
+    const window = { dispatchEvent: () => true };
+    class CustomEvent { constructor(type, init) { this.type = type; this.detail = init && init.detail; } }
   `;
   const epilogue = `return { routeUserMessage, flushStaged, renderStagedStrip, stagedMsgs, stagedOpen, stagedCollapsed, stagedScroll };`;
   return new Function("HOOKS", prelude + js + epilogue) as (hooks: Hooks) => Api;
@@ -121,7 +127,7 @@ function world(): { H: Hooks; api: Api; strip: FakeEl; document: FakeDocument } 
   const strip = new FakeEl("div");
   const document: FakeDocument = { activeElement: null, getElementById: (id) => id === "composer-staged" ? strip : null };
   FakeEl.doc = document;
-  const H: Hooks = { FakeEl, document, StagedStack, quoteReplyBody, stagedPosts, mintQid, isClearCmd, posted: [], qids: [], optimistic: [], persists: 0, down: new Set(), provisional: new Set(), toasts: [] };
+  const H: Hooks = { FakeEl, document, StagedStack, quoteReplyBody, stagedPosts, mintQid, isClearCmd, posted: [], qids: [], optimistic: [], persists: 0, down: new Set(), provisional: new Set(), toasts: [], activeId: A };
   return { H, api: lift()(H), strip, document };
 }
 const listOf = (strip: FakeEl): FakeEl => { const l = strip.querySelector(".staged-list"); assert.ok(l, "the strip holds a .staged-list"); return l; };
@@ -307,6 +313,22 @@ test("flushStaged routes the posts stagedPosts composes, one routeUserMessage ca
   api.stagedMsgs.push(A, { text: "/compact", cites: [Q1] });
   api.flushStaged(A);
   assert.deepEqual(H.posted.filter(send), [{ type: "sendMessage", id: A, text: quoteReplyBody([Q1], "/compact") }]);
+});
+
+test("a flush for a background tab sends its run and leaves the active tab's strip alone", () => {
+  // the file viewer's Submit sends for the session it was opened for, which a tab switch under the open
+  // viewer can leave in the background
+  const { H, api, strip } = world();
+  api.stagedMsgs.push(A, { text: "the active tab's note", cites: [Q1] });
+  api.stagedMsgs.push(B, { text: "the viewer's note", cites: [Q2] });
+  api.renderStagedStrip(A);
+  const shown = strip.style.display;
+  assert.notEqual(shown, "none", "A's note is shown");
+  assert.equal(api.flushStaged(B), 1);
+  assert.equal(H.posted.filter(send).length, 1, "B's run went");
+  assert.equal(strip.style.display, shown, "the strip still shows A");
+  assert.equal(api.stagedMsgs.count(A), 1, "A still holds its note");
+  assert.equal(listOf(strip).children.length, 1, "A's one chip is still painted");
 });
 
 test("a batched /clear gets its optimistic bubble flagged to end at the boundary; the message gets a plain one", () => {

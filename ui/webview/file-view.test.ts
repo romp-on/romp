@@ -65,7 +65,7 @@ test("the viewer is a singleton MODAL over its pane: ~95% card, dimmed backdrop,
   // the backdrop closes on ITS OWN clicks only — content clicks don't (the lightbox contract)
   assert.match(VIEW, /wrap\.onclick = \(ev\) => \{ if \(ev\.target === wrap\) closeFileView\(\); \};/);
   assert.match(VIEW, /close\.addEventListener\("click", closeFileView\);/);
-  assert.match(VIEW, /if \(e\.key !== "Escape" \|\| !document\.getElementById\("romp-fileview"\)\) return;/);
+  assert.match(VIEW, /if \(e\.key !== "Escape" \|\| e\.defaultPrevented \|\| !document\.getElementById\("romp-fileview"\)\) return;/);
   // the panels treatment on the CHAT sheet: dimmed rgba(0,0,0,0.55) backdrop, the content behind visible
   assert.match(CHAT_CSS, /#romp-fileview \{ position: fixed; inset: 0; z-index: 1200; background: var\(--overlay-dim\);/);
   assert.match(CHAT_CSS, /\.fileview \{ width: 95%; height: 95%;/);
@@ -77,11 +77,11 @@ test("the viewer is a singleton MODAL over its pane: ~95% card, dimmed backdrop,
     "the feed boots the listener with the WS poster (saves ride it — the raw-mode slice)");
 });
 
-// ── selection → quote chip (the user 2026-08-23, the three-verbs consolidation): the viewer's
-// separate review layer (per-file comment store, marks, one-shot Submit — romp:fileviewComments +
-// buildReviewMessage) is GONE. Selecting a passage now seeds the chat composer's own labeled quote
-// chip, exactly like a VS Code editor highlight, and batching rides the chip + ⌘⏎ staging flow the
-// chat already has. "Comment" means only the transcript's live threads now. ──
+// ── selection → quote chip: selecting a passage seeds the chat composer's own labeled quote chip,
+// exactly like a VS Code editor highlight. Beside it, a right-click opens the viewer's own box: Stage
+// where the pane has a composer (the note joins the staged run, and the bar's Submit sends it), Comment
+// in the feed pane (a thread). That box is executed in file-view-comment.test.ts. What stays gone is
+// the old per-file store (romp:fileviewComments), which kept notes beside the file. ──
 
 test("selecting in the viewer seeds the composer's editor chip — the editorSelection shape, path:line label", () => {
   // mouseup posts to the composer's window — this document's when it holds one (the browseFiles
@@ -135,10 +135,9 @@ test("a viewer whose document has no composer seeds THROUGH the shell: the feed 
   // …and the chat's existing window-message handler is the receiver: nothing new listens in feed.ts
   assert.match(RENDER, /else if \(m\.type === "editorSelection" && typeof m\.text === "string" && m\.text\.trim\(\)\) \{/);
   assert.doesNotMatch(FEED, /editorSelection/);
-  // the review layer is gone from every module and both sheets, and the orphaned store is swept
-  for (const source of [VIEW, RENDER, FEED, CHAT_CSS, FEED_CSS]) {
-    assert.doesNotMatch(source, /setCommentSink|buildReviewMessage|fv-hl|fileview-submit/);
-  }
+  // nothing keeps a note beside the file: the viewer writes no comment store, and the old one is swept
+  const stored = [...VIEW.matchAll(/localStorage\.setItem\((\w+)/g)].map((m) => m[1]).sort();
+  assert.deepEqual(stored, ["FMT_KEY", "TEXT_SIZE_KEY"], "the view prefs alone: a note lives in the session's composer or thread, never in the browser");
   assert.match(VIEW, /localStorage\.removeItem\("romp:fileviewComments"\)/);
 });
 

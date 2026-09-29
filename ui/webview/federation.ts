@@ -641,6 +641,9 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
   // floor). Remote rows are host-prefixed like every other remote surface; the SIG is host-scoped so
   // two kernels' ring sequences can never collide in the seen-set.
   const syncs: any[] = [];
+  // Remote kernels' own problems (the error center's `sdkNotices`) the same way: a file comment refused or
+  // rolled back on another host records its words there, and the viewer that sent it may be closed.
+  const sdks: any[] = [];
   // Every kernel counts feed builds on its OWN counter, so `merged.buildId` (the local scalar kept by
   // the spread above) says nothing about any REMOTE host's frame. The per-host map is what lets the
   // feed pane compare a payload against a cardMoveAck on the SAME counter (the user 2026-08-15, whose
@@ -666,6 +669,12 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
       for (const r of f.syncNotices) {
         if (!r || !r.sig) continue;
         syncs.push(h === LOCAL ? r : { ...r, sig: h + "|" + r.sig, text: h + ": " + (r.text || "") });
+      }
+    }
+    if (Array.isArray(f.sdkNotices)) {
+      for (const r of f.sdkNotices) {
+        if (!r || !r.sig) continue;
+        sdks.push(h === LOCAL ? r : { ...r, sig: h + "|" + r.sig, text: h + ": " + (r.text || "") });
       }
     }
     if (Array.isArray(f.items)) merged.items.push(...f.items);
@@ -707,6 +716,8 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
   if ("canUndoClear" in merged || canUndo) merged.canUndoClear = canUndo;
   if (syncs.length) merged.syncNotices = syncs;
   else delete merged.syncNotices;
+  if (sdks.length) merged.sdkNotices = sdks;
+  else delete merged.sdkNotices;
   merged.buildIds = buildIds;
   merged.boards = boards;   // the hosts' data-defined boards, the local definition winning on an id (plans/card-boards.md)
   merged.offHosts = offHosts;

@@ -256,8 +256,8 @@ test("a replaced viewer's Escape handler leaves the live card's notice alone", a
   // file (which re-opens fresh) the OLD viewer's handler still runs first on Escape, with editing still
   // true in its closure and dirty cleared by the Reload click: its exitEdit runs. Looked up by id, the
   // notice it removed was the NEW card's, while that card was still in edit mode over a dirty buffer, and
-  // with it went the Reload button, the user's only way out of the conflict. Held by reference, it is the
-  // old card's own (already detached) notice, and the live card keeps its own.
+  // with it went the Reload button, the user's only way out of the conflict. A handler whose card is gone
+  // now removes itself and does nothing, so the live card's handler alone answers the Escape.
   const from = docKeys.length;                   // the handlers this case registers, oldest first
   const a = await openInFallbackEditor();
   a.ta.value = TEXT + "a\n";
@@ -279,11 +279,13 @@ test("a replaced viewer's Escape handler leaves the live card's notice alone", a
   ta.dispatch("input");                          // dirty: Escape must ask, and the answer is no
   win.confirm = () => false;
   assert.equal(docKeys.length - from, 2, "two viewers were opened, so two handlers are registered");
-  for (const fn of docKeys.slice(from)) fn({ key: "Escape", preventDefault() {} });
+  let prevented = 0;
+  for (const fn of docKeys.slice(from)) fn({ key: "Escape", preventDefault() { prevented++; } });
+  assert.equal(prevented, 1, "only the live card's handler claims the Escape");
   win.confirm = () => true;
   const note = assertAboveBody(noteEl(), b, ["fileview-editor"]);
   assert.match(note.textContent, /editing in the plain fallback editor\.$/, "the live card's own notice, still up");
-  assert.ok(conflict.parentNode === null, "the old viewer's exitEdit removed its own notice, not the live card's");
+  assert.ok(conflict.parentNode !== null, "the old viewer's handler, its card gone, did nothing and removed itself");
   assert.equal(ta.value, TEXT + "b\n", "the kept edits are still in the buffer");
   assert.equal(b.edit.hidden, true); assert.equal(b.cancel.hidden, false, "still in edit mode");
 });

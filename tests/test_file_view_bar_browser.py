@@ -376,9 +376,14 @@ class ServedFileViewBar(unittest.TestCase):
         self.assertLessEqual(abs(b["left"] - a["right"]), 1.5, "the pair touches (one shared hairline): " + json.dumps(seg))
         self.assertEqual(seg["group"], "view")
         self.assertTrue(seg["btns"][0]["radius"].startswith("6px 0px 0px 6px") or seg["btns"][0]["radius"] == "6px 0px 0px 6px", seg["btns"][0]["radius"])
-        # the row's order: the view group, the file group, the close cross
+        # the row's order: the view group, the file group, the note pair, the close cross
         kinds = [g.split("[")[0] for g in m["groups"]]
-        self.assertEqual(kinds, ["fileview-group fileview-group-view", "fileview-group fileview-group-file", "fileview-btn fileview-close"], json.dumps(m["groups"]))
+        self.assertEqual(kinds, ["fileview-group fileview-group-view", "fileview-group fileview-group-file",
+                                 "fileview-cmt-count", "fileview-btn fileview-send",
+                                 "fileview-btn fileview-close"], json.dumps(m["groups"]))
+        # and the pair is QUIET until notes exist: a file opened with none staged shows neither
+        for kind in ("fileview-cmt-count", "fileview-btn fileview-send"):
+            self.assertIn(kind + "[hidden]", m["groups"], json.dumps(m["groups"]))
 
     def test_an_image_has_no_view_controls_and_the_view_group_takes_no_room(self):
         m = self._file("image")

@@ -156,3 +156,17 @@ test("the tracked delegation's recipients take the awaiting peers' rule, on a ca
   assert.deepEqual(rowIn.status.notices[0].delegTracked.map((p: any) => [p.host, p.sid]), [["TESTHOST", "TESTHOST:" + HANDED], ["OTHER", HOSTED]], "on a row, which carries the field though it draws no tracked delegation: the same helper serves both shapes");
   assert.equal(tracked[0].sid, HANDED, "a COPY: the inbound entries are not mutated");
 });
+
+test("a remote host's error-center rows reach the merged feed with its host on the sig and the text; the local rows pass as they are", () => {
+  // a file comment refused or rolled back on another host records its words in THAT kernel's error center, and the
+  // viewer that sent it may be closed, so the bell is the only surface left
+  const local = { type: "feed", sdkNotices: [{ sig: "boot|3", t: 1, text: "a local problem" }] };
+  const remote = { type: "feed", sdkNotices: [{ sig: "boot|3", t: 2, text: "A comment on ~/a.md in web was not saved." }, { t: 3, text: "no sig" }] };
+  const merged: any = mergeHostFeeds({ "": local, HOSTA: remote }, ["", "HOSTA"]);
+  assert.deepEqual(merged.sdkNotices, [
+    { sig: "boot|3", t: 1, text: "a local problem" },
+    { sig: "HOSTA|boot|3", t: 2, text: "HOSTA: A comment on ~/a.md in web was not saved." },
+  ], "two hosts' ring sequences never collide, and a row with no sig is not an entry");
+  const none: any = mergeHostFeeds({ "": { type: "feed" }, HOSTA: { type: "feed" } }, ["", "HOSTA"]);
+  assert.equal(none.sdkNotices, undefined);
+});

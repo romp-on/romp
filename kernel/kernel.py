@@ -18231,24 +18231,34 @@ def _comment_cut_target(path, sid, anchor_uuid):
 
 
 _COMMENT_FRAME_HEAD = "About this part of the conversation:"
+COMMENT_OPENER_QUOTE_CAP = 2000   # the passage quoted in a thread's opener, the length the row keeps
+_COMMENT_FRAME_HEAD_FILE = "About this part of %s:"   # a passage highlighted in a FILE, not the chat
 
 
-def _comment_first_message(exact, comment):
+def _comment_first_message(exact, comment, src=""):
     """The thread's opening message — romp-authored FRAMING around the user's own words, read by an
     agent that has the conversation up to the highlight and no idea it is being tracked, so it
     speaks as the person it works for quoting the conversation back (test_injected_voice scans it;
-    it must never name romp machinery)."""
-    q = "\n".join("> " + ln for ln in str(exact or "").splitlines()).strip() or "> …"
-    return "%s\n\n%s\n\n%s" % (_COMMENT_FRAME_HEAD, q, str(comment or "").strip())
+    it must never name romp machinery). `src` names the FILE a passage came from, when the highlight
+    was in a viewer rather than the chat."""
+    passage = str(exact or "")
+    if len(passage) > COMMENT_OPENER_QUOTE_CAP:
+        passage = passage[:COMMENT_OPENER_QUOTE_CAP] + "…"
+    q = "\n".join("> " + ln for ln in passage.splitlines()).strip() or "> …"
+    head = _COMMENT_FRAME_HEAD_FILE % str(src).strip() if str(src or "").strip() else _COMMENT_FRAME_HEAD
+    return "%s\n\n%s\n\n%s" % (head, q, str(comment or "").strip())
 
 
-def _comment_strip_frame(text):
+def _comment_strip_frame(text, src=""):
     """The opening message, shown as the user's COMMENT alone — the framing + quote it was wrapped
     in for the thread's agent already sit in the popover header, so rendering them again would say
-    everything twice."""
-    if not text.startswith(_COMMENT_FRAME_HEAD):
-        return text
+    everything twice. `src` is the thread row's file: the head stripped is the one that row was framed
+    with, so a plain opener that happens to read like a head is kept whole."""
     lines = text.splitlines()
+    src = str(src or "").strip()
+    head = _COMMENT_FRAME_HEAD_FILE % src if src else _COMMENT_FRAME_HEAD
+    if not lines or lines[0].strip() != head:
+        return text
     i = 1
     while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
         i += 1
@@ -18322,7 +18332,7 @@ def _thread_transcript_path(reg, tsid):
 _THREAD_TAIL_BYTES = 262144   # the tail window that usually holds the whole side conversation
 
 
-def _thread_messages(tsid, cut_uuid, floor_t=0):
+def _thread_messages(tsid, cut_uuid, floor_t=0, src=""):
     """The side conversation: user/assistant text AFTER the fork cut in the thread's transcript,
     oldest first, [{who, text, t}]. The fork copies parent history VERBATIM (same uuids), so
     everything above `cut_uuid` on the active chain IS the thread's own exchange. mtime-cached —
@@ -18335,7 +18345,8 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
 
     A TIP-forked thread (cut_uuid "", the restart-seam fallback) has no cut record to stop at —
     `floor_t` (the thread's createdT) bounds it instead: copied records carry their ORIGINAL
-    timestamps, strictly before the fork moment, so the time floor is the recorded boundary."""
+    timestamps, strictly before the fork moment, so the time floor is the recorded boundary.
+    `src` is the row's file, which names the opener's head (_comment_strip_frame)."""
     reg = _thread_reg(tsid)
     if reg.get("forkOf"):
         return []
@@ -18346,7 +18357,7 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
     except OSError:
         return []
     hit = _thread_msgs_cache.get(tsid)
-    if hit and hit[0] == path and hit[1] == mt and hit[2] == (cut_uuid, floor_t):
+    if hit and hit[0] == path and hit[1] == mt and hit[2] == (cut_uuid, floor_t, src):
         return hit[3]
     by_uuid = parent_of = leaf = None
     if cut_uuid and size > _THREAD_TAIL_BYTES:
@@ -18408,7 +18419,7 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
         u = parent_of.get(u); hops += 1
     rows.reverse()
     if rows and rows[0]["who"] == "you":            # the opening message: show the comment, not its frame
-        rows[0]["text"] = _comment_strip_frame(rows[0]["text"])
+        rows[0]["text"] = _comment_strip_frame(rows[0]["text"], src)
     merged = []                                     # one assistant turn can span records — read as one reply
     for r in rows:
         if merged and merged[-1]["who"] == r["who"] == "agent":
@@ -18419,7 +18430,7 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
     merged = merged[-40:]
     if len(_thread_msgs_cache) > 512:
         _thread_msgs_cache.clear()
-    _thread_msgs_cache[tsid] = (path, mt, (cut_uuid, floor_t), merged)
+    _thread_msgs_cache[tsid] = (path, mt, (cut_uuid, floor_t, src), merged)
     return merged
 
 
@@ -18638,6 +18649,7 @@ def _thread_turn_open(tsid, reg, state):
 
 
 _thread_unreadable_warned = set()
+_threads_starting = set()   # thread sids whose row is saved and whose fork has not settled: owed, never broken
 _thread_backend_warned = set()
 
 
@@ -18657,8 +18669,8 @@ def _thread_owes_first_reply(tsid, reg, th, turns, state=""):
     after it. A MISSING or unreadable transcript with no process, or one the cut is not in, is a broken
     thread: shout once, owe nothing — a green wash promising a reply that will never come is the lie this
     change exists to end (the caller routes the verdict to the popover's error note, T237b D)."""
-    if reg.get("forkOf"):
-        return True
+    if reg.get("forkOf") or tsid in _threads_starting:
+        return True                                 # the row is saved ahead of the fork's registry entry
     if not turns and state:
         return True                                 # the fork-boot window: a live process, its transcript a beat behind
     cut = str(th.get("cutUuid") or "")
@@ -18767,7 +18779,8 @@ def _comments_frame(sid, live_map=None):
         # chat's own events from the branch point on (the user 2026-08-17: same component, rail
         # dots and all — tool folds, notice cards, markdown, exactly as the chat renders them)
         msgs = [] if status == "promoted" else _thread_messages(
-            tsid, str(th.get("cutUuid") or ""), floor_t=(0 if th.get("cutUuid") else int(th.get("createdT") or 0)))
+            tsid, str(th.get("cutUuid") or ""), floor_t=(0 if th.get("cutUuid") else int(th.get("createdT") or 0)),
+            src=str(th.get("src") or ""))
         seen = int(th.get("lastSeenT") or 0)
         # the backend's live echoes are read BEFORE the events projection is built (T237b A): build_session
         # → _merge_live_atoms → prune_live retires echoes as their records land — reading after it could
@@ -18861,6 +18874,7 @@ def _comments_frame(sid, live_map=None):
                         "relayedT": th.get("relayedT") or 0,   # the persistent sent-back indicator's stamp (T145)
                         "name": th.get("name") or "", "color": th.get("color") or "",
                         "exact": str(th.get("exact") or "")[:500], "status": status,
+                        "src": str(th.get("src") or ""),   # a file passage's path; empty for a chat comment
                         "createdT": th.get("createdT") or 0, "state": state, "error": err,
                         "unread": unread, "replyOwed": reply_owed,   # yellow / green — see the docstring (T237)
                         "queued": queued,                              # sends the backend holds or has fed, not yet in the transcript
@@ -18895,11 +18909,12 @@ def _comments_frame(sid, live_map=None):
 
 
 def _comment_markers(sid):
-    """The timeline lane's comment SQUARES: [{t, uuid, tid, status}] for threads anchored on this
+    """The timeline lane's comment SQUARES: [{t, uuid, tid, status, src}] for threads anchored on this
     session — open + resolved only (a promoted thread is a session with a branch connector; a
     dead-promoted one is done). anchorT (stamped at create) places the square at the commented
-    message; rows from before that stamp fall back to createdT, the comment's own moment. One
-    exists() stat for every session that never had a thread."""
+    message; rows from before that stamp fall back to createdT, the comment's own moment. A file
+    passage (src set) quotes no message: its anchorT is the create time, and its uuid the last chat
+    event then. One exists() stat for every session that never had a thread."""
     p = _comments_path(sid)
     if not p.exists():
         return []
@@ -18909,7 +18924,7 @@ def _comment_markers(sid):
             continue
         out.append({"t": th.get("anchorT") or th.get("createdT") or 0,
                     "uuid": th.get("anchorUuid") or "", "tid": th.get("tid"),
-                    "status": th.get("status") or "open"})
+                    "status": th.get("status") or "open", "src": str(th.get("src") or "")})
     return out
 
 
@@ -18949,18 +18964,18 @@ _create_lock = threading.RLock()
 _inflight_creates = set()                  # keys whose _comment_create is running right now, either door
 
 
-def _create_key(sid, uuid, exact, text, create_id=""):
+def _create_key(sid, uuid, exact, text, create_id="", src=""):
     """What one create is remembered by: the gesture's own id when the frame carries one (a fresh comment
-    in the same words is a new id, a re-post is the same one), else its words. The two shapes never meet:
-    a stamped frame is not a repeat of an unstamped one, nor the other way round."""
+    in the same words is a new id, a re-post is the same one), else its words and the file they came
+    from. The two shapes never meet: a stamped frame is not a repeat of an unstamped one."""
     cid = str(create_id or "")
     if cid:
         return (str(sid), cid)
-    return (str(sid), str(uuid), str(exact), str(text))
+    return (str(sid), str(uuid), str(exact), str(text), str(src or ""))
 
 
 def _parked_key(pk):
-    return _create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"], pk.get("createId", ""))
+    return _create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"], pk.get("createId", ""), pk.get("src", ""))
 
 
 def _note_create(key, tid):
@@ -19024,7 +19039,7 @@ def _retry_parked_creates():
         try:
             err, tid = _comment_create(pk["sid"], pk["uuid"], pk["exact"], pk["text"], name=pk["name"],
                                        model=pk["model"], effort=pk["effort"], fast=pk.get("fast", ""),
-                                       color=pk["color"])
+                                       color=pk["color"], src=pk.get("src", ""))
             with _create_lock:                     # note BEFORE the park is dropped: no gap where the
                 if not err:                        # identity is neither parked nor noted
                     _note_create(key, tid)
@@ -19043,7 +19058,7 @@ def _retry_parked_creates():
                     if fr:
                         c["send"](json.dumps(fr))
                     c["send"](json.dumps({"type": "commentCreated", "id": pk["sid"], "tid": tid,
-                                          "uuid": pk["uuid"]}))
+                                          "uuid": pk["uuid"], "createId": pk.get("createId", "")}))
                 except Exception:
                     pass
 
@@ -19090,12 +19105,55 @@ def _comment_launch_prefs(model="", effort="", fast=""):
     return tuple(out)
 
 
+COMMENT_FAILED = "A comment on %s in %s %s. Reason: %s. Your words: %s"
+COMMENT_ROLLED_BACK = "was not started, so its thread was removed"
+COMMENT_REFUSED = "was not saved"
+THREAD_NOT_CREATED = "thread not created: "
+COMMENT_FAILED_TEXT_CAP = 200   # the comment's words the error center keeps; the reason leads, so the cap cuts only these
+FILE_COMMENT_NO_ANCHOR = "this conversation has no message yet for a comment thread to attach to."
+FILE_COMMENT_UNREAD = "this conversation could not be read, so the comment was not saved."
+
+
+def _comment_failed_entry(what, src, sid, err, words):
+    """The error center's line for a file comment that did not land: each part on one line (a multi-line
+    entry reads as a traceback), the session named, and the kernel's own prefix left out of the reason."""
+    reason = " ".join(str(err).split())
+    if reason.startswith(THREAD_NOT_CREATED):
+        reason = reason[len(THREAD_NOT_CREATED):]
+    return COMMENT_FAILED % (src, _name_of(sid) or sid[:8], what, reason.rstrip("."),
+                             " ".join(str(words).split())[:COMMENT_FAILED_TEXT_CAP])
+
+
+def _file_comment_anchor(path, sid, now):
+    """The last chat event's uuid, which a FILE passage's thread is anchored at (it has no record of its
+    own), so the row opens from the rail and the timeline; "" when the chat shows no event yet. Not the
+    transcript leaf: that is usually an attachment or system record, which no surface renders. Read
+    from the pusher's last build of the tab; only a session no tab has built is parsed here, and None
+    when that parse raises."""
+    hit = _built_chat.get(sid)
+    events = (hit[1] or {}).get("events") if hit else None
+    if not events:
+        try:
+            events = build_session(sid, now, path_override=path).get("events") or []
+        except Exception as e:
+            sys.stderr.write("file comment anchor for %s not read: %s: %s\n" % (sid[:8], type(e).__name__, e))
+            return None
+    return next((str(e["uuid"]) for e in reversed(events) if e.get("uuid")), "")
+
+
 def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", effort="", fast="", color="",
-                    now=None, raw_opener=False, meta=None):
+                    src="", now=None, raw_opener=False, meta=None, on_row=None):
     """Anchor a new comment thread: fork the parent at the highlighted message (inclusive) as a
     threadOf fork — no names/ entry, so no judge seeding is needed until promotion — and send the
     opening message. Returns (error, tid): error is the warn-toast string (tid None), success is
     (None, the new thread's id) so the client can adopt exactly the thread it created.
+
+    `on_row(tid)` fires the moment the thread row is DURABLE, before the fork. Forking mints a session
+    — process spawn, connect, opening send — which is seconds the caller would otherwise spend holding
+    a dialog open over a passage whose row is already saved (the words stay in memory until the opening
+    send queues them). Every refusal a user can provoke (no SDK
+    backend, no transcript, anchor lag, a bad name) happens above this point, so an ack here is honest;
+    a fork that then dies rolls the row back and reports itself the same way it always did.
 
     `name` (the user 2026-08-15, who wanted to name the thread right in the dialog): the thread's
     editable name, defaulting to <parent>-comment-<N> where N counts the threads this session has
@@ -19130,6 +19188,12 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             return err, None
     else:
         cut, cut_t = "", int(now)   # tip fork by request (see docstring) — no record to cut at
+        if str(src or "").strip():
+            anchor_uuid = _file_comment_anchor(sess["path"], parent_sid, now)
+            if anchor_uuid is None:
+                return FILE_COMMENT_UNREAD, None
+            if not anchor_uuid:
+                return FILE_COMMENT_NO_ANCHOR, None
     nm = str(name or "").strip()
     # the model the thread would launch on, vouched BEFORE the name claim and the fork, like every other pick road
     # (_pick_vouched): a removed extra gateway model picked in the dialog (a stale picker) launched a new session on
@@ -19160,7 +19224,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     tsid = str(uuid.uuid4())
     row = {"tid": tsid, "sid": tsid, "anchorUuid": str(anchor_uuid or ""), "cutUuid": cut,
            "anchorT": cut_t,   # the commented message's own time — the timeline square's x
-           "exact": str(exact)[:2000], "status": "open",
+           "exact": str(exact)[:2000], "src": str(src or "")[:512], "status": "open",
            "createdT": int(now), "lastSeenT": int(now)}
     if isinstance(meta, dict) and (meta.get("thread") or meta.get("note")):
         row["meta"] = {k: str(meta.get(k) or "")[:500] for k in ("thread", "note") if meta.get(k)}
@@ -19187,6 +19251,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             n += 1
     # the try begins AT the claim: a _save_comments that raises (an atomic write re-raises) must
     # release the name too, or every later create of it is refused as in flight for the kernel's life
+    _threads_starting.add(tsid)
     try:
         with _comments_lock:
             data = _load_comments(parent_sid)
@@ -19195,12 +19260,14 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
                 row["color"] = col                 # the comment's identity color (the dialog's name tint)
             data.setdefault("threads", []).append(row)
             _save_comments(parent_sid, data)
+        if on_row is not None:
+            on_row(tsid)
         model, effort, fast = launch          # resolved once, above the name claim (see the vouch)
         try:
             be.fork(nm, parent_sid, cut, bg=col, fg=(pal.fg_for(col) if col else ""), sid=tsid, thread_of=parent_sid,
                     model=model, effort=effort, fast=fast)
             be.connect(tsid)
-            _user_send(be, tsid, text if raw_opener else _comment_first_message(exact, text))
+            _user_send(be, tsid, text if raw_opener else _comment_first_message(exact, text, src))
         except Exception as e:
             with _comments_lock:                       # loud + lossless: no half-born thread row
                 data = _load_comments(parent_sid)
@@ -19210,10 +19277,11 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
                 be.kill(tsid)                          # and no orphaned reg/CLI behind the removed row
             except Exception:
                 pass
-            return "thread not created: %s" % e, None
+            return THREAD_NOT_CREATED + str(e), None
         _push_soon()
         return None, tsid
     finally:
+        _threads_starting.discard(tsid)
         _release_name(nm)   # saved (its registration), removed again, or never written — settled either way
 
 
@@ -19253,7 +19321,7 @@ MERGE_BODY_CAP = 48000  # the relay sends the WHOLE exchange (T145, the user 202
 #                           trim marker still says so honestly when it fires
 
 
-def _merge_body(exact, msgs):
+def _merge_body(exact, msgs, src=""):
     """The RELAY handoff (the user 2026-08-23 as 'merge'; renamed + machine-dressed by T145): send a
     side discussion back into the main conversation. Injected-voice rules apply to the PROSE (repo
     CLAUDE.md): the agent reading this has never heard of romp, so it reads as the person it works
@@ -19275,7 +19343,8 @@ def _merge_body(exact, msgs):
     convo = "\n\n".join(lines)
     if len(convo) > MERGE_BODY_CAP:
         convo = "… (earlier discussion trimmed)\n\n" + convo[-MERGE_BODY_CAP:]
-    parts = ["I took a side discussion with another assistant about this passage of your earlier work:"]
+    where = ("this passage of %s" % str(src).strip()) if str(src or "").strip() else "this passage of your earlier work"
+    parts = ["I took a side discussion with another assistant about %s:" % where]
     if quote:
         parts.append("\n".join("> " + ln for ln in quote.splitlines()[:6]))
     parts.append("Here is how it went:")
@@ -19304,7 +19373,7 @@ def _comment_merge(parent_sid, tid):
     def _revert(msg):
         _comment_update(parent_sid, tid, status=prior)
         return msg
-    msgs = _thread_messages(th["sid"], th.get("cutUuid") or "", th.get("createdT") or 0)
+    msgs = _thread_messages(th["sid"], th.get("cutUuid") or "", th.get("createdT") or 0, src=th.get("src") or "")
     # A LATER relay sends only the NEW tail (T145: the thread stays talkable after a relay, and
     # relaying again must not repeat what the session already has). relayedT is EVIDENCE time — the
     # last relayed message's own stamp, never wall clock (the design rule; wall clocks also skew
@@ -19314,7 +19383,7 @@ def _comment_merge(parent_sid, tid):
         msgs = [m for m in msgs if (m.get("t") or 0) > floor]
     if not any((m.get("text") or "").strip() for m in msgs):
         return _revert("nothing new to send back yet." if floor else "this thread has no discussion to send back yet.")
-    body = _merge_body(th.get("exact"), msgs)
+    body = _merge_body(th.get("exact"), msgs, th.get("src") or "")
     be = Sessions.backend_for(parent_sid)
     try:
         delivered = _user_send(be, parent_sid, body)     # the merge is the user's gesture (T315: it retries a stood-down attach)
@@ -20005,8 +20074,12 @@ def _default_backend():
 _SDK_BOOT_PROBLEMS = []
 
 
+_SDK_PROBLEM_SEQ = [0]   # every problem ever recorded: the ring trims to 20, so its length cannot number them
+
+
 def _sdk_problem(text):
-    _SDK_BOOT_PROBLEMS.append({"seq": len(_SDK_BOOT_PROBLEMS) + 1, "t": time.time(), "text": str(text)})
+    _SDK_PROBLEM_SEQ[0] += 1
+    _SDK_BOOT_PROBLEMS.append({"seq": _SDK_PROBLEM_SEQ[0], "t": time.time(), "text": str(text)})
     del _SDK_BOOT_PROBLEMS[:-20]
 
 
@@ -20169,7 +20242,7 @@ def _judge_limit_view():
 def _sdk_problem_count():
     """Total problems recorded so far (boot + backend). The view-cache key: it changes only when
     something actually failed, so a failure lands in the payload on its own event."""
-    n = len(_SDK_BOOT_PROBLEMS)
+    n = _SDK_PROBLEM_SEQ[0]
     be = _sdk_backend if _sdk_backend else None
     if be is not None and hasattr(be, "problem_seq"):
         try:
@@ -21224,36 +21297,55 @@ def _drive(msg, client):
             or _fork_session(sid, str(msg.get("uuid") or ""), str(msg["name"]), client=client)
         if err:
             client["send"](json.dumps({"type": "warn", "text": err}))
-    elif t == "commentCreate" and msg.get("uuid") and msg.get("exact") and msg.get("text"):
+    elif t == "commentCreate" and (msg.get("uuid") or msg.get("src")) and msg.get("exact") and msg.get("text"):
         # Anchor a comment thread on a highlighted passage (the user 2026-08-13). LOUD on refusal; on
         # success a commentCreated ack names the new thread (the popover adopts exactly it — never a
         # guess) and the fresh {type:"comments"} frame rides straight back, ahead of the pusher cycle.
+        # A FILE passage is acked on the DURABLE row, ahead of the fork (the on_row callback): the viewer
+        # has no draft to restore, and minting the session is seconds it would spend holding a dialog
+        # over a saved row (its words stay in memory until the opening send queues them). A chat comment is acked after the fork, so a failure keeps its draft open.
+        cmt_uuid = str(msg.get("uuid") or "")     # a FILE passage has no anchor record, only a src label
+        cmt_src = str(msg.get("src") or "")
+        cmt_cid = str(msg.get("createId") or "")  # echoed on every reply, so the viewer settles the right box
+        acked_tids = []
+        def _acked(tid, with_frame=True):
+            # the FRAME rides ahead of the ack: the ack's handler adopts the new thread from the
+            # client's thread map, so the thread must be in it first (reversed, the popover looked
+            # up a thread it had never heard of and closed itself). The file road's early ack sends
+            # none: its thread has no registry entry yet, so the frame would read it as unreadable.
+            acked_tids.append(tid)
+            try:
+                fr = _comments_frame(sid) if with_frame else None
+                if fr:
+                    client["send"](json.dumps(fr))
+                client["send"](json.dumps({"type": "commentCreated", "id": sid, "tid": tid, "uuid": cmt_uuid,
+                                           "createId": cmt_cid}))
+            except Exception as e:                # a gone socket: the row stands and the fork goes on
+                sys.stderr.write("comment create ack not delivered (%s): %s\n" % (sid[:8], e))
         # A REPEAT of a create this kernel already completed (a client re-post after a lost ack or a
         # parked copy that landed) is the same comment: answer with the same thread, never a twin (T289).
         # The repeat is known by the createId the popover minted at the send gesture, so a second comment
         # in the same words on the same passage, a new id, is a new thread (review, 2026-09-09).
-        key = _create_key(sid, msg["uuid"], msg["exact"], msg["text"], msg.get("createId") or "")
+        key = _create_key(sid, cmt_uuid, msg["exact"], msg["text"], msg.get("createId") or "", cmt_src)
         state, again = _reserve_create(key)
         if state == "repeat":
             sys.stderr.write("comment create repeated (%s): the same comment again, answered with thread %s\n"
                              % (sid[:8], str(again)[:8]))   # a collapse is visible, never silent
-            fr = _comments_frame(sid)
-            if fr:
-                client["send"](json.dumps(fr))
-            client["send"](json.dumps({"type": "commentCreated", "id": sid, "tid": again, "uuid": str(msg["uuid"])}))
+            _acked(again)
             return True
         if state == "busy":
             # the other door holds this create (parked, or mid-create on the pusher): the typed transient
             # nack keeps the popover's mark alive, and the pusher's success acks every chat client
-            client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": str(msg["uuid"]),
-                                       "transient": True, "text": ANCHOR_LAG_ERR}))
+            client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": cmt_uuid,
+                                       "createId": cmt_cid, "transient": True, "text": ANCHOR_LAG_ERR}))
             return True
         try:
-            err, tid = _comment_create(sid, str(msg["uuid"]), str(msg["exact"]), str(msg["text"]),
+            err, tid = _comment_create(sid, cmt_uuid, str(msg["exact"]), str(msg["text"]),
                                        name=str(msg.get("name") or ""),
                                        model=str(msg.get("model") or ""), effort=str(msg.get("effort") or ""),
                                        fast=str(msg.get("fast") or ""),
-                                       color=str(msg.get("color") or ""))
+                                       color=str(msg.get("color") or ""), src=cmt_src,
+                                       on_row=(lambda tid: _acked(tid, with_frame=False)) if cmt_src else None)
             if not err:
                 _note_create(key, tid)
         finally:
@@ -21267,30 +21359,39 @@ def _drive(msg, client):
             if err == ANCHOR_LAG_ERR:
                 with _create_lock:
                     if not any(_parked_key(pk) == key for pk in _parked_creates):
-                        _parked_creates.append({"sid": sid, "uuid": str(msg["uuid"]), "exact": str(msg["exact"]),
+                        _parked_creates.append({"sid": sid, "uuid": cmt_uuid, "exact": str(msg["exact"]),
                                                 "text": str(msg["text"]), "name": str(msg.get("name") or ""),
                                                 "model": str(msg.get("model") or ""),
                                                 "effort": str(msg.get("effort") or ""),
                                                 "fast": str(msg.get("fast") or ""),
                                                 "color": str(msg.get("color") or ""),
+                                                "src": str(msg.get("src") or ""),
                                                 "createId": str(msg.get("createId") or ""), "tries": 0})
             else:
-                client["send"](json.dumps({"type": "warn", "text": err}))
                 # the kernel log carries the refusal too (T289): a name refused at this door showed only
                 # as a toast on the viewer, and the refusing kernel's log held no trace of what the user saw
                 sys.stderr.write("comment create refused (%s, name %r): %s\n" % (sid[:8], str(msg.get("name") or "")[:80], err))
-            client["send"](json.dumps({"type": "commentCreateFailed", "id": sid,
-                                       "uuid": str(msg["uuid"]), "transient": err == ANCHOR_LAG_ERR,
-                                       "text": err}))
-        else:
-            # the FRAME rides ahead of the ack: the ack's handler adopts the new thread from the
-            # client's thread map, so the thread must be in it first (reversed, the popover looked
-            # up a thread it had never heard of and closed itself)
-            fr = _comments_frame(sid)
-            if fr:
-                client["send"](json.dumps(fr))
-            client["send"](json.dumps({"type": "commentCreated", "id": sid, "tid": tid,
-                                       "uuid": str(msg["uuid"])}))
+                # A file passage's failure goes to the dashboard's error center with its words, recorded
+                # before any send (a send can raise): the box that sent it may be closed by now, and the
+                # viewer's hooks go with it. The viewer takes the failure by its createId, so no bare warn
+                # goes out for a file passage (a bare warn fails every box the viewer holds open).
+                if acked_tids:
+                    _sdk_problem(_comment_failed_entry(COMMENT_ROLLED_BACK, cmt_src, sid, err, msg["text"]))
+                elif cmt_src and cmt_cid:
+                    _sdk_problem(_comment_failed_entry(COMMENT_REFUSED, cmt_src, sid, err, msg["text"]))
+                else:
+                    client["send"](json.dumps({"type": "warn", "text": err}))
+            try:
+                fr = _comments_frame(sid) if acked_tids else None   # drops the thread the pusher may have listed
+                if fr:
+                    client["send"](json.dumps(fr))
+                client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": cmt_uuid,
+                                           "createId": cmt_cid, "transient": err == ANCHOR_LAG_ERR,
+                                           "text": err}))
+            except Exception as e:
+                sys.stderr.write("comment create failure not delivered (%s): %s\n" % (sid[:8], e))
+        elif not acked_tids:
+            _acked(tid)
     elif t == "commentReply" and msg.get("tid") and msg.get("text"):
         err = _comment_reply(sid, str(msg["tid"]), str(msg["text"]))
         if err:

@@ -2007,6 +2007,40 @@ body.filebrowse-open { overflow: hidden; }
 .fsm-chipx:hover { color: var(--fg); background: rgba(255, 255, 255, 0.10); }
 @media (prefers-reduced-motion: reduce) { #feed-search input { transition: none; } }
 
+/* Viewer-owned selection menu + comment box. The viewer mounts in the chat pane AND the feed pane, so
+   these ride both sheets; the skin is the shared menu vocabulary (#252526 card, hairline, 6px, shadow).
+   Both mount on document.body, SIBLINGS of the #romp-fileview overlay (z-index 1200) they open over, so
+   they must outrank it: at .ctx-menu's 100-family value they painted UNDERNEATH the viewer and a
+   right-click inside a doc appeared to do nothing at all — the handler had already preventDefault'd the
+   browser's own menu, so nothing replaced it (the user 2026-09-21). Under #romp-lightbox at 1300. */
+.ctx-menu.fileview-ctx { z-index: 1250; }   /* the shared card, lifted over the viewer */
+.fileview-cmt {
+  position: fixed; z-index: 1251; width: 340px; max-width: calc(100vw - 8px); box-sizing: border-box;
+  padding: 10px; display: flex; flex-direction: column; gap: 8px;
+  background: var(--vscode-menu-background, #252526);
+  color: var(--vscode-menu-foreground, var(--fg, #ddd));
+  border: 1px solid var(--box-border, rgba(255,255,255,0.12)); border-radius: 6px;
+  box-shadow: var(--shadow-menu);
+}
+.fileview-cmt-quote {
+  font-size: 0.82em; opacity: 0.7; max-height: 72px; overflow: auto;
+  border-left: 2px solid var(--accent, #9cd2ff); padding-left: 8px; white-space: pre-wrap;
+}
+.fileview-cmt-input {
+  font: inherit; font-size: 0.92em; min-height: 68px; resize: vertical; padding: 6px;
+  color: inherit; background: var(--vscode-input-background, rgba(0,0,0,0.25));
+  border: 1px solid var(--box-border, rgba(255,255,255,0.12)); border-radius: 4px;
+}
+.fileview-cmt-acts { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.fileview-cmt-err { font-size: 0.82em; color: var(--warn, #f0a84a); white-space: pre-wrap; }
+.fileview-cmt-count { flex: 0 0 auto; font-size: 0.82em; color: var(--dim); white-space: nowrap; }
+.fileview-send { border-color: var(--accent, #9cd2ff); color: var(--fg, #ddd); }
+/* The noted passage, marked for the life of this open — a format toggle re-renders the body and the
+   mark goes with it, which the bar's count outlives. No store: the feed pane's note is a thread. */
+.fileview-cmt-mark {
+  background: color-mix(in srgb, var(--accent, #9cd2ff) 16%, transparent); border-bottom: 1px solid var(--accent, #9cd2ff);
+  border-radius: 2px;
+}
 /* NOTICE CARDS (T370, plans/notice-cards.md): the producer label beside the session name; the body in the takeaway's
    typography (.fask-distill's size), the attachment as an inline picture capped to the card, the action buttons in the
    card's own button style (.fdismiss) */
