@@ -1157,3 +1157,87 @@ test("executed: the join menu's new-tag draft is keyed by the open [+], survives
   assert.equal(panel._tagNewDraft, null, "the draft died with the menu");
   assert.equal(panel._tagNewInput, null);
 });
+
+// The lane gear under the master default (the session-flags `*` key): a session whose mail is off only by the
+// master is still listed to peers, so the mailbox row words it apart and a "Hide from peers" row writes the
+// hand-set off in one click (the toggle alone gets there only through an opt-in, which opens the mail). The
+// kernel ships the reason as the lane row's mailOffWhy; the latch holds the hide against a stale push, where
+// postalServiceOff is already true and only the reason moves, and a refusal hands the reason back to the frame.
+test("executed: the gear words a master-held mailbox apart and hides it from peers in one click", () => {
+  const flags: any[] = [];
+  g.__rompTimelineSetFlag = (id: string, flag: string, value: unknown) => flags.push([id, flag, value]);
+  const mail = (why: string, off = true) => [
+    { ...sess(SID1, "web", "#f7768e"), postalServiceOff: off, mailOffWhy: why },
+    { ...sess(SID2, "api", "#7aa2f7"), postalServiceOff: true, mailOffWhy: "isolation" },
+  ];
+  const push = (panel: any, why: string, off = true) => panel.update({ now, sessions: mail(why, off), turns: {}, messages: [], judging: [], views: copy(S0), palette: PALETTE.slice() });
+  const open = (panel: any) => {
+    panel._closeLaneMenu();
+    const anchor = makeNode("g"); anchor._rect = { left: 40, top: 60, right: 60, bottom: 76, width: 20, height: 16 };
+    panel._openLaneMenu(panel.data.sessions.find((x: any) => x.id === SID1), anchor);
+  };
+  const texts = (panel: any) => walk(panel._laneMenu).map((n) => n.textContent as string);
+  const hideRow = (panel: any) => { const n = walk(panel._laneMenu).find((x) => x.textContent === "Hide from peers"); return n && n.parentNode; };
+  const MASTER = "off by the master default: peers still see it listed, it can't send or receive; on opts it in";
+  const NORMAL = "visible to peer sessions, can send and receive their messages; off = hidden from peers, can't send or receive";
+  try {
+    const panel = new TimelinePanel(makeNode("div"));
+    push(panel, "master");
+    open(panel);
+    assert.ok(texts(panel).includes("Postal service — off"));
+    assert.ok(texts(panel).includes(MASTER), "the master's off, worded as listed-but-unreachable");
+    assert.ok(!texts(panel).includes(NORMAL));
+    assert.ok(texts(panel).includes("turns its mail off by hand: peers stop seeing it listed"));
+    const hide = hideRow(panel);
+    assert.ok(hide && hide._listeners.click, "the hide row is offered, and clickable");
+    hide._listeners.click({ stopPropagation() {} });
+    assert.deepEqual(flags, [[SID1, "postalServiceOff", true]], "a hand-set true through the same persistence, no opt-in first");
+    assert.ok(!hideRow(panel), "the menu repainted in place without it");
+    assert.ok(texts(panel).includes(NORMAL) && texts(panel).includes("Postal service — off"), "…as a hand-set off");
+    // a push built before the kernel saw the write still says master: the latch holds the hide
+    push(panel, "master");
+    open(panel);
+    assert.ok(!hideRow(panel), "a stale push does not bring the master's wording back");
+    assert.ok(texts(panel).includes(NORMAL));
+    // the kernel's own answer releases the latch
+    push(panel, "isolation");
+    assert.equal(panel._leftMasterMail.size, 0, "released once the kernel stops reporting the master");
+    // a hand-set off never offers the hide row: it is hidden already
+    open(panel);
+    assert.ok(!hideRow(panel), "no hide row");
+    // a refused hide: the latch drops on that event and the frame's reason (still the master's) shows again
+    const r = new TimelinePanel(makeNode("div"));
+    push(r, "master");
+    open(r);
+    hideRow(r)._listeners.click({ stopPropagation() {} });
+    r.settingRefused({ type: "settingRefused", gesture: "flag", sid: SID1, flag: "postalServiceOff", value: true, text: "couldn't save that setting" });
+    assert.ok(hideRow(r), "the hide row is back with the refusal");
+    assert.ok(texts(r).includes(MASTER));
+    // the toggle under the master opts in: the row reads on, and neither the master's wording nor the hide stays
+    const o = new TimelinePanel(makeNode("div"));
+    push(o, "master");
+    open(o);
+    const toggle = walk(o._laneMenu).find((x) => x.textContent === "Postal service — off").parentNode.parentNode;
+    toggle._listeners.click({ stopPropagation() {} });
+    assert.deepEqual(flags.slice(-1), [[SID1, "postalServiceOff", false]]);
+    assert.ok(texts(o).includes("Postal service — on") && texts(o).includes(NORMAL));
+    assert.ok(!hideRow(o), "no hide row");
+    // the reason is read off the current frame on every repaint: a push that moved it while the gear was open
+    // (another window's hide) is what the next repaint shows, not the copy the menu opened on
+    const w = new TimelinePanel(makeNode("div"));
+    push(w, "master");
+    open(w);
+    push(w, "isolation");
+    w.settingRefused({ type: "settingRefused", gesture: "flag", sid: SID1, flag: "notify", value: false, text: "x" });
+    assert.ok(!hideRow(w), "the repaint read the frame's reason");
+    assert.ok(texts(w).includes(NORMAL));
+    w._closeLaneMenu();
+    // a kernel that ships no reason: the ordinary wording, no hide row, nothing latched
+    const n = new TimelinePanel(makeNode("div"));
+    n.update({ now, sessions: [{ ...sess(SID1, "web", "#f7768e"), postalServiceOff: true }], turns: {}, messages: [], judging: [], views: copy(S0), palette: PALETTE.slice() });
+    open(n);
+    assert.ok(texts(n).includes(NORMAL));
+    assert.ok(!hideRow(n), "no hide row");
+    for (const p of [panel, r, o, n]) p._closeLaneMenu();
+  } finally { delete g.__rompTimelineSetFlag; }
+});

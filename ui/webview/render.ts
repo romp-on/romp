@@ -6185,12 +6185,13 @@ function showTabTip(tab: HTMLElement, s: Session): void {
   // The value is a GLANCE (the user 2026-09-16): an accent check mark when mail is on, the bare word off or held when it is
   // not, and no explanation inline. The reasons live where a hover works, the Sessions pane's mail mark title (mail off /
   // mail held with the four reasons); this rich tip is pointer-inert by tip.ts's contract, so a value tip here
-  // could never show (round two of PR 1803). The two HELD states, a session that needs repair, get one dim sub-line
-  // under the row; off gets none.
+  // could never show (round two of PR 1803). The two HELD states, a session that needs repair, and a session the
+  // master default isolates get one dim sub-line under the row; a hand-toggled off gets none.
   rows.push(["Mail", !s.postalServiceOff ? "\u2713" : (s.mailOffWhy === "unreadable" || s.mailOffWhy === "flags") ? "held" : "off",
              !s.postalServiceOff ? "var(--accent)" : undefined]);   // the shared names (T288); a session still running on the retired terminal backend (until stage 3) reads its id, never blank (review find)
-  if (s.postalServiceOff && (s.mailOffWhy === "unreadable" || s.mailOffWhy === "flags")) {
+  if (s.postalServiceOff && (s.mailOffWhy === "unreadable" || s.mailOffWhy === "flags" || s.mailOffWhy === "master")) {
     rows.push(["", s.mailOffWhy === "unreadable" ? "its record cannot be read; mail waits until it is repaired"
+                 : s.mailOffWhy === "master" ? "by the master default; its mailbox toggle opts it back in"
                  : "its settings file cannot be read; mail waits until it is written again", "var(--dim)"]);
   }
   // Billing: whether this tab bills the API key or the Claude login — and WHICH login account (the
@@ -11084,10 +11085,11 @@ function renderCommentPopover(): void {
     if (th && th.mailOff && (th.heldMail || 0) > 0) {
       // T356: a thread's mail is off until it is broken out, but the comment box does not SAY so (the user
       // 2026-09-11, 3:05 PM PT: not here; the tab hover's Mail row and the Sessions pane tag carry the state quietly).
-      // Only a message actually held in its box is worth a line: the count, and that it lands at the break-out.
+      // Only a message actually held in its box is worth a line: the count, and when it lands. Not at the break-out
+      // itself: under an isolating master default the broken-out session's mail stays off, and so does the held mail.
       const held = th.heldMail || 0;
       const mail = el("div", "cmt-note cmt-mail");
-      mail.textContent = held + (held === 1 ? " message waits in its box and lands" : " messages wait in its box and land") + " at the break-out.";
+      mail.textContent = held + (held === 1 ? " message waits in its box and lands" : " messages wait in its box and land") + " once it is broken out and its mail is on.";
       pop.appendChild(mail);
     }
     if (th && th.status === "open") {
@@ -11165,6 +11167,7 @@ function renderCommentPopover(): void {
       ? "Its mail is on now: peers can reach it and it can send." + (held ? " " + held + (held === 1 ? " held message lands" : " held messages land") + " in a moment." : "")
       : th.mailOffWhy === "unreadable" ? "Its mail is held: this session's record cannot be read, and mail flows again once the record is repaired."
       : th.mailOffWhy === "flags" ? "Its mail is held: the session settings file cannot be read, and mail flows again once it is written."
+      : th.mailOffWhy === "master" ? "Its mail is off by the master default: the lane's mailbox toggle opts it back in."
       : "Its mailbox is off: the lane's mailbox toggle turns peer mail back on.";   // the reason rides the frame: a remedy that fits (T356)
     pop.appendChild(mailOn);
     const row = el("div", "cmt-actions");

@@ -200,3 +200,39 @@ test("a raw delta frame reaching the pane is loud, asks for the whole slot, and 
   err.mock.restore();
   mock.timers.reset();
 });
+
+// The master note (the session-flags `*` key isolating every session with no key of its own) counts the rows
+// this render SHOWS, not every session in the payload, and marks each row it counts; a hand-toggled off keeps
+// its own chip. Same harness, after the clock tests: the mock timers are reset, so ages read the real clock.
+test("the master note counts only the shown rows, marks them in both views, and goes with the last of them", () => {
+  const MA = "11111111-2222-3333-4444-5555555555a1", MB = "11111111-2222-3333-4444-5555555555b2", MC = "11111111-2222-3333-4444-5555555555c3";
+  const top = (id: string, done: boolean) => ({ id, text: "Tidy the notes-api " + id, depth: 0, done, blocked: false, t: K0 - 10, current: !done });
+  const row = (sid: string, name: string, why: string, done: boolean) => ({ sid, name, color: null, status: { state: "idle" },
+    postalServiceOff: !!why, mailOffWhy: why, ledger: { current: { t: K0 - 10 }, tree: [top("g-" + name, done)] } });
+  const push = (aWhy: string) => win.dispatchEvent(new MessageEvent("message", { data: { type: "feed", now: K0, buildId: 2, asks: [],
+    ledgers: [row(MA, "web", aWhy, false), row(MB, "api", "master", true), row(MC, "tests", "isolation", false)] } }));
+  const note = () => list.byClass("fl-master-mail").map((n) => n.textContent);
+  store.set("romp:fleetShowDone", "0");      // api's only top is done: its row is not shown
+  store.delete("romp:fleetGroupBySession");
+  push("master");
+  assert.deepEqual(note(), ["* Mail off by the master default for 1 session"], "api is master-held too, but not shown");
+  const marks = list.byClass("fl-mail-master");
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0].textContent, "*");
+  assert.equal(marks[0].title, "mail off by the master default: listed for peers, but not reachable");
+  assert.ok(marks[0].parentNode?.byClass("fl-name")[0]?.textContent === "web", "on web's own row");
+  assert.deepEqual(list.byClass("fl-mail-off").map((c) => c.textContent), ["mail off"], "the hand-toggled session keeps its chip");
+  assert.equal(list.byClass("fl-mail-off")[0].parentNode, list.byClass("fl-session")[1].byClass("fl-head")[0], "…on tests' row, not web's");
+  store.set("romp:fleetShowDone", "1");      // api's row shows now
+  push("master");
+  assert.deepEqual(note(), ["* Mail off by the master default for 2 sessions"]);
+  store.set("romp:fleetGroupBySession", "0");   // the flat view marks the session label on each counted row
+  push("master");
+  assert.equal(list.byClass("fl-mail-master").length, 2);
+  assert.ok(list.byClass("fl-mail-master").every((m) => m.parentNode?.classList.contains("fl-sesslabel")));
+  store.delete("romp:fleetGroupBySession");
+  store.set("romp:fleetShowDone", "0");
+  push("");                                   // web opted in: no shown row is master-held
+  assert.deepEqual(note(), [], "no note without a shown master-held row");
+  assert.equal(list.byClass("fl-mail-master").length, 0);
+});

@@ -1099,20 +1099,28 @@ function offsetRect(rect, frames) {
   for (const fr of frames || []) { left += fr.left; top += fr.top; bottom += fr.top; }
   return { left, top, bottom };
 }
+// The kernel's mailOffWhy for a session whose mail is off only by the master default (the `*` key): unlike a
+// hand-set off it is still listed to peers, so the gear words it apart and offers the hand-set off directly.
+const MAIL_WHY_MASTER = 'master';
 // The gear menu's rows, one per per-session flag. `enabled` reads the toggle's MEANING off the session
 // (hideFromFeed/postalServiceOff are off-flags; notify is an on-flag), `value` maps a desired
-// enabled-state back to the flag value _setSessionFlag persists.
+// enabled-state back to the flag value _setSessionFlag persists. `descMaster` replaces `desc` while the
+// master default is what holds the mail off.
 const LANE_TOGGLES = [
   { flag: 'hideFromFeed', label: 'Feed cards', icon: feedCheckIcon,
     enabled: (s) => !s.hideFromFeed, value: (enable) => !enable,
     desc: 'its prompts make cards on the feed; off, the lane stays here but new prompts mint none' },
   { flag: 'postalServiceOff', label: 'Postal service', icon: mailboxIcon,
     enabled: (s) => !s.postalServiceOff, value: (enable) => !enable,
-    desc: 'visible to peer sessions, can send and receive their messages; off = fully isolated' },
+    desc: "visible to peer sessions, can send and receive their messages; off = hidden from peers, can't send or receive",
+    descMaster: "off by the master default: peers still see it listed, it can't send or receive; on opts it in" },
   { flag: 'notify', label: 'Notifications', icon: bellIcon,
     enabled: (s) => !!s.notify, value: (enable) => enable,
     desc: 'system notification when its work blocks on you or completes' },
 ];
+// The gear's extra row under the mailbox while the master holds a session's mail off: the hand-set off in one
+// click. The toggle alone gets there only through an opt-in, which opens the mail and delivers what is held.
+const LANE_HIDE_FROM_PEERS = { label: 'Hide from peers', desc: 'turns its mail off by hand: peers stop seeing it listed' };
 // Model + effort choices come from the kernel's /models — the ONE list shared with the chat statusline picker
 // and the judge-tier settings (the user 2026-07-02: no hardcoded model list per surface). Populated in place
 // on load so _openMetaMenu keeps its reference; the lane picker appends its own 'Default' sentinel (not a model).
@@ -3701,6 +3709,7 @@ class TimelinePanel {
     if (m && m.gesture === 'flag' && sid && flag) {
       const pend = this._pendingFlags[sid];
       if (pend) { delete pend[flag]; if (!Object.keys(pend).length) delete this._pendingFlags[sid]; }
+      if (flag === 'postalServiceOff' && this._leftMasterMail) this._leftMasterMail.delete(sid);   // the frame's reason stands again
       if (typeof m.value === 'boolean') {
         // both copies a click may have written: the current frame's session, and the one the open gear built from
         const targets = [((this.data && this.data.sessions) || []).find((x) => x.id === sid),
@@ -5502,8 +5511,28 @@ class TimelinePanel {
     menu._sid = s.id;
     menu._session = s;             // the copy build() reads; a refusal restores it alongside the frame's
     menu.addEventListener('click', (e) => e.stopPropagation());   // inside clicks must not reach the doc closer
+    // one flag write, from a toggle row or the mailbox's hide row
+    const flip = (t, next) => {
+      if (this._laneRefusal && this._laneRefusal.sid === s.id && this._laneRefusal.flag === t.flag) this._laneRefusal = null;   // a retry retires the last refusal
+      if (t.flag === 'postalServiceOff') this._leaveMasterMail(s);   // either mailbox write replaces the master's off
+      s[t.flag] = next;                          // optimistic …
+      (this._pendingFlags[s.id] = this._pendingFlags[s.id] || {})[t.flag] = next;   // … sticky until the kernel confirms
+      this._setSessionFlag(s, t.flag, next);
+      this._reconcilePendingFlags();
+      this.draw();
+      build();                                   // repaint states in place; the panel stays open
+    };
+    const hoverWash = (row) => {
+      row.addEventListener('mouseenter', () => { row.style.background = HOVER_BG; });
+      row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+    };
     const build = () => {
       menu.textContent = '';
+      // the mail reason is the kernel's alone, never optimistic: read it off the current frame, which a push may
+      // have moved since the menu opened on its copy
+      const live = ((this.data && this.data.sessions) || []).find((x) => x.id === s.id);
+      if (live) s.mailOffWhy = live.mailOffWhy;
+      const byMaster = this._mailOffByMaster(s);
       for (const t of LANE_TOGGLES) {
         const on = t.enabled(s);
         const row = menu.createDiv();
@@ -5516,21 +5545,24 @@ class TimelinePanel {
         body.setAttribute('style', 'display:flex;flex-direction:column;line-height:1.25;min-width:0;');
         const lab = body.createDiv({ text: t.label + ' — ' + (on ? 'on' : 'off') });
         lab.setAttribute('style', on ? '' : 'opacity:0.75;');
-        const sub = body.createDiv({ text: t.desc });
+        const sub = body.createDiv({ text: (byMaster && t.descMaster) || t.desc });
         sub.setAttribute('style', 'opacity:0.6;font-size:0.82em;');
-        row.addEventListener('mouseenter', () => { row.style.background = HOVER_BG; });
-        row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+        hoverWash(row);
         row.addEventListener('click', (e) => {
           e.stopPropagation();
           const next = t.value(!on);                 // the flag value that flips this toggle
-          if (this._laneRefusal && this._laneRefusal.sid === s.id && this._laneRefusal.flag === t.flag) this._laneRefusal = null;   // a retry retires the last refusal
-          s[t.flag] = next;                          // optimistic …
-          (this._pendingFlags[s.id] = this._pendingFlags[s.id] || {})[t.flag] = next;   // … sticky until the kernel confirms
-          this._setSessionFlag(s, t.flag, next);
-          this._reconcilePendingFlags();
-          this.draw();
-          build();                                   // repaint states in place; the panel stays open
+          flip(t, next);
         });
+        if (t.flag === 'postalServiceOff' && byMaster) {
+          // indented under the mailbox row's text (padding + icon + gap), the same row dress
+          const hide = menu.createDiv();
+          hide.setAttribute('style', 'display:flex;flex-direction:column;line-height:1.25;padding:2px 10px 4px 33px;border-radius:4px;cursor:pointer;');
+          hide.createDiv({ text: LANE_HIDE_FROM_PEERS.label });
+          const hsub = hide.createDiv({ text: LANE_HIDE_FROM_PEERS.desc });
+          hsub.setAttribute('style', 'opacity:0.6;font-size:0.82em;');
+          hoverWash(hide);
+          hide.addEventListener('click', (e) => { e.stopPropagation(); flip(t, true); });   // a hand-set true: hidden from peers
+        }
       }
       // the kernel's refusal of this lane's last toggle (settingRefused): the same dismissible row the
       // views dialog wears for a refused tag edit, here because the gear is where the click was made
@@ -5609,6 +5641,20 @@ class TimelinePanel {
       }
       if (!Object.keys(p).length) delete pend[s.id];
     }
+    // a mailbox write that left the master's off is held until the kernel stops reporting the master
+    const left = this._leftMasterMail;
+    if (left && left.size) for (const s of (this.data && this.data.sessions) || []) if (s.mailOffWhy !== MAIL_WHY_MASTER) left.delete(s.id);
+  }
+
+  // Whether the master default alone holds this session's mail off (the kernel's mailOffWhy), and no mailbox
+  // write since has replaced it. A hide keeps postalServiceOff true, so the flag's own latch cannot hold this.
+  _mailOffByMaster(s) {
+    return !!s.postalServiceOff && s.mailOffWhy === MAIL_WHY_MASTER && !(this._leftMasterMail && this._leftMasterMail.has(s.id));
+  }
+
+  _leaveMasterMail(s) {
+    if (s.mailOffWhy !== MAIL_WHY_MASTER) return;
+    (this._leftMasterMail = this._leftMasterMail || new Set()).add(s.id);
   }
 
   // Clear (dead-lane dismiss) needs the SAME stickiness as the eye toggle, and for the same reason: the

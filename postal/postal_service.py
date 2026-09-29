@@ -87,6 +87,9 @@ NAMES_DIR = Path(os.environ.get("ROMP_STATE_DIR")
                  or Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp") / "names"
 TLDIR = STATE.parent / "timeline"     # append-only logs for the timeline view (messages.jsonl)
 SESSION_FLAGS = STATE.parent / "session-flags.json"   # the kernel's per-session view flags {sid:{flag:true}}; we honour postalServiceOff (legacy: postalOff)
+# The reserved key in that file carrying MASTER defaults per-session entries override — a uuid can never
+# collide with it. Must stay identical to kernel.POSTAL_ALL_KEY: both files read the one store.
+POSTAL_ALL_KEY = "*"
 CODEX_REGISTRY = STATE.parent / "codex" / "registry.json"   # the kernel's Codex backend's store: rows keyed by the stable sid, each carrying the native thread id ("tid"); read by _codex_self_id only
 
 
@@ -1129,15 +1132,44 @@ def _from_disp(m):
     nm = str(m.get("from") or "").strip()
     return nm if nm and nm.lower() != "unknown" and nm != "?" else "an unidentified session"
 
-def format_agents(agents, me, me_id=""):
-    if not agents:
-        return "(no live romp sessions)"
-    lines = []
+NO_AGENTS_LISTED = "(no other romp sessions listed; a session whose own mailbox is off is not listed)"
+OWN_MAIL_OFF_LISTED = "(your own mail is off, so peers do not see you here, and you can neither send nor receive)"
+WORKING_UNSEEN = ("Saved, but your own mail is off, so no peer sees it: working on '%s'. It shows "
+                  "once your mail is back on.")
+WORKING_UNSEEN_FLAGS = ("Saved, but the session settings file cannot be read, so mail is held for every session and "
+                        "no peer sees it: working on '%s'. It shows once the file reads again.")
+WORKING_NOT_SAVED = ("Your 'working on' note was not saved: the romp kernel, which keeps it, did not take it (it may "
+                     "be restarting). Retry shortly.")
+MASTER_OFF_TAG = "  (mail off by the master default: not reachable)"   # a listed row the master isolates
+
+
+def working_reply(text, own_why):
+    """set_working's answer for a note `text` that was saved, by the caller's own mail-off reason: published, or saved
+    where no peer sees it and why."""
+    if own_why == "flags":
+        return WORKING_UNSEEN_FLAGS % text
+    if not _listed(own_why):
+        return WORKING_UNSEEN % text
+    return "Published — others see: working on '%s'." % text
+
+
+def _listed(why):
+    """Whether a session with mail-off reason `why` appears in list_agents: mail on, or off only by the master
+    (listed, marked not reachable, so its branch and working note still show before a shared repo is edited)."""
+    return why in ("", "master")
+
+
+def format_agents(agents, me, me_id="", own_why=""):
+    """list_agents' text: one line per row, a line first when the caller's own mail is off and so it is not listed
+    (`own_why`, its reason), and a note when no row but its own is listed."""
+    lines = [OWN_MAIL_OFF_LISTED] if not _listed(own_why) else []
+    peers = 0
     for a in agents:
         # '(you)' is an IDENTITY claim, so match on the session id when we have one. Matching on
         # the name alone marks every same-named session as you, which is precisely the case where
         # the reader most needs to know which row is theirs (see resolve_recipient).
         mine = (a.get("id") == me_id) if me_id else (a["name"] == me)
+        peers += not mine
         tag = " (you)" if mine else (" [remote]" if a.get("remote") else "")
         if a.get("thread") and not mine:
             # a comment thread of one of these sessions: addressable for replies, but a minor player —
@@ -1165,7 +1197,10 @@ def format_agents(agents, me, me_id=""):
             st = a.get("state", "")
             stale = "  (idle now — claim may be stale)" if st and st != "working" else ""
             wk = "  — %s%s" % (a["working"], stale)
-        lines.append("  %s%s%s%s%s" % (disp, tag, sid_tag, br, wk))
+        off = MASTER_OFF_TAG if a.get("mailOff") == "master" else ""
+        lines.append("  %s%s%s%s%s%s" % (disp, tag, off, sid_tag, br, wk))
+    if not peers:
+        lines.append(NO_AGENTS_LISTED)
     return "\n".join(lines)
 
 def _hhmm_epoch(t):
@@ -1564,6 +1599,8 @@ def _mail_off_why(sid):
                     told it was a comment thread, a wrong diagnosis the norms then make final).
       "isolation" — the user toggled POSTAL ISOLATION on (the timeline lane's mailbox icon → postalServiceOff;
                     the legacy `postalOff` key still honoured).
+      "master"    — the session has no key of its own and the master under POSTAL_ALL_KEY isolates (never for a
+                    script's ext: sender). Closed like isolation, but list_agents still shows it, marked not reachable.
       "flags":    the kernel's session-flags file, which carries the isolation boundaries, cannot be read (a read or
                     parse fault, or bytes the kernel quarantined beside a now-missing file) and no flags are known:
                     closed for every session until the file is written again (mail held; the UI names the settings file).
@@ -1586,9 +1623,20 @@ def _mail_off_why(sid):
         return "thread"
     if not known:
         return "flags"                                   # the flags cannot be read and none are known: closed, never open
-    return "isolation" if (isinstance(f, dict) and (f.get("postalServiceOff") or f.get("postalOff"))) else ""
+    # Most-specific-wins: the session's own key decides either way, else the MASTER default under
+    # POSTAL_ALL_KEY. The kernel's reader honours the master too, and the two MUST agree — were only the
+    # kernel to, this service would go on advertising peers and taking sends the kernel treats as isolated.
+    if isinstance(f, dict):
+        for key in ("postalServiceOff", "postalOff"):
+            if f.get(key) is not None:                   # a null is absent, as the kernel's _session_flag_raw reads it
+                return "isolation" if f[key] else ""
+    if sid.startswith(SCRIPT_SENDER_PREFIX):
+        return ""                                        # a script's `--from` label has no lane to opt in: the master skips it
+    master = flags.get(POSTAL_ALL_KEY) if isinstance(flags, dict) else None
+    return "master" if (isinstance(master, dict) and master.get("postalServiceOff")) else ""
 
 
+SCRIPT_SENDER_PREFIX = "ext:"   # the id a script's `romp mail send --from <label>` sends under (cli_send)
 _FLAGS_LAST = [None]          # the last session-flags dict read cleanly (a missing file reads {}); None: none yet
 _FLAGS_FAULT_SAID = [False]   # the flags file's read fault said once per fault spell (re-armed by a clean read)
 
@@ -1626,14 +1674,30 @@ def _session_flags_read():
     return d, True
 
 def _postal_off(sid):
-    """True if the session can neither send nor receive mail (see _mail_off_why): it's invisible to list_agents,
-    can't send, and can't receive."""
+    """True if the session can neither send nor receive mail (see _mail_off_why): it can't send or receive, and
+    list_agents leaves it out unless only the master isolates it (_listed)."""
     return bool(_mail_off_why(sid))
 
 ISOLATION_SENDER = ("isolation: YOUR OWN mailbox is OFF. This session is in postal isolation (its mailbox icon is toggled off "
                     "on its timeline lane), so it can't send OR receive any mail. This is NOT the recipient's mailbox — the "
                     "recipient is fine; nothing was sent. To fix, ask the USER to toggle THIS session's mailbox back on in "
                     "the timeline, then retry. When you relay this, say it's YOUR mailbox that's off, not theirs.")
+
+MASTER_SENDER = ("isolation: YOUR OWN mail is off by the master default (the `*` key in the kernel's session-flags.json), "
+                 "not by a toggle of this session, so it can't send OR receive mail. The recipient is fine; nothing was "
+                 "sent. To fix, ask the USER to toggle THIS session's mailbox on in its timeline lane (that opts it in) or "
+                 "to clear the master, then retry.")
+
+MASTER_SENDER_TUNNELED = ("isolation: YOUR OWN mail is off by the master default of the machine this bus runs on (the `*` "
+                          "key in its kernel's session-flags.json). This session reaches that bus over a tunnel and has no "
+                          "lane there to toggle, so it can't send OR receive mail until it has a key of its own in that "
+                          "file. The recipient is fine; nothing was sent. To fix, ask the USER to opt this session in on "
+                          "that machine with the kernel's `POST /flag` (this session's id, `postalServiceOff` false), "
+                          "then retry.")
+
+MASTER_SENDER_UNCONFIRMED = ("can't tell whether YOUR OWN mail is on right now: the master default isolates every session "
+                             "with no key of its own, and the romp kernel, which says which session this id belongs to, "
+                             "didn't answer (likely mid-restart). Nothing was sent, and this is NOT final: retry shortly.")
 
 UNREADABLE_REG_SENDER = ("isolation: YOUR OWN mail is held because this session's record (its entry under the kernel's sdk/ "
                          "directory) cannot be read, so the bus cannot tell what kind of session this is. Mail to and from it is "
@@ -1646,6 +1710,61 @@ THREAD_MAIL_OFF_SENDER = ("isolation: YOUR OWN mail is OFF because this session 
                           "another session's mailbox, not a file drop). Answer in the thread, and leave mail to the "
                           "session the thread belongs to. When you relay this, say the thread's mail is off until it "
                           "is broken out.")
+
+RECIPIENT_UNREADABLE = ("isolation: the RECIPIENT '%s' has a session record the bus cannot read; mail to it is held "
+                        "until the record is repaired. YOUR mailbox is fine; nothing was sent, and this is final.")
+RECIPIENT_THREAD = ("isolation: the RECIPIENT '%s' is a COMMENT THREAD, and a thread's mail is OFF, both "
+                    "directions, until the user breaks it out into a session of its own. YOUR mailbox is "
+                    "fine; nothing was sent, and this is final. Mail the session the thread belongs to "
+                    "instead, or wait for the user to break the thread out.")
+RECIPIENT_MASTER = ("isolation: the RECIPIENT '%s' has its mail off by the master default (the `*` key in the "
+                    "session flags), so it can't receive mail right now. YOUR mailbox is fine; nothing was sent, "
+                    "and this is final. It becomes reachable once the user opts it in with its lane's mailbox "
+                    "toggle or clears the master.")
+RECIPIENT_MASTER_TUNNELED = ("isolation: the RECIPIENT '%s' has its mail off by this machine's master default (the `*` "
+                             "key in the kernel's session-flags.json). It reaches this bus over a tunnel and has no lane "
+                             "on this machine, so it becomes reachable once the user opts it in here with the kernel's "
+                             "`POST /flag` (its id, `postalServiceOff` false). YOUR mailbox is fine; nothing was sent, "
+                             "and this is final.")
+RECIPIENT_MIXED = ("isolation: every session answering to '%s' has its mail off, some by their own mailbox toggle and "
+                   "the rest by the master default, so none can receive mail right now. YOUR mailbox is fine; nothing "
+                   "was sent, and this is final. One becomes reachable once the user turns its mailbox on in its lane.")
+RECIPIENT_ISOLATION = ("isolation: the RECIPIENT '%s' has its mailbox OFF (it's in "
+                       "postal isolation — its mailbox icon is toggled off), so it can't receive "
+                       "mail right now. YOUR mailbox is fine; nothing was sent. It'll "
+                       "be reachable once the user toggles ITS mailbox back on.")
+
+
+def _all_off_refusal(to, whys, tunneled):
+    """The recipient refusal when every session answering to `to` has its mail off, `whys` their reasons; `tunneled`
+    when one of them reaches this bus over a tunnel and so has no lane here."""
+    if "unreadable" in whys:
+        return RECIPIENT_UNREADABLE % to
+    if "thread" in whys:
+        # a comment thread's mail is off until the user breaks it out (T356): say what it is, so the sender
+        # reaches the session the thread belongs to instead of waiting on a mailbox toggle nobody offers
+        return RECIPIENT_THREAD % to
+    if whys == {"master"}:
+        return (RECIPIENT_MASTER_TUNNELED if tunneled else RECIPIENT_MASTER) % to
+    if "master" in whys:
+        return RECIPIENT_MIXED % to
+    return RECIPIENT_ISOLATION % to
+
+
+def _sender_refusal(frm_id):
+    """(status, error) refusing a send from `frm_id` because its own mail is off, or None when it may send. The
+    master's refusal is final only once the kernel has answered for the id: an unanswered listing is a retry."""
+    why = _mail_off_why(frm_id)
+    if not why:
+        return None
+    if why == "master":
+        rows, answered = local_agents_checked(threads=True)
+        if not answered:
+            return 503, MASTER_SENDER_UNCONFIRMED
+        if frm_id in HEARTBEATS and not any(a.get("id") == frm_id for a in rows):
+            return 403, MASTER_SENDER_TUNNELED
+        return 403, MASTER_SENDER
+    return 403, {"thread": THREAD_MAIL_OFF_SENDER, "unreadable": UNREADABLE_REG_SENDER}.get(why, ISOLATION_SENDER)
 
 def _git_branch(d):
     """Current git branch of a dir (for the agent list — same-branch is what makes
@@ -1789,49 +1908,52 @@ def resolve_recipient(to, frm_id=""):
                          "that happens to share your name, address it as host:name." % bare}
 
     direct = [a for a in direct_all if not _postal_off(a["id"])]
+    # every candidate list_agents shows, a master-isolated one included: a sender who sees two rows under a name must
+    # be refused, never quietly handed the reachable one when it meant the other
+    shown = [a for a in direct_all if _listed(_mail_off_why(a["id"]))]
     peer_cands = []
     if peers_on():
         ph, hit = peer_route(to)
         peer_cands = [(ph, hit)] if ph else list(hit)
+    # a far row carries its home bus's reason (_presence_row): listed and reachable split there as they do here
+    peer_shown = [(h, a) for h, a in peer_cands if _listed(a.get("mailOff") or "")]
+    peer_reach = [(h, a) for h, a in peer_cands if not a.get("mailOff")]
+    reachable = [a["id"] for a in direct] + [a.get("id") or "%s:%s" % (h, a.get("name") or bare) for h, a in peer_reach]
+    listed_n = len(shown) + len(peer_shown)
 
-    if len(direct) + len(peer_cands) > 1:
+    if listed_n > 1 and reachable:
         labels = []
-        for a in direct:
+        for a in shown:
             # Two live sessions HERE share the name: no address can separate them, so show the id
             # rather than print the same candidate twice and call it a choice.
-            labels.append("%s:%s%s" % (here, a["name"],
-                                       (" [%s]" % a["id"][:8]) if len(direct) > 1 else ""))
-        labels += ["%s:%s" % (h, a.get("name") or bare) for h, a in peer_cands]
-        hint = ("Address it as host:name to say which one you mean." if len(direct) <= 1 else
-                "Two sessions on this host answer to that name, so no address distinguishes them. "
-                "Ask the user which they meant, or have one renamed.")
+            labels.append("%s:%s%s%s" % (here, a["name"],
+                                         (" [%s]" % a["id"][:8]) if len(shown) > 1 else "",
+                                         "" if a in direct else " (not reachable)"))
+        labels += ["%s:%s%s" % (h, a.get("name") or bare, " (not reachable)" if a.get("mailOff") else "")
+                   for h, a in peer_shown]
+        if len(reachable) == 1:
+            # the one that can take mail has an address of its own; the sender says whether it is the one meant
+            hint = ("Only one of them can take mail: if that is the one you mean, address it as %s." % reachable[0])
+        elif len(shown) <= 1:
+            hint = "Address it as host:name to say which one you mean."
+        else:
+            hint = ("Two sessions on this host answer to that name, so no address distinguishes them. "
+                    "Ask the user which they meant, or have one renamed.")
         return {"kind": "error", "status": 409,
                 "error": "'%s' is ambiguous: %d live sessions answer to it (%s). Nothing was sent. %s"
-                         % (bare, len(direct) + len(peer_cands), ", ".join(sorted(labels)), hint)}
+                         % (bare, listed_n, ", ".join(sorted(labels)), hint)}
 
     if direct:
         return {"kind": "direct", "agent": direct[0]}
-    if peer_cands:
+    if peer_reach:
+        return {"kind": "relay", "host": peer_reach[0][0], "agent": peer_reach[0][1]}
+    if len(peer_cands) == 1 and not direct_all:
+        # a lone far candidate its home bus marks off: relayed, so that bus answers in its own words
         return {"kind": "relay", "host": peer_cands[0][0], "agent": peer_cands[0][1]}
-    if direct_all:                        # live, but every candidate has its mailbox off
-        whys = {a["id"]: _mail_off_why(a["id"]) for a in direct_all}
-        if "unreadable" in whys.values():
-            return {"kind": "error", "status": 403,
-                    "error": "isolation: the RECIPIENT '%s' has a session record the bus cannot read; mail to it is held "
-                             "until the record is repaired. YOUR mailbox is fine; nothing was sent, and this is final." % to}
-        if "thread" in whys.values():
-            # a comment thread's mail is off until the user breaks it out (T356): say what it is, so the sender
-            # reaches the session the thread belongs to instead of waiting on a mailbox toggle nobody offers
-            return {"kind": "error", "status": 403,
-                    "error": "isolation: the RECIPIENT '%s' is a COMMENT THREAD, and a thread's mail is OFF, both "
-                             "directions, until the user breaks it out into a session of its own. YOUR mailbox is "
-                             "fine; nothing was sent, and this is final. Mail the session the thread belongs to "
-                             "instead, or wait for the user to break the thread out." % to}
-        return {"kind": "error", "status": 403,
-                "error": "isolation: the RECIPIENT '%s' has its mailbox OFF (it's in "
-                         "postal isolation — its mailbox icon is toggled off), so it can't receive "
-                         "mail right now. YOUR mailbox is fine; nothing was sent. It'll "
-                         "be reachable once the user toggles ITS mailbox back on." % to}
+    if direct_all or peer_cands:          # live, but every candidate has its mail off
+        whys = {_mail_off_why(a["id"]) for a in direct_all} | {a.get("mailOff") for _, a in peer_cands}
+        tunneled = any(a.get("remote") for a in direct_all)
+        return {"kind": "error", "status": 403, "error": _all_off_refusal(to, whys, tunneled)}
     # Addressing is LIVE-only: no dead-session resurrection — but "not live" is a claim about the
     # world, and the kernel is its authoritative source (fail loudly, never degrade silently, the
     # user 2026-07-03). Before making the claim, ask whether the source ANSWERED: a mid-restart
@@ -2341,7 +2463,7 @@ def _stuck_warn_text(recip, box_sid, body):
     """The one-time line a sender gets about a message its LIVE recipient has not read: 'resend' for a stuck session,
     but never for a comment thread whose mail is off (the review's low on this change: the resend invitation was the
     very reroute the thread refusal calls final) — its mail is HELD in the box and lands when the user breaks the
-    thread out; nothing to resend, nothing to do."""
+    thread out; nothing to resend, nothing to do. Isolated mail, own key or master, is held the same way."""
     name = recip.get("name") or box_sid[:8]
     original = " ".join(body.split())[:160]
     why = _mail_off_why(box_sid)
@@ -2352,6 +2474,16 @@ def _stuck_warn_text(recip, box_sid, body):
         return ("↩ HELD — '%s' is a comment thread, and a thread's mail is off until the user breaks it out. Your "
                 "message waits in its box and lands the moment they do. Nothing to resend, and no other door: the "
                 "refusal is final.\nOriginal: %s" % (name, original))
+    if why == "isolation":
+        return ("↩ HELD — '%s' has its mail off. Your message waits in its box and lands when its mail is back on. "
+                "Nothing to resend, and no other door: the refusal is final.\nOriginal: %s" % (name, original))
+    if why == "master":
+        return ("↩ HELD — '%s' has its mail off by the master default. Your message waits in its box and lands once the "
+                "user opts it in with its lane's mailbox toggle. Nothing to resend, and no other door: the refusal is final."
+                "\nOriginal: %s" % (name, original))
+    if why == "flags":
+        return ("↩ HELD — the bus cannot read the session settings file, so mail is held for every session until it "
+                "is written again. Your message to '%s' waits in its box. Nothing to resend.\nOriginal: %s" % (name, original))
     return ("↩ STILL UNDELIVERED — '%s' is live but hasn't read your message after %d min; it may "
             "be stuck. Check on it or resend.\nOriginal: %s" % (name, max(1, STUCK_GRACE // 60), original))
 
@@ -2365,6 +2497,12 @@ def _isolated_bounce_why(named, to):
     if "thread" in whys:
         return ("recipient '%s' is a COMMENT THREAD, and a thread's mail is off, both directions, until the user "
                 "breaks it out into a session of its own; mail the session the thread belongs to instead" % to)
+    if whys == {"master"}:
+        return ("recipient '%s' has its mail off by the master default (postal isolation); it becomes reachable once "
+                "the user opts it in with its lane's mailbox toggle on that machine" % to)
+    if "master" in whys:
+        return ("every session answering to '%s' has its mail off, by its own mailbox toggle or the master default "
+                "(postal isolation); one becomes reachable once the user turns its mailbox on in its lane" % to)
     return "recipient '%s' has its mailbox off (postal isolation)" % to
 
 def _hhmm(iso):
@@ -2793,9 +2931,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(peers_snapshot())
         if u.path == "/agents":
             me = (q.get("me") or [""])[0]
-            agents = [a for a in all_agents(threads=True) if not _postal_off(a["id"])]   # isolated sessions are invisible to peers
-            for a in agents:                       # enrich with branch for display only
-                a["branch"] = _git_branch(a.get("dir", ""))
+            agents = []
+            for a in all_agents(threads=True):     # isolated sessions are invisible to peers; the master's are marked
+                why = _mail_off_why(a["id"])
+                if not _listed(why):
+                    continue
+                if why:
+                    a["mailOff"] = why
+                a["branch"] = _git_branch(a.get("dir", ""))   # enrich with branch for display only
+                agents.append(a)
             if peers_on():
                 # Peer-bus fleet view (DISPLAY only — all_agents() itself stays local so the delivery
                 # paths can never mistake a peer entry for a local maildir): each peer's last-gossiped
@@ -2809,15 +2953,17 @@ class Handler(BaseHTTPRequestHandler):
                 for host, st in PEER_STATE.items():
                     age = int(now - (st.get("seenAt") or 0))
                     for pa in st.get("presence") or []:
-                        if _via_duplicate(pa, direct_bus):
-                            continue
+                        if _via_duplicate(pa, direct_bus) or not _listed(pa.get("mailOff") or ""):
+                            continue               # a far session its home bus hides stays hidden here too
                         sid = pa.get("id") or ""
                         if sid and sid in listed:
                             continue
                         if sid:
                             listed.add(sid)
-                        agents.append({"name": pa.get("name") or "?", "id": sid,
-                                       "remote": True, "peer": host, "seenAgo": age})
+                        row = {"name": pa.get("name") or "?", "id": sid, "remote": True, "peer": host, "seenAgo": age}
+                        if pa.get("mailOff"):
+                            row["mailOff"] = pa["mailOff"]
+                        agents.append(row)
             return self._send({"agents": agents, "me": me})
         if u.path == "/sent":
             sid = (q.get("id") or [""])[0]
@@ -2919,13 +3065,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send({"ok": True, "to": to, "id": prior.get("id"), "duplicate": True})
             #   (the user 2026-08-24): only a delegate can be tracked; wire metadata only — nothing
             #   about the flag ever appears in message prose (the injected-voice rule)
-            why_off = _mail_off_why(frm_id)
-            if why_off == "thread":                # a comment thread's own send: refused until broken out (T356)
-                return self._send({"error": THREAD_MAIL_OFF_SENDER}, 403)
-            if why_off == "unreadable":            # its own words: never the thread diagnosis for a corrupt record
-                return self._send({"error": UNREADABLE_REG_SENDER}, 403)
-            if why_off:                            # the sender is in isolation → sending is disabled
-                return self._send({"error": ISOLATION_SENDER}, 403)
+            refused = _sender_refusal(frm_id)      # the sender's own mail is off: each closed door in its own words
+            if refused:
+                return self._send({"error": refused[1]}, refused[0])
             # ONE resolution step for every case (self, ambiguous, isolated, relayed, unknown) —
             # see resolve_recipient. A name that answers to more than one live session is refused
             # here, not tiebroken.
@@ -4463,6 +4605,13 @@ def _local_presence():
     return rows                                     # never answered ANYWHERE yet → claim nothing either way
 
 
+def _presence_row(a):
+    """A local row as peers receive it: with its mail-off reason (mailOff) when its mail is off, so a far listing
+    hides or marks it as this machine's does and a far sender can tell which namesake takes mail."""
+    why = _mail_off_why(a.get("id") or "")
+    return dict(a, mailOff=why) if why else a
+
+
 def fleet_presence(exclude_host):
     """Presence for an exchange payload: local agents + ONE hop of gossip from our other peers, each
     labeled `via` (plans/postal-peer-buses.md 3b) — so a spoke can address the far spoke through the
@@ -4471,7 +4620,7 @@ def fleet_presence(exclude_host):
     (`viaBus`): the receiver folds gossip about a box it ALREADY peers with directly, and the id is
     the identity that survives nickname drift — the same machine wears different ssh aliases on
     different hosts, so a name can't say "same box" (the user 2026-08-12; see _via_duplicate)."""
-    out = list(_local_presence())
+    out = [_presence_row(a) for a in _local_presence()]
     for h, st in PEER_STATE.items():
         if h == exclude_host:
             continue
@@ -5690,7 +5839,7 @@ MCP_TOOLS = [
      "description": "Read and clear any messages other romp sessions have sent you. Messages are also delivered automatically at the end of each turn, so you rarely need to call this.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_agents",
-     "description": "List live romp sessions you can message (yours marked), each with its git branch and working-note. Check before editing shared files to avoid collisions; discount a note flagged '(idle now, claim may be stale)' and never wake an idle peer to ask if it still owns a file.",
+     "description": "List live romp sessions (yours marked), each with its git branch and working-note. A session only the master default isolates is listed but marked not reachable; one whose own mailbox is off is left out. Check before editing shared files to avoid collisions; discount a note flagged '(idle now, claim may be stale)' and never wake an idle peer to ask if it still owns a file.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "set_working",
      "description": "Publish what you're working on (files/surface) so peers steer clear; your branch shows automatically. Empty text clears it (romp also auto-clears once your work is done and the session idles).",
@@ -5792,7 +5941,7 @@ def _mcp_call(name, args):
         return (format_inbox(msgs, mid) or "No new messages."), False
     if name == "list_agents":
         res = _http("GET", "/agents?me=%s" % urllib.parse.quote(me or ""))
-        return format_agents(res.get("agents", []), me, mid), False
+        return format_agents(res.get("agents", []), me, mid, _mail_off_why(mid) if mid else ""), False
     if name == "set_working":
         if not mid:
             return _mcp_no_identity(), True
@@ -5802,9 +5951,11 @@ def _mcp_call(name, args):
             return ("set_working needs its `text` argument — nothing was changed. "
                     "Pass text='' if you mean to clear your published note."), True
         text = args.get("text", "")
-        _publish_working(mid, text)        # the kernel's working-note store (POST /working)
-        return ("Cleared your 'working on' note." if not text.strip()
-                else "Published — others see: working on '%s'." % text), False
+        if not _publish_working(mid, text):    # the kernel's working-note store (POST /working)
+            return WORKING_NOT_SAVED, True
+        if not text.strip():
+            return "Cleared your 'working on' note.", False
+        return working_reply(text, _mail_off_why(mid)), False
     if name == "check_sent":
         if not mid:
             return _mcp_no_identity(), True
@@ -5933,12 +6084,12 @@ def cli_send(argv):
     if not ensure():
         sys.stderr.write("[romp mail] %s\n" % _unreachable_hint()); return 1
     mid, me = _self_identity()
-    own = _mail_off_why(mid) if mid else ""
-    if own:
+    refused = _sender_refusal(mid) if mid else None
+    if refused:
         # the CALLER's own identity is judged before any --from label substitutes a synthetic one, for every closed
         # door (the review: --from was a door around the thread's own-send refusal, the incident's shape; then around
         # a mailbox the user toggled off too)
-        sys.stderr.write("[romp mail] %s\n" % {"thread": THREAD_MAIL_OFF_SENDER, "unreadable": UNREADABLE_REG_SENDER}.get(own, ISOLATION_SENDER))
+        sys.stderr.write("[romp mail] %s\n" % refused[1])
         return 1
     if not mid:
         why = _identity_refusal()
@@ -5954,7 +6105,7 @@ def cli_send(argv):
                              "not this command (inside its sandbox this command is refused by design).\n" % why)
             return 1
     if frm_label:
-        me, mid = frm_label, "ext:" + frm_label
+        me, mid = frm_label, SCRIPT_SENDER_PREFIX + frm_label
     if not mid:
         # the bus refuses anonymous sends; say it here with BOTH actionable halves: a broken
         # session identity is a bug to surface, and a deliberate non-session caller has a door

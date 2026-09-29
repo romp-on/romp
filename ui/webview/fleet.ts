@@ -391,6 +391,7 @@ function renderFleetNode(ctx: SessCtx, n: LedgerNode, depth: number, container: 
     const tnm = el("span", "fl-sesslabel-name"); nameInto(tnm, s.name, s.sid, curSearch);
     if (s.color?.bg) tnm.style.color = s.color.bg;
     tag.appendChild(tnm);
+    const mm = masterMailMark(s); if (mm) tag.appendChild(mm);
     tag.title = "this goal belongs to “" + s.name + "” — click to open it";
     row.appendChild(tag);
   }
@@ -602,6 +603,8 @@ function render() {
   // live gist matches the query (the user 2026-06-29).
   if (sq) for (const [sid, p] of Array.from(provBySid))
     if (!p.name.toLowerCase().includes(sq) && !(p.text || "").toLowerCase().includes(sq)) provBySid.delete(sid);
+  const masterNote = masterMailNote(survivors.map((x) => x.ctx.s));   // the rows this render shows, and only those
+  if (masterNote) list.appendChild(masterNote);
 
   if (grouped) {
     // BY-SESSION view: each session, then its goal tree beneath it (the original layout).
@@ -627,8 +630,8 @@ function render() {
       nameInto(nm, s.name, s.sid, curSearch);   // highlight a name match (remote "host:" stays quiet metadata)
       if (s.color?.bg) nm.style.color = s.color.bg;
       head.appendChild(nm);
-      if (s.postalServiceOff) {
-        // T356: a session whose mail is off says so on its row, quietly
+      if (s.postalServiceOff && s.mailOffWhy !== MAIL_WHY_MASTER) {
+        // T356: a session whose mail is off says so on its row, quietly; the master's sessions share one pane note
         const mo = el("span", "fl-mail-off");
         mo.textContent = (s.mailOffWhy === "unreadable" || s.mailOffWhy === "flags") ? "mail held" : "mail off";
         mo.title = s.mailOffWhy === "unreadable" ? "this session's record cannot be read: mail waits until it is repaired"
@@ -637,6 +640,7 @@ function render() {
           : "this session neither sends nor receives peer mail";
         head.appendChild(mo);
       }
+      const mm = masterMailMark(s); if (mm) head.appendChild(mm);
       head.title = s.provisional ? "Open this session: its transcript has not been loaded since the restart, so its goals are read from the store and their jumps wait for the tab" : "Open this session";
       head.dataset.act = "open"; head.dataset.sid = s.sid;   // click-safe: action lives on the #fleet-list delegate
       head.tabIndex = 0; head.setAttribute("role", "button");   // focusable: Enter opens, the menu key or Shift+F10 opens the row's menu (2026-09-16)
@@ -711,6 +715,32 @@ function render() {
     focusedHead = next;
     next?.focus({ preventScroll: true });
   }
+}
+
+// One note above the list for the sessions the master default isolates, instead of the mail-off chip on every row:
+// under an isolating master most rows would carry the same chip. Each counted row wears a light mark instead, the
+// note leads with the same mark, and the rows a session opted in stand out by lacking it.
+const MAIL_WHY_MASTER = "master";
+export const MASTER_MAIL_MARK = "*";
+export const MASTER_MAIL_TIP = "these sessions' mail is off by the master default (the * key in session-flags.json): peers still see them listed but cannot reach them; a lane's mailbox toggle opts one back in";
+export const MASTER_MAIL_ROW_TIP = "mail off by the master default: listed for peers, but not reachable";
+function mailOffByMaster(s: { postalServiceOff?: boolean; mailOffWhy?: string }): boolean {
+  return !!s.postalServiceOff && s.mailOffWhy === MAIL_WHY_MASTER;
+}
+function masterMailNote(shown: { postalServiceOff?: boolean; mailOffWhy?: string }[]): HTMLElement | null {
+  const n = shown.filter(mailOffByMaster).length;
+  if (!n) return null;
+  const note = el("div", "fl-master-mail");
+  note.textContent = MASTER_MAIL_MARK + " Mail off by the master default for " + n + (n === 1 ? " session" : " sessions");
+  note.title = MASTER_MAIL_TIP;
+  return note;
+}
+function masterMailMark(s: { postalServiceOff?: boolean; mailOffWhy?: string }): HTMLElement | null {
+  if (!mailOffByMaster(s)) return null;
+  const badge = el("span", "fl-mail-master");
+  badge.textContent = MASTER_MAIL_MARK;
+  badge.title = MASTER_MAIL_ROW_TIP;
+  return badge;
 }
 
 // The Fleet controls live in a DOCKED bottom bar — its own dedicated rectangle in normal flow (#fleet-foot),

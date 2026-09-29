@@ -11,7 +11,7 @@ the SDK backend writes the `states/<sid>.jsonl` rows itself.
 |---|---|---|
 | `romp-wake.sh` | turn end / prompt / compaction end | Wakes the kernel — the judges and the parked-op drain — when an event creates new work for them (event-based over time heuristics, by design). |
 | `romp-postal-ensure.sh` | SessionStart | Makes sure the postal bus is running (async, singleton). |
-| `romp-postal-context.sh` | SessionStart | Gives a romp session a compact pointer to the postal skill (not the full skill body). |
+| `romp-postal-context.sh` | SessionStart | Gives a romp session whose mail is on a compact pointer to the postal skill (not the full skill body). |
 | `romp-postal-drain.sh` | Stop | Delivers queued peer mail at turn end, so mail never interleaves with a working turn. |
 | `romp-postal-revive.sh` | SessionStart | On revival with unread mail (a parked handoff), makes the session act on that mail. |
 

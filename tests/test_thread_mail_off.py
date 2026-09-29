@@ -89,7 +89,7 @@ class ThreadMailOff(unittest.TestCase):
         rows = inspect.getsource(km._thread_rows)
         self.assertIn('**_mail_off_fields(tsid)', rows, "the thread rows carry both fields from one derivation")
         whole = Path(os.path.join(BIN, "romp-kernel")).read_text()
-        self.assertEqual(whole.count('"postalServiceOff": _postal_isolated('), 1, "the timeline lane row alone (it carries no reason); the chat, thread and Sessions pane rows read _mail_off_fields")
+        self.assertEqual(whole.count('"postalServiceOff": _postal_isolated('), 0, "every row, the timeline lane's included, reads _mail_off_fields: the gear words the master's off by its reason")
         self.assertNotIn('"postalServiceOff": _session_flag(sid, "postalServiceOff")', whole, "no row reads the raw flag past the effective reader")
 
 
@@ -132,7 +132,7 @@ class UnreadableRecordOnTheKernelSide(unittest.TestCase):
         (Path(self.td) / "session-flags.json").write_text(json.dumps({PARENT: {"postalOff": True}}))
         self.assertEqual(km._mail_off_why_k(PARENT), "isolation", "the legacy key still isolates, under its reason")
         whole = Path(os.path.join(BIN, "romp-kernel")).read_text()
-        self.assertEqual(whole.count('**_mail_off_fields('), 4, "chat rows, thread rows, the ledgers rows and the Outline's provisional row (plans/outline-pane-provisional-row.md) carry both fields from ONE derivation (the review's low: each derived the reason twice)")
+        self.assertEqual(whole.count('**_mail_off_fields('), 5, "chat rows, thread rows, the ledgers rows, the Outline's provisional row (plans/outline-pane-provisional-row.md) and the timeline lane row carry both fields from ONE derivation (the review's low: each derived the reason twice)")
         self.assertEqual(whole.count('"mailOffWhy": _mail_off_why_k('), 0, "…and no row derives it inline any more")
         fields_src = inspect.getsource(km._mail_off_fields)
         self.assertEqual(fields_src.count("_mail_off_why_k("), 1); self.assertIn('{"postalServiceOff": bool(why), "mailOffWhy": why}', fields_src)

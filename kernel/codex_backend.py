@@ -141,7 +141,7 @@ POSTAL_TOOL_SPECS = [
      "description": "Read and clear any messages other romp sessions have sent you. Messages are also delivered automatically at the end of each turn, so you rarely need to call this.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"type": "function", "name": "list_agents",
-     "description": "List live romp sessions you can message (yours marked), each with its git branch and working-note. Check before editing shared files to avoid collisions; discount a note flagged '(idle now, claim may be stale)' and never wake an idle peer to ask if it still owns a file.",
+     "description": "List live romp sessions (yours marked), each with its git branch and working-note. A session only the master default isolates is listed but marked not reachable; one whose own mailbox is off is left out. Check before editing shared files to avoid collisions; discount a note flagged '(idle now, claim may be stale)' and never wake an idle peer to ask if it still owns a file.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"type": "function", "name": "set_working",
      "description": "Publish what you're working on (files/surface) so peers steer clear; your branch shows automatically. Empty text clears it (romp also auto-clears once your work is done and the session idles).",

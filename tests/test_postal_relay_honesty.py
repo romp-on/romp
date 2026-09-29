@@ -523,7 +523,7 @@ class SetWorkingMissingParamRefuses(unittest.TestCase):
         self.saved = (pm._self_identity, pm._publish_working)
         self.calls = []
         pm._self_identity = lambda: (ALPHA, "web")     # the one resolver every tool call reads (2026-09-06)
-        pm._publish_working = lambda mid, text: self.calls.append((mid, text))
+        pm._publish_working = lambda mid, text: self.calls.append((mid, text)) or True   # the kernel took it
         self.addCleanup(lambda: (setattr(pm, "_self_identity", self.saved[0]),
                                  setattr(pm, "_publish_working", self.saved[1])))
 

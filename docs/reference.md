@@ -5515,12 +5515,53 @@ A comment thread's mail is off, both directions, until you break it out: peers
 cannot see or mail the thread, and its own mail is refused with a line saying
 so. The comment box itself says nothing about it (the tab hover's Mail row and
 the Sessions pane show the state), except a count when messages are actually
-held for the thread; they land within seconds of a break-out. The moment you
-break the thread out it is a session like any other, mail on unless you toggle
-its mailbox off. Only peer mail is gated: what you type into the thread's
+held for the thread; they land within seconds of a break-out once the promoted
+session's mail is on. The moment you break the thread out it is a session like
+any other: mail on unless you toggle its mailbox off, or unless the master
+default isolates it, in which case the held mail waits until you opt it in. Only peer mail is gated: what you type into the thread's
 box yourself, and plain text the kernel's own send route carries, is yours and
 still goes through; that is the human channel, by design, not a hole in the
 gate.
+
+## A master default for mail off
+
+`session-flags.json` can carry a master isolation default under the reserved
+key `*`: with `{"*": {"postalServiceOff": true}}` every session's mail is off
+unless the session opts back in. The kernel, the postal bus and the SessionStart
+pointer resolve it the same way: a comment thread's own default first, then the
+session's own mailbox toggle (either value; a `null` counts as unset), then the
+master. Turning a session's mail off always stores `true`, so a later change to
+the master cannot open it; turning it on stores an explicit `false` under an
+isolating master and removes the override otherwise. The master itself is set through the same flag route
+with `*` as the id (`POST /flag` with `{"id": "*", "flag": "postalServiceOff",
+"value": true}`); off removes the key. The reserved id means something only for
+`postalServiceOff`; the notify master is the bell popover or `POST /notify-all`.
+
+A session whose own toggle turns its mail off is left out of `list_agents`,
+working note included. A session only the master isolates is still listed, with
+its branch and working note, marked `(mail off by the master default: not
+reachable)`, so a peer still sees who is working where before editing a shared
+repo; sends to it are refused like any isolated session's. Its mail-off reason is
+`master` rather than `isolation`: every refusal, held-mail line and cross-machine
+bounce names the master and says how the session opts back in, which is its
+lane's mailbox toggle, or `POST /flag` with its id for a session that reaches the
+bus over a tunnel and has no lane on that machine. Presence sent to other
+machines carries each session's mail-off reason, so their listings hide and mark
+the same rows. A caller whose own toggle hides it gets a first line saying its
+mail is off, and a listing with no row but the caller's own ends with a note
+that sessions with their mailbox off are left out. In the
+Sessions pane each such row carries a light `*` mark in place of the "mail off"
+chip, and a note above the list counts the marked rows it shows; the tab hover's
+Mail row names the master. The timeline lane's gear describes the master's off
+for what it is and offers "Hide from peers", which turns the session's mail off
+by hand without opening it on the way. Either way the session's SessionStart
+pointer is withheld.
+The postal MCP tools and their instructions are still served, to Claude and
+Codex sessions alike. A script's `romp mail send --from <label>` run from a
+shell that belongs to no session is not isolated by the master, though a
+recipient the master isolates still refuses it. Run from a session's own shell,
+the send is judged as that session's, so a session the master isolates cannot
+send that way either.
 
 ## The tags a new session inherits
 

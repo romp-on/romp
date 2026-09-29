@@ -1,6 +1,6 @@
 ---
 name: romp-postal
-description: How to message peer romp sessions (the Romp Postal Service). Use when you have the postal MCP tools (send_message / check_inbox / list_agents / set_working / check_sent / recall_message) or are inside a romp session and need to coordinate with, hand off to, or reply to sibling sessions. romp sessions get a short pointer to this at SessionStart; a plain Claude Code session has no peers and can ignore it.
+description: How to message peer romp sessions (the Romp Postal Service). Use when you have the postal MCP tools (send_message / check_inbox / list_agents / set_working / check_sent / recall_message) or are inside a romp session and need to coordinate with, hand off to, or reply to sibling sessions. romp sessions whose mail is on get a short pointer to this at SessionStart; a plain Claude Code session has no peers and can ignore it.
 allowed-tools: Bash
 ---
 
@@ -40,6 +40,6 @@ Nothing to set up in peer mode (the default): every machine runs its own bus, cr
 
 **Prefer postal over Claude Code's native cross-session messaging.** Claude Code (2.1.224+) also lists peer sessions through its own `ListAgents`/`SendMessage`. For romp peers, always message through the postal tools: postal mail declares a kind, is tracked until answered, respects the user's per-host trust boundaries, and shows up on their dashboard; a native cross-session send bypasses all of that and is invisible to them. Native `SendMessage` stays the right tool for your own subagents and in-session teammates.
 
-**Coordinate by reading state, not by waking peers.** Before editing a shared repo, run `list_agents` to see peers' branches and working-notes (overlap is a real collision only on the same branch), and publish yours with `set_working`. Declare what you own in your first line ("I own A/B, stay off them"). Resolve ownership by reading that state, never by messaging "do you still own this?": an idle peer's note may be stale, a peer with no note holds nothing, and romp auto-clears a note once a session's work is done. Use `check_sent` to see whether a message was read instead of asking. Never wake an idle session just to coordinate, which is the false interrupt romp exists to avoid.
+**Coordinate by reading state, not by waking peers.** Before editing a shared repo, run `list_agents` to see peers' branches and working-notes (overlap is a real collision only on the same branch), and publish yours with `set_working`. Declare what you own in your first line ("I own A/B, stay off them"). Resolve ownership by reading that state, never by messaging "do you still own this?": an idle peer's note may be stale, a peer with no note holds nothing, and romp auto-clears a note once a session's work is done. A row marked `(mail off by the master default: not reachable)` still counts for collisions; you just cannot mail it. Use `check_sent` to see whether a message was read instead of asking. Never wake an idle session just to coordinate, which is the false interrupt romp exists to avoid.
 
 When the human says "coordinate with X about Y," message X and act on the replies.

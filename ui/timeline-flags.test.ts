@@ -41,11 +41,23 @@ test("the menu lists all three toggles with icons, state words, and plain-langua
   assert.match(SRC, /\{ flag: 'notify', label: 'Notifications', icon: bellIcon,/);
   // each row explains itself (the user asked for an explanation per toggle, not bare labels)
   assert.match(SRC, /its prompts make cards on the feed; off, the lane stays here but new prompts mint none/);
-  assert.match(SRC, /visible to peer sessions, can send and receive their messages; off = fully isolated/);
+  // a hand-set off hides the session from peers; the master's off leaves it listed, so it is worded apart
+  assert.match(SRC, /desc: "visible to peer sessions, can send and receive their messages; off = hidden from peers, can't send or receive",/);
+  assert.match(SRC, /descMaster: "off by the master default: peers still see it listed, it can't send or receive; on opts it in" \},/);
+  assert.doesNotMatch(SRC, /fully isolated/, "the master's off is not isolation from the listing");
   assert.match(SRC, /system notification when its work blocks on you or completes/);
   // polarity is encoded per toggle: two off-flags, one on-flag
   assert.match(SRC, /enabled: \(s\) => !s\.hideFromFeed, value: \(enable\) => !enable,/);
   assert.match(SRC, /enabled: \(s\) => !!s\.notify, value: \(enable\) => enable,/);
+});
+
+test("a master-held mailbox gets its own wording and a one-click hand-set off (run in timeline-views-ack.test.ts)", () => {
+  assert.match(SRC, /const MAIL_WHY_MASTER = 'master';/);
+  assert.match(SRC, /const sub = body\.createDiv\(\{ text: \(byMaster && t\.descMaster\) \|\| t\.desc \}\);/);
+  assert.match(SRC, /const LANE_HIDE_FROM_PEERS = \{ label: 'Hide from peers', desc: 'turns its mail off by hand: peers stop seeing it listed' \};/);
+  assert.match(SRC, /if \(t\.flag === 'postalServiceOff' && byMaster\) \{/, "offered only while the master holds the mail off");
+  assert.match(SRC, /hide\.addEventListener\('click', \(e\) => \{ e\.stopPropagation\(\); flip\(t, true\); \}\);/, "the same write as the toggle, with a hand-set true");
+  assert.match(SRC, /_mailOffByMaster\(s\) \{\s*\n\s*return !!s\.postalServiceOff && s\.mailOffWhy === MAIL_WHY_MASTER && !\(this\._leftMasterMail && this\._leftMasterMail\.has\(s\.id\)\);/);
 });
 
 test("menu rows toggle with the SAME optimistic + sticky + reconcile-before-draw treatment as the old icons", () => {

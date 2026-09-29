@@ -61,7 +61,8 @@ class SendRefusal(unittest.TestCase):
         self.assertIn("pass --from <label>", src,
                       "the CLI surface guards AND names the non-session door (2026-08-19: the "
                       "refusal broke launchd scripts that had been mailing as 'unknown')")
-        self.assertIn('mid = frm_label, "ext:" + frm_label', src,
+        self.assertIn('SCRIPT_SENDER_PREFIX = "ext:"', src)
+        self.assertIn('mid = frm_label, SCRIPT_SENDER_PREFIX + frm_label', src,
                       "--from mails placeable under a stable synthetic id, never anonymously")
 
 
