@@ -9310,6 +9310,45 @@ _namefp_memo = {}    # names/ entry -> (its mtime, resolved project dir or None)
 #                      the number of live names/ entries, never by uptime.
 
 
+def _recorded_transcript(sid):
+    """The transcript discover() reads for a session whose CLI recorded its location, else None: the
+    recorded file's sibling named by lastSid when that exists, else the recorded file itself."""
+    rec = _sdk_transcript_path(sid)
+    if rec is None or not os.path.isfile(rec):
+        return None
+    last = _sdk_last_sid(sid)
+    cand = os.path.join(os.path.dirname(rec), last + ".jsonl") if last else rec
+    return cand if os.path.isfile(cand) else rec
+
+
+def _mtime_or_none(path):
+    """`path`'s mtime, or None when it cannot be stat'd."""
+    try:
+        return os.stat(path).st_mtime
+    except (OSError, ValueError):   # ValueError: a NUL in a recorded path
+        return None
+
+
+def _signed_mtime(sid, rec, last, pdir):
+    """The mtime of the transcript discover() reads for `sid`, resolved as discover() resolves it but
+    from the registry values the fingerprint already holds: the recorded file (or its lastSid sibling)
+    when the record exists, else the launch dir's file for the current fsid. Fork LANES are not
+    signed: a new lane bumps its project dir's mtime, but a dormant lane waking in place stays unseen."""
+    rec_mtime = _mtime_or_none(rec) if rec else None
+    if rec_mtime is not None:
+        sibling = _mtime_or_none(os.path.join(os.path.dirname(rec), last + ".jsonl")) if last else None
+        return rec_mtime if sibling is None else sibling
+    if pdir is None:
+        return None
+    return _mtime_or_none(os.path.join(pdir, (last or sid) + ".jsonl"))
+
+
+def _in_window(mtime, now):
+    """True iff `mtime` falls inside WINDOW of `now`. Signed as a boolean so an append inside the
+    window keeps discover()'s cache, while a dormant session waking (or aging out) invalidates it."""
+    return mtime is not None and mtime >= now - WINDOW
+
+
 def _codex_rows(cutoff, seen):
     """Discovery rows for Codex sessions — (fsid=STABLE SID, materialized path, anchor sid, name),
     read from the Codex backend's registry (plans/codex-backend.md). The names/ loop above skips
@@ -9351,9 +9390,10 @@ def _codex_rows(cutoff, seen):
 
 def _discover_fingerprint():
     """A cheap structural signature of the transcript namespace that changes EXACTLY when discover()'s
-    output would: a session ADDED/RENAMED (a names/ entry's set or mtime changes) or a FORK appearing (a
-    .jsonl added to a project dir bumps that dir's mtime). A plain transcript APPEND adds no directory entry,
-    so it leaves this unchanged — which is the whole point: discover()'s LIST doesn't change on an append, so
+    output would: a session ADDED/RENAMED (a names/ entry's set or mtime changes), a FORK appearing (a
+    .jsonl added to a project dir bumps that dir's mtime), or a session crossing discover()'s WINDOW in
+    either direction (_in_window above; a fork lane's own crossing is not signed). A plain transcript APPEND
+    to a session already inside the window leaves this unchanged — which is the whole point: discover()'s LIST doesn't change on such an append, so
     we must not re-walk ~80 project dirs + read every fork's head 2-4× per push for nothing. Same (mtime)
     change-detection idiom as the parse cache; NOT a time heuristic. ~2ms vs ~60-250ms for a full discover.
     The signature also carries each session's diverged SDK lastSid (mtime-memoized, see _sdk_last_sid): an
@@ -9373,6 +9413,7 @@ def _discover_fingerprint():
         entries = sorted(e for e in NAMES.iterdir() if not e.name.endswith(".tmp"))
     except OSError:
         return None
+    now = int(time.time())                                  # discover()'s callers pass the same rounding
     fp = []
     for f in entries:
         try:
@@ -9404,13 +9445,9 @@ def _discover_fingerprint():
         # unsigned, every surface stayed on the pre-clear transcript until the next Stop hook re-recorded
         # the path (review find). pm stays in the tuple: a stale record falls back to the launch-dir walk.
         rec = _sdk_transcript_path(f.name) or ""
-        rm = 0
-        if rec:
-            try:
-                rm = os.stat(os.path.dirname(rec)).st_mtime
-            except OSError:
-                rm = 0
-        fp.append((f.name, mt, pm, _sdk_last_sid(f.name) or "", rec, rm))
+        last = _sdk_last_sid(f.name) or ""
+        rm = (_mtime_or_none(os.path.dirname(rec)) or 0) if rec else 0
+        fp.append((f.name, mt, pm, last, rec, rm, _in_window(_signed_mtime(f.name, rec, last, pdir), now)))
     if len(_namefp_memo) > len(fp):                             # a retired session's entry is gone from the
         live = {row[0] for row in fp}                           # walk → evict it, so the memo stays bounded
         for name in [k for k in _namefp_memo if k not in live]:  # by the sessions that currently EXIST
@@ -9540,11 +9577,8 @@ def _discover_impl(now, window=None, forks=True):
         # session that entered a Claude Code worktree writes under the WORKTREE cwd's project dir,
         # which no walk of the launch dir can find (the user 2026-08-20). A /clear fork after a
         # relocation keeps working: lastSid resolves against the RECORDED file's directory.
-        rec = _sdk_transcript_path(sid)
-        if rec is not None and os.path.isfile(rec):
-            last = _sdk_last_sid(sid)
-            cand = os.path.join(os.path.dirname(rec), last + ".jsonl") if last else rec
-            path_str = cand if os.path.isfile(cand) else rec
+        path_str = _recorded_transcript(sid)
+        if path_str is not None:
             _note_leaf(sid, path_str)   # the leaf flips here as in the walk branches below: the previous leaf's
             #                             trees go (one tree per session, 2026-09-11) — a recorded session that
             #                             skipped the note left every /clear's pre-clear tree resident until the LRU
