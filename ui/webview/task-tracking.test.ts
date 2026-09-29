@@ -41,7 +41,7 @@ test("the gear: the flip posts setTaskTracking with a stamp and nothing more; th
 
 test("the gear: dressTracking greys the judge rows, the Outline and Feed pane toggles and the Judging-bands boxes, with the one tooltip and inert inputs", () => {
   assert.match(GEAR, /var TT_OFF_TIP = 'Enable task tracking to use this \(Settings, Task tracking\)\.';/);
-  assert.match(GEAR, /var rows = Array\.prototype\.slice\.call\(document\.querySelectorAll\('#rsettings \.rs-pane\[data-pane=tasks\] \.rs-row'\)\)\.filter\(function \(r\) \{ return !r\.querySelector\('#rs-tasktrack'\); \}\);[^\n]*\n\s*\[pn\.fleet, pn\.feed, jix, jtr\]\.forEach/, "the pane's rows but the switch's own");
+  assert.match(GEAR, /var rows = Array\.prototype\.slice\.call\(document\.querySelectorAll\('#rsettings \.rs-pane\[data-pane=tasks\] \.rs-row'\)\)\.filter\(function \(r\) \{ return !r\.querySelector\('#rs-tasktrack, #rs-prstatus'\); \}\);[^\n]*\n\s*\[pn\.fleet, pn\.feed, jix, jtr\]\.forEach/, "the pane's rows but the switch's own and PR status, which governs gh reads");
   assert.match(GEAR, /row\.classList\.toggle\('rs-off', !on\);\s*\n\s*if \(on\) row\.removeAttribute\('title'\); else row\.title = TT_OFF_TIP;\s*\n\s*Array\.prototype\.forEach\.call\(row\.querySelectorAll\('input, select, button'\), function \(c\) \{ c\.disabled = !on; \}\);/);
   // the Automation rows say what waits while the switch is off, and what still goes out
   assert.match(GEAR, /<span class=rs-note id=rs-autonudge-tt hidden>While task tracking is off, the goal nudges wait: the judges no longer update the goals they are about\. Only the reminders about unanswered messages from other sessions still go out\.<\/span>/);

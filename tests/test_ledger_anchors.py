@@ -121,7 +121,8 @@ class SharedHelperAntiDrift(unittest.TestCase):
             return m.group(0)
         self.assertIn("_node_anchor_uuids(", body("_goal_tree_walk"), "the ledger's shared walk resolves anchors via the helper")
         self.assertNotIn("_node_anchor_uuids(", body("build_session"), "build_session holds no private anchor resolution beside the walk")
-        self.assertIn("_goal_tree_walk(sid, gstore, seg_trig, seg_work, anchors=True)", body("build_session"), "the ledger takes the shared walk, anchors on")
+        self.assertIn("_goal_tree_walk(sid, gstore, seg_trig, seg_work, anchors=True, pr_repo=_pr_repo)", body("build_session"),
+                      "the ledger takes the shared walk, anchors on, the repo for the per-goal PR chip")
         self.assertIn("_goal_tree_walk(sid, gstore, anchors=False)", body("_provisional_ledger"), "the Outline's provisional row takes the same walk, anchors off (a cold tab has no landing)")
         self.assertEqual(len(re.findall(r"def _goal_tree_walk\(", src)), 1, "the walk defined exactly once")
         self.assertIn("_node_anchor_uuids(", body("_feed_session_entry"),   # T368: build_feed's per-session loop body

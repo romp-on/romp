@@ -16,6 +16,8 @@ import { fleetVisibleRoots } from "./fleet-roots";
 import { onlyTag, matchesOnly } from "./only-filter";
 import { hostPrefix } from "./host-prefix";
 import { ageColorReadable } from "./age-color";
+import { prChipParts, rollupParts, prDetailLines, prMatches, sessionPrs, goalChip, headChip, prErrTitle, headOnlyShown,
+  markRetry, retryPending, settleRetries, RetryPending, PR } from "./pr-chip";
 import { liveNow } from "./feed-age";
 import { TIP_GRACE_MS } from "./tip";
 import { perfFrameHandler } from "./perf-telemetry";
@@ -36,11 +38,19 @@ interface LedgerNode {
   // the SAME place the feed modal does (the user 2026-06-27): promptAnchorUuid = the user's minting message,
   // anchorUuid = where the node resolved (an assistant turn).
   promptAnchorUuid?: string | null; anchorUuid?: string | null;
+  // the PRs this goal's work opened, already filtered to the session's own repo by the kernel — the join
+  // key into FleetSession.prs, which carries their live state (the user 2026-08-17)
+  prNums?: number[] | null;
 }
 interface Ledger { summary?: string; tree: LedgerNode[]; current?: { t?: number } | null; archivedTops?: LedgerNode[]; }
 interface FleetSession { sid: string; name: string; color: Color; status?: { state?: string } | null; ledger?: Ledger | null;
                          postalServiceOff?: boolean; mailOffWhy?: string;   // the session's mail is off, and why (isolation, a comment thread's default, an unreadable record; T356)
-                         provisional?: boolean; }   // the cold-tab gate skipped this tab: the row's ledger is the store's, its jumps wait for the tab (plans/outline-pane-provisional-row.md)
+                         provisional?: boolean;   // the cold-tab gate skipped this tab: the row's ledger is the store's, its jumps wait for the tab (plans/outline-pane-provisional-row.md)
+                         // the session's PR slice (kernel _session_pr_payload): its branch, that branch's PR,
+                         // every PR its goals reference, and the reason when gh could not answer — rendered,
+                         // never swallowed, since a blank chip would read as "no PR"
+                         branch?: string; prNum?: number | null; prs?: Record<string, PR> | null; prError?: string | null;
+                         prErrorRetry?: boolean; }   // false: a failure a re-read cannot fix, so the error chip offers no retry
 
 const vscodeApi =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
@@ -133,7 +143,8 @@ function fmtAge(s: number): string {
   if (s < 86400) return Math.round(s / 3600) + "h";
   return Math.round(s / 86400) + "d";
 }
-// The AGE (secs) of a session's OLDEST currently-eligible TOP goal (respecting Show-completed), or 0 if none.
+// The AGE (secs) of a session's OLDEST currently-eligible TOP goal (respecting Show-completed); with none, its open
+// branch PR's age (headPrAge), or 0.
 // The slider's adaptive right end takes the max of this across the fleet, so tightening the window can reach an
 // old COMPLETED top even in an otherwise-active session — the per-TOP basis the cutoff filter also uses (NOT the
 // session's single newest activity, which stayed ≈ now for any live session and made the slider a no-op).
@@ -144,7 +155,12 @@ function sessionOldestTopAge(s: FleetSession, now: number): number {
   const roots = tree.filter((n) => n.depth === 0);
   let age = 0;
   for (const r of fleetVisibleRoots(roots, archRoots, showDone())) { const rec = nodeRecency(r); if (rec) age = Math.max(age, now - rec); }
-  return age;
+  return age || headPrAge(s, now);   // a head shown alone is gated on its PR's age, so the far end must reach it
+}
+// The age of the session's open branch PR, which the slider gates a head shown alone on (0 when none).
+function headPrAge(s: FleetSession, now: number): number {
+  const pr = headChip(s).pr;
+  return pr && pr.state === "open" && pr.updatedT ? now - pr.updatedT : 0;
 }
 const folded = new Set<string>(), expanded = new Set<string>();   // fold state, keyed "sid\0nodeId"
 const fkey = (sid: string, id: string) => sid + "\0" + id;
@@ -233,6 +249,16 @@ function linkHover(group: HTMLElement[]): void {
 function backToChat() { try { if (window.parent !== window) window.parent.postMessage({ romp: "toggleFleet", to: "chat" }, "*"); } catch { /* not in the shell */ } }
 function openSession(sid: string) { vscodeApi?.postMessage({ type: "openSession", id: sid }); backToChat(); }
 
+// Opening an external link is HOST-DEPENDENT, and getting it wrong fails silently. On the web dashboard a
+// window.open inside the click gesture is the only route that works (the kernel has no link handler at
+// all); inside a VS Code webview the sandbox blocks window.open, so the host extension's openLink →
+// openExternal is the only one. Same two branches render.ts's anchor handler uses, and for the same
+// reason it documents: a postMessage-only version did nothing on the web (the user 2026-06-25).
+function openExternalUrl(url: string): void {
+  if (location.protocol === "http:" || location.protocol === "https:") window.open(url, "_blank", "noopener,noreferrer");
+  else vscodeApi?.postMessage({ type: "openLink", href: url });
+}
+
 // Deep-link a fleet node to the SAME place the feed modal's matching zone does (the user 2026-06-27): post the
 // SAME `showOnTimeline` message (sid + anchorUuid + t), keyed off the node's kernel-supplied anchor uuids, then
 // leave the full-screen Fleet view so the chat/timeline land is visible. kind="prompt" → the asking message
@@ -290,7 +316,9 @@ function stampSubtreeRecency(tree: LedgerNode[], cur: { t?: number } | null): vo
 interface SessCtx { s: FleetSession; byId: Map<string, LedgerNode>; curT?: number;
   // SEARCH (the user 2026-06-29): subtreeHit(id) = this node OR any descendant matches the query → used to
   // FORCE-EXPAND collapsed branches that contain a match so the hit is revealed. null when not searching.
-  subtreeHit?: (id: string) => boolean; }
+  subtreeHit?: (id: string) => boolean;
+  // FLAT view: the session's PR error chip rides its first row only, so one failed read reads once.
+  errShown?: boolean; }
 let curSearch = "";   // the active query (lowercased), snapshot per render() for highlighting + fold override
 
 // Paint `text` into `elm`, wrapping every case-insensitive occurrence of `q` in a .fl-hit highlight span (no
@@ -325,6 +353,111 @@ function nameInto(elm: HTMLElement, name: string, sid: string, q: string): void 
 // Render node `n` (and its open children) into `container`. Hoisted out of render() so the FLAT (ungrouped)
 // view can merge nodes from many sessions into one list. `flat` adds the session-name tag on the RIGHT of a
 // depth-0 row (the ungrouped view's "which session is this" marker).
+// ── the per-goal PR chip (the user 2026-08-17) ────────────────────────────────────────────────────
+// PR detail rows are their own keyed fold, so opening one survives every kernel push exactly like the
+// tree's own folds do.
+const prOpen = new Set<string>();
+const HEAD_DETAIL_INDENT_PX = 22;   // the session head's detail row sits under its name, past the caret
+const prKey = (sid: string, nid: string) => fkey(sid, nid) + ":pr";
+
+// One PR: #number · state · checks · review. The NUMBER carries its own data-act so a click on it opens
+// the browser, while a click anywhere else on the chip toggles the detail row (innermost data-act wins,
+// the same layering the mark/text/time zones already use).
+function prChip(sid: string, nid: string, pr: PR): HTMLElement {
+  const p = prChipParts(pr);
+  const chip = el("span", p.cls);
+  chip.dataset.act = "prfold"; chip.dataset.sid = sid; chip.dataset.nid = nid;
+  chip.title = "PR #" + pr.num + " — click for detail, click the number to open it";
+  if (pr.live) chip.appendChild(el("span", "fl-pr-pulse"));
+  const num = el("span", "fl-pr-num");
+  num.textContent = p.num;
+  num.dataset.act = "propen"; num.dataset.url = pr.url;
+  chip.appendChild(num);
+  for (const [txt, cls] of [[p.state, "fl-pr-state"], [p.checks, "fl-pr-ck"], [p.review, "fl-pr-rv"]] as const) {
+    if (!txt) continue;
+    const g = el("span", cls);
+    g.textContent = txt;
+    chip.appendChild(g);
+  }
+  return chip;
+}
+
+// Several PRs under one goal: the count plus the worst state among them, so folding a parent never hides
+// a red.
+function prRollup(sid: string, nid: string, prs: PR[]): HTMLElement {
+  const r = rollupParts(prs);
+  const chip = el("span", "fl-pr roll w-" + r.worst);
+  chip.dataset.act = "prfold"; chip.dataset.sid = sid; chip.dataset.nid = nid;
+  chip.title = r.label + " under this task — click to list them";
+  const lbl = el("span", "fl-pr-num");
+  lbl.textContent = r.label;
+  chip.appendChild(lbl);
+  if (r.fails) {
+    const bad = el("span", "fl-pr-ck");
+    bad.textContent = "✗" + r.fails;
+    chip.appendChild(bad);
+  }
+  return chip;
+}
+
+// gh could not answer. Rendered rather than swallowed: a blank chip would claim "no PR" when the truth is
+// "we could not look" (CLAUDE.md ## Authoritative sources). A click asks the kernel to re-read now, unless
+// the kernel says a re-read cannot help; then the chip only names the error.
+function prErrChip(s: FleetSession): HTMLElement {
+  const hc = headChip(s);
+  const bad = el("span", "fl-pr err" + (hc.retry ? "" : " noretry"));
+  bad.title = prErrTitle(hc.err, hc.snapshot, hc.retry);
+  if (!hc.retry) { bad.textContent = PR_RETRY_LABEL; return bad; }
+  bad.dataset.act = "prretry"; bad.dataset.sid = s.sid; bad.dataset.err = hc.err;
+  const busy = retryPending(prRetryPending, s.sid, hc.err, Date.now());
+  if (busy) { bad.dataset.busy = "1"; bad.setAttribute("aria-disabled", "true"); }
+  bad.textContent = busy ? PR_RETRYING_LABEL : PR_RETRY_LABEL;
+  return bad;
+}
+
+const PR_RETRY_LABEL = "⚠ PR status";
+const PR_RETRYING_LABEL = "↻ Retrying…";
+const PR_RETRY_RESTORE_MS = 8000;   // a payload with a new reason (or none) settles it sooner; this is the backstop
+const prRetryPending: RetryPending = new Map();   // sid → the retried reason: every render reads it, so the chip stays disabled
+
+// The retry posts and waits, so the chip disables and relabels itself until the answer re-renders it. The
+// state lives in prRetryPending, not on the node; the timer repaints once the backstop has passed.
+function markPrRetrying(sid: string, reason: string): void {
+  markRetry(prRetryPending, sid, reason, Date.now() + PR_RETRY_RESTORE_MS);
+  render();
+  setTimeout(render, PR_RETRY_RESTORE_MS);
+}
+
+// The one-click-deeper body: the same lines the hover card shows, plus the actions.
+function prDetail(prs: PR[], now: number, indentPx: number): HTMLElement {
+  const det = el("div", "fl-prdet");
+  det.style.marginLeft = indentPx + "px";
+  for (const pr of prs) {
+    if (prs.length > 1) {
+      const head = el("div", "fl-prdet-num");
+      head.textContent = "#" + pr.num;
+      head.dataset.act = "propen"; head.dataset.url = pr.url;
+      det.appendChild(head);
+    }
+    for (const line of prDetailLines(pr, now)) {
+      const ln = el("div", "fl-prdet-line");
+      ln.textContent = line;
+      det.appendChild(ln);
+    }
+    const acts = el("div", "fl-prdet-acts");
+    const open = el("button");
+    open.textContent = "Open in browser";
+    open.dataset.act = "propen"; open.dataset.url = pr.url;
+    acts.appendChild(open);
+    const copy = el("button");
+    copy.textContent = "Copy #";
+    copy.dataset.act = "prcopy"; copy.dataset.num = String(pr.num);
+    acts.appendChild(copy);
+    det.appendChild(acts);
+  }
+  return det;
+}
+
 function renderFleetNode(ctx: SessCtx, n: LedgerNode, depth: number, container: HTMLElement, now: number, flat: boolean) {
   const { s, byId, curT } = ctx;
   const expandable = !!(n.children && n.children.length);
@@ -382,6 +515,12 @@ function renderFleetNode(ctx: SessCtx, n: LedgerNode, depth: number, container: 
   if (n.done || n.blocked) { linkHover([txt]); linkHover(time.textContent ? [mark, time] : [mark]); }
   else { linkHover([mark, txt]); if (time.textContent) linkHover([time]); }
   row.appendChild(tri); row.appendChild(mark); row.appendChild(txt);
+  // The PR chip sits LEFT of the age, so the age column stays where the eye already expects it. A goal
+  // with its own PR shows that PR; a parent with none of its own rolls up its subtree's (the user
+  // 2026-08-17).
+  const chipPlan = goalChip(s.prs, byId, n);
+  if (chipPlan.kind === "one") row.appendChild(prChip(s.sid, n.id, chipPlan.prs[0]));
+  else if (chipPlan.kind === "rollup") row.appendChild(prRollup(s.sid, n.id, chipPlan.prs));
   row.appendChild(time);
   // FLAT view: tag each top-level goal with the session it belongs to, on the row's RIGHT (the user 2026-06-29).
   // It's a label, not its own action — a click bubbles to the row's data-act="open" and jumps into the session.
@@ -392,11 +531,15 @@ function renderFleetNode(ctx: SessCtx, n: LedgerNode, depth: number, container: 
     if (s.color?.bg) tnm.style.color = s.color.bg;
     tag.appendChild(tnm);
     tag.title = "this goal belongs to “" + s.name + "” — click to open it";
+    // the flat list has no session head, so the session's failed PR read sits beside its name instead
+    if (s.prError && !ctx.errShown) { ctx.errShown = true; row.appendChild(prErrChip(s)); }
     row.appendChild(tag);
   }
   row.dataset.act = "open"; row.dataset.sid = s.sid;   // click-safe: action lives on the #fleet-list delegate
   row.dataset.nid = n.id;                              // the hover card keys off the row (sid, nid)
   container.appendChild(row);
+  if (chipPlan.prs.length && prOpen.has(prKey(s.sid, n.id)))
+    container.appendChild(prDetail(chipPlan.prs, now, 4 + depth * 15 + 34));
   if (expandable && !isFolded) for (const cid of n.children!) { const c = byId.get(cid); if (c) renderFleetNode(ctx, c, depth + 1, container, now, flat); }
 }
 
@@ -570,7 +713,10 @@ function render() {
       if (cached !== undefined) return cached;
       hitMemo.set(id, false);                            // cycle guard (trees are acyclic, but be safe)
       const node = byId.get(id);
-      let h = !!node && node.text.toLowerCase().includes(sq);
+      // A goal matches on its text OR on a PR it shipped, so typing a PR number (or its branch) reveals
+      // the task that produced it (the user 2026-08-17).
+      let h = !!node && (node.text.toLowerCase().includes(sq)
+                         || sessionPrs(s.prs, node.prNums).some((pr) => prMatches(pr, sq)));
       if (!h && node) for (const cid of node.children || []) if (subtreeHit(cid)) { h = true; break; }
       hitMemo.set(id, h);
       return h;
@@ -584,19 +730,20 @@ function render() {
       // the session's in-window tops; a CONTENT match keeps just the tops whose subtree hits.)
       const base = fleetVisibleRoots(roots, archRoots, sd).filter((r) => (now - nodeRecency(r)) <= cutoff);
       visibleRoots = s.name.toLowerCase().includes(sq) ? base : base.filter((r) => subtreeHit(r.id));
-      if (!visibleRoots.length) continue;                // no in-window name/content match → drop the session
     } else {
-      visibleRoots = fleetVisibleRoots(roots, archRoots, sd);
-      if (!visibleRoots.length) continue;                // nothing to show for this session → skip
       // recency cutoff (the user 2026-06-30): filter INDIVIDUAL top goals by recency — not just whole sessions.
       // Before, a session was kept whole if its NEWEST activity was recent, so an active session's old COMPLETED
       // tops always rode along and the slider looked dead. Now each top is gated on its own subtree-rolled-up
       // recency (_rec, stamped above): a live/in-progress top stays (≈ now), an old completed one drops as you
-      // tighten the window. If nothing's left in-window, the session header is skipped too.
+      // tighten the window.
+      visibleRoots = fleetVisibleRoots(roots, archRoots, sd);
       visibleRoots = visibleRoots.filter((r) => (now - nodeRecency(r)) <= cutoff);
-      if (!visibleRoots.length) continue;
     }
-    survivors.push({ ctx: { s, byId, curT: s.ledger?.current?.t, subtreeHit: sq ? subtreeHit : undefined }, visibleRoots });
+    const ctx: SessCtx = { s, byId, curT: s.ledger?.current?.t, subtreeHit: sq ? subtreeHit : undefined };
+    // no top goal left, but the head has news (an open branch PR, a failed read): the grouped view draws it alone
+    if (!visibleRoots.length && grouped && headOnlyShown(s, now, cutoff, sq)) { survivors.push({ ctx, visibleRoots }); continue; }
+    if (!visibleRoots.length) continue;                  // nothing in the window, no head to show → drop the session
+    survivors.push({ ctx, visibleRoots });
   }
   // SEARCH also filters the provisional ("about to appear") rows: keep one only if its session name or its
   // live gist matches the query (the user 2026-06-29).
@@ -616,9 +763,11 @@ function render() {
       // session — only a click on the name/rest of the head (data-act="open") jumps in.
       const sfolded = curFoldMode === "collapse" ? true : curFoldMode === "expand" ? false : sessFolded.has(s.sid);
       const caret = el("span", "fl-caret");
-      caret.textContent = sfolded ? "▶" : "▼";
-      caret.title = sfolded ? "expand this session's tasks" : "collapse this session's tasks";
-      caret.dataset.act = "sessfold"; caret.dataset.sid = s.sid;
+      if (visibleRoots.length || provBySid.has(s.sid)) {   // a head shown alone has nothing to fold: the caret keeps its width only
+        caret.textContent = sfolded ? "▶" : "▼";
+        caret.title = sfolded ? "expand this session's tasks" : "collapse this session's tasks";
+        caret.dataset.act = "sessfold"; caret.dataset.sid = s.sid;
+      }
       caret.style.cssText = "flex:0 0 auto;cursor:pointer;color:var(--vscode-descriptionForeground,#9a9a9a);"
         + "font-size:9px;width:13px;text-align:center;user-select:none";
       head.appendChild(caret);
@@ -639,8 +788,15 @@ function render() {
       }
       head.title = s.provisional ? "Open this session: its transcript has not been loaded since the restart, so its goals are read from the store and their jumps wait for the tab" : "Open this session";
       head.dataset.act = "open"; head.dataset.sid = s.sid;   // click-safe: action lives on the #fleet-list delegate
+      // The session's own chip: the PR on its CURRENT BRANCH — "what is this session shipping right now",
+      // readable with the tree collapsed. It deliberately repeats the live goal's chip, which is the point
+      // (the user 2026-08-17). Nothing when the branch has no PR.
+      const hc = headChip(s);
+      if (hc.pr) head.appendChild(prChip(s.sid, "", hc.pr));
+      if (hc.err) head.appendChild(prErrChip(s));
       head.tabIndex = 0; head.setAttribute("role", "button");   // focusable: Enter opens, the menu key or Shift+F10 opens the row's menu (2026-09-16)
       sec.appendChild(head);
+      if (hc.pr && prOpen.has(prKey(s.sid, ""))) sec.appendChild(prDetail([hc.pr], now, HEAD_DETAIL_INDENT_PX));   // the head chip's own detail row
 
       const treeBox = el("div", "ledger-tree");
       if (!sfolded) {
@@ -846,6 +1002,7 @@ listenForFrames(perfFrameHandler("fleet", (m) => vscodeApi?.postMessage(m), (e: 
   if (!Array.isArray(m.ledgers)) return;
   loaded = true;
   sessions = m.ledgers as FleetSession[];
+  settleRetries(prRetryPending, sessions, Date.now());   // a new reason, or none, is the retry's answer
   provCards = (Array.isArray(m.asks) ? m.asks : [])
     .filter((a: any) => a && a.provisional && a.sid)
     .map((a: any) => ({ sid: a.sid, name: a.name || "", color: a.color || null, text: a.text || "Working…" }));
@@ -1017,6 +1174,17 @@ function confirmEndSession(sid: string): void {
       if (el.dataset.folded === "1") { expanded.add(k); folded.delete(k); } else { folded.add(k); expanded.delete(k); }
       render();
     },
+    // ── the PR chip (the user 2026-08-17) ──
+    prfold: (el) => {                                    // chip body → the detail row, one level deeper
+      const sid = el.dataset.sid, nid = el.dataset.nid;
+      if (!sid) return;
+      const k = prKey(sid, nid || "");
+      if (prOpen.has(k)) prOpen.delete(k); else prOpen.add(k);
+      render();
+    },
+    propen: (el) => { if (el.dataset.url) openExternalUrl(el.dataset.url); },   // the NUMBER → the PR itself
+    prretry: (el) => { if (el.dataset.sid && !el.dataset.busy) { markPrRetrying(el.dataset.sid, el.dataset.err || ""); vscodeApi?.postMessage({ type: "prRetry", id: el.dataset.sid }); } },   // the error chip → re-read now
+    prcopy: (el) => { try { navigator.clipboard?.writeText("#" + el.dataset.num); } catch { /* ignore */ } },
   });
 })();
 
@@ -1084,6 +1252,10 @@ function buildHoverCard(s: FleetSession, n: LedgerNode, byId: Map<string, Ledger
     const body = el("div", "fl-hover-body"); body.textContent = text;
     sec.append(lab, body); card.appendChild(sec);
   };
+  // The goal's PRs, same body the detail row shows (one source, so the two can never disagree). Here the
+  // untruncated title is already above, which is why the row is free to ellipsize it (the user 2026-08-17).
+  for (const pr of sessionPrs(s.prs, n.prNums))
+    section("PR #" + pr.num, prDetailLines(pr, now).slice(1).join(" · "));
   const ask = asksById.get(n.id);   // top goals with a live feed card carry the distiller BACKGROUND
   if (ask?.background && ask.background.trim()) section("Background", ask.background);
   const summary = (n.summary || ask?.summary || "").trim();

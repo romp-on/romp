@@ -133,6 +133,10 @@ find past work: the search box reaches every session, live or closed.
 Right-click a session's name here to rename or end it. A rename changes the
 label only: the session's mail, goals and history follow the session itself.
 
+In a GitHub checkout, a session's row shows its branch's pull request, and each
+task shows the pull requests it opened or merged, with their checks. The PR
+status setting turns these off, along with every GitHub read behind them.
+
 ### The other panes
 
 Two panes sit beside these, off until you switch them on in Settings, General,

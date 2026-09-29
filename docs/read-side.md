@@ -393,6 +393,119 @@ place in the parent card.
   once (batch `cleared`); an **undo** restores that batch if invoked right after.
   For sweeping away a stale backlog you know you don't care about.
 
+### Outline = the goal trees, with each goal's PR
+
+The Outline pane rides the feed payload's `ledgers` slice — one per-session
+`build_session` ledger, the same tree the ledger box draws. Alongside the tree, each
+session carries its **PR slice**, so a goal row can show the PR that goal shipped and
+that PR's live state:
+
+| key | on | what |
+|---|---|---|
+| `prNums` | each ledger node | the PRs this goal opened, filtered to the session's own repo |
+| `branch` | each session | the checkout's current branch (`""` when detached) |
+| `prNum` | each session | that branch's PR — the header chip, "what is this shipping right now" |
+| `prs` | each session | `{number: PR}` for the PRs this session references, each with a `live` flag |
+| `prError` | each session | why the last `gh` read failed; **rendered** beside the last snapshot, never swallowed |
+
+How the two sides split the work, and why:
+
+- **The judge mines, the kernel filters.** `judge._record_pr_refs` scans a goal's own
+  recorded segments for full PR urls. It stamps at the **end of each turn** the closer
+  judges (every pass, not only at distill), so a draft PR opened mid-turn shows once that
+  turn ends, while its goal is still open. A goal none of whose segments resolve in the
+  pass's parse keeps its refs: after a `/clear` the parse stops at the new root, and
+  "not in this parse" is not "has no PR". The same holds for a goal some of whose keys
+  no longer resolve: it merges what it finds with what it had. It records refs
+  **unfiltered**: that side has the atoms but not the checkout. `kernel._node_pr_nums`
+  keeps only the session's own repo (compared without case), since it is the side that
+  knows the remote.
+- **A bare number binds to the checkout its command ran in.** `gh pr merge 12` names no
+  repo, so the stamp asks the kernel for the repo of the directory that call ran in
+  (session meta keeps each acting call's `cwd`, `pushCwd`). A call that ran outside
+  GitHub drops the number; a call the meta has not seen keeps an **empty owner**, read as
+  "this session's repo", and is re-scanned on a later pass rather than memoized. A
+  command that names another repo (`-R`, `--repo`, a `GH_REPO=` prefix or an exported
+  `GH_REPO`) is not this repo's and stamps nothing.
+- **Stamping is forward-only.** Segments still lazy from the assembly checkpoint are not
+  loaded to be mined, so a goal with no stored refs whose receipts predate the checkpoint
+  gains refs only when a later turn of its session is judged. After an upgrade, goals in
+  sessions with no new judged turn, completed ones included, show no chip.
+- **A goal owns the PRs it ACTED ON, not the ones it mentioned.** A segment contributes
+  refs only when it also holds the receipt: `gh pr create` / `edit` / `merge` / `ready` /
+  `close` / `reopen` / `comment` / `review`, or a `git push`. Read-only subcommands
+  (`view`, `list`, `checks`) are deliberately absent — looking at a PR is not acting on
+  it. A url counts from the segment's prose, from the acting command itself, and from
+  the tool result paired by call id with an acting call (where `gh pr create` prints the
+  new url), never from the output of some other command in the same segment, and a
+  segment claims at most 8. The command is read by a bash-shaped lexer (quotes, `$'…'`,
+  `$( )` and backticks, comments, heredocs in every delimiter form, reserved words,
+  `bash -c`), checked against bash itself, so `grep -rn 'git push' docs/` does not read as
+  a push, while `cd x && git push` does; like bash, an unterminated construct ends the
+  line. One reader (`gitpr.simple_commands`, with `is_push_command` and `gh_pr_action`)
+  serves this gate and the kernel's push counter. A segment still lazy from the assembly checkpoint is
+  not loaded to be mined: its goal keeps the refs stamped before the restart. Without this gate, live sessions attributed a stranger's PR
+  to a goal that had merely re-authenticated a cloud CLI, and two PRs to one that had
+  only read a design note.
+- **That trade is deliberate, and the header chip is its counterweight** (the user
+  2026-08-18). Strict receipts cost recall: a session whose PR was opened in an earlier
+  episode, or by an outside agent, shows no chip on its goals. Rather than loosen
+  attribution, the SESSION header carries its current branch's PR — so "what am I
+  shipping here" is always answerable even when no individual goal can claim it.
+- **Bare `#NNNN` is never mined.** It is ambiguous by construction — an internal
+  ticket or audit id wears exactly that shape — and a silently-wrong PR link is worse
+  than no link, the same call the path linkifier makes for shortened file mentions.
+- **`live` comes from the ahead count**, an event (a commit, a completed push), never
+  from an open-turn bit, which toggles at every turn boundary and would flap the chip
+  with no new information. It marks only the branch's own PR. When a reused branch name
+  carries several PRs, an open one wins (the largest number), else the largest of any
+  state.
+- **`kernel/gitpr.py` owns every git and `gh` call** for this surface, so the
+  view-builder stays a pure assembler. The local half reads the checkout's pointer
+  files: an unchanged checkout costs stats and no fork, and a moved HEAD, branch ref or
+  tracking ref costs one `rev-list`. A local commit only recounts the ahead number; a
+  moved branch, upstream or tracking ref (a push, a switch) is the event that re-reads
+  gh. A git call that did not answer is never memoized.
+- **The repo is the one `gh` itself resolves.** A remote marked `gh-resolved` (what
+  `gh repo set-default` writes) wins, `base` meaning that remote and an owner/name
+  meaning that repo; else gh's remote order, `upstream`, `github`, `origin`, then the
+  rest. One `git config --get-regexp` call reads them, memoized on the config file's
+  mtime, so a remote added later is seen. The branch's PR matches on its head owner, the
+  push remote's, so a fork's PR on a same-named branch is passed over. Chat links keep
+  reading `origin`: only the remote parser is shared.
+- One `gh` list call per **repo**, cached and
+  invalidated by event: a moved ref, a rise in the transcript's push / `gh pr` count
+  (a push moves *remote* state while HEAD and branch stay put), a PR number some
+  session cites for the first time, or the error chip's click. A refresh assembles its
+  result privately and publishes it whole; an invalidation that lands while it runs
+  leaves the result stale, so it is re-read rather than lost. A branch with no PR in
+  the list is looked up by `--head` first, then cited numbers never read, then re-reads
+  of cited singles; what does not fit one refresh's budget is owed to the next full read.
+  Each branch PR gets its checks fetched first, ahead of the cited ones. A merged PR is
+  kept between reads only when a goal cites it or it is a current branch's, and a failed
+  checks read keeps the last verdict rather than dropping to unknown.
+- **The poll watches only the session's own PRs.** The single interval in the module is
+  a 30 s poll that runs **only** while a check on a watched PR (a current branch's PR or
+  a cited one) is non-terminal, a push's new head has not reached gh yet, or the last
+  read failed; CI completing and the network recovering are external and have no local
+  event. A poll re-reads the watched PRs' unsettled checks, branch PRs first, never an
+  uncited PR's. After a push it also waits, for at most 10 polls, until gh's `headRefOid`
+  matches the sha pushed. While the last full read's error stands, each poll is a full
+  read instead, so a PR that failed to arrive arrives once gh recovers and a failure gh
+  never recovers from stays shown. Any failing read backs off from 30 s to 15 minutes
+  until a clean read or the error chip's click, and the kernel log says once when a
+  repo's reads start failing, reach the ceiling, and recover.
+- **A failed `gh` read keeps the last snapshot and shows the reason beside it.** The
+  pane draws the known chips plus a `⚠ PR status` chip whose title names the error;
+  clicking it posts `prRetry`, which re-reads that session's repo now. A first read that
+  fails has no snapshot, so only the reason shows. A payload that could not be built at
+  all (a kernel fault) carries `prErrorRetry: false`: the chip shows, with no retry.
+- **The PR status setting** (the gear's Task tracking tab, per install, since the `gh`
+  login is this machine's) skips every git and `gh` read for this surface, and the judge's
+  PR stamp; the rows are also built without a PR slice when no client that reads them is
+  connected. `ROMP_PR_STATUS=off` seeds the setting off once, on an install with no
+  stored value. `ROMP_GH_BIN` and `ROMP_GIT_BIN` name the binaries it runs.
+
 ### Timeline = segments as bars, with connectors and overlays
 
 - **Lanes**: one per session; each **segment** is a bar `[t, end]` (segments are

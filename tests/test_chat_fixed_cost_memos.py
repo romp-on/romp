@@ -1104,6 +1104,26 @@ class LedgerMemo(unittest.TestCase):
         now = km._ledger_memo_stats
         return {k: now[k] - before[k] for k in now if now[k] != before[k]}
 
+    def test_the_session_s_repo_is_in_the_key_and_filters_each_row_s_prs(self):
+        """A goal's PR chips show only refs in the session's own repo, so a session whose repo changes must
+        re-walk rather than serve rows filtered for the old one."""
+        w = self.w
+        nodes = w.nodes(2)
+        nodes["g1"]["prRefs"] = [["notes-api-org/notes-api", 12], ["someone-else/other", 9]]
+        w.store(nodes)
+        repo = ["notes-api-org/notes-api"]
+        with mock.patch.object(km.gp, "repo_of", lambda cwd: repo[0]):
+            row = next(r for r in w.build()["ledger"]["tree"] if r["id"] == "g1")
+            self.assertEqual(row["prNums"], [12], "the walk stamps the session repo's refs on the row")
+            s = self._stats()
+            w.build()
+            self.assertEqual(self._delta(s), {"hit": 1})
+            repo[0] = "someone-else/other"
+            s = self._stats()
+            row = next(r for r in w.build()["ledger"]["tree"] if r["id"] == "g1")
+            self.assertEqual(self._delta(s), {"miss": 1}, "a new repo is a new key")
+            self.assertEqual(row["prNums"], [9])
+
     def test_unchanged_inputs_hit_and_each_input_change_misses_once(self):
         w = self.w
         s = self._stats()

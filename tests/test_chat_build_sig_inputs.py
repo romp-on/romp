@@ -34,6 +34,8 @@ import itertools
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import textwrap
 import time
@@ -135,6 +137,8 @@ CENSUS = {
     "_path_preview_verdicts": ("sig", "pathlink", "the preview popover's verdict per verified link, with the refusal for each link that does not preview (T351, T364): a stat of each target beside the links, and it warms the cache; it moves only when the links move or a file appears, the pathlink dep"),
     "_postal_card_deps": ("sig", "postal"),
     "_postal_index": ("sig", "postal", "memoized on the log's identity"),
+    "_pr_note_push": ("out", "the PR cache's push event: writes _pr_push_seen and pokes gitpr, reading the transcript's pushCount (transcript)"),
+    "_pr_repo_of": ("sig", "cwd", "the base repo of the session's checkout (lastEditPath's tree, else its cwd), which the rows' PR refs are filtered to; the signature folds the same call"),
     "_queue_recallable": ("sig", "backend"),
     "_queued_romp_flags": ("pure", "over a queued text"),
     "_read_task_store": ("sig", "tasks"),
@@ -1188,6 +1192,21 @@ class Differential(_World):
         moved = self.moved(b, self.sig())
         self.assertIn("cwd", moved)
         self.assertLessEqual(set(moved), {"cwd", "claudemd", "names"})
+
+    def test_the_pr_repo_the_rows_are_filtered_to_moves_cwd(self):
+        """A second remote gh reads first (upstream) changes the rows' PR repo with origin unchanged."""
+        if not shutil.which("git"):
+            self.skipTest("no git")
+        run = lambda *a: subprocess.run(["git", "-C", str(self.cdir)] + list(a), check=True, capture_output=True)
+        run("init", "-q")
+        run("remote", "add", "origin", "https://github.com/notes-api-dev/notes-api.git")
+        a = self.sig()
+        self.assertEqual(km._pr_repo_of(SID, str(self.tpath)), "notes-api-dev/notes-api")
+        run("remote", "add", "upstream", "https://github.com/notes-api-org/notes-api.git")
+        cfg = self.cdir / ".git" / "config"
+        os.utime(cfg, ns=(cfg.stat().st_atime_ns, cfg.stat().st_mtime_ns + 10 ** 9))   # a clock that did not tick
+        self.assertEqual(km._pr_repo_of(SID, str(self.tpath)), "notes-api-org/notes-api")
+        self.assertEqual(self.moved(a, self.sig()), ("cwd",))
 
     def test_the_handed_liveness_map_is_served_to_every_nested_read(self):
         """_chat_build_sig serves the map it was handed (_serve_live) to the reads beneath it, so the bg

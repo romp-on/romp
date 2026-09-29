@@ -41,7 +41,13 @@ const EXACT: Record<string, number> = {
   // as a token (the light override resolves through var(--st-needs-fg)), so it stays a literal like styles.css keeps it.
   "gear.css": 13,
   "strip.css": 8,
-  "fleet-pane.css": 8,   // 9 until 2026-09-21: the hover card's Needs you mark resolved its red through --st-needs-bg (plans/needs-you.md), the literal now its var() fallback
+  // 8 with the per-goal PR chip: its one red (closed, failing, a failing rollup, the error chip) resolves through
+  // var(--vscode-errorForeground), a literal #e5484d before its review (3.82:1 dark, 3.31:1 light as text on the chip);
+  // its greens, purple and yellows resolve through --pr-open, --pr-merged and --st-working-bg, its buttons through
+  // --overlay-05/-10, its numbers through var(--accent-ink) and its live border and wash through var(--accent) and
+  // var(--accent-wash). 9 until 2026-09-21: the hover card's Needs you mark resolved its red through --st-needs-bg
+  // (plans/needs-you.md), the literal now its var() fallback
+  "fleet-pane.css": 8,
   "timeline-pane.css": 10,
 };
 
@@ -60,5 +66,85 @@ test("no literal modal dims outside var() fallbacks — except gear's pinned #ra
   assert.equal(rawDims(read("gear.css")).length, 1, "gear.css: only the vocab-pinned analytics dim");
   for (const f of ["strip.css", "fleet-pane.css", "timeline-pane.css"]) {
     assert.equal(rawDims(read(f)).length, 0, f + " has no bare 0.55 dim literal");
+  }
+});
+
+// THE PR CHIP'S TEXT INKS, by value, both themes. theme-parity.test.ts's PAIRS skip a token a :root does not declare,
+// and the dark :root declares no --vscode-errorForeground: the chip's red resolves through the rule's own fallback
+// there (and the kernel's served theme, pinned equal below), so the pairs are measured here from the sheets' bytes.
+// Text reads 4.5:1 on every ground it sits on: the chip, the hovered chip, the detail row, the live chip's wash, and
+// the page under a rollup, which has no fill of its own; the error chip's border reads 3:1 (non-text chrome).
+const hexRgb = (h: string): [number, number, number] => {
+  const x = h.replace(/^#/, "");
+  const full = x.length === 3 ? x.split("").map((c) => c + c).join("") : x;
+  return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16)) as [number, number, number];
+};
+const over = (v: string, ground: [number, number, number]): [number, number, number] => {
+  const m = v.match(/^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)$/);
+  if (!m) return hexRgb(v);
+  const a = parseFloat(m[4]);
+  return [1, 2, 3].map((i) => Math.round(parseInt(m[i], 10) * a + ground[i - 1] * (1 - a))) as [number, number, number];
+};
+const lum = (c: [number, number, number]) => {
+  const ch = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2]);
+};
+const ratio = (a: [number, number, number], b: [number, number, number]) => {
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+const tokens = (css: string, opener: string) => {
+  const at = css.indexOf(opener);
+  assert.ok(at >= 0, opener + " present");
+  const text = css.slice(at, css.indexOf("\n}", at)).replace(/\/\*[\s\S]*?\*\//g, "");
+  return new Map([...text.matchAll(/(--[a-zA-Z0-9-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()] as const));
+};
+
+test("fleet-pane.css: the PR chip's red and number inks clear their contrast floors on every ground, both themes", () => {
+  const PANE = read("fleet-pane.css").replace(/\/\*[\s\S]*?\*\//g, ""), STYLES = read("styles.css");
+  const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
+  const decl = (sel: string, prop: string) => {
+    const rule = new RegExp("(?:^|\\})" + sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\{([^}]*)\\}", "m").exec(PANE);
+    assert.ok(rule, sel + " rule present");
+    const m = new RegExp("(?:^|;)\\s*" + prop + ":([^;]+)").exec(rule![1]);
+    assert.ok(m, sel + " declares " + prop);
+    return m![1].trim();
+  };
+  const RED = "var(--vscode-errorForeground,#f48771)";
+  const served = KERNEL.match(/--vscode-errorForeground:(#[0-9a-fA-F]{6});/);
+  assert.ok(served && RED.includes(served[1]), "the kernel's served dark theme declares the fallback's own red");
+  const pageDark = decl("html,body", "background");
+  for (const [name, root] of [["dark", tokens(STYLES, ":root {")], ["light", tokens(STYLES, "body.theme-light {")]] as const) {
+    // a token the theme block declares wins; otherwise the var()'s own fallback, as the cascade resolves it here
+    const resolve = (v: string): string => {
+      const m = v.match(/^var\((--[a-zA-Z0-9-]+)\s*(?:,\s*(.+))?\)$/);
+      if (!m) return v;
+      const own = root.get(m[1]);
+      assert.ok(own || m[2], `${name}: ${m[1]} resolves (declared, or a fallback)`);
+      return resolve(own || m[2]!);
+    };
+    const page = hexRgb(resolve(name === "dark" ? pageDark : root.get("--vscode-editor-background")!));
+    const chip = over(decl(".fl-pr", "background"), page), hover = over(decl(".fl-pr:hover", "background"), page);
+    const detail = over(decl(".fl-prdet", "background"), page), wash = over(resolve("var(--accent-wash)"), page);
+    const rollHover = over(decl(".fl-pr.roll:hover", "background"), page);
+    const checks: Array<[string, string, string, [number, number, number], number]> = [
+      [".fl-pr.err", "color", "the error chip", chip, 4.5],
+      [".fl-pr.err", "color", "the hovered error chip", hover, 4.5],
+      [".fl-pr.err", "border-color", "the error chip's border", chip, 3],
+      [".fl-pr.ck-fail .fl-pr-ck", "color", "a failing check", chip, 4.5],
+      [".fl-pr.ck-fail .fl-pr-ck", "color", "a failing check, hovered", hover, 4.5],
+      [".fl-pr.roll.w-fail .fl-pr-ck", "color", "a failing rollup", page, 4.5],
+      [".fl-pr.roll.w-fail .fl-pr-ck", "color", "a failing rollup, hovered", rollHover, 4.5],
+      [".fl-pr.st-closed .fl-pr-state", "color", "a closed PR's glyph", chip, 4.5],
+      [".fl-pr-num", "color", "the chip's number", chip, 4.5],
+      [".fl-pr-num", "color", "the hovered chip's number", hover, 4.5],
+      [".fl-pr-num", "color", "the live chip's number", wash, 4.5],
+      [".fl-pr-num", "color", "a rollup's count", page, 4.5],
+      [".fl-prdet-num", "color", "the detail row's number", detail, 4.5],
+    ];
+    for (const [sel, prop, what, ground, floor] of checks) {
+      const v = decl(sel, prop), ink = hexRgb(resolve(v)), r = ratio(ink, ground);
+      assert.ok(r >= floor, `${name}: ${what} (${sel} ${prop}: ${v} → ${resolve(v)}) reads ${r.toFixed(2)}:1 < ${floor}`);
+    }
   }
 });

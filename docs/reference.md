@@ -5433,6 +5433,26 @@ The settings open from the gear at the bottom right, or the palette's **Open
 settings**, in seven tabs: General, Chat, Feed, Sessions, Automation, Task
 tracking and Debug. The tab you used last is remembered in this browser.
 
+## PR chips in the Outline
+
+A session in a GitHub checkout shows its branch's PR on its row, and each goal
+the PRs it acted on (a `gh pr` command or a push in the same step), with their
+check state. The repo is the one `gh` resolves: a `gh repo set-default` choice
+first, then the `upstream`, `github` and `origin` remotes in that order. In the
+grouped view a session with no goal in view still shows its header when its
+branch has an open or draft PR inside the time range, or its PR read failed.
+
+A failed `gh` read keeps the last chips and adds a `⚠ PR status` chip naming the
+error, on the session's first row in the flat view and on its header in the
+grouped one; clicking it re-reads. A chip for a fault in the kernel itself has
+no retry.
+
+The **PR status** setting (Settings, Task tracking) turns off every git and `gh`
+read for the chips, and the judge's PR stamp. It is kept per install, since the
+`gh` login is this machine's. `ROMP_PR_STATUS=off` in the kernel's environment
+seeds it off on an install that has not set it; `ROMP_GH_BIN` and `ROMP_GIT_BIN`
+name the binaries. The design is in [read-side.md](read-side.md).
+
 ## Renaming, restarting and ending a session from the Outline
 
 Right-click a session's name in the Outline pane, or press the Menu key (or

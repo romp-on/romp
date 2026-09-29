@@ -19,6 +19,7 @@ const RENDER = web("render.ts");
 const CHAT_CSS = web("styles.css");
 const FEED_CSS = web("feed.css");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
+const GITPR = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "gitpr.py"), "utf8");   // the one GitHub remote parser
 
 // ── a DOM stand-in: the members the GitHub action touches at mount and on the reply ───────────────
 class El {
@@ -231,8 +232,10 @@ test("the kernel's answer is a verdict from git itself, threaded off the recv lo
   assert.match(KERNEL, /GIT_TERMINAL_PROMPT="0"/);
   assert.match(KERNEL, /elif msg and msg\.get\("type"\) == "fileGitLink":/);
   assert.match(KERNEL, /threading\.Thread\(target=_gl, daemon=True\)\.start\(\)/);
-  // the spellings git actually writes for a GitHub origin — incl. ports and ssh.github.com
-  assert.match(KERNEL, /ssh:\/\/git@\(\?:ssh\\\.\)\?github\\\.com\(\?::\\d\+\)\?/);
+  // the spellings git actually writes for a GitHub origin — incl. ports, ssh.github.com and an ssh host alias;
+  // the kernel shares gitpr's parser rather than keeping its own
+  assert.match(KERNEL, /^_GITHUB_REMOTE = gp\.GITHUB_REMOTE_RE\b/m);
+  assert.match(GITPR, /ssh:\/\/git@\(\?:ssh\\\.\)\?github\\\.com\(\?:-\[\\w\.-\]\+\)\?\(\?::\\d\+\)\?/);
   assert.match(KERNEL, /ls-files", "--error-unmatch"/, "tracked files only — no link to a thing not there");
   // realpath, not normpath: a lexical '..' collapse linked a DIFFERENT file than the viewer shows
   assert.match(KERNEL, /p = os\.path\.realpath\(p\)\n    d = os\.path\.dirname\(p\)/);

@@ -74,6 +74,61 @@ test("Fleet: header / row open + caret fold are DELEGATED to the stable #fleet-l
   assert.match(FLEET, /if \(el\.dataset\.folded === "1"\) \{ expanded\.add\(k\); folded\.delete\(k\); \} else \{ folded\.add\(k\); expanded\.delete\(k\); \}/);
 });
 
+test("Fleet: the PR chip's actions are declared on the node and handled by the #fleet-list delegate", () => {
+  // the chip body folds its detail row, the number opens the PR, the detail row's buttons open and copy
+  assert.match(FLEET, /chip\.dataset\.act = "prfold"; chip\.dataset\.sid = sid; chip\.dataset\.nid = nid;/);
+  assert.match(FLEET, /num\.dataset\.act = "propen"; num\.dataset\.url = pr\.url;/);
+  assert.match(FLEET, /open\.dataset\.act = "propen"; open\.dataset\.url = pr\.url;/);
+  assert.match(FLEET, /copy\.dataset\.act = "prcopy"; copy\.dataset\.num = String\(pr\.num\);/);
+  assert.match(FLEET, /bad\.dataset\.act = "prretry"; bad\.dataset\.sid = s\.sid; bad\.dataset\.err = hc\.err;/);
+  for (const act of ["prfold", "propen", "prcopy", "prretry"]) assert.match(FLEET, new RegExp("\\n    " + act + ": \\(el\\) =>"), act);
+  assert.match(FLEET, /prretry: \(el\) => \{ if \(el\.dataset\.sid && !el\.dataset\.busy\) \{ markPrRetrying\(el\.dataset\.sid, el\.dataset\.err \|\| ""\); vscodeApi\?\.postMessage\(\{ type: "prRetry", id: el\.dataset\.sid \}\); \} \}/);
+});
+
+test("Outline: the retry chip's disabled state survives the re-render, held outside the DOM until the retry answers", () => {
+  // a post-and-wait control disables and relabels itself until it restores (ui/CLAUDE.md); the state lives in a
+  // module map every render reads, since a flag on the node died with the node on the next frame
+  const chip = /\nfunction prErrChip\([\s\S]*?\n\}/.exec(FLEET)![0];
+  assert.match(chip, /const busy = retryPending\(prRetryPending, s\.sid, hc\.err, Date\.now\(\)\);/);
+  assert.match(chip, /if \(busy\) \{ bad\.dataset\.busy = "1"; bad\.setAttribute\("aria-disabled", "true"\); \}/);
+  assert.match(chip, /bad\.textContent = busy \? PR_RETRYING_LABEL : PR_RETRY_LABEL;/);
+  const mark = /\nfunction markPrRetrying\([\s\S]*?\n\}/.exec(FLEET)![0];
+  assert.match(mark, /markRetry\(prRetryPending, sid, reason, Date\.now\(\) \+ PR_RETRY_RESTORE_MS\);\n  render\(\);/);
+  assert.doesNotMatch(mark, /dataset|setAttribute|textContent/, "nothing is written onto a node the next frame replaces");
+  assert.match(FLEET, /const prRetryPending: RetryPending = new Map\(\);/);
+  // each payload settles it: a different reason, or none, is the answer
+  assert.match(FLEET, /sessions = m\.ledgers as FleetSession\[\];\n  settleRetries\(prRetryPending, sessions, Date\.now\(\)\);/);
+});
+
+test("Outline: an error the kernel says a re-read cannot fix renders without the retry action", () => {
+  const chip = /\nfunction prErrChip\([\s\S]*?\n\}/.exec(FLEET)![0];
+  assert.match(chip, /const bad = el\("span", "fl-pr err" \+ \(hc\.retry \? "" : " noretry"\)\);/);
+  // the no-retry chip returns before any data-act is set, so it is not a control
+  assert.match(chip, /if \(!hc\.retry\) \{ bad\.textContent = PR_RETRY_LABEL; return bad; \}\n  bad\.dataset\.act = "prretry";/);
+  assert.match(chip, /bad\.title = prErrTitle\(hc\.err, hc\.snapshot, hc\.retry\);/);
+  assert.match(FLEET, /prError\?: string \| null;\n\s*prErrorRetry\?: boolean; \}/, "the payload field is typed on the row");
+});
+
+test("Fleet: the PR chips are placed on goal rows and the session head, each with its detail row", () => {
+  assert.match(FLEET, /const chipPlan = goalChip\(s\.prs, byId, n\);/);
+  assert.match(FLEET, /if \(chipPlan\.kind === "one"\) row\.appendChild\(prChip\(s\.sid, n\.id, chipPlan\.prs\[0\]\)\);/);
+  assert.match(FLEET, /else if \(chipPlan\.kind === "rollup"\) row\.appendChild\(prRollup\(s\.sid, n\.id, chipPlan\.prs\)\);/);
+  assert.match(FLEET, /if \(chipPlan\.prs\.length && prOpen\.has\(prKey\(s\.sid, n\.id\)\)\)\s*\n\s*container\.appendChild\(prDetail\(chipPlan\.prs,/);
+  assert.match(FLEET, /if \(hc\.pr\) head\.appendChild\(prChip\(s\.sid, "", hc\.pr\)\);/);
+  assert.match(FLEET, /if \(hc\.err\) head\.appendChild\(prErrChip\(s\)\);/);
+  assert.match(FLEET, /if \(hc\.pr && prOpen\.has\(prKey\(s\.sid, ""\)\)\) sec\.appendChild\(prDetail\(\[hc\.pr\]/, "the head chip's detail row renders");
+  // the FLAT view has no session head: the error chip rides the session's first row, beside its name
+  const flat = /if \(flat && depth === 0\) \{[\s\S]*?\n  \}/.exec(FLEET)![0];
+  assert.match(flat, /if \(s\.prError && !ctx\.errShown\) \{ ctx\.errShown = true; row\.appendChild\(prErrChip\(s\)\); \}\n\s*row\.appendChild\(tag\);/);
+  // the grouped view keeps a session whose goals are all hidden when its head has news, and draws the head alone
+  const loop = FLEET.slice(FLEET.indexOf("for (const s of sessions) {\n    if (only"), FLEET.indexOf("  if (grouped) {"));
+  assert.match(loop, /if \(!visibleRoots\.length && grouped && headOnlyShown\(s, now, cutoff, sq\)\) \{ survivors\.push\(\{ ctx, visibleRoots \}\); continue; \}\n\s*if \(!visibleRoots\.length\) continue;/);
+  assert.equal(loop.split("if (!visibleRoots.length) continue;").length - 1, 1, "no earlier exit skips the head-only keep");
+  assert.match(FLEET, /return age \|\| headPrAge\(s, now\);/, "the slider's far end reaches a head shown alone");
+  // the search box matches a goal on a PR it shipped
+  assert.match(FLEET, /\|\| sessionPrs\(s\.prs, node\.prNums\)\.some\(\(pr\) => prMatches\(pr, sq\)\)\);/);
+});
+
 test("Timeline: the EXTERNAL redraws (poll + live-tick) are held under a pressed pointer, NOT user gestures", () => {
   assert.match(TIMELINE, /this\.svg\.addEventListener\('pointerdown', \(\) => \{ this\._pointerHeld = true; \}\);/);
   // the poll update() buffers (reusing the freeze-on-hover _dirtyWhileTip path) instead of relaying out

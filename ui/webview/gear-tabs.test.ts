@@ -50,7 +50,7 @@ test("every existing control keeps its id and sits in exactly one pane, by the a
     feed: ["rs-feedcollapsed"],
     sessions: ["rs-defaultdir", "rs-backend"],
     automation: ["rs-autonudge", "rs-suggestcompact", "rs-alwaysfast", "rs-retryupgrade"],   // the two model switches: kernel policies applied to sessions on the kernel's own initiative (2026-09-17)
-    tasks: ["rs-tasktrack", "rs-judgemodel", "rs-judgefast", "rs-judgeeffort", "rs-distillmodel", "rs-distillfast", "rs-distilleffort", "rs-indexmodel", "rs-indexfast", "rs-indexeffort", "rs-judgeconc"],
+    tasks: ["rs-tasktrack", "rs-prstatus", "rs-judgemodel", "rs-judgefast", "rs-judgeeffort", "rs-distillmodel", "rs-distillfast", "rs-distilleffort", "rs-indexmodel", "rs-indexfast", "rs-indexeffort", "rs-judgeconc"],
     debug: ["rs-judges-index", "rs-judges-triage", "ra-open", "rs-log-open", "rsver"],
   };
   for (const [pane, ids] of Object.entries(where)) {

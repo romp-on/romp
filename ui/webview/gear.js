@@ -338,6 +338,11 @@ var GEAR_HTML =
   '<span><b>Task tracking</b><span class=rs-mixed hidden></span>' +
   '<span class=rs-sub>romp reads every session and keeps the feed and the outline current with its judges. Off, the judges do not run and spend nothing, the feed and the outline are not shown, and the controls that depend on them wait; the chat and the Sessions pane carry on. Follows to every connected machine.</span>' +
   '</span></label>' +
+  // PR STATUS: the Outline's PR chips read git and gh (the local gh login) per checkout; per-install, the login is this machine's
+  "<label class='rs-row'><input type=checkbox id=rs-prstatus checked>" +
+  '<span><b>PR status</b>' +
+  '<span class=rs-sub>Show each session’s pull request, the ones its goals opened, and their checks in the outline, read with the gh CLI under this machine’s GitHub login. Off, romp runs no git or gh command for them. Applies to this machine only.</span>' +
+  '</span></label>' +
   '<div class=rs-sec>Judges</div>' +
   "<div class='rs-row rs-jrow'><b>Triage model <span class=rs-mixed hidden></span></b><span class=rs-sub>The model the triage judges use — planner, grouper, closer, courier (the judgment-heavy tier). Applies on the judges' next pass; no restart. A pick here follows to every connected machine's kernel.</span><select id=rs-judgemodel></select>" +
   // Fast mode sits with the model (the user 2026-09-10, who wanted the setting to speak the chat's own words
@@ -445,6 +450,7 @@ function initGear(post, opts) {
     pn = { timeline: document.getElementById('rs-pane-timeline'), fleet: document.getElementById('rs-pane-fleet'), feed: document.getElementById('rs-pane-feed') },
     ths = document.getElementById('rs-thinksum'),
     wcf = document.getElementById('rs-wholechat'),
+    prs = document.getElementById('rs-prstatus'),
     afb = document.getElementById('rs-alwaysfast'), rub = document.getElementById('rs-retryupgrade'),   // the Automation pane's model switches (2026-09-17)
     tk = document.getElementById('rs-tasktrack'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
@@ -1137,6 +1143,8 @@ function initGear(post, opts) {
   if (ths) ths.addEventListener('change', function () { post({ type: 'setThinkingSummaries', enabled: ths.checked, gt: gclock.stamp('thinking-summaries') }); });
   // Whole chat frames (2026-09-15): per-install like Thinking summaries (the LOCAL kernel's floor), not a KERNEL_SETTING; stamped
   if (wcf) wcf.addEventListener('change', function () { post({ type: 'setWholeChatFrames', enabled: wcf.checked, gt: gclock.stamp('whole-chat-frames') }); });
+  // PR status: per-install like Whole chat frames (this machine's gh login), not a KERNEL_SETTING; stamped
+  if (prs) prs.addEventListener('change', function () { post({ type: 'setPrStatus', enabled: prs.checked, gt: gclock.stamp('pr-status') }); });
   // THE TASK TRACKING SWITCH (T404): the kernel's setting (gt-gated, a KERNEL_SETTING across machines). The click POSTS and
   // nothing more: the dependent controls dress and the shell hears the flip (a taskTracking message: the rail's Outline and
   // Feed buttons and any open pane of theirs, ahead of its next /version read) on the KERNEL'S ECHO, the taskTracking frame
@@ -1145,7 +1153,7 @@ function initGear(post, opts) {
   // a click the kernel had refused, and the judges kept spending behind a switch that read off)
   var TT_OFF_TIP = 'Enable task tracking to use this (Settings, Task tracking).';
   function dressTracking(on) {
-    var rows = Array.prototype.slice.call(document.querySelectorAll('#rsettings .rs-pane[data-pane=tasks] .rs-row')).filter(function (r) { return !r.querySelector('#rs-tasktrack'); });   // the judge rows; never the switch's own row
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#rsettings .rs-pane[data-pane=tasks] .rs-row')).filter(function (r) { return !r.querySelector('#rs-tasktrack, #rs-prstatus'); });   // the judge rows; never the switch's own row, nor PR status (it governs gh reads, so it stays reachable)
     [pn.fleet, pn.feed, jix, jtr].forEach(function (el) { var row = el && el.closest ? el.closest('label') : null; if (row) rows.push(row); });
     rows.forEach(function (row) {
       row.classList.toggle('rs-off', !on);
@@ -1601,14 +1609,14 @@ function initGear(post, opts) {
     'comment-fast': 'Fast comment threads',
     'judge-fast': 'Fast mode (triage judges)', 'distill-fast': 'Fast mode (distilling judges)', 'index-fast': 'Fast mode (indexing judges)',
     'always-fast': 'Always fast', 'retry-upgrade': 'Retry upgrades after downgrades',
-    'thinking-summaries': 'Thinking summaries', 'whole-chat-frames': 'Always load whole chats',
+    'thinking-summaries': 'Thinking summaries', 'whole-chat-frames': 'Always load whole chats', 'pr-status': 'PR status',
     'router-models': 'Extra models from your API gateway' };
   // store name → the message type that sets it: the whitelist for the toast's Apply anyway (a frame
   // may re-issue the one setting it names, nothing else) and the completeness pin's map
   // (gear.test.ts checks every emitter stamps through the clock under its own store name)
   var STALE_TYPE = { 'auto-nudge': 'setAutoNudge', 'compact-suggest': 'setCompactSuggest', 'task-tracking': 'setTaskTracking',
     'file-editing': 'setFileEditing', 'update-mode': 'setUpdateMode', 'thinking-summaries': 'setThinkingSummaries',
-    'whole-chat-frames': 'setWholeChatFrames', 'router-models': 'setRouterModels',
+    'whole-chat-frames': 'setWholeChatFrames', 'pr-status': 'setPrStatus', 'router-models': 'setRouterModels',
     'judge-model': 'setJudgeModel', 'judge-effort': 'setJudgeEffort',
     'index-model': 'setIndexModel', 'index-effort': 'setIndexEffort', 'judge-concurrency': 'setJudgeConcurrency',
     'distill-model': 'setDistillModel', 'distill-effort': 'setDistillEffort',
@@ -2137,6 +2145,7 @@ function initGear(post, opts) {
     lastV = v; selfName = (typeof v.host === 'string' && v.host) ? v.host : selfName;
     if (ths) ths.checked = !!v.thinkingSummaries;   // per-install opt-in: this kernel's persisted answer is authoritative
     if (wcf) wcf.checked = !!v.wholeChatFrames;     // the Whole chat frames switch: the same per-install rule
+    if (prs) prs.checked = v.prStatus !== false;    // the PR status switch: absent reads on
     if (tk) { tk.checked = v.taskTracking !== false; dressTracking(tk.checked); }   // the master switch (T404): absent reads on
     if (fe) fe.checked = !!v.fileEditing;   // the kernel's persisted opt-in is authoritative (see the viewer's consent popup)
     if (cvm) cvm.checked = !!v.conserveMemory;   // T148: the kernel's persisted conserve flag is authoritative

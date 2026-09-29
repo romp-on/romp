@@ -163,10 +163,25 @@ and per-machine, from this trust level).
 
 ## Network access
 
-romp makes one outbound request by default: it fetches a public model-pricing
-table (`raw.githubusercontent.com/.../model_prices_and_context_window.json`)
-every few hours to label context/cost. The response is parsed strictly as
-numeric pricing. No telemetry or session data is sent anywhere.
+Apart from the PR chip below, romp makes one outbound request by default: it
+fetches a public model-pricing table
+(`raw.githubusercontent.com/.../model_prices_and_context_window.json`) every
+few hours to label context/cost. The response is parsed strictly as numeric
+pricing. That request carries no telemetry or session data.
+
+For a session in a GitHub checkout, the Outline's PR chip runs `gh pr list` and
+`gh pr view` under your local `gh` login. They send the repo's owner/name
+(private repos included), the checkout's branch name (`gh pr list --head`, which
+can send a branch that was never pushed), and the numbers of the PRs the
+session's goals opened or acted on. They run when a session's row is first
+built; after a push or a turn that acted on a PR (`gh pr create`, `merge`,
+`edit` and the like, never `view`, `list` or `checks`), which also covers a
+newly cited PR; when a commit, amend or branch switch moves a ref; on a 30 s
+poll only while a check on the session's own PRs is running; and when you click
+the error chip. A failing read retries on a backoff from 30 s to 15 minutes.
+The **PR status** setting (Settings, Task tracking) turns all of it off, and
+the judge's PR stamp with it; `ROMP_PR_STATUS=off` in the kernel's environment
+seeds that setting off on an install that has not set it.
 
 ## Reporting a vulnerability
 
