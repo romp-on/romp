@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DEFAULT_TURN_PX, OVERLAY_KINDS, gapAt, gapFraction, gapHeight, insertRun, landingCancel, landingNotice, pagesToAsk, regionsFromRuns, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Ev, type Region, type Run } from "./chat-regions";
+import { DEFAULT_TURN_PX, OVERLAY_KINDS, gapAt, gapFraction, gapHeight, insertRun, landingCancel, landingNotice, pagesToAsk, regionsFromRuns, redoSpans, runHoldingKey, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Ev, type Region, type Run } from "./chat-regions";
 
 const ev = (k: string) => ({ uuid: k });
 const run = (lo: number, hi: number | null, keys: string[]): Run => ({ kind: "run", lo, hi, events: keys.map(ev) });
@@ -136,4 +136,31 @@ test("the echo landing: the held echo after the last shared key is dropped, not 
   assert.deepEqual(keys(r.before), ["t1", "t2"]);
   assert.deepEqual(keys(r.dropped), ["echo:x"], "the echo the record replaced leaves with the frame");
   assert.equal(r.behind, false);
+});
+
+test("the history run holding a key, for a changedBelow tail: a held history run is found, the tail run and a gap never (2026-09-30)", () => {
+  // the kernel names a change ABOVE the client's tail run by its key instead of sending a full frame; the page re-asks the
+  // history run that holds it, and only that: the tail run is the delta's own business, a key in a gap is nothing it holds
+  let rs: Region[] = regionsFromRuns([run(200, null, ["t1", "t2"])]);
+  rs = insertRun(rs, run(96, 128, ["w1", "w2"]));
+  rs = insertRun(rs, run(32, 48, ["v1"]));
+  assert.equal(runHoldingKey(rs, "w2")?.lo, 96, "the run above holding the key");
+  assert.equal(runHoldingKey(rs, "v1")?.hi, 48);
+  assert.equal(runHoldingKey(rs, "t1"), null, "the tail run holds it: not stale history");
+  assert.equal(runHoldingKey(rs, "g9"), null, "a key in a gap: nothing held");
+  assert.equal(runHoldingKey(rs, undefined), null);
+  assert.equal(runHoldingKey(null, "w1"), null);
+  // a key spelled as uuid#n (a record's second event) matches by the wire key, as every anchor does
+  const keyed: Region[] = insertRun(regionsFromRuns([run(200, null, ["t1"])]), { kind: "run", lo: 0, hi: 16, events: [{ uuid: "r1", key: "r1#1" }] });
+  assert.equal(runHoldingKey(keyed, "r1#1")?.lo, 0);
+  assert.equal(runHoldingKey(keyed, "r1"), null, "the record's uuid is not the second event's key");
+});
+
+test("the deferred re-asks: a span named while its ask was on the wire is asked once more when free, per session, never while in flight (2026-09-30)", () => {
+  const deferred = [{ sid: "s1", lo: 96, hi: 128 }, { sid: "s1", lo: 32, hi: 48 }, { sid: "s2", lo: 96, hi: 128 }];
+  const busy = new Set(["96:128"]);
+  assert.deepEqual(redoSpans(deferred, "s1", (lo, hi) => busy.has(lo + ":" + hi)), [{ sid: "s1", lo: 32, hi: 48 }], "the span still in flight waits; another session's entry is not this one's");
+  busy.clear();
+  assert.deepEqual(redoSpans(deferred, "s1", () => false).map((d) => d.lo), [96, 32], "every freed span, once");
+  assert.deepEqual(redoSpans([], "s1", () => false), []);
 });

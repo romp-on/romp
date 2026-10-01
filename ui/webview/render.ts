@@ -39,7 +39,7 @@ import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
 import { compactDisplay, isFoldableNoticeShape, itemAnchor, type DisplayItem } from "./compact";
-import { insertRun, regionsFromRuns, gapHeight, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, type Region, type Run, type Gap, type Ev } from "./chat-regions";
+import { insertRun, regionsFromRuns, gapHeight, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, type Region, type Run, type Gap, type Ev, runHoldingKey, redoSpans } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { loadSettings, saveSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
 import { backendLabel, effectiveDefaultBackend } from "./backend-names";
@@ -18946,6 +18946,26 @@ function chatTail(msg: any) {
   // path now reads the painted unit count too, so the keyed paint removes the retired units and touches nothing
   // else (a stale mark here rebuilt the whole window, until 2026-09-23).
   if (!regionsAbsorbTail(s)) requestFullSession(s.id, "gap");   // a delta ate into held history: re-base rather than relabel a short tail over it (the dropped-history fix, 2026-09-19)
+  // A change ABOVE the tail run rode this delta as a key, not as a full frame (the kernel's `changedBelow`, 2026-09-30): the tail
+  // run holds no such event, so the suffix above is the whole change HERE; a HISTORY run that holds it shows a stale copy and is
+  // re-asked by its span, so the fresh page lands through chatTurns and insertRun's merge, the window's events first, replacing
+  // the card in place with the reader's row where it was. Nothing held: nothing to ask — a later gap ask reads the current list.
+  // One ask per span on the wire (gapHasAsk), as a gap's own asks are.
+  if (typeof msg.changedBelow === "string" && s.regions) {
+    const stale = runHoldingKey(s.regions, msg.changedBelow);
+    if (stale && stale.hi != null) {
+      // an ask for the span already on the wire may answer with the copy from BEFORE this change (its build read the list
+      // earlier): remembered, not doubled, and asked once more when that reply lands (chatTurns → drainGapRedo; chat-regions.ts
+      // redoSpans), however many changes arrive meanwhile
+      const busy = gapHasAsk(msg.id, { lo: stale.lo, hi: stale.hi });
+      if (busy) gapRedo.set(gapKey(msg.id, stale.lo, stale.hi), { sid: msg.id, lo: stale.lo, hi: stale.hi });
+      if (!busy) {
+        gapLoading.add(gapKey(msg.id, stale.lo, stale.hi));
+        scrollDiagRow("regionask", { sid: msg.id, lo: stale.lo, hi: stale.hi, edge: "top", why: "changed-below", notice: landingNoticeSid === msg.id });
+        vscodeApi?.postMessage({ type: "loadTurns", id: msg.id, lo: stale.lo, hi: stale.hi });
+      }
+    }
+  }
   if (typeof msg.total === "number") s.headTotal = msg.total;
   if (s.proto === 2 && s.headKnown && !(s.regions && s.regions.some((r) => r.kind === "gap"))) s.headTotal = s.events.reduce((n, e) => n + (isOptimistic(e) || isHeldGroup(e) ? 0 : 1), 0);   // the WHOLE is resident (no gap): its count (T386 stage 2, low 7: a mid-transcript gap holds older history, so the resident count is not the total)
   const before = awaitKey(s.status);
@@ -19001,6 +19021,17 @@ function insertRegionRun(s: Session, lo: number, hi: number, events: ChatEvent[]
   return true;
 }
 const gapLoading = new Set<string>();                                        // "sid:lo:hi" of the page asks in flight
+const gapRedo = new Map<string, { sid: string; lo: number; hi: number }>();   // spans a changedBelow named while their ask was on the wire: re-asked once when it lands (2026-09-30)
+/** The deferred re-asks of `sid` whose span has no ask in flight any more (chat-regions.ts redoSpans): one follow-up each, through
+ *  the gap asks' own road. Run from chatTurns once its reply has freed its span. */
+function drainGapRedo(sid: string): void {
+  for (const sp of redoSpans(gapRedo.values(), sid, (lo, hi) => gapHasAsk(sid, { lo, hi }))) {
+    gapRedo.delete(gapKey(sid, sp.lo, sp.hi));
+    gapLoading.add(gapKey(sid, sp.lo, sp.hi));
+    scrollDiagRow("regionask", { sid, lo: sp.lo, hi: sp.hi, edge: "top", why: "changed-below-redo", notice: landingNoticeSid === sid });
+    vscodeApi?.postMessage({ type: "loadTurns", id: sid, lo: sp.lo, hi: sp.hi });
+  }
+}
 const gapKey = (sid: string, lo: number, hi: number): string => sid + ":" + lo + ":" + hi;
 // lo/hi are the last two colon fields; a REMOTE sid carries a host prefix ("HOST:uuid"), so the sid is everything
 // before them, parse from the RIGHT, never k.split(":")[0], which for a federated key named only the host and left
@@ -19087,6 +19118,7 @@ function chatTurns(msg: any): void {
   if (span) gapLoading.delete(gapKey(msg.id, span[0], span[1]));
   const s = sessions.get(msg.id);
   if (!s) return;
+  if (span) drainGapRedo(msg.id);   // a changedBelow that arrived while this ask was out: its span is asked once more now (2026-09-30)
   if (!span || !(span[1] > span[0])) {
     // an OLDER host's page reply carries no span (or an empty one): the gap cannot be placed, so tell the reader and free the gap
     // instead of dropping it silently (T386 stage 2, low 2). A scroll-driven fill shows no notice, so no toast beyond the row.

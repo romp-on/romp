@@ -162,6 +162,29 @@ export function landingCancel(state: LandingState): LandingState {
   return { target: null, notice: false, askInFlight: state.askInFlight };
 }
 
+/** The HISTORY run (never the tail run) holding the event keyed `key`, or null (2026-09-30): what a chatTail's `changedBelow`
+ *  names — a change the kernel saw above the client's tail run. A history run that holds it shows a stale copy and is re-asked
+ *  by its span (render.ts chatTail); the tail run is the delta's own business, and a key in a gap is nothing the page holds. */
+export function runHoldingKey(regions: readonly Region[] | null | undefined, key: string | null | undefined): Run | null {
+  if (!regions || !key) return null;
+  for (const r of regions) {
+    if (r.kind !== "run" || r.hi == null) continue;
+    for (const e of r.events) if (keyOf(e) === key) return r;
+  }
+  return null;
+}
+
+export interface SpanAsk { sid: string; lo: number; hi: number; }
+/** The deferred re-asks of `sid` that may go now (2026-09-30): a changedBelow that arrived while the run's span already had a
+ *  page ask on the wire was not doubled but REMEMBERED, since that ask's reply may carry the older copy (its build read the
+ *  list before the change); once no ask is in flight for the span — the reply landed — it is asked once more, one coalesced
+ *  follow-up however many changes arrived meanwhile. `inFlight` is the page's own in-flight test (render.ts gapHasAsk). */
+export function redoSpans(deferred: Iterable<SpanAsk>, sid: string, inFlight: (lo: number, hi: number) => boolean): SpanAsk[] {
+  const out: SpanAsk[] = [];
+  for (const d of deferred) if (d.sid === sid && !inFlight(d.lo, d.hi)) out.push(d);
+  return out;
+}
+
 /** The gap a turn span falls in, if any. */
 export function gapAt(regions: readonly Region[], turn: number): Gap | null {
   for (const r of regions) if (r.kind === "gap" && turn >= r.lo && turn < r.hi) return r;

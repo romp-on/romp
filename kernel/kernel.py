@@ -520,6 +520,7 @@ class _PerfStats:
             # chatFullWhy: its own attribute, since snapshot()'s dict(self.pusher) is a shallow copy that would share a nested
             # map with every reader; see chat_full_why
             self.chat_full_why_stats = {}
+            self.chat_below_first_delta_n = 0   # proto-2 deltas that carried a change above the client's held run as a key (2026-09-30), where a full went before
             self.ring = collections.deque(maxlen=self.RING)
             self.stages = {k: 0.0 for k in self.STAGES}
             # T397: the stage split PER CYCLE. `cycle_stages` fills as the cycle's stages close (wall ms, the reader's bytes
@@ -635,6 +636,13 @@ class _PerfStats:
             if reason not in d and len(d) >= self.SLOTS:
                 reason = "other"
             d[reason] = d.get(reason, 0) + 1
+
+    def chat_below_first_delta(self):
+        """One proto-2 chatTail that carried a change ABOVE the client's held tail run as `changedBelow` (2026-09-30): the send
+        that used to be a changeBelowFirst full. Beside chatFullWhy in the snapshot's pusher as chatBelowFirstDelta, so the
+        two read together: the fulls that remain under that reason are senders with no baseline on their thread."""
+        with self.lock:
+            self.chat_below_first_delta_n += 1
 
     def cycle_failed(self):
         """A pusher cycle that raised out of the loop and was skipped (the loop's guard): counted under its lock like every
@@ -1096,6 +1104,7 @@ class _PerfStats:
             pusher["connectPush"] = {k: (dict(v) if k != "byApp" else {a: dict(row) for a, row in v.items()}) if isinstance(v, dict) else v
                                      for k, v in self.connect_push_stats.items()}
             pusher["chatFullWhy"] = dict(self.chat_full_why_stats)   # the proto-2 full frames by reason (2026-09-19): a copy, its own map
+            pusher["chatBelowFirstDelta"] = self.chat_below_first_delta_n   # the deltas that replaced changeBelowFirst fulls (2026-09-30)
             pusher["firstCycle"] = dict(self.first_cycle) if self.first_cycle is not None else None   # T397: the boot's
             sr = list(self.stage_ring) if self.stage_ring is not None else []                           #  first cycle's split
             pusher["stageRing"] = sr if ring_all else sr[-self.STAGE_RING_SERVED:]   # the newest few by default: the whole ring
@@ -35298,6 +35307,42 @@ def _chat_diff(prev, cur):
     return i
 
 
+def _chat_diff_from(prev, cur, lo):
+    """_chat_diff's rule from index `lo` on (2026-09-30): the first index at or after `lo` where `cur` differs from `prev`;
+    the shorter length when one list ends before a difference (an append, a cut); len(cur) when the lists end together
+    unchanged. A `lo` past the shorter list is answered as is: the caller reads an index at or past the client's held
+    edges as no delta (the status-only tail) or, past its held first and not its last, a delta from after what it holds."""
+    n = min(len(prev), len(cur))
+    i = max(0, int(lo))
+    while i < n:
+        a, b = prev[i], cur[i]
+        if a is not b and a != b:      # identity first, as _chat_diff: the fold hands back the same prefix dicts
+            break
+        i += 1
+    return i
+
+
+# The baseline a send loop's change index was diffed against, on the sending thread (2026-09-30): the two session-frame
+# senders compute `change_from = _chat_diff(_seen, events)` once per build and hand every client the one index, the FIRST
+# change in the list. A proto-2 client whose held tail run begins BELOW that change (its first edge at a later index) does
+# not hold the changed event at all, and the full frame it fell to carried nothing of the change either, only the tail run
+# it already held. With the baseline at hand the sender re-diffs from the client's own first edge (_chat_diff_from) and
+# cuts its delta there. Per thread and nested like _chat_delivery; a sender outside such a loop (a connect push with no
+# baseline, a test driving the sender alone) finds none and keeps the full frame, as before.
+_CHAT_PREV = threading.local()
+
+
+@contextlib.contextmanager
+def _chat_prev_seen(prev):
+    """Hold `prev` (the list `_seen`, or None) as this thread's diff baseline for the sends inside the block."""
+    before = getattr(_CHAT_PREV, "events", None)
+    _CHAT_PREV.events = prev if isinstance(prev, list) else None
+    try:
+        yield
+    finally:
+        _CHAT_PREV.events = before
+
+
 # The chat send loop's delivery ledger (2026-09-21): the sids a per-client send loop wrote a client's echat entry for,
 # recorded on the sending thread by the two SESSION-FRAME senders that write one (_send_chat_locked and the proto-2
 # sender it delegates to, _note_chat_handed beside each of their entry writes) and read by the loop's owner once the
@@ -52238,7 +52283,10 @@ def _chat_view_note(c, sid, m, evs, end, anchor=None):
         i = _uuid_positions(evs, sid).get(anchor)
         if i is not None:
             after = tuple((_event_key(e), _chat_ev_digest(e)) for e in evs[i + 1:])
-    c.setdefault("echatView", {})[sid] = {"view": _chat_view_key(m, end), "anchor": anchor, "after": after}
+    # `list`: the very list object the frame was cut from (2026-09-30), so the above-the-run delta can tell that the client's
+    # held run IS the shared baseline's content (the cycle advances the baseline to the list it served) and not a targeted
+    # push's build the baseline never saw (an identity, no copy: the baseline map holds the same object)
+    c.setdefault("echatView", {})[sid] = {"view": _chat_view_key(m, end), "anchor": anchor, "after": after, "list": evs}
 
 
 def _chat_skip_held(c, sid, evs, start):
@@ -54907,7 +54955,33 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
             pf = 0                                        # the client's run begins before the floor'd list (pages it scrolled
         #                                                    into): the list's first event is inside what it holds
         if pf is not None and pl is not None and pf <= pl:
-            if change_from >= total:
+            # A change strictly ABOVE the held run (2026-09-30): the client holds none of evs[:pf] in its tail run, so the full
+            # frame this fell to carried nothing of the change either (the frame is the tail run from its turn boundary, which
+            # the client already held), only its ~1.6 MB, at every such change: 3,470 times in a day for one session whose
+            # long-lived background agents re-fired their task cards in place, far above an hours-long current turn's head
+            # (pusher.chatFullWhy changeBelowFirst). With the baseline the change was diffed against at hand (_chat_prev_seen,
+            # set by the two senders around their loops) the delta is cut from the first change AT OR AFTER pf instead — none:
+            # the status-only tail — and the wire key of the change above rides it as `changedBelow`, so a page that holds
+            # that history in a run above re-asks the run's span and the fresh page replaces the card in place; a page that
+            # does not holds nothing stale. A change AT pf (the held first event itself) and a sender with no baseline on its
+            # thread keep the full frame, as before. `eff` is the index this client's delta is cut from; `change_from` stays
+            # the list's first change for the full frame's reason and row.
+            # The re-diff is sound only when the client's held run IS the baseline's content: the cycle advances the baseline
+            # to the list it served every client from, and a client's view record names the list its last frame was cut
+            # from (_chat_view_note `list`); a client a TARGETED push served from a build the baseline never saw (the
+            # connect push, the typed-input echo) holds content the baseline cannot vouch for, and a build that reverts a
+            # card to the baseline's version would re-diff as unchanged and leave that client's copy stale for good (the
+            # review of the first cut, 2026-09-30). Such a client keeps the full until the next cycle lines the two up.
+            eff = change_from
+            below_key = below_rev = None
+            if 0 < change_from < pf:
+                prev = getattr(_CHAT_PREV, "events", None)
+                rec = (c.get("echatView") or {}).get(sid)
+                if isinstance(prev, list) and rec is not None and rec.get("list") is prev:
+                    below_key = _event_key(evs[change_from])
+                    below_rev = _chat_ev_digest(evs[change_from]).hex()
+                    eff = _chat_diff_from(prev, evs, pf)
+            if eff >= total:
                 tx = pos.get(_last_anchor(evs))           # the list's last transcript event: the anchor a caught-up base ends on
                 if tx is None or pl >= tx:
                     start = total                         # nothing changed: a status-only tail with an empty suffix (the trailing
@@ -54920,26 +54994,33 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
                     #                                       sat past what the client held, which the page reads as a gap and
                     #                                       answers with a full ask, the frame the targeted push stopped sending
             else:
-                start = min(change_from, pl + 1) if change_from > 0 else 0   # from the change, or from after the held
+                start = min(eff, pl + 1) if eff > 0 else 0   # from the change, or from after the held
             if start > pf:                                #  last record (overlay cards past it ride from the first change)
                 start = _chat_skip_held(c, sid, evs, start)   # …past what the client holds unchanged there (2026-09-23)
                 view = _chat_view_key(m, _event_key(evs[-1]))
                 # an EMPTY suffix that would leave the page exactly as it is (the view it holds, no ledger riding) is not sent
                 # (2026-09-23, _chat_view_key's comment); the entries below are written as for a frame that went, since the page
-                # already holds what this one would have left it holding
-                if not (start == total and not led_changed and _chat_view_held(c, sid, view)):
+                # already holds what this one would have left it holding. One that carries a change above the held run
+                # (`changedBelow`) goes: the page may hold that history in a run and owes it a re-ask (2026-09-30)
+                if below_key is not None or not (start == total and not led_changed and _chat_view_held(c, sid, view)):
                     tail = {"type": "chatTail", "id": sid, "afterUuid": _event_key(evs[start - 1]),
                             "events": evs[start:], "status": m.get("status"),
                             # the per-session view flags ride this delta as they ride the index client's (2026-09-11, the bell
                             # on a key): the empty-suffix tail a flag-only change sends is how another window learns the flip
                             "notify": m.get("notify"), "hideFromFeed": m.get("hideFromFeed"), "postalServiceOff": m.get("postalServiceOff")}
                     tail["wm"] = m.get("wm")          # what the build read (_chat_wm), for the page's own stale-build rule (2026-09-22)
+                    if below_key is not None:
+                        tail["changedBelow"] = below_key   # the change above the held run, as a key: the page re-asks the run holding it (2026-09-30)
+                        tail["changedBelowRev"] = below_rev   # …and the changed event's digest: two changes to one card with the same
+                        #                                       tail, status and watermark are two frames, not one the per-client dedup
+                        #                                       (_send_client) folds into the first (the review of the first cut)
                     # …and the base it assumes (2026-09-23): the keys of the events ending at the anchor, from the client's own
                     # first edge at most, so a page that holds anything else before the anchor refuses the delta and asks for the full
                     tail["baseFp"] = _chat_base_fp(evs, max(pf, start - CHAT_BASE_FP_K), start)
                     if led_changed:
                         tail["ledger"] = m.get("ledger")
-                    _send_client(c, ("chat", sid), tail, kind="delta")
+                    if _send_client(c, ("chat", sid), tail, kind="delta") and below_key is not None:
+                        _PERF_STATS.chat_below_first_delta()   # counted as sends are: a frame that LEFT
                 st[sid] = {"first": pc["first"], "last": _last_anchor(evs)}
                 _chat_view_note(c, sid, m, evs, _event_key(evs[-1]), anchor=st[sid]["last"])
                 _chat_wm_note(c, sid, m)                  # …and the watermark of the build it now holds (2026-09-22)
@@ -58459,8 +58540,8 @@ def _push(targets, connect=False, live_map=None):
                 # drops from the whole events array to just what changed.
                 change_from = _chat_diff(_seen, m.get("events") or [])   # against the baseline read before the build (above)
                 led_changed = m.get("ledger") != _prev_chat_ledger.get(m["id"])
-                with _chat_delivery() as _handed:        # this loop's echat writes, the seed's gate below (2026-09-21)
-                    for c in chat_clients:
+                with _chat_delivery() as _handed, _chat_prev_seen(_seen):   # this loop's echat writes, the seed's gate below (2026-09-21);
+                    for c in chat_clients:                                     # the baseline the diff read, for the per-client cut (2026-09-30)
                         # flush as built → the active tab lands first; a full send materializes the lazy
                         # serialization ONCE and every later client (and the cache below) reuses it. A tab the
                         # client holds as a skeleton gets only its status (2026-09-07)
@@ -59151,8 +59232,8 @@ def _push_session_now(sid):
         change_from = _chat_diff(_seen, m.get("events") or [])   # against the baseline read before the build (above)
         led_changed = m.get("ledger") != _prev_chat_ledger.get(sid)
         ms = None                                    # lazy: the first full send materializes it, the rest reuse
-        with _chat_delivery() as _handed:            # this loop's echat writes, the seed's gate below (2026-09-21)
-            for c in targets:                        # the strip went above, before the gate; here the session frame
+        with _chat_delivery() as _handed, _chat_prev_seen(_seen):   # this loop's echat writes, the seed's gate below (2026-09-21);
+            for c in targets:                        # the strip went above, before the gate; here the session frame (the baseline the diff read rides the thread, 2026-09-30)
                 ms = _send_chat_or_status(c, m, ms, change_from, led_changed)
         if not _seen and sid in _handed:             # a build every page took as a status frame seeds nothing (2026-09-21): the
             _seed_chat_baseline(sid, m, _seen)       # loop's own writes, not the bases after it, where a racing sender's write
@@ -73429,6 +73510,13 @@ class Handler(BaseHTTPRequestHandler):
                             old = client.get("echat", {}).get(sid)
                             if isinstance(old, dict):
                                 client.setdefault("echat", {})[sid] = {"first": base["first"], "last": old.get("last")}
+                                # the run now holds this reply's page, content the baseline list never produced (its own build), so the
+                                # view record's provenance is dropped (2026-09-30): the above-the-run delta (_send_chat_proto2) reads the
+                                # record's `list` as the baseline only while every event of the run came from it, and keeps the full
+                                # frame for this client until the next cycle serves it from the list it advances the baseline to
+                                _rec = (client.get("echatView") or {}).get(sid)
+                                if isinstance(_rec, dict):
+                                    _rec["list"] = None
                         _wire = json.dumps(reply)
                         try:
                             client["send"](_wire); _sent = True
