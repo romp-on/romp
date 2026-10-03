@@ -383,7 +383,7 @@ def _scan_bg_tasks(path, want_all=False):
     return _bg_finish(state, want_all)
 
 
-def _bg_fresh(want_all=False):
+def _bg_fresh(want_all=False, slim=False):
     """A fresh pairing state. `all`: keep every task's row (the launch-ordered history view); otherwise a
     task that reaches a terminal status is dropped from the state at once — the running-only view can
     never show it again (no record the harness emits returns an existing task to "running"; a literal
@@ -393,8 +393,58 @@ def _bg_fresh(want_all=False):
     tombstone set: transcripts DO replay records — a duplicate async ack (same tool-use id, even the same
     uuid) can land after the terminal notification — and with the row gone such a replay would pass the
     `tid not in tasks` creation guards and resurrect the task as running, where a retained row ignored it.
-    The tombstone keeps that answer while releasing the row and its prompt text."""
-    return {"tasks": {}, "order": [], "dispatch": {}, "all": bool(want_all), "done": set()}
+    The tombstone keeps that answer while releasing the row and its prompt text.
+    `slim` (2026-10-03): every row keeps only _BG_SLIM_KEYS, the fields the awaiting-stamp lift rules on, and a remembered
+    dispatch only its type. The every-task view's rows carry each agent's closing report (up to _RESULT_CAP characters),
+    its brief or command and its summaries; on a long transcript that state was over the checkpoint's per-fold cap, so it
+    was written as a cursor without its state, and after every drop of the reader's entry the lift's next fold read the
+    whole transcript again (live: 97 reads, 85.5 GB in 15.7 hours). The slim state is about 170 bytes a task (under 200
+    is pinned). The key is present only on a slim state, so the every-task and running-only states keep their shape (and
+    the documents already on disk still decode as what they are)."""
+    state = {"tasks": {}, "order": [], "dispatch": {}, "all": bool(want_all), "done": set()}
+    if slim:
+        state["slim"] = True
+    return state
+
+
+# The fields a slim pairing state keeps per task (_bg_fresh's `slim`): what the awaiting-stamp lift reads off every row,
+# returned ones included (_lift_spent_awaiting, _lift_decisions, _bg_ended_after, _bg_expired).
+_BG_SLIM_KEYS = frozenset(("id", "status", "t", "endT", "type", "deadline", "monitor"))
+
+
+def bg_slim_encoded(enc):
+    """An every-task pairing state in its checkpointed form (_ckpt_encode) narrowed to what a slim state's own steps would
+    hold over the same records: every row on _BG_SLIM_KEYS, every remembered dispatch its type alone, `slim` set. The slim
+    step is the every-task step plus that narrowing (no branch reads a narrowed field), so the two agree record for record
+    (tests/test_bg_lift_fold_size.py). None for anything not of that shape. The seed of the lift's fold (_FOLD_SEEDS)."""
+    if not (isinstance(enc, dict) and enc.get("all") is True and not enc.get("slim") and isinstance(enc.get("tasks"), dict)
+            and isinstance(enc.get("order"), list) and isinstance(enc.get("dispatch"), dict)):
+        return None
+    if any(str(k).startswith("~") for k in list(enc["tasks"]) + list(enc["dispatch"])):
+        return None                                       # a tagged (non-string-keyed) encoding: not a shape this step writes
+    tasks = {}
+    for tid, row in enc["tasks"].items():
+        if not isinstance(row, dict):
+            return None
+        tasks[tid] = {k: v for k, v in row.items() if k in _BG_SLIM_KEYS}
+    dispatch = {}
+    for tid, d in enc["dispatch"].items():
+        if not isinstance(d, dict):
+            return None
+        dispatch[tid] = {"type": d.get("type")}
+    out = dict(enc)
+    out.update(tasks=tasks, dispatch=dispatch, slim=True)
+    return out
+
+
+def _bg_slim_rows(state, tids):
+    """Narrow the rows `tids` name to _BG_SLIM_KEYS, in place (a slim state's step ends here)."""
+    tasks = state["tasks"]
+    for tid in tids:
+        row = tasks.get(tid)
+        if row is not None:
+            for k in [k for k in row if k not in _BG_SLIM_KEYS]:
+                del row[k]
 
 
 def _bg_forget_terminal(state, tid):
@@ -411,6 +461,8 @@ def _bg_step(state, o):
     """One transcript record of the pairing — see _scan_bg_tasks. Returns the state (the fold_records
     contract)."""
     tasks, order, dispatch, done = state["tasks"], state["order"], state["dispatch"], state["done"]
+    slim = state.get("slim")
+    touched = []                           # the rows this record created or changed: a slim state narrows them at the end
 
     def _mark(note, end_t=None):
         # a notification keyed by its INNER <tool-use-id> (the string/queue shapes have no wrapper block)
@@ -419,11 +471,12 @@ def _bg_step(state, o):
             if tasks[tid].get("monitor") and not note.get("has_status"):
                 return                     # a monitor EVENT (no <status> tag) — the watch is still live
             tasks[tid].update(status=note["status"], outputFile=note["output_file"],
-                              summary=note["summary"] or tasks[tid]["summary"])
+                              summary=note["summary"] or tasks[tid].get("summary"))
             if note.get("result"):         # an agent's closing message → the Agent head's report fold
                 tasks[tid]["result"] = note["result"]
             if end_t:                      # WHEN the result landed — the awaiting-stamp lift keys the
                 tasks[tid]["endT"] = end_t  # "returned after the stamp was written" test on it (2026-08-16)
+            touched.append(tid)
             _bg_forget_terminal(state, tid)
 
     t = o.get("type")
@@ -440,13 +493,14 @@ def _bg_step(state, o):
                 # real Agent shape, which registers via the launch branch below instead). A
                 # replayed launch record for a task already registered or already returned can
                 # never be consumed (both creation paths refuse the id), so it is not captured.
-                dispatch[b["id"]] = {
+                kind = "local_workflow" if b.get("name") == "Workflow" else "local_agent"
+                dispatch[b["id"]] = {"type": kind} if slim else {   # a slim state keeps the type alone (_bg_fresh)
                     "desc": str(inp.get("description") or "").strip(),
                     "launchDesc": _launch_desc(b.get("name"), inp),
                     "detail": _clip_detail(inp.get("prompt") or inp.get("script")
                                            or ("script: " + str(inp["scriptPath"])
                                                if inp.get("scriptPath") else "")),
-                    "type": "local_workflow" if b.get("name") == "Workflow" else "local_agent"}
+                    "type": kind}
             # The THIRD durable launch shape: a Monitor tool_use. A non-persistent monitor is
             # dispatched background work exactly like a backgrounded Bash — a session idle
             # behind one read as plain 'ready', its goal stamps could lift only by the 6h
@@ -468,7 +522,7 @@ def _bg_step(state, o):
                 d = dispatch.pop(tid, None)
                 if d:   # an Agent/Task/Workflow with an explicit run_in_background lands
                         # HERE, not at its ack (tid already registered) — same enrichment
-                    tasks[tid]["command"] = tasks[tid]["command"] or d["detail"]
+                    tasks[tid]["command"] = tasks[tid]["command"] or d.get("detail", "")
                     tasks[tid]["type"] = d["type"]
                 if is_mon:
                     tasks[tid]["monitor"] = True
@@ -479,6 +533,7 @@ def _bg_step(state, o):
                     if tasks[tid]["t"]:
                         tasks[tid]["deadline"] = tasks[tid]["t"] + min(max(tmo, 1000.0), 3600000.0) / 1000.0
                 order.append(tid)
+                touched.append(tid)
     elif t == "user" and isinstance(c, list):
         tur = o.get("toolUseResult")
         tur = tur if isinstance(tur, dict) else {}
@@ -514,6 +569,7 @@ def _bg_step(state, o):
                     if tur.get("agentId"):   # the ack names the agent whose own transcript this launch writes
                         tasks[tid]["agentId"] = str(tur["agentId"])   # (plans/subagent-transcripts.md)
                     order.append(tid)
+                    touched.append(tid)
                     continue
                 if async_launch and tid in tasks and not b.get("is_error") \
                         and tasks[tid]["status"] == "running":
@@ -521,27 +577,29 @@ def _bg_step(state, o):
                     # run_in_background): the ack still owns outputFile/taskType — fill what
                     # the launch row lacks, never overwrite what it has
                     tk = tasks[tid]
-                    tk["outputFile"] = tk["outputFile"] or tur.get("outputFile") or ""
+                    tk["outputFile"] = tk.get("outputFile") or tur.get("outputFile") or ""
                     if not tk.get("launchDesc") and tur.get("description"):
                         tk["launchDesc"] = str(tur["description"]).strip()[:200]
                     if tur.get("taskType"):
                         tk["type"] = tur["taskType"]
                     if tur.get("agentId") and not tk.get("agentId"):
                         tk["agentId"] = str(tur["agentId"])
-                    if not tk["command"]:
+                    if not tk.get("command"):
                         tk["command"] = _clip_detail(tur.get("prompt") or "")
+                    touched.append(tid)
                     continue
                 note = _parse_task_notification(_result_text(b.get("content")))
                 if tid in tasks and note:      # its result landed → mark it done; the keep-filter drops it
                     if tasks[tid].get("monitor") and not note.get("has_status"):
                         continue               # a wrapped monitor EVENT — not a terminal (see _mark)
                     tasks[tid].update(status=note["status"], outputFile=note["output_file"],
-                                      summary=note["summary"] or tasks[tid]["summary"])
+                                      summary=note["summary"] or tasks[tid].get("summary"))
                     if note.get("result"):
                         tasks[tid]["result"] = note["result"]
                     et = parse_z(o.get("timestamp"))
                     if et:                     # the return's moment (see _mark)
                         tasks[tid]["endT"] = et
+                    touched.append(tid)
                     _bg_forget_terminal(state, tid)
                 elif tid in tasks and note is None and b.get("is_error") \
                         and tasks[tid]["status"] == "running":
@@ -552,11 +610,14 @@ def _bg_step(state, o):
                     et = parse_z(o.get("timestamp"))
                     if et:
                         tasks[tid]["endT"] = et
+                    touched.append(tid)
                     _bg_forget_terminal(state, tid)
     elif t == "user" and isinstance(c, str):
         _mark(_parse_task_notification(c), parse_z(o.get("timestamp")))
     elif t == "queue-operation" and o.get("operation") == "enqueue":
         _mark(_parse_task_notification(o.get("content") or ""), parse_z(o.get("timestamp")))
+    if slim and touched:
+        _bg_slim_rows(state, touched)
     return state
 
 
@@ -576,18 +637,22 @@ def _bg_finish(state, want_all=False):
     return keep[:60]
 
 
-def scan_bg_tasks_cached(path, cache, want_all=False, ckpt=None):
+def scan_bg_tasks_cached(path, cache, want_all=False, ckpt=None, slim=False):
     """_scan_bg_tasks folded append-incrementally through `cache` (fold_records): a changed transcript
     steps only its appended records instead of re-pairing the whole file — the kernel's chat box, awaiting
     source and awaiting-stamp lift, and the judge's settled gate, all asked per push per session, and
     each re-walked a working session's entire transcript on every streamed record (measured live
     2026-09-02: four such readers over one 180 MB transcript held the push loop at a full core). `cache`
-    is the caller's dict (the kernel keeps a running-only and an every-task cache; the judge its own), so
-    the two views never invalidate each other and a test's `.clear()` still forces a re-fold."""
-    state = fold_records(cache, path, lambda: _bg_fresh(want_all), _bg_step, ckpt=ckpt)
+    is the caller's dict (the kernel keeps a running-only, an every-task and a slim every-task cache for
+    the awaiting-stamp lift; the judge its own), so the views never invalidate each other and a test's
+    `.clear()` still forces a re-fold. `slim`: rows narrowed to _BG_SLIM_KEYS (see _bg_fresh)."""
+    state = fold_records(cache, path, lambda: _bg_fresh(want_all, slim), _bg_step, ckpt=ckpt)
     if state["all"] != bool(want_all):                    # the view is baked into the state at init: a cache handed to
         raise ValueError("bg fold cache for %s is shaped for want_all=%r, asked for %r"   # both views would answer
                          % (path, state["all"], bool(want_all)))                          # one of them wrong
+    if bool(state.get("slim")) != bool(slim):             # so is the slim narrowing: a slim state has no reports to give
+        raise ValueError("bg fold cache for %s is shaped for slim=%r, asked for %r"
+                         % (path, bool(state.get("slim")), bool(slim)))
     return _bg_finish(state, want_all)
 
 
@@ -968,6 +1033,38 @@ def fold_cursor_appendable(cache, path):
     return ent is not None and cur is not None and cur[1] == ent[6]
 
 
+# Folds that are a narrowing of another fold: name -> (source fold name, project(source's encoded state) -> encoded state or
+# None). A fold new to the documents on disk has no entry in any of them, and its first run after the boot that introduces
+# it would read every file whole: for the awaiting-stamp lift's narrow background view (the kernel's bgLift, a narrowing of
+# its every-task view bgAll, 2026-10-03) that is every alive transcript in the first pusher cycle. Declared here, beside the
+# pairing it projects, rather than registered by the kernel: every kernel, judge and test load re-executes this module into
+# the same object, which would reset a registry filled from outside.
+_FOLD_SEEDS = {"bgLift": ("bgAll", bg_slim_encoded)}
+
+
+def _pending_folds(doc):
+    """The document's fold entries for a pending restore. Where the document carries a seed's source (_FOLD_SEEDS) but not
+    the seeded fold, it gains an entry for that fold at the source's count: the projection of the source's state when the
+    source carries one and the projection answers (a warm restore: the state the fold's own steps would have held), else a
+    cursor without a state, which restarts cold over the tail exactly as the source would and is healed once by a whole
+    refold at the next settle (T359). The document on disk is unchanged (the converge pass still sees the fold missing and
+    writes it); the fold's own entry, once written, is the one every later restore takes."""
+    folds = dict(doc.get("folds") or {})
+    for name, (source, project) in list(_FOLD_SEEDS.items()):
+        src = folds.get(source)
+        if name in folds or not isinstance(src, dict) or "count" not in src:
+            continue
+        seeded = None
+        if "state" in src:
+            try:
+                seeded = project(src["state"])
+            except Exception:
+                seeded = None
+        folds[name] = ({"count": src["count"], "state": seeded} if seeded is not None
+                       else {"count": src["count"], "cold": 1, "seededFrom": source})
+    return folds
+
+
 def name_fold_cache(cache, name):
     """Give a fold's cursor dict its checkpoint name once, so every fold_records call over it is resumable without
     a `ckpt` argument at the call (a caller whose call shape other code stubs, such as the judge's background-task
@@ -1111,8 +1208,9 @@ def _checkpoint_entry(path, st):
     if verdict is not None:
         _ckpt_fallback(path, verdict, "size %d, recorded %d at offset %d" % (st.st_size, int(doc["size"]), offset)); return None
     gen = _next_gen()
+    folds = _pending_folds(doc)                           # a seed's projection runs outside the lock (it walks a state)
     with _CKPT_LOCK:
-        _CKPT_PENDING[str(path)] = {"count": count, "gen": gen, "folds": dict(doc.get("folds") or {})}
+        _CKPT_PENDING[str(path)] = {"count": count, "gen": gen, "folds": folds}
         _CKPT_SEQ[str(path)] = int(doc.get("seq") or 0)
     return (float(doc.get("mtime") or 0), int(doc["size"]), offset, bytes.fromhex(doc.get("guard") or ""), [], count, gen)
 
@@ -1155,7 +1253,7 @@ def _ckpt_pending(path, ent):
         with _CKPT_LOCK:
             _CKPT_SEQ[key] = int(doc.get("seq") or 0)
         return None                                       # the fold's count is outside the held records: a cold fold, no fallback
-    pend = {"count": count, "gen": ent[6], "folds": dict(doc.get("folds") or {})}
+    pend = {"count": count, "gen": ent[6], "folds": _pending_folds(doc)}
     with _CKPT_LOCK:
         _CKPT_PENDING[key] = pend
         _CKPT_SEQ[key] = int(doc.get("seq") or 0)
@@ -1204,6 +1302,10 @@ def _restored_cursor(key, name, ent):
             if reason == "over":
                 _say_once("checkpoint: fold %s of %s restarts cold over the tail: its state was %d KB, over the %d KB cap"
                           % (name, key, int(f["over"]), _CKPT_FOLD_CAP // 1024))
+            elif f.get("seededFrom"):
+                _say_once("checkpoint: fold %s of %s restarts cold over the tail: its document predates it and carries "
+                          "fold %s without a state; one whole refold heals it at the session's next settle"
+                          % (name, key, f["seededFrom"]))
             else:
                 _say_once("checkpoint: fold %s of %s restarts cold over the tail: its document carries its cursor without a state "
                           "(a tail-only state, or an older kernel's cursor-only entry); one whole refold heals it, at the session's "

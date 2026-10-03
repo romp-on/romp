@@ -12998,10 +12998,10 @@ def _GENERIC_LEAF_FOLDS():
 
 
 def _LEAF_FOLDS():
-    """The leaf's checkpointed folds with their cursor dicts: the kernel's two background-task views, the judges' pairing, the
-    session meta and the agent launch state."""
-    return ((_bg_scan_cached, _bgtasks_cache), (_bg_scan_all_cached, _bgall_cache), (jd._bg_scan, jd._BG_SCAN_CACHE),
-            (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE))
+    """The leaf's checkpointed folds with their cursor dicts: the kernel's three background-task views (running, every task,
+    and every task narrowed for the awaiting-stamp lift), the judges' pairing, the session meta and the agent launch state."""
+    return ((_bg_scan_cached, _bgtasks_cache), (_bg_scan_all_cached, _bgall_cache), (_bg_scan_lift_cached, _bglift_cache),
+            (jd._bg_scan, jd._BG_SCAN_CACHE), (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE))
 
 
 def _heal_cold_folds(leaf):
@@ -14513,7 +14513,7 @@ def _lift_spent_awaiting(now, live_map):
             # for every dispatch the transcript pairs, WHETHER its recorded deadline has passed (a
             # watcher past deadline+grace counts as returned — a clock fact, keyed as the boolean it
             # resolves to, so the crossing itself re-examines the session; review 2026-09-03).
-            every = _bg_scan_all_cached(s["path"]) if s.get("path") else []
+            every = _bg_scan_lift_cached(s["path"]) if s.get("path") else []   # the lift's narrow view: it fits the checkpoint
             gate = _sid_inputs_fp(sid, s.get("path"),
                                   extra=(tuple(sorted(str(t.get("toolUseId") or "") for t in (snap.get("bgTasks") or ())
                                                       if isinstance(t, dict))),
@@ -14666,7 +14666,7 @@ def _lift_decisions(sid, s, store, now, live_map):
             stamped.remove((nid, nd))
     if not stamped:
         return out
-    every = _bg_scan_all_cached(s["path"])
+    every = _bg_scan_lift_cached(s["path"])
     # the backend's lifecycle set (present-but-empty is AUTHORITATIVE — _bg_live_norm's own
     # rule) and the CLI epoch it (re)started at: the restart-orphan reconciliation evidence
     snap = live_map.get(sid) or {}
@@ -32171,10 +32171,28 @@ _bgall_cache = {}             # path -> em.fold_records entry (every task, launc
 def _bg_scan_all_cached(path):
     """Every background task the transcript records (launch-ordered, each with its launch `t` and current
     status), mtime+size cached like _bg_scan_cached. Its own cache: the running-only view is read on every
-    push, this one only by the awaiting-stamp lift, and sharing one entry would make each invalidate the
-    other's shape.
+    push, this one by the chat build (an agent's closing report, `result`), the task-output view (`command`)
+    and the feed's top-goal heal (`launchDesc`, `summary`), and sharing one entry would make each invalidate
+    the other's shape. The awaiting-stamp lift reads _bg_scan_lift_cached instead (2026-10-03).
     Folds append-incrementally since 2026-09-03 (em.fold_records), like _bg_scan_cached."""
     return em.scan_bg_tasks_cached(path, _bgall_cache, want_all=True, ckpt="bgAll")
+
+
+_bglift_cache = {}            # path -> em.fold_records entry (every task, the lift's fields only)
+
+
+def _bg_scan_lift_cached(path):
+    """Every background task the transcript records, as _bg_scan_all_cached, each row narrowed to the fields the
+    awaiting-stamp lift rules on (id, status, t, endT, type, deadline, monitor: em._BG_SLIM_KEYS). The lift folds
+    this for every alive session on every cycle, before its skip check (whose fingerprint is built from it). It read
+    the every-task view until 2026-10-03, whose rows carry each agent's closing report and each brief or command: on
+    a long transcript that state is over the checkpoint's per-fold cap, so it was written as a cursor without its
+    state, and after every drop of the reader's entry (the quiescent drop, an eviction) the lift's next fold read
+    the whole transcript again (live: 97 reads, 85.5 GB in 15.7 hours, over half of the kernel's whole-read bytes).
+    This state is about 170 bytes a task (under 200 is pinned), so it is written whole and the fold after a drop
+    restores from it. A document written before this fold existed restores it from bgAll's entry (em._FOLD_SEEDS),
+    so the first boot of this kernel does not read every alive transcript whole for it."""
+    return em.scan_bg_tasks_cached(path, _bglift_cache, want_all=True, ckpt="bgLift", slim=True)
 
 
 def _session_started_face(nodes, nid, healed):

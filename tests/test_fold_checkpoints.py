@@ -599,6 +599,7 @@ class KernelFolds(Base):
             "sessionMeta": dict(km._session_meta(self.leaf)),
             "bgRunning": km._bg_scan_cached(self.leaf),
             "bgAll": km._bg_scan_all_cached(self.leaf),
+            "bgLift": km._bg_scan_lift_cached(self.leaf),
             "agentLaunches": {k: (dict(v) if isinstance(v, dict) else sorted(v)) for k, v in km._agent_launch_state(self.leaf).items()},
             "agentGist": km._agent_steps(self.agent),
             "agentLaunchIds": sorted(km._agent_launch_ids(self.agent)),
@@ -631,7 +632,7 @@ class KernelFolds(Base):
         for p in self.files:
             self.assertTrue(em.checkpoint_write(p), p)
             names |= set(self.doc(p)["folds"])
-        ALL_NAMES = {"sessionMeta", "bgRunning", "bgAll", "bgJudge", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
+        ALL_NAMES = {"sessionMeta", "bgRunning", "bgAll", "bgLift", "bgJudge", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
                      "stateIntervals", "statesNotes", "machineCut", "queueLedger", "wakeTail", "postalLog", "lastState",
                      "lastNaturalState", "retryingSince", "nudgeTimes", "parkedHandoffs"}
         self.assertEqual(names, ALL_NAMES, "every kernel fold this test drives left its state in the checkpoint")
@@ -727,7 +728,7 @@ class KernelFolds(Base):
             self.assertGreaterEqual(km._persist_checkpoints(TS0), 1)
         finally:
             km._sessions, km._turn_end_key = saved_sessions, saved_turn
-        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"],
+        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgLift", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"],
                          "the leaf's document holds every leaf fold, the judges' pairing included")
         self.fresh_process()
         km._session_meta(self.leaf)                               # a restored TAIL entry: priming would read the file whole
@@ -746,17 +747,18 @@ class KernelFolds(Base):
         """Review find (2026-09-11, third round): after the first boot every restored leaf is a tail entry; a fold whose
         cursor merely lagged the leaf (the judges' pairing steps only in their passes) dropped out of the settle write, and
         the next boot's first pass read the leaf whole. Over a tail entry the primer steps every fold holding a cursor at
-        that entry, so the document carries all five and the next boot restores each."""
+        that entry, so the document carries all six and the next boot restores each."""
         self.write_all(tail=False)
         self.answers()
         for p in self.files:
             em.checkpoint_write(p)
         self.fresh_process()
-        for fn in (km._session_meta, km._bg_scan_cached, km._bg_scan_all_cached, km.jd._bg_scan, km._agent_launch_state):
-            fn(self.leaf)                                             # five cursors restored at the tail entry
+        for fn in (km._session_meta, km._bg_scan_cached, km._bg_scan_all_cached, km._bg_scan_lift_cached, km.jd._bg_scan,
+                   km._agent_launch_state):
+            fn(self.leaf)                                             # six cursors restored at the tail entry
         self.assertFalse(em.entry_whole_resident(self.leaf))
         _append(self.leaf, _user("a new prompt", "u_lag", "a3", TS0 + 500))
-        km._session_meta(self.leaf)                                   # the one fold a build stepped; the other four lag
+        km._session_meta(self.leaf)                                   # the one fold a build stepped; the other five lag
         rows = [{"sid": SID, "path": self.leaf}]
         saved_sessions, saved_turn = km._sessions, km._turn_end_key
         turn_end = [TS0]
@@ -770,7 +772,7 @@ class KernelFolds(Base):
         finally:
             km._sessions, km._turn_end_key = saved_sessions, saved_turn
         d = self.doc(self.leaf)
-        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"], "all five at the new count")
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgLift", "bgRunning", "sessionMeta"], "all six at the new count")
         self.assertEqual({f["count"] for f in d["folds"].values()}, {d["count"]})
         self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "no whole read at the settle")
         self.fresh_process()
@@ -862,14 +864,14 @@ class KernelFolds(Base):
         cost was paid at EVERY boot because an idle session never settles, so its document was never rewritten (the devbox:
         the judges' pairing missing from 39 of 60 documents, 2.4 GB per boot). The converge pass, on the pusher's cycle, writes
         a dirty document that lacks a state this process now holds; over the whole entry the boot's read left, every leaf
-        fold is primed first, so one write carries all five and the next boot restores them."""
+        fold is primed first, so one write carries all six and the next boot restores them."""
         self._converge_world({"bgJudge": "missing", "agentLaunches": "missing"})
         size = os.path.getsize(self.leaf)
         jd._bg_scan(self.leaf)                                        # the judges' first pass: no document entry, a whole refold
         self.assertGreaterEqual(em.read_bytes_report().get(self.leaf, 0), size, "the boot paid the whole read")
         self.assertEqual(em.checkpoint_converge_candidates(), [self.leaf], "a dirty document lacking a fold this process holds")
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
-        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"],
+        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgLift", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"],
                          "the write carries every leaf fold: the four others primed over the whole entry, and the ledger and wake folds (T377)")
         self.assertTrue(all("state" in f for f in self.doc(self.leaf)["folds"].values()))
         cv = em.checkpoint_stats()["converge"]
@@ -964,11 +966,11 @@ class KernelFolds(Base):
         never ran (the transcript's wake-tail and queue-ledger folds beside the five leaf folds), and the next boot read the
         leaf whole for them. Every write merges the on-disk document's states for such folds (verified by its guard)."""
         self._converge_world({"bgJudge": "missing"}, extra=("extraA", "extraB"))
-        self.assertEqual(len(self.doc(self.leaf)["folds"]), 6, "five leaf folds less the stripped one, plus two extra")
+        self.assertEqual(len(self.doc(self.leaf)["folds"]), 7, "six leaf folds less the stripped one, plus two extra")
         jd._bg_scan(self.leaf)
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
         d = self.doc(self.leaf)
-        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "extraA", "extraB", "queueLedger", "sessionMeta", "wakeTail"], "nine: the two carried, and the ledger and wake folds primed (T377)")
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgLift", "bgRunning", "extraA", "extraB", "queueLedger", "sessionMeta", "wakeTail"], "ten: the two carried, and the ledger and wake folds primed (T377)")
         self.assertTrue(all("state" in f for f in d["folds"].values()))
         self.fresh_process()
         self.assertEqual(em.fold_records({}, self.leaf, list, lambda st, o: st + [1], on=self.kinds_sink(), ckpt="extraA"), [1] * 4)
@@ -1154,7 +1156,7 @@ class KernelFolds(Base):
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 0, "the pass wrote nothing itself")
         self.assertGreater(em._CKPT_CYCLE["spent"], 0, "the drop's write charged the cycle's take")
         d = self.doc(self.leaf)
-        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"])
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgLift", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"])
         self.assertTrue(all("state" in f for f in d["folds"].values()), "the healed view and the primed folds, all complete")
         with em._JSONL_CACHE_LOCK:
             self.assertIsNone(em._JSONL_CACHE.get(self.leaf), "and the entry left memory")
@@ -1224,7 +1226,7 @@ class KernelFolds(Base):
         km._begin_checkpoint_cycle()
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 0)
         d = self.doc(self.leaf)
-        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"], "every leaf fold, primed before the drop")
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgLift", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"], "every leaf fold, primed before the drop")
         self.assertTrue(all("state" in f for f in d["folds"].values()), "the healed launch state complete, the rest primed")
         cv = em.checkpoint_stats()["converge"]
         self.assertEqual((cv["heals"], cv["viaDrop"], cv["dropWrites"], cv["writes"]), (1, 1, 1, 0), "%s" % cv)
@@ -1358,7 +1360,7 @@ class KernelFolds(Base):
         with em._JSONL_CACHE_LOCK:
             self.assertIsNone(em._JSONL_CACHE.get(self.leaf), "the entry left memory after the write")
         d = self.doc(self.leaf)
-        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"], "written from the read that already happened")
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgLift", "bgRunning", "sessionMeta"], "written from the read that already happened")
         self.assertTrue(all("state" in f for f in d["folds"].values()))
         cv = em.checkpoint_stats()["converge"]
         self.assertEqual((cv["dropWrites"], cv["dropDeferred"]), (1, 0))
