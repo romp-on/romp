@@ -28,7 +28,7 @@ class PushThroughKernel(unittest.TestCase):
         self.saved = (pm._drain, pm._kernel_post, pm.deliver, pm._push_disabled)
         self.posted, self.redelivered = [], []
         pm._push_disabled = lambda: False
-        pm._drain = lambda sid: {"messages": [{"from": "alpha", "from_id": "uuid-a", "body": "hi"}]}
+        pm._drain = lambda sid, **k: {"messages": [{"from": "alpha", "from_id": "uuid-a", "body": "hi"}]}
         pm.deliver = lambda sid, frm, frm_id, body, **k: self.redelivered.append((sid, body))
 
     def tearDown(self):
@@ -37,7 +37,7 @@ class PushThroughKernel(unittest.TestCase):
         pm._drain, pm._kernel_post, pm.deliver, pm._push_disabled = self.saved
 
     def test_injected_consumes_and_returns_true(self):
-        pm._kernel_post = lambda path, body, timeout=2: (self.posted.append((path, body)),
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: (self.posted.append((path, body)),
                                                          {"ok": True, "injected": True})[1]
         self.assertTrue(pm._push("sid-b", {"id": "sid-b", "state": "idle"}))
         self.assertEqual(self.posted[0][0], "/deliver")
@@ -46,18 +46,18 @@ class PushThroughKernel(unittest.TestCase):
         self.assertEqual(self.redelivered, [], "injected → nothing put back")
 
     def test_not_injected_redelivers_for_the_drain(self):
-        pm._kernel_post = lambda path, body, timeout=2: {"ok": True, "injected": False}
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: {"ok": True, "injected": False}
         self.assertFalse(pm._push("sid-b", {"id": "sid-b", "state": "idle"}))
         self.assertEqual(self.redelivered, [("sid-b", "hi")], "not injected → mail put back for the drain")
 
     def test_unreachable_kernel_redelivers(self):
-        pm._kernel_post = lambda path, body, timeout=2: None
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: None
         self.assertFalse(pm._push("sid-b", {"id": "sid-b", "state": "idle"}))
         self.assertEqual(self.redelivered, [("sid-b", "hi")])
 
     def test_skips_not_ready_local_without_draining(self):
         pm._kernel_post = lambda *a, **k: self.fail("must not POST for a skipped session")
-        pm._drain = lambda sid: self.fail("must not drain a skipped session")
+        pm._drain = lambda sid, **k: self.fail("must not drain a skipped session")
         self.assertFalse(pm._push("sid-b", {"id": "sid-b", "state": "permission"}))
         self.assertEqual(self.redelivered, [])
 
@@ -66,7 +66,7 @@ class PushThroughKernel(unittest.TestCase):
         # kernel's wake-router forwards it over the host's -L tunnel to the owning kernel. (Regression: the
         # bus used to SKIP remote agents, so an idle remote peer could never be woken cross-machine.)
         self.posted = []
-        pm._kernel_post = lambda path, body, timeout=2: (self.posted.append((path, body)),
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: (self.posted.append((path, body)),
                                                          {"ok": True, "injected": True})[1]
         self.assertTrue(pm._push("sid-r", {"id": "sid-r", "remote": True}))
         self.assertEqual(self.posted[0][0], "/deliver")
@@ -164,7 +164,7 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
         m.update(k)
         return m
 
-    def _inject_all(self, path, body, timeout=2):
+    def _inject_all(self, path, body, timeout=2, no_answer=None):
         self.posted.append(body)
         return {"ok": True, "injected": True}
 
@@ -177,7 +177,7 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
 
     def test_a_box_past_the_cap_crosses_in_chunks_each_under_it(self):
         msgs = [self._msg("m1", 600_000), self._msg("m2", 600_000), self._msg("m3", 1000)]
-        pm._drain = lambda sid: {"messages": msgs}
+        pm._drain = lambda sid, **k: {"messages": msgs}
         pm._kernel_post = self._inject_all
         self.assertTrue(pm._push(self.SID, {"id": self.SID, "state": "idle"}))
         self.assertEqual(len(self.posted), 2, "two bodies: m1 alone, then m2 with m3")
@@ -192,9 +192,9 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
 
     def test_a_chunk_that_does_not_land_holds_it_and_the_rest_and_names_the_cause(self):
         msgs = [self._msg("m1", 600_000), self._msg("m2", 600_000), self._msg("m3", 1000)]
-        pm._drain = lambda sid: {"messages": msgs}
+        pm._drain = lambda sid, **k: {"messages": msgs}
         answers = iter([{"ok": True, "injected": True}, None])
-        pm._kernel_post = lambda path, body, timeout=2: (self.posted.append(body), next(answers))[1]
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: (self.posted.append(body), next(answers))[1]
         self.assertFalse(pm._push(self.SID, {"id": self.SID, "state": "idle"}), "not everything landed")
         self.assertEqual(len(self.posted), 2, "the run stops at the first chunk that does not land")
         self.assertEqual(self.restored, [(self.SID, "m2"), (self.SID, "m3")],
@@ -208,11 +208,11 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
     def test_a_not_taken_deferral_and_a_kernel_refusal_read_differently_in_the_log(self):
         # both used to log the same "deferred" line, so a size refusal was indistinguishable from a
         # session that did not take the wake
-        pm._drain = lambda sid: {"messages": [self._msg("m1", 1000)]}
-        pm._kernel_post = lambda path, body, timeout=2: {"ok": True, "injected": False}
+        pm._drain = lambda sid, **k: {"messages": [self._msg("m1", 1000)]}
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: {"ok": True, "injected": False}
         self.assertFalse(pm._push(self.SID, {"id": self.SID, "state": "idle"}))
         self.assertIn("deferred (not injected)", self.logged[-1])
-        pm._kernel_post = lambda path, body, timeout=2: {"ok": False, "status": 413,
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: {"ok": False, "status": 413,
                                                          "error": "request body of 2000000 bytes exceeds the 1048576-byte limit"}
         self.assertFalse(pm._push(self.SID, {"id": self.SID, "state": "idle"}))
         self.assertIn("deferred (kernel answered HTTP 413)", self.logged[-1])
@@ -255,7 +255,7 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
 
     def test_a_single_oversize_message_is_bounced_to_its_local_sender_not_reposted(self):
         big = self._msg("m-big", 1_000_000)
-        pm._drain = lambda sid: {"messages": [big, self._msg("m-small", 1000)]}
+        pm._drain = lambda sid, **k: {"messages": [big, self._msg("m-small", 1000)]}
         pm._kernel_post = self._inject_all
         self.assertTrue(pm._push(self.SID, {"id": self.SID, "state": "idle"}), "the rest of the box landed")
         self.assertEqual(len(self.posted), 1)
@@ -295,15 +295,16 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
             self.assertIn("undeliverable, returned to you", text)
             self.assertEqual([(r["id"], r["exec"], bool(r["bounced"])) for r in recs], [(mid, None, True)])
             rows = [json.loads(l) for l in (pm.TLDIR / "messages.jsonl").read_text().splitlines()]
-            self.assertEqual([r["ev"] for r in rows if r.get("id") == mid], ["sent", "exec", "unexec", "bounced"],
-                             "the drain's claim stamped exec; the bounce retracts it before its terminal row")
+            self.assertEqual([r["ev"] for r in rows if r.get("id") == mid], ["sent", "unexec", "bounced"],
+                             "the push claims without a read stamp (2026-10-03); the bounce's unexec still retracts any "
+                             "stamp an older bus wrote, before its terminal row")
         finally:
             pm.local_agents = saved_agents
             pm.STREAKS.pop(rcp, None)
 
     def test_an_oversize_message_with_no_local_sender_waits_for_the_drain_and_is_named_once(self):
         relayed = self._msg("m-far", 1_000_000, from_host="TESTHOST")   # acked to its host at relay time
-        pm._drain = lambda sid: {"messages": [relayed]}
+        pm._drain = lambda sid, **k: {"messages": [relayed]}
         pm._kernel_post = lambda *a, **k: self.fail("an oversize body must never be posted")
         for _ in range(3):                                   # the retry pass re-claims it every 5 s
             self.assertFalse(pm._push(self.SID, {"id": self.SID, "state": "idle"}))
@@ -320,7 +321,7 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
         # every message the drain had claimed sat in cur/ while its sender's receipt read "read".
         pm.deliver = self.saved[2]                            # the real one: its refusal is the point
         big = self._msg("m-big", 1_000_000, **{"from": "cron", "from_id": "ext:cron"})
-        pm._drain = lambda sid: {"messages": [big, self._msg("m-small", 1000)]}
+        pm._drain = lambda sid, **k: {"messages": [big, self._msg("m-small", 1000)]}
         pm._kernel_post = self._inject_all
         self.assertTrue(pm._push(self.SID, {"id": self.SID, "state": "idle"}), "the rest of the box landed")
         self.assertEqual([l for l in self.logged if "push error" in l], [], "nothing escaped to the catch-all")
@@ -335,11 +336,11 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
         self.assertIn("has no local sender to bounce to", named[0])
 
     def test_publish_working_reads_a_refusal_as_failure(self):
-        pm._kernel_post = lambda path, body, timeout=2: {"ok": False, "status": 400, "error": "id required"}
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: {"ok": False, "status": 400, "error": "id required"}
         self.assertFalse(pm._publish_working(self.SID, "note"), "a refusal used to pass the `is not None` test")
-        pm._kernel_post = lambda path, body, timeout=2: {"ok": True}
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: {"ok": True}
         self.assertTrue(pm._publish_working(self.SID, "note"))
-        pm._kernel_post = lambda path, body, timeout=2: None
+        pm._kernel_post = lambda path, body, timeout=2, no_answer=None: None
         self.assertFalse(pm._publish_working(self.SID, "note"))
 
 

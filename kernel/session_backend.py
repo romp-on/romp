@@ -392,6 +392,12 @@ class SessionBackend(ABC):
         backstop). The bus reaches this via the kernel's POST /deliver so it never drives a session itself."""
         return False
 
+    def reports_postal_takes(self, sid: str) -> bool:
+        """Will this backend tell the bus when `sid`'s agent actually TAKES a delivered banner (the model has it), so
+        the bus writes the sender's read stamp then rather than at the delivery (2026-10-03)? The kernel's /deliver
+        answers it as `reportsTake`. Default False: the bus stamps at its answer, the old reading of a delivery."""
+        return False
+
     # ── chat tail ────────────────────────────────────────────────────────────────────────────────
     @abstractmethod
     def pending_queued(self, sid: str) -> list:

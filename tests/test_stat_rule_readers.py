@@ -165,7 +165,7 @@ class TheQueuedLows(unittest.TestCase):
         self.assertFalse((pm.MAILROOT / sid / "new" / mid).exists(), "nothing claimed back")
         self.assertTrue(any("could not be answered for" in m for m in logs), logs)
         import inspect
-        src = inspect.getsource(pm._push) + inspect.getsource(pm._bounce_oversize)
+        src = inspect.getsource(pm._put_back) + inspect.getsource(pm._bounce_oversize)   # _put_back: _push's roll-back
         self.assertEqual(src.count("== RESTORE_MISSING"), 2, "both push callers re-send on MISSING alone")
         self.assertEqual(src.count("== RESTORE_UNKNOWN"), 3, "...and name the unknown answer, re-sending nothing")
 
@@ -310,7 +310,7 @@ class TheQueuedLows(unittest.TestCase):
         self.assertFalse((pm.MAILHELD / sid).exists(), "the record is dropped")
         self.assertTrue((pm.MAILPENDING / sid).exists(), "the put-back mail is pending mail for the retry")
         import inspect
-        src = inspect.getsource(pm._push) + inspect.getsource(pm._bounce_oversize) + inspect.getsource(pm.restore_stranded)
+        src = inspect.getsource(pm._put_back) + inspect.getsource(pm._bounce_oversize) + inspect.getsource(pm.restore_stranded)
         self.assertEqual(src.count("_hold_claim("), 4, "every site that meets RESTORE_UNKNOWN records the claim (the push's two, the "
                          "oversize bounce's, and POST /restore: round three found the fourth unwired)")
         self.assertIn("_retry_held_claims()", inspect.getsource(pm._retry_pending), "the retry pass puts held claims back first")

@@ -132,6 +132,7 @@ CALLBACK_ALLOW = {
     # handed by ATTRIBUTE assignment on the constructed backend (kernel.py, after the SDK constructor): the same rows
     ("SdkBackend", "login_ok", "<lambda>"): "reads the credential store's account state",
     ("SdkBackend", "postal_restore", "_bus_restore_mail"): "a POST to the local postal bus",
+    ("SdkBackend", "postal_taken", "_bus_report_take"): "a POST to the local postal bus (the read stamp at the CLI's take)",
     ("SdkBackend", "rewind_resolved_cb", "_on_rewind_resolved"): "archives or restores held goals in the goal store at a rewind's "
                                                                  "outcome and logs through the judge; no session parse, build or hydrate",
 }

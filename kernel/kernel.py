@@ -4734,6 +4734,23 @@ def _bus_restore_mail(sid, mids):
     return out
 
 
+def _bus_report_take(sid, mids):
+    """POST /seen to the local bus: `sid`'s CLI has TAKEN a banner carrying `mids` (SdkBackend._report_postal_take,
+    2026-10-03), so the bus writes the read stamp the sender's receipt reads. RAISES when the bus could not be told or
+    refused; the caller logs it, and the bus settles the stamp at the session's next take."""
+    conn = http.client.HTTPConnection("127.0.0.1", _bus_port(), timeout=5)
+    try:
+        conn.request("POST", "/seen", json.dumps({"id": sid, "mids": list(mids)}),
+                     {"Content-Type": "application/json", "X-Romp-Token": TOKEN})
+        resp = conn.getresponse()
+        data = resp.read()
+    finally:
+        conn.close()
+    body = json.loads(data.decode("utf-8", "replace") or "{}") if resp.status == 200 else None
+    if not isinstance(body, dict) or not body.get("ok"):
+        raise RuntimeError("bus /seen answered %d: %s" % (resp.status, data[:200].decode("utf-8", "replace")))
+
+
 class _BusHeld(set):
     """The set _bus_restore_mail answers: the ids the bus holds (put back, or held under an unreadable cur/ for its retry), with
     the held ones named in `.held` so SdkSession._return_stranded_mail can say the pending fault in its own line."""
@@ -5040,6 +5057,8 @@ def _codex_receipts_text(recs):
                 st = "parked for %s · id %s" % (r["parked"], rid)
         elif r.get("relayed"):
             st = "delivered %s (not read yet) · id %s" % (_codex_hhmm(r["relayed"]), rid)
+        elif r.get("queued"):
+            st = "waiting in the session's queue (not read yet) · id %s" % rid
         else:
             st = "pending (not read yet) · id %s" % rid
         out.append("  → %-18s sent %s · %s%s" % (r.get("to", "?"), _codex_hhmm(r.get("sent")), st,
@@ -19830,6 +19849,9 @@ def _sdk_locked():
             # a postal banner the backend fed and a connection rebuild stranded goes BACK to the bus by message id
             # (SdkSession._return_stranded_mail → the bus's POST /restore), never dropped (2026-09-12)
             _sdk_backend.postal_restore = _bus_restore_mail
+            # ...and a banner the CLI has TAKEN is reported to the bus, which writes the sender's read stamp then, never at
+            # the delivery (SdkSession's take → the bus's POST /seen, 2026-10-03)
+            _sdk_backend.postal_taken = _bus_report_take
             # NO thread-wake model remap. The T223 rider installed _family_newest_model as the
             # backend's wake hook, so a dormant comment thread registered on a superseded full id came
             # up on its family's newest at its next explicit wake — built for the artefact where a
@@ -73012,7 +73034,13 @@ class Handler(BaseHTTPRequestHandler):
                     res = _remote_forward(r, "/deliver", {"id": sid, "text": text})
                     return self._send(200, json.dumps({"ok": True, "injected": bool(res and res.get("injected"))}), "application/json")
                 injected = bool(Sessions.backend_for(sid).deliver(sid, text))
-                return self._send(200, json.dumps({"ok": True, "injected": injected}), "application/json")
+                # reportsTake (2026-10-03): this backend tells the bus when the agent TAKES the banner, so the bus holds the
+                # sender's read stamp until then (a queued banner can wait minutes to hours behind a long tool call or a
+                # queue of earlier texts). Absent or false, the bus stamps at this answer, as it always has.
+                rt = getattr(Sessions.backend_for(sid), "reports_postal_takes", None)   # duck-typed: Codex has none, never reports
+                takes = bool(injected and callable(rt) and rt(sid))
+                return self._send(200, json.dumps({"ok": True, "injected": injected, "reportsTake": takes}),
+                                  "application/json")
             # /picker-check, /mail-badge, /deliver-chrome and /reconcile-peers painted the tmux status bar and
             # watched a revived pane; they left with the tmux backend (2026-09-11) and fall to the 404 below. The
             # postal bus is a long-lived singleton that restarts only when its own source changes, so a bus from

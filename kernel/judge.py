@@ -1554,30 +1554,73 @@ def active_runs():
         return [dict(v) for v in _active.values()]
 
 
-_USAGE_PRUNE_BYTES = 128 * 1024 * 1024  # prune trigger — must sit comfortably ABOVE what the
-                                         # 31-day retention below keeps, or every prune is a full
-                                         # rewrite that lands back over the trigger and re-fires
-                                         # forever (the T142 finding: a 48MB trigger against a
-                                         # ~65MB retained month rewrote 67MB per pass and could
-                                         # never shrink the file). Retention is consumer-driven
-                                         # (the kernel's 30-day analytics view) and is the side
-                                         # that must NOT move; the trigger exists only for
-                                         # pathological growth beyond it — 2x the observed
-                                         # steady-state month, with T142's memo shrinking judge
-                                         # volume (and so the month) from here.
+_USAGE_PRUNE_BYTES = 128 * 1024 * 1024  # the prune trigger's FLOOR. It once had to sit above what the
+                                         # 31-day retention below keeps, or every prune was a full rewrite
+                                         # that landed back over the trigger and re-fired (the T142 finding:
+                                         # a 48MB trigger against a ~65MB retained month). A fixed number
+                                         # cannot keep that promise, since the retained month grows with
+                                         # judge volume: by 2026-09-29 the month weighed ~134MB against this
+                                         # 128MiB line, and every judge call (11-16 a minute) rewrote the
+                                         # whole file inside the kernel, ~2.7s of CPU each, and made the
+                                         # kernel's reader re-read it. So the trigger now FOLLOWS what the
+                                         # last prune kept (_usage_prune_trigger); this is only its floor.
+                                         # Retention is consumer-driven (the kernel's 30-day analytics view)
+                                         # and is the side that must NOT move.
+_USAGE_PRUNE_GROWTH = 1.5                # prune again only once the file has grown half again past what the
+                                         # last prune kept: a rewrite can never re-fire on the next call, and
+                                         # the rewrites are paid once per third of the file's growth
+_USAGE_KEPT = {}                         # str(USAGE) -> bytes the last prune in this process kept
+_USAGE_RETRY_GROWTH = 1.1                # a prune that FAILED tries again once the file has grown a tenth past the
+                                         # size it failed at: before, the failure recorded nothing, and every judge
+                                         # call re-read and re-parsed the whole file only to fail again (disk full,
+                                         # quota, a read-only mount: review of 2026-09-29)
+_USAGE_RETRY_AT = {}                     # str(USAGE) -> the size a failed prune waits for (this process)
+_USAGE_FAIL_SAID = set()                 # str(USAGE) whose failing prune has been said, once per spell of failures
 _USAGE_RETAIN_S = 31 * 86400             # matches the kernel reader's widest consumer window
                                          # (_JUDGE_USAGE_RETAIN, the 30-day analytics view + slack)
 
 
+def _usage_kept_path():
+    """Where the last prune's kept size is written, beside USAGE, so a fresh process (a kernel restart, the judges'
+    own process, a hand-run romp-judge) keeps the trigger the last prune set instead of re-pruning at the floor."""
+    return USAGE.with_name(USAGE.name + ".kept")
+
+
+def _usage_prune_trigger(size):
+    """The size USAGE must pass before a prune: the floor, or _USAGE_PRUNE_GROWTH times what the last prune kept,
+    whichever is larger. This process's own memory answers first; the sidecar is read only when that memory would let
+    a file of `size` prune (another process may have pruned since, or this one never has)."""
+    kept = _USAGE_KEPT.get(str(USAGE), 0)
+    if size > kept * _USAGE_PRUNE_GROWTH:
+        try:
+            kept = max(kept, int(_usage_kept_path().read_text().strip() or 0))
+        except (OSError, ValueError):
+            pass                             # no sidecar yet (or unreadable): the floor and this process's memory
+    return max(_USAGE_PRUNE_BYTES, int(kept * _USAGE_PRUNE_GROWTH))
+
+
 def _prune_usage_log():
-    """Rewrite USAGE keeping the newest 31 days once it outgrows the cap. The kernel's incremental
-    reader detects the shrink (size < offset) and re-reads cleanly. Best-effort and racy by design:
-    an append from a concurrent judge process during the rewrite window can be lost — this is
-    telemetry whose consumers read a bounded window, and the trigger only fires in pathological
-    growth. The prune says what it did (one stderr line), never silently."""
+    """Rewrite USAGE keeping the newest 31 days once it outgrows the trigger (_usage_prune_trigger: the floor, or
+    half again past what the last prune kept). The kernel's incremental reader detects the shrink (size < offset) and
+    re-reads cleanly. Best-effort and racy by design: an append from a concurrent judge process during the rewrite
+    window can be lost — this is telemetry whose consumers read a bounded window, and a rewrite is rare by
+    construction. The prune says what it did (one stderr line), never silently, and says so too when the kept size
+    could not be written down (the next process may then prune once at the floor).
+
+    A prune that FAILS once it has begun reading (the read, the temp file's write, the rename: a full disk, a quota, a
+    read-only mount) removes its half-written temp file, and waits for the file to grow a tenth past the size it failed
+    at before it reads the file again (_USAGE_RETRY_AT); the first failure of a spell says so in one stderr line, and a
+    prune that lands ends the spell. Before, the failure recorded nothing, and every judge call re-read and re-parsed
+    the whole file (review of 2026-09-29)."""
+    key = str(USAGE)
     try:
-        if USAGE.stat().st_size <= _USAGE_PRUNE_BYTES:
+        size = USAGE.stat().st_size
+        if size <= _USAGE_PRUNE_BYTES or size <= _USAGE_RETRY_AT.get(key, 0) or size <= _usage_prune_trigger(size):
             return
+    except Exception:
+        return
+    tmp = USAGE.with_name(USAGE.name + ".tmp")
+    try:
         parsed = []
         for ln in USAGE.read_text(errors="replace").splitlines():
             try:
@@ -1588,11 +1631,42 @@ def _prune_usage_log():
                 parsed.append((o.get("t") or 0, ln))
         floor = max((t for t, _ in parsed), default=0) - _USAGE_RETAIN_S
         keep = [ln for t, ln in parsed if t >= floor]
-        tmp = USAGE.with_name(USAGE.name + ".tmp")
-        tmp.write_text("\n".join(keep) + ("\n" if keep else ""))
+        data = ("\n".join(keep) + ("\n" if keep else "")).encode("utf-8")
+        tmp.write_bytes(data)
         os.replace(tmp, USAGE)
+    except Exception as e:
+        _USAGE_RETRY_AT[key] = int(size * _USAGE_RETRY_GROWTH)
+        try:
+            tmp.unlink()                         # a half-written copy on a full disk only fills it further
+        except OSError:
+            pass
+        if key not in _USAGE_FAIL_SAID:
+            _USAGE_FAIL_SAID.add(key)
+            try:
+                sys.stderr.write("romp-judge: judge-usage.jsonl (%dMB) could not be pruned (%s: %s); it is left as it "
+                                 "was, and the next attempt waits until it passes %dMB\n"
+                                 % (size // (1024 * 1024), type(e).__name__, e,
+                                    _USAGE_RETRY_AT[key] // (1024 * 1024)))
+            except Exception:
+                pass
+        return
+    _USAGE_RETRY_AT.pop(key, None)
+    _USAGE_FAIL_SAID.discard(key)
+    try:
+        _USAGE_KEPT[key] = len(data)
+        note = ""
+        try:
+            side = _usage_kept_path()
+            stmp = side.with_name(side.name + ".tmp")
+            stmp.write_text("%d\n" % len(data))
+            os.replace(stmp, side)
+        except OSError as e:
+            note = "; the kept size could not be written down (%s), so another process may prune once more" % (
+                type(e).__name__,)
         sys.stderr.write("romp-judge: judge-usage.jsonl outgrew %dMB — pruned to the newest 31 days "
-                         "(%d rows kept)\n" % (_USAGE_PRUNE_BYTES // (1024 * 1024), len(keep)))
+                         "(%d rows kept, %dMB); the next prune waits for %dMB%s\n"
+                         % (size // (1024 * 1024), len(keep), len(data) // (1024 * 1024),
+                            _usage_prune_trigger(len(data)) // (1024 * 1024), note))
     except Exception:
         pass
 
