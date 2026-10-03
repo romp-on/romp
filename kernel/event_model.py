@@ -677,6 +677,8 @@ _JSONL_CACHE_BUDGET_BYTES = (int(float(os.environ["ROMP_RECORD_CACHE_BUDGET_MB"]
                              if os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB") else _record_cache_default_budget_bytes())
 _JSONL_CACHE_BYTES = [0]          # the sum of every held entry's weight, kept in step with _JSONL_CACHE under its lock
 _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetEvictions": 0, "dropped": 0, "droppedBytes": 0,
+                       "dropKept": 0,   # 2026-10-03: quiescence drops held because a live session's jobs fold the file every pass and a
+                       #                   fold over it cannot restore from its document (counted once per hold; keptWhole is the gauge)
                        "released": 0,   # #1735: EVERY pop that removed an entry, whatever the cause (eviction, a re-read
                        #                   replacement, an OSError pop, a quiescent drop). A /perf STATISTIC only, never a
                        #                   gc-freeze reclaim trigger: these entries are decoded json, acyclic, freed by refcount
@@ -750,7 +752,7 @@ def record_cache_stats() -> dict:
     budget, evicted bytes, drop-after-fold drops)."""
     with _JSONL_CACHE_LOCK:
         out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
-               "countCap": _JSONL_CACHE_MAX, **_RECORD_CACHE_STATS}
+               "countCap": _JSONL_CACHE_MAX, **_RECORD_CACHE_STATS, "keptWhole": len(_DROP_KEPT)}
         table = _RECORD_CACHE_STATS.get("wholeReads")
         out["wholeReads"] = {k: dict(v) for k, v in table.items()} if isinstance(table, dict) else {}
         bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")             # T401: the same reads per (stage, caller)
@@ -909,6 +911,12 @@ _DROP_OWED = {}                   # path -> when its quiescence drop was deferre
 _DROP_OWED_MAX = 4096             # over it the OLDEST owed entry is popped unwritten (its memory released), never the table cleared
 _DROP_HOLD = threading.local()    # the converge pass holds this thread's quiescence drops while it heals and primes a leaf, then pays
 #                                   them once (T362 follow-up review, low 2): {path: pop} of the drops held, or absent
+_KEEP_WHOLE = [frozenset()]       # the main transcripts of the sessions in the live map, as the kernel's jobs pass last published them
+#                                   (set_keep_whole_paths): the pass folds every one of them on every pass (the awaiting lift's
+#                                   background view), so a quiescence drop of one that a fold cannot restore is undone by a whole
+#                                   read within a pass (2026-10-03, see _drop_rereads)
+_DROP_KEPT = set()                # the paths whose drop is held for that reason: owed (in _DROP_OWED), so every cycle's start and the
+#                                   next fold over the file retry it, and paid once the session leaves the live map
 _CKPT_LOCK = threading.Lock()
 _CKPT_PENDING = {}                # path -> {"count": N, "gen": g, "folds": {name: {"count", "state"}}} restores not yet taken
 _CKPT_SEQ = {}                    # path -> the seq of the last checkpoint read or written for it
@@ -986,7 +994,7 @@ def set_checkpoint_dir(fn):
         _ASM_LAST_WRITE_CUT.clear()
         _ASM_DOC_MEMO.clear(); _ASM_DOC_MEMO_BYTES[0] = 0   # nor does a memoized assembly document, the seeded walk's or the restore's (round two)
     with _CKPT_LOCK:
-        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear(); _DROP_OWED.clear()
+        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear(); _DROP_OWED.clear(); _DROP_KEPT.clear()
         _RETIRED_FOLDS.clear()                            # a retirement never outlives a state rebind (round two, low 2)
         _DOC_MEMO.clear(); _DOC_MEMO_BYTES[0] = 0         # nor does a memoized document (the harnesses' fresh process is this setter)
         _CKPT_CYCLE["cap"] = _ckpt_cycle_default_cap(); _CKPT_CYCLE["spent"] = 0
@@ -1339,7 +1347,7 @@ def checkpoint_pay_owed_drops():
             ent = _JSONL_CACHE.get(key)
         if ent is None or not os.path.exists(key):
             with _CKPT_LOCK:
-                _DROP_OWED.pop(key, None)
+                _DROP_OWED.pop(key, None); _DROP_KEPT.discard(key)
             if ent is not None:                           # the file is gone: nothing to write, everything to release (round two,
                 _pop_owed_entry(key)                      #  low 2: the memory the drop was owed for)
             continue
@@ -1348,6 +1356,29 @@ def checkpoint_pay_owed_drops():
             if key not in _DROP_OWED:
                 paid += 1
     return paid
+
+
+def set_keep_whole_paths(paths):
+    """Kernel wiring, once per jobs pass: the main transcripts of the sessions in the live map. The pass folds each of them on
+    every pass (the awaiting lift's background view, before its skip gate), so the quiescence drop holds such a file's whole
+    entry while a fold over it cannot take its state back from the document (_drop_rereads), and pays the drop once the file
+    is no longer listed here or every fold restores (2026-10-03)."""
+    _KEEP_WHOLE[0] = frozenset(str(p) for p in paths)
+
+
+def keep_whole_paths():
+    """The live main transcripts as last published (set_keep_whole_paths)."""
+    return _KEEP_WHOLE[0]
+
+
+def _drop_rereads(key):
+    """The folds holding a cursor over `key` that the file's document cannot give a state back to: none recorded for the file,
+    or the fold's entry a cursor without a state (over the cap, tail-only or bare), or no entry for it. After a drop each one's
+    next run meets a tail entry with a cursor at a gone generation and nothing to restore, so it refolds from record 0, which
+    reads the file whole (fold_records). Empty when every fold over the file restores warm: the drop the T362 write is for."""
+    with _CKPT_LOCK:
+        shapes = dict(_CKPT_DOC_FOLDS.get(key) or {})
+    return sorted(n for n, cache in list(_FOLD_REG.items()) if cache.get(key) is not None and shapes.get(n) != "state")
 
 
 def checkpoint_cycle_charge(n):
@@ -2073,7 +2104,8 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     `drop_after` (the kernel memory work, 2026-09-11): "quiescent" drops the file's records from the shared reader's
     cache once this fold has stepped them, when the file has not changed for _DROP_AFTER_QUIESCENT_S (a subagent
     that returned; the user's rule: nothing stays resident that nobody looks at). The cursor and its checkpoint stand;
-    a later fold of an unchanged file re-reads it once, a growing file keeps its records (see _drop_quiescent_entry).
+    a later fold of an unchanged file re-reads it once, a growing file keeps its records, and a live session's main
+    transcript keeps them while a fold over it cannot restore from its document (see _drop_quiescent_entry).
 
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
@@ -2205,8 +2237,10 @@ def _drop_quiescent_entry(key, ent, pop=True):
     once a fold has stepped them: the fold's cursor (and its checkpoint) stands, the file's bytes leave memory. Only the
     very entry this fold read is dropped (another thread's newer entry is left alone); a file still changing keeps its
     records, since its next append would otherwise re-read it whole. Without `pop` (a fold that stepped nothing: a hit or
-    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. Returns
-    True when the document was written here."""
+    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. A live
+    session's main transcript (keep_whole_paths) that a fold cannot restore from its document is not popped either: its drop
+    stays owed until the session leaves the live map or every fold restores (2026-10-03, at the pop below). Returns True when
+    the document was written here."""
     try:
         if time.time() - float(ent[0]) < _DROP_AFTER_QUIESCENT_S:
             return False
@@ -2219,6 +2253,11 @@ def _drop_quiescent_entry(key, ent, pop=True):
     with _CKPT_LOCK:
         if key in _DROP_OWED:                             # a drop deferred for the budget is taken at the next fold over the file
             _DROP_OWED.pop(key, None); pop = True         #  (whichever path that fold takes) or at the next cycle's start
+        rekeep = pop and key in _DROP_KEPT
+    if rekeep and key in _KEEP_WHOLE[0] and _drop_rereads(key):
+        with _CKPT_LOCK:                                  # a drop held for its live session (below), retried and still held: owed
+            _DROP_OWED[key] = time.time()                 #  again, and no write here (its session's settle and periodic writes keep
+        return False                                      #  the document current), so a held leaf never costs a write per cycle
     # T362: the entry a quiescent-drop fold ends over is a read that already happened (the boot's, by whichever fold read the
     # file whole); if the file's document lacks something this process holds (the one rule), it is written NOW, before any
     # pop, from that read: the idle sessions' documents converge here, where no settle reaches them and the converge pass must
@@ -2246,8 +2285,9 @@ def _drop_quiescent_entry(key, ent, pop=True):
                 if pop:
                     _DROP_OWED[key] = time.time()
                     if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
-                        oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
-                        _DROP_OWED.pop(oldest, None)
+                        oldest = next((k for k in _DROP_OWED if k not in _DROP_KEPT), None)   #  two, low 1: a cleared mark left
+                        if oldest is not None:            #  its entry neither paid nor popped), never one held for its live
+                            _DROP_OWED.pop(oldest, None)  #  session (2026-10-03: that pop is a whole read on the next pass)
             if oldest is not None:
                 _pop_owed_entry(oldest)                   # outside _CKPT_LOCK: the reader's lock alone
             return False
@@ -2262,6 +2302,23 @@ def _drop_quiescent_entry(key, ent, pop=True):
                 _CKPT_STATS["converge"]["dropWrites"] += 1
     if not pop:
         return wrote
+    if key in _KEEP_WHOLE[0] and _drop_rereads(key):
+        # 2026-10-03: a live session's main transcript, which the jobs pass folds on every pass, with a fold the document cannot
+        # restore (the background view of a long transcript is over the cap): the pop would come back as a whole read within a
+        # pass, not as memory (on a devbox, 101 such reads of 89 GB in 16 hours, and the auto-nudge and interrupt parses that
+        # upgraded the same tail entries, 48 GB more). The entry stays whole and its drop stays OWED, so every cycle's start and
+        # the next fold over the file retry it; it is paid once the session leaves the live map or every fold restores. The
+        # write above ran as before. Subagent files, idle sessions' leaves and leaves whose folds all restore drop as before.
+        with _CKPT_LOCK:
+            _DROP_OWED.pop(key, None); _DROP_OWED[key] = time.time()   # the newest mark: the bound pays older ones first
+            first = key not in _DROP_KEPT
+            _DROP_KEPT.add(key)
+        if first:
+            with _JSONL_CACHE_LOCK:
+                _RECORD_CACHE_STATS["dropKept"] += 1
+        return wrote
+    with _CKPT_LOCK:
+        _DROP_KEPT.discard(key)
     with _JSONL_CACHE_LOCK:
         if _JSONL_CACHE.get(key) is ent:
             w = _cache_pop_locked(key)

@@ -1490,7 +1490,14 @@ document over a tail read instead of reading the file whole, provided the
 document's cursor carries a state: against a state the process holds, a cursor
 without one (an over-cap, cold or legacy bare write) is refused and the fold
 reads whole as before, so a complete state is never replaced by a tail-only one.
-The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
+For that reason a live session's main transcript is not popped while any fold
+over it lacks a state in its document (the background view of a long
+transcript is over the cap): the jobs pass folds every live session's
+transcript on every pass, so the pop would only come back as a whole read. Its
+document is still written, its drop stays owed, and it is paid at the first
+cycle start after the session leaves the live map (`recordCache.dropKept`
+counts the holds, `recordCache.keptWhole` the transcripts held now). The
+knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
 it (the drop then pops as it did before the write existed, except under the
 incident scan's memo, which keeps a walked file's records resident when the
 document write is off, since its memo cannot reach the disk); `ROMP_CKPT_CONVERGE_MB`
@@ -2613,7 +2620,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `recordCache`: the reader's record cache (the JSONL records held in memory):
   `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
   `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop), `released` (every pop that removed an entry, whatever the
+  quiescence drop), `dropKept` and `keptWhole` (drops held for a live session's
+  main transcript, counted once per hold, and the transcripts held now), `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,

@@ -63223,6 +63223,18 @@ def _pusher_cycle_jobs(now, live_map, any_client):
 
 
 
+def _publish_live_leaves(now, live_map):
+    """Hand the event model the main transcripts of the sessions in the live map (the lift's own rule: a sid mapped to nothing
+    is dormant), once per jobs pass, before the lift. The lift folds every one of them on every pass (_bg_scan_all_cached,
+    before its skip gate), so a quiescence drop of one whose background view is over the document cap was undone by a whole
+    read within a pass: on a devbox, 101 such reads of 89 GB in 16 hours, plus 48 GB of auto-nudge and interrupt parses
+    upgrading the same tail entries, minutes of jobs-thread time per large file and no memory saved. With the paths published,
+    the drop keeps such a leaf whole and pays it once the session leaves this set (em.set_keep_whole_paths). The rows come from
+    the pass's sessions memo, so this costs no listing of its own."""
+    em.set_keep_whole_paths(str(s["path"]) for s in _alive_sessions(now, live_map)
+                            if s.get("path") and live_map.get(s.get("sid")) is not None)
+
+
 def _jobs_pass(now, live_map):
     """One pass of the housekeeping jobs, in the order they always ran (the lift before the walk, the walk before the interrupt
     tick, the deferral sweep before the walk: each comment below names its reason), on the jobs thread, with the pass's own
@@ -63236,6 +63248,10 @@ def _jobs_pass(now, live_map):
         _PERF_STATS.cycle_begin("jobs")   # a caller that did not open the pass (a test driving the jobs alone) opens it here
     _own_stat = _files_stat_pass_open(live_map)   # the dirty set taken, the prelude's observers read, the pass's shared ten-file
     #                                               snapshot opened when the caller did not (closed below; the cycle's finally too)
+    try:                                  # the live sessions' main transcripts, which the lift below folds every pass: the
+        _publish_live_leaves(now, live_map)   # quiescence drop keeps them whole while a fold cannot restore (2026-10-03)
+    except Exception:
+        sys.stderr.write("live-leaves: %s\n" % traceback.format_exc())
     try:                                  # EXACT retraction first: dispatches returned → the stamp is spent,
         _job_stage('liftSpentAwaiting', lambda: _lift_spent_awaiting(now, live_map))   # so the nudge tick below never wakes a wait that already ended
     except Exception:
