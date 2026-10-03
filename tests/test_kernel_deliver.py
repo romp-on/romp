@@ -23,7 +23,9 @@ class SdkDeliverSourcePin(unittest.TestCase):
     def test_sdk_backend_defines_deliver_as_a_no_echo_enqueue(self):
         src = open(os.path.join(BIN, "romp_sdk_backend.py"), encoding="utf-8").read()
         body = src.split("def deliver(", 1)[1].split("\n    def ", 1)[0]
-        self.assertIn("s.enqueue(text)", body, "SDK deliver enqueues the banner (the deliver-time wake)")
+        self.assertIn("s.enqueue_postal(text, ", body,
+                      "SDK deliver enqueues the banner (the deliver-time wake), its repeat check and its queue entry "
+                      "one step (2026-09-29)")
         self.assertNotIn("_echo_text", body, "no optimistic human echo — it's a peer's mail, not the user's input")
 
     def test_post_deliver_routes_through_backend_for(self):

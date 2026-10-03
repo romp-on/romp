@@ -599,7 +599,7 @@ class TheBusNamesTheToolForCodex(unittest.TestCase):
         saved = (pm._drain, pm._kernel_post, pm._push_disabled, pm._name_for_id, pm._log,
                  os.environ.get("ROMP_SESSIONS_FILE"))
         pm._drain = lambda sid: {"messages": list(box["messages"])}
-        pm._kernel_post = lambda path, body, timeout=None: posted.append((path, body)) or {"injected": True}
+        pm._kernel_post = lambda path, body, timeout=None, no_answer=None: posted.append((path, body)) or {"injected": True}
         pm._push_disabled = lambda: False
         pm._name_for_id = lambda sid, rows=None: {SID: "api", WEB: "web"}.get(sid, sid)   # no kernel to ask; the oversize note names the recipient
         pm._log = lambda m: None
