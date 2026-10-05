@@ -132,7 +132,7 @@ class PerTierAsk(_Base):
         with open(os.path.join(ROOT, "kernel", "judge.py")) as f:
             src = f.read()
         self.assertIn("fast_asked = _tier_fast(tier, model)", src)
-        self.assertIn("_judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier)", src)
+        self.assertIn("_judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier, key_held=bool(held))", src)
 
     def test_only_on_and_off_are_storable(self):
         for bad in ("yes", "true", "1", "", "session", "ON"):

@@ -928,7 +928,7 @@ UNTRUSTED_SYS = (
     "prompt and from text outside the marked sections.")
 
 
-def _judge_cmd(model, sys_prompt, effort=None, auth=None, tier="triage"):
+def _judge_cmd(model, sys_prompt, effort=None, auth=None, tier="triage", key_held=False):
     """The `claude -p` argv for ONE judge call, isolated so the model sees ONLY its own prompt. Three
     flags do it (verified by token count: a probe call drops 8334 -> ~165 input tokens):
       --system-prompt (REPLACE, not --append) — drops Claude Code's static base prompt (~6k tokens);
@@ -963,6 +963,13 @@ def _judge_cmd(model, sys_prompt, effort=None, auth=None, tier="triage"):
         # lever a login-picked session's launch uses (sdk_backend.flag_settings_path). The machine's own login
         # and a STORED login alike: a stored login's token rides the child's environment (_judge_env, the
         # environment road since 2026-09-14), where a helper would outrank it.
+        overlay["apiKeyHelper"] = ""
+    elif key_held:
+        # A key-billed call carrying the kernel's held key in its environment (_judge_env, 2026-10-05): the same
+        # empty value turns the child's own helper off. Without it the CLI 2.1.284 still runs the helper once per
+        # call even though it then sends the environment's key, so every call stayed one secret-manager read
+        # (measured with a counting stand-in helper and a local stand-in API: helper on, 1 run per call; helper
+        # off, 0 runs, the environment's key sent as x-api-key).
         overlay["apiKeyHelper"] = ""
     if overlay:
         cmd += ["--settings", json.dumps(overlay)]
@@ -1116,8 +1123,9 @@ def _log_judge_error(judge, fsid, err, note=None, goal=None, seg=None):
             last = getattr(_judge_ctx, "last", None)
             if isinstance(last, dict) and last.get("judge") == judge:
                 rec["debug"] = {"input": last.get("input"), "reply": last.get("reply")}
+        line = _held_scrub(json.dumps(rec))           # a held key never reaches the error log, whatever quoted it
         with open(ERRORS, "a") as f:
-            f.write(json.dumps(rec) + "\n")
+            f.write(line + "\n")
     except Exception:
         pass
 
@@ -1731,9 +1739,10 @@ _LOGIN_AUTH_ENV_FN = None      # login tokens claimed out of the manager's ambie
 
 def _key_available():
     """Whether an unpicked judge call bills the key: an apiKeyHelper is configured in Claude Code's settings
-    in the operator's settings, managed or user (credentials.key_available: read, never run). romp holds no key of
-    its own since 2026-09-08 (the user, after a contributor PR's test printed a key from a session's
-    environment); the child resolves the helper itself. An unreadable settings file reads as no helper here;
+    in the operator's settings, managed or user (credentials.key_available: read, never run). romp holds no key for
+    its sessions since 2026-09-08 (the user, after a contributor PR's test printed a key from a session's
+    environment); the judges' held key (_KEY_SOURCE, 2026-10-05) runs the helper later, when a key-billed child is
+    built, never here. An unreadable settings file reads as no helper here;
     said once per process on stderr (the SDK backend says the same once in its problem ring)."""
     try:
         return _cred.key_available()
@@ -1745,6 +1754,52 @@ def _key_available():
 
 
 _SETTINGS_UNREADABLE_SAID = set()   # the unreadable-settings line: once per process, never silent
+
+# The key the kernel holds for key-billed judge children (the user 2026-10-05, after the secret manager's read
+# quota refused most of the one-run-per-call helper reads): credentials.HeldKey runs the operator's user-settings
+# apiKeyHelper once, keeps the value in this process's memory, and _judge_env hands it to each key-billed child
+# while _judge_cmd turns that child's own helper off. A refused key re-runs the helper at most once a minute
+# across every judge thread (_held_key_retry). Pluggable: the holder knows only "run this command, read stdout",
+# so a short-lived token's command replaces it by assigning another HeldKey here (env_name ANTHROPIC_AUTH_TOKEN
+# for a bearer token, a max_age_fn for its lifetime). No helper in the user's settings (none at all, or one in
+# managed settings, which the per-call layer cannot turn off): the holder has no command and the children
+# resolve their own credential as before.
+_KEY_SOURCE = _cred.HeldKey(_cred.child_key_helper, env_name="ANTHROPIC_API_KEY", label="apiKeyHelper",
+                            max_age_fn=_cred.helper_ttl_if_set)
+_HELD_FAIL_SAID = {}                # the holder's last failure said on stderr: once per distinct reason, cleared when it works
+
+
+def _held_scrub(text):
+    """`text` with any key the judges' holder has held blanked: for every writer that can put a child's output
+    in a file (the error rows, the auth latch, the API-health note). Never raises."""
+    try:
+        return _KEY_SOURCE.scrub(text)
+    except Exception:
+        return text
+
+
+def _envelope_auth_refused(p):
+    """Whether a finished judge child answered with a credential-class error envelope (a 401 from the API reads
+    "Invalid API key · Fix external API key" on CLI 2.1.284, at once: the API marks it not worth retrying)."""
+    try:
+        w = json.loads(getattr(p, "stdout", "") or "")
+    except Exception:
+        return False
+    return isinstance(w, dict) and bool(w.get("is_error")) and _is_auth_error(str(w.get("result") or w.get("subtype") or ""))
+
+
+def _held_key_retry(used, judge, fsid):
+    """A key-billed child given the held key `used` came back refused. Asks the holder for a value to retry that
+    child with once: a value another thread already fetched, or one fresh helper run when none ran in the last
+    minute. Returns (value or "", note): note is the helper's own failure in static words when the run failed,
+    filed loudly here (an "auth" error row) and handed back so the session's auth latch names it rather than
+    the API's refusal it caused. Never a fall onto the child's own helper."""
+    try:
+        return _KEY_SOURCE.refused(used), ""
+    except Exception as e:
+        note = _credential_error_note(e)
+        _log_judge_error(judge, fsid, "auth", note=note)
+        return "", note
 
 
 def _login_auth_env():
@@ -1833,7 +1888,7 @@ def _note_api_health(kind, auth, model, msg, fsid):
     if fn is None or auth == "codex":
         return
     try:
-        fn(kind, auth, model, msg, fsid)
+        fn(kind, auth, model, _held_scrub(msg), fsid)
     except Exception:
         pass
 
@@ -1845,6 +1900,8 @@ def _is_auth_error(text):
     low = (text or "").lower()
     return ("not logged in" in low
             or "api key is invalid" in low
+            or "invalid api key" in low                # the CLI's own words for a 401 on a key (2.1.284)
+            or "invalid auth token" in low             # …and on a bearer token in ANTHROPIC_AUTH_TOKEN
             or "invalid x-api-key" in low
             or "failed to authenticate" in low
             or ("oauth token" in low and ("expired" in low or "revoked" in low))
@@ -1892,7 +1949,7 @@ def _auth_down_mark(fsid, mode, note):
     without a session to pin it on (fleet-level rows stay in judge-errors.jsonl)."""
     if not fsid:
         return
-    note = str(note or "")[:300]
+    note = _held_scrub(str(note or ""))[:300]
     mode = str(mode or "")
     login = mode[6:] if mode.startswith("login:") else ""    # a stored login's id (T346); the mode stays the side word
     if login:
@@ -2077,9 +2134,12 @@ def _judge_env(tier, auth="login", model=None):
     latency-safe.
 
     `auth` is the call's resolved billing (_judge_auth). The three credential names are stripped
-    unconditionally, and a KEY-billed call injects nothing back (2026-09-08: romp holds no key; the child
-    resolves Claude Code's apiKeyHelper itself, and the first pass after boot runs exactly like every later
-    one). A LOGIN-billed call gets the claimed login tokens back and, in _judge_cmd, the helper suppression.
+    unconditionally, and a KEY-billed call gets back exactly one: the kernel's held key (_KEY_SOURCE, 2026-10-05:
+    one apiKeyHelper run for every child, where from 2026-09-08 each child ran the helper itself and the
+    secret manager's read quota ran out), with the helper turned off in _judge_cmd. No helper the kernel runs for
+    its children (none, or a managed one): nothing is injected and the child resolves its own, as before. A helper
+    that fails raises CredentialError, said once per reason on stderr and filed loudly by _judge_run.
+    A LOGIN-billed call gets the claimed login tokens back and, in _judge_cmd, the helper suppression.
     A call billed to a STORED login ('login:<id>', T346) gets that login's setup-token instead, read by running
     the record's token command now, the way the session's own launch runs it (the environment road, 2026-09-14:
     a setup-token through an apiKeyHelper hangs the CLI's request; through CLAUDE_CODE_OAUTH_TOKEN it is
@@ -2099,6 +2159,23 @@ def _judge_env(tier, auth="login", model=None):
             env.pop(k, None)
     if auth == "login":
         env.update(_login_auth_env())
+    elif auth == "key":
+        # The kernel's held key (2026-10-05): fetched by one helper run and reused for every key-billed child, which
+        # turns its own helper off (_judge_cmd key_held). "" when the box's helper is not one the kernel runs for
+        # its children (none, or a managed one): the child resolves its own, as before. A helper that fails raises
+        # CredentialError, which _judge_run files loudly (the auth latch and an "auth" row); never a fall onto the
+        # child's own helper run.
+        try:
+            held = _KEY_SOURCE.value()
+        except _cred.CredentialError as e:
+            if _HELD_FAIL_SAID.get("why") != str(e):     # the service log too, once per distinct reason (static words)
+                _HELD_FAIL_SAID["why"] = str(e)
+                sys.stderr.write("romp-judge: %s; key-billed judge calls stand down until it works (romp runs the "
+                                 "helper again at most once a minute)\n" % e)
+            raise
+        _HELD_FAIL_SAID.pop("why", None)
+        if held:
+            env[_KEY_SOURCE.env_name] = held
     elif str(auth or "").startswith("login:"):
         try:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = _logins.token_value(STATE, str(auth)[6:],
@@ -2423,13 +2500,34 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
             # passes — irreversible content loss from a permissions problem.
             _judge_ctx.paused = True
             return ""
+        held = env.get(_KEY_SOURCE.env_name, "") if auth == "key" else ""   # the kernel's held key, when it rides
+        auth_note = ""          # the helper's own failure, when refreshing a refused held key failed (_held_key_retry)
         try:
             fast_asked = _tier_fast(tier, model)
             if fast_asked and not _is_login_auth(auth):
                 env = dict(env, **_fast_org_env())    # permission follows billing (the sessions' rule, T300)
-            p = subprocess.run(_judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier), input=user,
-                               capture_output=True, text=True, cwd=JUDGE_SCRATCH, env=env,
+            cmd = _judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier, key_held=bool(held))
+            p = subprocess.run(cmd, input=user, capture_output=True, text=True, cwd=JUDGE_SCRATCH, env=env,
                                timeout=CALL_ALARM_S + 5)
+            if held and _envelope_auth_refused(p):
+                # The API refused the held key (2026-10-05): ask the holder for another, which is either a value a
+                # sibling thread already fetched or ONE helper run when none ran in the last minute, then run THIS
+                # child once more with it. A retry refused again marks the key refused without another run, so the
+                # next calls stand down loudly (_judge_env) until the minute is up instead of spending API calls.
+                fresh, auth_note = _held_key_retry(held, judge or tier, fsid)
+                if fresh:
+                    env = dict(env, **{_KEY_SOURCE.env_name: fresh})
+                    p = subprocess.run(cmd, input=user, capture_output=True, text=True, cwd=JUDGE_SCRATCH, env=env,
+                                       timeout=CALL_ALARM_S + 5)
+                    if _envelope_auth_refused(p):
+                        try:
+                            _KEY_SOURCE.refused(fresh, allow_run=False)
+                        except Exception:
+                            pass
+            if held:
+                # whatever the child printed is about to be parsed, stashed and logged: a held key in it goes now
+                p.stdout = _held_scrub(getattr(p, "stdout", "") or "")
+                p.stderr = _held_scrub(getattr(p, "stderr", "") or "")
         except Exception as e:
             # _judge_run owns ALL call-level logging (this, the error envelope below, the rate gate above)
             # so callers never double-log: to a caller every failed call is just "", and "call" rows always
@@ -2495,8 +2593,9 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
                             pass
                 if _is_auth_error(msg):
                     # credential-class: only the user can fix it — latch, so build_feed floors this
-                    # session's focus card instead of leaving the board silently frozen (2026-08-12)
-                    _auth_down_mark(fsid, auth, msg[:160])
+                    # session's focus card instead of leaving the board silently frozen (2026-08-12); when the
+                    # held key's refresh failed, the helper's own failure is the fix to name (_held_key_retry)
+                    _auth_down_mark(fsid, auth, auth_note or msg[:160])
                 _note_api_health("gaveup", auth, model, msg, fsid)   # the judges' half of the login's bucket (T346)
                 return ""
             if isinstance(wrap, dict) and isinstance(wrap.get("result"), str):

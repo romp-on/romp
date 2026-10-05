@@ -1012,11 +1012,15 @@ runs `node` without replacing itself leaks nothing.
 
 The installed unit also sets `MALLOC_ARENA_MAX=2` for the manager and every kernel it spawns (2026-09-11): the kernel is a many-threaded Python process that rebuilds large record lists, and the allocator's per-thread arenas kept hundreds of megabytes of freed memory between restarts; two arenas return it. A line in `service.env` overrides it.
 
-Romp holds no API key (the user 2026-09-08, who wants romp to hold no key). A
-session's credential is Claude Code's own resolution: the `apiKeyHelper` in its
-settings (the helper) for a key, the login otherwise. Romp injects no credential
-into a session or a judge child, runs no key command, reads no
-secret-manager reference, and keeps no key in `service.env`.
+Romp holds no API key for its sessions (the user 2026-09-08, who wants romp to
+hold no key). A session's credential is Claude Code's own resolution: the
+`apiKeyHelper` in its settings (the helper) for a key, the login otherwise.
+Romp injects no credential into a session, reads no secret-manager reference,
+and keeps no key in `service.env`. The one exception is the judges (the user
+2026-10-05, after one helper run per judge call exhausted a secret manager's
+read quota): the judge process runs the same helper once and holds the key in
+memory for its key-billed children (see [A key from a secret
+manager](#a-key-from-a-secret-manager)).
 
 A retired key path stops the kernel at boot. A `service.env` that still carries
 `ROMP_API_KEY_CMD`, `ROMP_API_KEY_REF` or `ANTHROPIC_API_KEY`, or one of the
@@ -1049,10 +1053,12 @@ Claude Code's own credential resolution is the only key path. Point Claude
 Code's [`apiKeyHelper`](https://code.claude.com/docs/en/settings-reference#apikeyhelper)
 at your secret manager: the CLI runs the helper, holds what it prints, and
 re-runs it after `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` (five minutes by default)
-and on a 401 or 403. Every session and every key-billed judge call runs the
-helper inside its own Claude Code process. Romp never sees the key: the
-Billing picker and the tooltip row read the setting to know that a key exists,
-and no surface of romp's fetches it.
+and on a 401 or 403. Every session runs the helper inside its own Claude Code
+process. The judges are the one exception: the judge process runs the helper
+once and hands the key to its key-billed children (below), because one helper
+run per judge call can exhaust a secret manager's read quota. No surface of
+romp's shows the key: the Billing picker and the tooltip row read the setting
+to know that a key exists.
 
 1. Write a script that prints the key from your secret manager, and make it
    executable. The script fetches its own credential: the CLI runs the helper
@@ -1118,15 +1124,23 @@ and no surface of romp's fetches it.
 4. Restart the service once, for the declaration; `service.env` loads at
    manager startup. Sessions and judges run the helper from their next launch.
 
-Judges (`claude -p` children of the kernel) launch with no credential in their
-environment. A key-billed judge call resolves the helper itself, inside its own
-CLI, the way a session does. A login-billed call passes the same helper
-suppression (`--settings '{"apiKeyHelper": ""}'`) and gets back the login
-tokens the kernel claimed at boot. A helper that fails inside a judge's CLI
-fails that call with a credential error, which latches the session's
-judge-auth-down state like any other credential failure (see
-[judges.md](judges.md#billing-and-when-the-credential-itself-is-broken)); it
-never falls back to the login.
+Judges (`claude -p` children of the kernel) launch with the ambient credentials
+stripped from their environment. For key-billed judge calls the judge process
+holds the key: it runs the helper from the user's settings once, keeps what it
+printed in memory, and hands it to each key-billed child as `ANTHROPIC_API_KEY`
+together with the helper suppression (`--settings '{"apiKeyHelper": ""}'`), so
+no child runs the helper again. It runs the helper again when a child reports
+the key refused, when the helper command changes, and after
+`CLAUDE_CODE_API_KEY_HELPER_TTL_MS` when that variable is set (unset, a key is
+held until it is refused); never more than once a minute, a failed run included.
+A refused child is retried once with the new value. A helper that fails, or a
+key refused again inside the minute, latches the session's judge-auth-down
+state like any other credential failure (see
+[judges.md](judges.md#billing-and-when-the-credential-itself-is-broken)), with
+one line in the service log; it never falls back to the login or to the child's
+own helper. A helper in managed settings is left to each child, since the
+suppression cannot turn it off there. A login-billed call passes the same
+suppression and gets back the login tokens the kernel claimed at boot.
 
 The kernel makes two API calls of its own: the model catalog refresh and the
 fast-mode organisation probe. Both read the helper from the settings files

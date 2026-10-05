@@ -73,6 +73,7 @@ if log:
                              "menu": (re.search(r"<open-goals[^>]*>\n(.*?)\n</open-goals", user, re.S) or [None, ""])[1] if judge == "planner" else None,
                              "argv": args, "cwd": os.getcwd(),                            # review MED 2: the flags and the cwd the caller ran, observed
                              "credPresent": [k for k in SENSITIVE if os.environ.get(k)],  # which sensitive names ride the child env (presence, never a value)
+                             "ambientKeyRode": os.environ.get("ANTHROPIC_API_KEY") == "synthetic-ambient-key",   # a yes/no, never the value
                              "rawHash": raw_hash, "markNorm": mark_norm}) + "\n")         # raw differs per call (the mark); mark-normalized is equal across builds
 if os.environ.get("JE_TEST_KILL_ALL") and judge in ("planner", "closer", "unblocker"):   # kill EVERY arm call (none ever serves): no usage row lands, so the budget stop must price kills from the floor
     import signal as _sig
@@ -1781,8 +1782,12 @@ class Harness(unittest.TestCase):
         argv = probe[0]["argv"]
         for flag in ("--safe-mode", "--strict-mcp-config", "--system-prompt", "--output-format"):
             self.assertIn(flag, argv, "the probe carries the judges' flag %s (not a bare claude -p): %r" % (flag, argv))
-        self.assertEqual(probe[0]["credPresent"], [],
-                         "the ambient credential and 1Password/OP names are stripped from the probe env: %r" % probe[0]["credPresent"])
+        # the corpus carries an apiKeyHelper, so the probe is key-billed and carries the judges' held key (2026-10-05), with
+        # its own helper turned off; the ambient key and the 1Password/OP names never ride
+        self.assertEqual(probe[0]["credPresent"], ["ANTHROPIC_API_KEY"],
+                         "only the held key rides the probe env; the 1Password/OP names are stripped: %r" % probe[0]["credPresent"])
+        self.assertFalse(probe[0]["ambientKeyRode"], "the key that rides is the held one, never the ambient credential")
+        self.assertEqual(argv[-2:], ["--settings", '{"apiKeyHelper": ""}'], "the probe turns its helper off as the judges do: %r" % argv)
         self.assertEqual(os.path.realpath(probe[0]["cwd"]), os.path.realpath(str(jd._ensure_judge_scratch())),
                          "the probe runs in the romp judge scratch, not the checkout (realpath both sides: the temp dir is a symlink on macOS): %r" % probe[0]["cwd"])
 
