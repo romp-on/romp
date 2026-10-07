@@ -33135,6 +33135,8 @@ def _is_auth_error(text):
     low = (text or "").lower()
     return ("not logged in" in low
             or "api key is invalid" in low
+            or "invalid api key" in low                # the CLI's own words for a 401 on a key (2.1.284)
+            or "invalid auth token" in low             # …and on a bearer token in ANTHROPIC_AUTH_TOKEN
             or "invalid x-api-key" in low
             or "failed to authenticate" in low
             or ("oauth token" in low and ("expired" in low or "revoked" in low))

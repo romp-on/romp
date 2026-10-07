@@ -62,6 +62,8 @@ JUDGE_ALLOWED = {
     # raw records, the states log, captions
     "transcript_head", "_bg_step", "_bg_unresolved",
     "_skill_load_index",                                # the skill-load boot pass reads raw jsonl rows it json.loads itself (T333)
+    "_direct_api_error_text",                           # the Messages API's own error envelope (a dict json.loads made from the
+                                                        #  HTTP reply), never a transcript record or atom
 }
 
 

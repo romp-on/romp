@@ -14,11 +14,13 @@ test, as they stand since 2026-09-08:
     the session picker's exact fallback: an explicit pick wins; otherwise the key when Claude Code's
     settings for this process's cwd carry an apiKeyHelper (_key_available: read, never run), else login.
   * _judge_env strips ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN and the 1Password
-    CLI's own names from EVERY child env. A key-billed call injects nothing back: the child resolves the
-    helper itself. A login-billed call gets the claimed login tokens back (_LOGIN_AUTH_ENV_FN, wired by the
-    kernel to sdk_backend.startup_auth_env; the environment standalone).
-  * _judge_cmd appends `--settings {"apiKeyHelper": ""}` for a login-billed call only: the helper
-    outranks the login in the CLI's precedence, so a login-billed call disables it for that one process.
+    CLI's own names from EVERY child env. A key-billed call gets back exactly one thing since 2026-10-05: the
+    kernel's held key (credentials.HeldKey, one helper run for every child; tests/test_judge_held_key.py pins
+    the holder), never the ambient value. A login-billed call gets the claimed login tokens back
+    (_LOGIN_AUTH_ENV_FN, wired by the kernel to sdk_backend.startup_auth_env; the environment standalone).
+  * _judge_cmd appends `--settings {"apiKeyHelper": ""}` for a login-billed call (the helper outranks the
+    login in the CLI's precedence) and for a key-billed call carrying the held key (the CLI would otherwise
+    still run its helper once per call): either way the helper is off for that one process.
   * A credential-class error envelope LATCHES judge-auth-down for the session (STATE/judge-auth.json);
     the session's next successful call clears it. Both edges are events, no timers.
   * build_feed floors a latched session's focus card to needs-you wearing the "judgeAuth" story, whose
@@ -28,11 +30,13 @@ tests/test_credentials.py pins the credentials module itself and the basic judge
 extends those pins at the judge boundary and keeps the latch, classifier and kernel-wiring history.
 
 Synthetic sids only; every credential-shaped value is an invented string used solely to assert that it
-is stripped; the staged helper is a path that is read and never run.
+is stripped or carried; the staged helper is a fixture script that prints an invented value.
 """
 import json
 import os
 import shutil
+import stat
+import subprocess
 import tempfile
 import time
 import unittest
@@ -56,7 +60,8 @@ jd = load_source("romp_judge_authbill", os.path.join(BIN, "romp-judge"))
 
 AMBIENT = "synthetic-ambient-value"       # what a credential variable carries when a test stages one to
                                           # assert it is stripped; nothing under test validates the shape
-HELPER_CMD = "/synthetic/helper.sh"       # the staged apiKeyHelper: romp reads the setting, never runs it
+HELD = "synthetic-held-value"             # what the staged apiKeyHelper fixture prints: the kernel's held key
+_REAL_RUN = subprocess.run                # the fakes below replace subprocess.run module-wide; the helper still runs
 CREDENTIAL_NAMES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 SID = "11111111-2222-3333-4444-555555555555"
 NOT_LOGGED_IN = "Not logged in · Please run /login"   # the CLI's live refusal, verbatim shape
@@ -174,8 +179,15 @@ class _JudgeAuthBase(unittest.TestCase):
                 pass
         jd._judge_ctx.fsid = None
         jd._judge_ctx.paused = False
+        # a fresh holder per test: the key one test's helper printed must never ride the next test's children
+        self._source_before = jd._KEY_SOURCE
+        self.now = [1000.0]                           # the holder's clock: a test steps past its one-minute gap
+        jd._KEY_SOURCE = jd._cred.HeldKey(jd._cred.child_key_helper, env_name="ANTHROPIC_API_KEY",
+                                          label="apiKeyHelper", max_age_fn=jd._cred.helper_ttl_if_set,
+                                          clock=lambda: self.now[0])
 
     def tearDown(self):
+        jd._KEY_SOURCE = self._source_before
         jd._LOGIN_AUTH_ENV_FN = self._login_before
         jd._cred.managed_settings_path = self._managed_before
         if self._cfg_before is None:
@@ -200,10 +212,22 @@ class _JudgeAuthBase(unittest.TestCase):
     def _reg(self, auth):
         (jd.SDKDIR / (SID + ".json")).write_text(json.dumps({"sid": SID, "auth": auth}))
 
-    def _helper(self, cmd=HELPER_CMD):
-        """Stage "a key exists": Claude Code's user settings name an apiKeyHelper. Read, never run, so the
-        path need not exist."""
+    def _helper(self, cmd=None):
+        """Stage "a key exists": Claude Code's user settings name an apiKeyHelper. By default a fixture script
+        that prints HELD and counts its runs in helper.ran (billing resolution only reads the setting; the
+        kernel's held key runs it once for the key-billed children)."""
+        if cmd is None:
+            script = Path(self.cfg, "helper.sh")
+            script.write_text("#!/bin/sh\nprintf . >> '%s'\necho '%s'\n" % (Path(self.cfg, "helper.ran"), HELD))
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            cmd = str(script)
         Path(self.cfg, "settings.json").write_text(json.dumps({"apiKeyHelper": cmd}))
+
+    def _helper_runs(self):
+        try:
+            return len(Path(self.cfg, "helper.ran").read_text())
+        except OSError:
+            return 0
 
 
 class JudgeBillingResolution(_JudgeAuthBase):
@@ -233,7 +257,7 @@ class JudgeBillingResolution(_JudgeAuthBase):
         # Claude Code's own resolution decides (KeylessKeyBilledCalls below), never a silent fall to login
         self._reg("key")
         self.assertEqual(jd._judge_auth(SID), "key")
-        self.assertNotIn("ANTHROPIC_API_KEY", jd._judge_env("triage", "key"))
+        self.assertNotIn("ANTHROPIC_API_KEY", jd._judge_env("triage", "key"), "no helper: nothing for the kernel to hold")
 
     def test_a_helper_that_disables_itself_reads_as_no_helper(self):
         # the empty string is the CLI's disable value (a login launch's per-session layer writes it), so a
@@ -241,18 +265,18 @@ class JudgeBillingResolution(_JudgeAuthBase):
         self._helper("")
         self.assertEqual(jd._judge_auth(SID), "login")
 
-    def test_the_helper_is_read_and_never_run(self):
-        # romp decides billing from the SETTING; running the helper would put the key in romp's process,
-        # the very thing the 2026-09-08 retirement removed
-        marker = Path(self.cfg, "helper.ran")
-        script = Path(self.cfg, "helper.sh")
-        script.write_text("#!/bin/sh\ntouch '%s'\necho synthetic-helper-output\n" % marker)
-        script.chmod(0o755)
-        self._helper(str(script))
+    def test_billing_resolution_reads_the_helper_and_only_the_held_key_runs_it_once(self):
+        # romp decides billing from the SETTING, and building the argv runs nothing; since 2026-10-05 the
+        # key-billed child's environment carries the kernel's held key, so the first env build runs the
+        # helper and every later one reuses what it printed
+        self._helper()
         self.assertEqual(jd._judge_auth(SID), "key")
-        jd._judge_env("triage", "key")
-        jd._judge_cmd("sonnet", "SYS", None, auth="key")
-        self.assertFalse(marker.exists(), "billing resolution runs nothing")
+        jd._judge_cmd("sonnet", "SYS", None, auth="key", key_held=True)
+        self.assertEqual(self._helper_runs(), 0, "billing resolution and the argv run nothing")
+        for _ in range(5):
+            self.assertEqual(jd._judge_env("triage", "key").get("ANTHROPIC_API_KEY"), HELD)
+        self.assertEqual(self._helper_runs(), 1, "one helper run for every key-billed child")
+        self.assertNotIn("ANTHROPIC_API_KEY", os.environ, "the held key never enters the kernel's own environment")
 
     def test_an_unreadable_settings_file_reads_as_no_helper_here(self):
         # the judge side answers the billing question and cannot raise out of it; the loud half (the SDK
@@ -264,8 +288,8 @@ class JudgeBillingResolution(_JudgeAuthBase):
 
 class JudgeEnvBilling(_JudgeAuthBase):
     """The child env: every credential name stripped, the login tokens restored for a login-billed call
-    only, nothing injected for a key-billed one (2026-09-08; before that a key-billed child was handed
-    romp's key and this class pinned the injection)."""
+    only, and for a key-billed one the kernel's held key alone (2026-10-05; from 2026-09-08 a key-billed
+    child got nothing and ran the helper itself, once per call)."""
 
     def test_every_credential_and_op_name_is_stripped_whatever_the_billing(self):
         """2026-09-08: the 1Password names are stripped unconditionally; until then a box with no key
@@ -282,16 +306,21 @@ class JudgeEnvBilling(_JudgeAuthBase):
                     # itself): they are the login, not key material, and the design keeps them
                     self.assertEqual(env.get(name), AMBIENT, "%s is the login-billed child's credential" % name)
                     continue
+                if auth == "key" and name == "ANTHROPIC_API_KEY":
+                    # the key-billed child carries the kernel's held key (2026-10-05), never the ambient value
+                    self.assertEqual(env.get(name), HELD, "the held key, not the ambient one")
+                    continue
                 self.assertNotIn(name, env, "%s rode a %s-billed child" % (name, auth))
             self.assertEqual(env.get("ROMP_SUMMARIZING"), "1", "the rest of the env contract is untouched")
 
-    def test_a_key_billed_child_gets_nothing_back_even_when_the_wire_has_login_tokens(self):
+    def test_a_key_billed_child_gets_the_held_key_and_never_a_login_token(self):
         # before 2026-09-08 an unkeyed key-billed child was handed the login tokens as a fallback
-        # credential; now the child resolves the helper itself and a login token would outrank it
+        # credential; a login token would outrank the key, so it never rides a key-billed child
         self._helper()
         jd._LOGIN_AUTH_ENV_FN = lambda: {"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-login-token"}
         env = jd._judge_env("triage", "key")
-        for name in CREDENTIAL_NAMES:
+        self.assertEqual(env.get("ANTHROPIC_API_KEY"), HELD)
+        for name in ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
             self.assertNotIn(name, env)
 
     def test_a_login_billed_child_gets_the_claimed_login_tokens_and_only_those(self):
@@ -331,7 +360,12 @@ class JudgeEnvBilling(_JudgeAuthBase):
 
 
 class JudgeArgvBilling(_JudgeAuthBase):
-    """The argv: a login-billed call disables the helper for its one process, a key-billed call does not."""
+    """The argv: a login-billed call disables the helper for its one process; a key-billed call does only when
+    it carries the kernel's held key (key_held), whose child must not run the helper again."""
+
+    def test_a_key_billed_call_carrying_the_held_key_turns_the_helper_off(self):
+        self.assertEqual(jd._judge_cmd("sonnet", "SYS", None, auth="key", key_held=True)[-2:], HELPER_OFF)
+        self.assertEqual(jd._judge_cmd("sonnet", "SYS", "low", auth="key", key_held=True).count("--settings"), 1)
 
     def test_the_suppression_rides_after_the_call_flags_and_beside_effort(self):
         cmd = jd._judge_cmd("sonnet", "SYS", "low", auth="login")
@@ -508,9 +542,13 @@ class JudgeRunBilling(_JudgeAuthBase):
         if auth_reg:
             self._reg(auth_reg)
         jd._judge_ctx.fsid = SID
-        seen = {}
+        seen = {"n": 0}
 
-        def fake_run(cmd, input=None, capture_output=None, text=None, cwd=None, env=None, timeout=None):
+        def fake_run(cmd, input=None, capture_output=None, text=None, cwd=None, env=None, timeout=None, **kw):
+            if isinstance(cmd, str):                  # the staged helper, run by the kernel's held key: for real
+                return _REAL_RUN(cmd, input=input, capture_output=capture_output, text=text, cwd=cwd, env=env,
+                                 timeout=timeout, **kw)
+            seen["n"] += 1
             seen["cmd"] = list(cmd)
             seen["env"] = env
             return SimpleNamespace(stdout=json.dumps(envelope), stderr="", returncode=0)
@@ -531,7 +569,9 @@ class JudgeRunBilling(_JudgeAuthBase):
         self.assertTrue(row, "credential refusal must latch judge-auth-down")
         self.assertEqual(row["mode"], "key", "the unpicked default on a helper box")
         self.assertIn("Not logged in", row["note"])
-        self.assertNotIn("ANTHROPIC_API_KEY", seen["env"], "the key-billed child resolved the helper itself")
+        self.assertEqual(seen["env"].get("ANTHROPIC_API_KEY"), HELD, "the key-billed child carried the held key")
+        self.assertEqual(seen["n"], 1, "the helper ran a moment ago, inside the minute: no refresh, so no retry")
+        self.assertEqual(self._helper_runs(), 1)
 
     def test_a_refusal_on_a_login_pick_latches_with_the_login_mode(self):
         # the card copy branches on the mode (KernelWiringAndFloorPins): sign in again vs fix the helper
@@ -547,18 +587,25 @@ class JudgeRunBilling(_JudgeAuthBase):
     def test_the_next_success_clears_the_latch(self):
         self._run({"is_error": True, "result": NOT_LOGGED_IN})
         self.assertIn(SID, jd._auth_down_map())
+        # inside the minute after the refusal the key-billed calls stand down (tests/test_judge_held_key.py);
+        # past it the helper runs again and the next served call is the deciding event
+        self.now[0] += jd._cred.HELD_KEY_REFRESH_GAP_S + 1
         out, _ = self._run({"result": "ok", "usage": {}, "duration_ms": 3})
         self.assertEqual(out, "ok")
         self.assertNotIn(SID, jd._auth_down_map())
 
-    def test_a_key_billed_call_carries_no_credential_and_leaves_the_helper_on(self):
+    def test_a_key_billed_call_carries_the_held_key_alone_and_turns_the_childs_helper_off(self):
         jd._LOGIN_AUTH_ENV_FN = lambda: {"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-login-token"}
         with patch.dict(os.environ, {name: AMBIENT for name in CREDENTIAL_NAMES + _op_names()}):
             out, seen = self._run({"result": "ok", "usage": {}, "duration_ms": 3})
         self.assertEqual(out, "ok")
         for name in CREDENTIAL_NAMES + _op_names():
+            if name == "ANTHROPIC_API_KEY":
+                self.assertEqual(seen["env"].get(name), HELD, "the kernel's held key, never the ambient value")
+                continue
             self.assertNotIn(name, seen["env"], name)
-        self.assertNotIn("--settings", seen["cmd"], "the child resolves the helper itself")
+        i = seen["cmd"].index("--settings")
+        self.assertEqual(seen["cmd"][i:i + 2], HELPER_OFF, "the child must not run the helper again")
 
     def test_a_login_pick_launches_with_the_login_tokens_and_the_helper_disabled(self):
         jd._LOGIN_AUTH_ENV_FN = lambda: {"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-login-token"}
@@ -702,7 +749,8 @@ class KernelWiringAndFloorPins(unittest.TestCase):
         # on the strings that matter (each side may only ever grow strictly looser together).
         for s in ("Not logged in", "API key is invalid", "invalid x-api-key",
                   "failed to authenticate", "OAuth token has expired", "oauth token revoked",
-                  "authentication_error", "overloaded", "rate_limit_error", ""):
+                  "authentication_error", "Invalid API key · Fix external API key",
+                  "Invalid auth token · Fix external auth token", "overloaded", "rate_limit_error", ""):
             self.assertEqual(jd._is_auth_error(s), self.km._is_auth_error(s), s)
 
     def test_the_feed_bundle_carries_the_chip(self):
