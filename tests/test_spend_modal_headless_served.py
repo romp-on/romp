@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import types
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from romp_load import load_source
@@ -62,6 +63,22 @@ class SpendModalServed(unittest.TestCase):
         km._self_host = lambda: "TESTHOST"
         km._claude_account = lambda: ""
         km._auth_key_present = lambda: True
+        # the KERNEL's clock is the fixture's too (2026-10-09). /spend/detail is served at the fixture's NOW
+        # below, but /usage and /usage/fleet come from km._usage(), whose spend windows (_spend_windows: five
+        # hours, seven days, the month) read time.time(). On the wall clock the anchored ledger slid out of
+        # those windows (out of the month on 2026-10-01, out of the rolling 30 days on 2026-10-07), the usage
+        # rows above the chart shrank, the chart rose, and the short-window tooltip found room below the
+        # pointer: the pin that it goes above the chart failed on every CI run with no change in the repo.
+        # The swap tests/test_spend_windows.py makes, kept whole: every attribute is the real module's;
+        # time() and time_ns() read the fixture's afternoon plus the seconds since here, so a kernel wait
+        # still ends
+        real_time, t0 = km.time, time.time()
+        clock = types.ModuleType("time")
+        clock.__dict__.update({k: getattr(real_time, k) for k in dir(real_time) if not k.startswith("__")})
+        clock.time = lambda: _sd.NOW + (real_time.time() - t0)
+        clock.time_ns = lambda: int(clock.time() * 1e9)
+        km.time = clock
+        self.addCleanup(setattr, km, "time", real_time)
         (state / "usage.json").write_text(json.dumps({"apiKey": True}))
         write_ledger(state, extra_sids=20)     # enough sessions to scroll the pane (T247e)
         (state / "session-order.json").write_text(json.dumps([API, WEB]))   # the tab strip's order: api before web (T247f)
@@ -137,6 +154,12 @@ class SpendModalServed(unittest.TestCase):
             self.td.cleanup()
 
     def test_click_opens_the_modal_with_table_and_stacked_histogram_and_escape_closes_it(self):
+        # the page's usage answer reads the fixture's clock (setUp's swap): every window holds the anchored
+        # ledger's spend. On the wall clock all three read zero from 2026-10-07 on, and the layout pins below
+        # drifted with the calendar instead of the code
+        sp = (km._usage() or {}).get("spend") or {}
+        self.assertTrue(all((sp.get(w) or {}).get("usd", 0) > 0 for w in ("fiveHour", "sevenDay", "month")),
+                        "the usage windows read the fixture's clock, not the wall clock: " + json.dumps(sp))
         shots = os.environ.get("ROMP_SHOTS", "")
         env = dict(os.environ, NODE_PATH=self.node_path)
         r = subprocess.run(["node", os.path.join(HERE, "spend_modal_headless.js"), "http://127.0.0.1:%d/" % self.port, shots],
