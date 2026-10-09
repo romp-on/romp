@@ -40,6 +40,12 @@ from _pytest._code.code import ReprExceptionInfo, ReprFileLocation, ReprTracebac
 # (pytest-timeout's thread method ends a hung run that way), so a hang leaves ONE top-level entry
 # in the system temp dir, the root with its marker, for the kernel's sweep.
 import tests as _tests  # noqa: E402  the package; its import is what minted the root this file removes
+# The package's import also cleared every ROMP_ name the run inherited from the shell, the live service's
+# settings among them, keeping only the test opt-ins it lists (tests/__init__.py, scrub_service_env,
+# 2026-10-09): it runs before this file under pytest and is the only floor a bare unittest run gets. The
+# named ROMP_ lines below set the run's own values on that clean slate; the per-test fixtures re-assert
+# theirs as before. It is not re-run here, since that would clear what the package has just set.
+SERVICE_ENV_SCRUBBED = _tests.SERVICE_ENV_SCRUBBED
 _TMP_ROOT = _tests.TMP_ROOT
 TEST_ROOT_OWNER_MARKER = _tests.TEST_ROOT_OWNER_MARKER   # tests/test_test_root_sweep.py pins it against the kernel's
 

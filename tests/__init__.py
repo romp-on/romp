@@ -18,6 +18,65 @@ import sys
 import tempfile
 import time
 
+# No test runs under the LIVE service's settings (2026-10-09). Every shell a romp-managed session opens
+# inherits the manager's environment, and that carries the service's own knobs (whatever the operator
+# put in the manager's env file: a record-cache tail budget of 0, a freeze-pause bound of off, the box's
+# auth declaration) beside the session's identity (its sid, name, state tag, checkout path, the real
+# CLI path, the manager's pid and grace). A suite started from such a shell loaded every kernel module
+# with those values, so a test could pass or fail for a reason CI never sees: a tail-cache benchmark ran
+# with its rule switched off because the service had it off. conftest.py floors a dozen of these by
+# name, one incident at a time; this floor removes the whole class, before anything below sets a name of
+# the run's own and before any test module loads (this package imports first under pytest and under a
+# bare `python -m unittest tests.test_x`, so both runners get it; conftest.py's named lines then set
+# the run's values on a clean slate).
+# Cleared by default, kept by ALLOWLIST: a production knob added tomorrow is cleared without anyone
+# remembering to list it, which is the failure this exists for, while a test opt-in nobody listed shows
+# itself at once (its own test does not opt in) and costs one line here.
+# What is kept is what a run is HANDED on purpose: the harness's own records an xdist worker inherits
+# from its controller (ROMP_TESTS_*: the system temp dir, the real Claude root) and the switches a test
+# reads to opt into a live, browser or diagnostic leg, or a parent test hands to the child run it starts
+# (ROMP_TEST_*, ROMP_HYGIENE_READY). tests/test_service_env_floor.py pins the list against every ROMP_
+# name a test module reads without setting, so a new opt-in that is not listed turns that test red.
+# The floor runs once, at import: a test module's own module-level setting (ROMP_KERNEL_NO_OPEN,
+# ROMP_SERVE_TOKEN and the like) comes after it and stands, and nothing clears names during the run.
+SERVICE_ENV_KEEP_PREFIXES = (
+    "ROMP_TESTS_",            # harness records (tests/__init__.py, conftest.py) an xdist worker inherits
+    "ROMP_TEST_",             # probes a parent test hands its child run (tests/test_env_value_redaction.py)
+    "ROMP_SERVED_TESTS_",     # CI's served-page job: _REQUIRE, _ENGINES (.github/workflows/ci.yml)
+    "ROMP_SMOKE_",            # tests/smoke_codex_live.py, an opt-in live script
+    "ROMP_CLI_PROBE_",        # tests/test_cli_control_protocol_probe.py's live leg
+    "ROMP_MOVE_LIVE",         # tests/test_session_move_live.py's live leg (_LIVE, _LIVE_CLAUDE)
+)
+SERVICE_ENV_KEEP_NAMES = (
+    "ROMP_HYGIENE_READY",         # tests/test_tempdir_hygiene.py hands it to the child module it writes (a
+    #                               string template, which the scan in tests/test_service_env_floor.py cannot read)
+    "ROMP_HYGIENE_MARKER",        # tests/test_tempdir_hygiene.py hands its child run the evidence file's path
+    "ROMP_BUS_SCOPE_LIVE", "ROMP_BUS_SCOPE_LIVE_DIR",   # tests/test_postal_bus_scope_live.py's live leg
+    "ROMP_PLAYWRIGHT_NODE_PATH",  # where the browser tests find playwright
+    "ROMP_LAB_SHOT", "ROMP_SHOTS",  # served-page tests: where to save a screenshot for a reviewer
+    "ROMP_WRITE_FIXTURES",        # tests/test_goal_store_fault_boundary.py: regenerate its committed table
+    "ROMP_READER_TRACE",          # a diagnosis aid a served test passes to its kernel: stderr lines only
+    "ROMP_SDK_PYTHON",            # tests/test_session_move_live.py: the interpreter its live leg runs
+    "ROMP_RESTARTSESSION_RESULT", "ROMP_SESSMENU_RESULT", "ROMP_SHAREDMENUS_RESULT", "ROMP_T416_RESULT",
+    "ROMP_T323S3_KEEP_LOGS", "ROMP_T323S4_KEEP_LOGS",   # served tests: keep a result or log for a reviewer
+)
+
+
+def service_env_kept(name):
+    return name in SERVICE_ENV_KEEP_NAMES or name.startswith(SERVICE_ENV_KEEP_PREFIXES)
+
+
+def scrub_service_env(environ=None):
+    """Remove every ROMP_ name the run inherited except the allowlist above; returns the names removed."""
+    env = os.environ if environ is None else environ
+    removed = sorted(k for k in env if k.startswith("ROMP_") and not service_env_kept(k))
+    for name in removed:
+        env.pop(name, None)
+    return removed
+
+
+SERVICE_ENV_SCRUBBED = scrub_service_env()   # names only, never values: tests/test_service_env_floor.py reads it
+
 # Temp-directory hygiene, the in-process half (2026-09-06): the suite used to leak every directory it
 # made. This floor and conftest.py's each minted a state root per process and never removed it (two
 # per pytest process: eighteen for a `pytest -n 8` run), and about three hundred test modules call
