@@ -26,6 +26,12 @@ os.environ.pop("ROMP_STATE_DIR", None)
 em = load_source("romp_event_model_tail_weight", os.path.join(BIN, "romp-event-model"))
 
 
+def _w(file_bytes):
+    """The weight of an entry holding `file_bytes` of a file: its resident estimate since 2026-09-28
+    (tests/test_record_cache_resident_weight.py); the arithmetic below is in file bytes as it always was."""
+    return int(file_bytes * em.RECORD_CACHE_RESIDENT_PER_FILE_BYTE)
+
+
 def _rec(i, text="x"):
     return (json.dumps({"uuid": "11111111-2222-3333-4444-%012d" % i, "type": "assistant", "text": text}) + "\n").encode()
 
@@ -64,8 +70,8 @@ class TailEntryWeight(unittest.TestCase):
         size = os.path.getsize(path)
         self.assertEqual((ent[5], len(ent[4])), (1, 1), "a tail entry: base 1, one held record")
         self.assertEqual(ent[7][0], plen, "the first held record sits at the cut")
-        self.assertEqual(em._entry_weight(ent), size - plen)
-        self.assertEqual(em.record_cache_stats()["bytes"], size - plen)
+        self.assertEqual(em._entry_weight(ent), _w(size - plen))
+        self.assertEqual(em.record_cache_stats()["bytes"], _w(size - plen))
         self.assertTrue(self._consistent())
 
     def test_an_append_to_a_tail_grows_its_weight_by_the_appended_bytes(self):
@@ -76,7 +82,7 @@ class TailEntryWeight(unittest.TestCase):
             f.write(_rec(200, "u" * 50_000))
         ent = em._read_jsonl_entry(path, tail_ok=True, tail_from=tf)
         self.assertEqual(len(ent[4]), 2, "the append landed on the tail")
-        self.assertEqual(em._JSONL_CACHE_BYTES[0], os.path.getsize(path) - plen)
+        self.assertEqual(em._JSONL_CACHE_BYTES[0], _w(os.path.getsize(path) - plen))
         self.assertGreater(em._JSONL_CACHE_BYTES[0], w1)
         self.assertTrue(self._consistent())
 
@@ -85,8 +91,8 @@ class TailEntryWeight(unittest.TestCase):
         em._read_jsonl_entry(path, tail_ok=True, tail_from=tf)
         ent = em._read_jsonl_entry(path)                       # a whole reader: the tail is upgraded to the file
         self.assertEqual(ent[5], 0)
-        self.assertEqual(em._entry_weight(ent), os.path.getsize(path))
-        self.assertEqual(em._JSONL_CACHE_BYTES[0], os.path.getsize(path), "one entry, the whole file")
+        self.assertEqual(em._entry_weight(ent), _w(os.path.getsize(path)))
+        self.assertEqual(em._JSONL_CACHE_BYTES[0], _w(os.path.getsize(path)), "one entry, the whole file")
         self.assertTrue(self._consistent())
 
     def test_a_tail_holding_no_record_weighs_nothing(self):
@@ -107,14 +113,14 @@ class TailEntryWeight(unittest.TestCase):
         # a shape no current writer produces (records held, no offsets to say where they start): a bound that
         # under-counts is no bound, so such an entry counts the whole file, over rather than under
         held = [{"uuid": "11111111-2222-3333-4444-000000000009", "type": "assistant"}]
-        self.assertEqual(em._entry_weight((0.0, 5000, 5000, b"", held, 1, 0, array.array("q"))), 5000)
-        self.assertEqual(em._entry_weight((0.0, 5000, 5000, b"", held, 1, 0)), 5000, "a 7-tuple holding records: the same")
+        self.assertEqual(em._entry_weight((0.0, 5000, 5000, b"", held, 1, 0, array.array("q"))), _w(5000))
+        self.assertEqual(em._entry_weight((0.0, 5000, 5000, b"", held, 1, 0)), _w(5000), "a 7-tuple holding records: the same")
 
     def test_the_budget_sees_tail_entries(self):
         # red on main: two tails of ~200 KB each under a budget of 1.5 tails never evicted (they weighed 0)
         a, plen_a, tf_a = self._tail_file("web.jsonl")
         b, plen_b, tf_b = self._tail_file("api.jsonl")
-        one = os.path.getsize(a) - plen_a
+        one = _w(os.path.getsize(a) - plen_a)
         em._JSONL_CACHE_BUDGET_BYTES = int(one * 1.5)
         ev0 = em._RECORD_CACHE_STATS["budgetEvictions"]
         em._read_jsonl_entry(a, tail_ok=True, tail_from=tf_a)
@@ -130,7 +136,7 @@ class TailEntryWeight(unittest.TestCase):
         self.assertGreater(em._JSONL_CACHE_BYTES[0], 0)
         with em._JSONL_CACHE_LOCK:
             w = em._cache_pop_locked(path)
-        self.assertEqual(w, os.path.getsize(path) - plen)
+        self.assertEqual(w, _w(os.path.getsize(path) - plen))
         self.assertEqual(em._JSONL_CACHE_BYTES[0], 0)
 
 

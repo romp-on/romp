@@ -2100,12 +2100,16 @@ if [[ "${1:-}" =~ ^(--)?(send|interrupt|end)$ ]]; then
     # send went to a session called `--tag` four times in one night, refused into nowhere while the timer read
     # "sent". A verb's own flag is never a session name; the label is checked and appended below with the
     # documented trailing form (`romp send <session> --tag <label> <text>`), which still works.
-    _tag=""
-    if [[ "$_verb" == "send" && "${1:-}" == "--tag" ]]; then
+    # `--from-user` (2026-10-06) marks the text as the person's own words: the chat page relays what the person types with
+    # it, and the session queues a marked text ahead of peer and machine sends (behind the person's earlier lines and any
+    # queued slash command). It may lead the session name or trail it, as --tag does.
+    _tag=""; _from_user=""
+    while [[ "$_verb" == "send" && ( "${1:-}" == "--tag" || "${1:-}" == "--from-user" ) ]]; do
+        if [[ "$1" == "--from-user" ]]; then _from_user=1; shift; continue; fi
         _tag="${2:-}"
-        [[ -n "$_tag" ]] || { echo "usage: romp send <session> [--tag <label>] <text>" >&2; exit 2; }
+        [[ -n "$_tag" ]] || { echo "usage: romp send [--from-user] <session> [--tag <label>] <text>" >&2; exit 2; }
         shift 2
-    fi
+    done
     _who="${1:-}"
     if [[ -z "$_who" ]]; then echo "usage: romp $_verb <session> $([[ "$_verb" == send ]] && echo '<text>')" >&2; exit 2; fi
     shift
@@ -2129,18 +2133,22 @@ if [[ "${1:-}" =~ ^(--)?(send|interrupt|end)$ ]]; then
         # brief): the chat shows a tagged message as machine-sent under that label instead of posing
         # it as the user's typed words (the user 2026-08-15). Sugar for appending the marker comment
         # `<!-- romp-tag: <label> -->` yourself; the label is one word, letters/digits/dashes.
-        if [[ "${1:-}" == "--tag" ]]; then       # …or trailing the session name (the leading form set _tag above)
+        while [[ "${1:-}" == "--tag" || "${1:-}" == "--from-user" ]]; do   # …or trailing the session name (the leading form set them above)
+            if [[ "$1" == "--from-user" ]]; then _from_user=1; shift; continue; fi
             _tag="${2:-}"
-            shift 2 || { echo "usage: romp send <session> [--tag <label>] <text>" >&2; exit 2; }
-        fi
+            shift 2 || { echo "usage: romp send [--from-user] <session> [--tag <label>] <text>" >&2; exit 2; }
+        done
         _text="$*"
-        if [[ -z "$_text" ]]; then echo "usage: romp send <session> [--tag <label>] <text>" >&2; exit 2; fi
+        if [[ -z "$_text" ]]; then echo "usage: romp send [--from-user] <session> [--tag <label>] <text>" >&2; exit 2; fi
+        if [[ -n "$_from_user" && -n "$_tag" ]]; then
+            echo "romp send: --from-user marks the person's own words and --tag marks a machine's; use one or the other" >&2; exit 2
+        fi
         if [[ -n "$_tag" ]]; then
             [[ "$_tag" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,23}$ ]] \
                 || { echo "romp send: --tag must be one word (letters/digits/dashes, <=24 chars)" >&2; exit 2; }
             _text="$_text"$'\n\n'"<!-- romp-tag: $_tag -->"
         fi
-        _payload="$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "text": sys.argv[2]}))' "$_who" "$_text")"
+        _payload="$(python3 -c 'import json,sys; d={"name": sys.argv[1], "text": sys.argv[2]}; d.update({"fromUser": True} if sys.argv[3] else {}); print(json.dumps(d))' "$_who" "$_text" "$_from_user")"
     elif [[ "$_verb" == "end" && "$_who" == "self" ]]; then
         if [[ -z "${ROMP_SID:-}" ]]; then
             echo "romp end self: ROMP_SID is not set — 'self' only works from inside a romp SDK session" >&2

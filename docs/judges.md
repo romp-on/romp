@@ -512,23 +512,34 @@ session's own Billing selector holds, read from the same registry, resolved by
 the same rule the launch uses (the kernel wires the backend's resolver into the
 judges): the session's own pick; else the machine's default set in the tab
 menu's Billing flyout, when the machine can bill it; else the API key when
-Claude Code's settings carry an `apiKeyHelper`, else the login. Judges run on Claude
-Code's own credential resolution, and romp holds no key (the user 2026-09-08).
-Every judge child (`claude -p`) launches with no credential in its environment.
-A key-billed call resolves the helper itself, inside its own CLI, the way a
-session does. A login-billed call passes `--settings '{"apiKeyHelper": ""}'`,
+Claude Code's settings carry an `apiKeyHelper`, else the login. Every judge child
+(`claude -p`) launches with the ambient credentials stripped from its environment.
+A key-billed call gets the key the judge process holds (the user 2026-10-05): it
+runs the user-settings `apiKeyHelper` once, keeps what it printed in memory, and
+hands it to each key-billed child as `ANTHROPIC_API_KEY` with
+`--settings '{"apiKeyHelper": ""}'`, so the child runs no helper of its own (one
+helper run for every judge call, where each call used to be one secret-manager
+read). When a child answers with a credential error, the process runs the helper
+again, at most once a minute across every judge thread, and retries that child
+once with the new value; a retry refused again makes the next key-billed calls
+stand down (a skip, latched as below) until the minute is up. A helper that fails
+files the same latch with the helper's own words, writes one line to the service
+log, and spawns no child. A helper set in managed settings, which the per-call
+layer cannot turn off, keeps the old road: each child resolves it itself. The
+held value is never written to a file, a log line or the kernel's environment.
+A login-billed call passes `--settings '{"apiKeyHelper": ""}'`,
 which disables the helper for that one process, and gets back the login tokens
 the kernel claimed out of its own environment at boot. A call billed to a
 stored login passes the same suppression and gets that login's setup-token
 instead, read by running the record's token command for that one child (the
 environment road, 2026-09-14; a failing command fails the call in its own
 words, never a fall onto another credential). The same selection
-applies to standalone `romp-judge --once`. A helper that fails inside a judge's
-CLI cannot silently use the login or a stale key; what the call files depends on
-how the CLI fails: a credential error the CLI reports within the call's 120 s
-alarm latches judge-auth-down below, and a call the CLI never answers (a helper
-that hangs, or a rejected key the CLI keeps retrying) is killed at the alarm and
-files as a timeout row. See [Service environment and
+applies to standalone `romp-judge --once`. A failing credential cannot silently
+use the login or a stale key; what the call files depends on how it fails: a
+credential error the CLI reports within the call's 120 s alarm latches
+judge-auth-down below, and a call the CLI never answers (a helper that hangs
+inside a child that still runs one, or a rejected key the CLI keeps retrying) is
+killed at the alarm and files as a timeout row. See [Service environment and
 credentials](reference.md#service-environment-and-credentials) for the helper's
 setup and the billing declaration.
 

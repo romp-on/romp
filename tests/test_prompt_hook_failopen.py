@@ -182,6 +182,20 @@ class CronPromptsStillGate(_Gate):
         self.assertEqual(self._reg().get("cronDelivered"), {key: slot}, "a refused replay changes nothing")
         self.assertTrue(any("blocked a replayed schedule fire" in m for m in self.logs), "loudly")
 
+    def test_a_blocked_replay_is_remembered_so_its_drop_is_not_re_sent(self):
+        """The gate's block is the one dropped_by_hook removal romp decides: it is recorded (_note_gate_blocked) so the
+        take path reads the CLI's removal as a decision and does not re-send it (_requeue_hook_drop). A prompt the gate
+        lets through is not recorded."""
+        self._write([_armed()])
+        s1 = self._session()
+        self.assertEqual(self._fire(s1), {})
+        self.assertFalse(s1._take_gate_blocked(PROMPT), "an allowed prompt is not remembered")
+        s2 = self._session()
+        self.assertEqual(self._fire(s2).get("decision"), "block")
+        self.assertEqual(self._fire(s2, ORDINARY), {})
+        self.assertFalse(s2._take_gate_blocked(ORDINARY))
+        self.assertTrue(s2._take_gate_blocked(PROMPT), "the blocked prompt is remembered for its drop")
+
     def test_long_prompts_match_on_the_recorded_500(self):
         long_prompt = "x" * 480 + PROMPT           # the reg stores prompt[:500]
         self._write([_armed(prompt=long_prompt[:500])])

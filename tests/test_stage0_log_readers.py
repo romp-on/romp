@@ -809,8 +809,8 @@ class PerCycleStoreReadersAreCached(_StateSandbox):
         km._alive_sessions = lambda now, live_map: [{"sid": sid, "path": str(gpath)}]
         live = {sid: {"state": "waiting", "bgTasks": []}}
         scan = []                                          # what the transcript pairs: a running watcher
-        saved_scan = km._bg_scan_all_cached
-        km._bg_scan_all_cached = lambda path: list(scan)
+        saved_scan = km._bg_scan_lift_cached               # the lift's own view of the pairing (2026-10-03)
+        km._bg_scan_lift_cached = lambda path: list(scan)
         try:
             km._lift_seen.pop(sid, None)
             km._lift_spent_awaiting(NOW, live)
@@ -846,7 +846,7 @@ class PerCycleStoreReadersAreCached(_StateSandbox):
             km._lift_spent_awaiting(NOW + 301, live)      # …so the next cycle retries on the same inputs
             self.assertEqual(len(loads), 8, "a raised ruling is retried, not skipped")
         finally:
-            jd.load_goals_shared = real; km._alive_sessions = saved_alive; km._bg_scan_all_cached = saved_scan; km._lift_seen.pop(sid, None)
+            jd.load_goals_shared = real; km._alive_sessions = saved_alive; km._bg_scan_lift_cached = saved_scan; km._lift_seen.pop(sid, None)
             try: os.unlink(gpath)
             except OSError: pass
 

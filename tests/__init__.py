@@ -151,6 +151,8 @@ os.environ["ROMP_CKPT_FIRST_DOC_KB"] = "0"   # the young-session floor off for t
 #                                                bare unittest run gave 113 failures with every checkpoint shape skipped young without it
 os.environ["ROMP_GC_FREEZE"] = "off"   # #1735: the freeze off in the suite, the twin of conftest.py's line, so an in-process pusher cycle
 #                                        never freezes the test interpreter's heap; the freeze's tests drive the controller directly
+os.environ.setdefault("ROMP_REG_LOCK_GUARD", "raise")   # the twin of conftest.py's line: a session loop thread that waits on the
+#                                        backend's registry lock raises in the suite (sdk_backend._RegLock)
 
 # `from romp_load import load_source` in a test module (tests/romp_load.py): under pytest and
 # `python -m unittest tests.test_x` the test modules are imported as members of this package, so the

@@ -38,7 +38,7 @@ These are for scripting and for agents rather than daily use:
 | `romp api-health` | The API-health signal as JSON (see [The API-health signal](#the-api-health-signal)): per-credential, per-model-family retry and give-up rates over rolling windows, with a derived state |
 | `romp restart-metrics [--json] [--window day\|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]` | What kernel restarts do to the sessions (see [Restart metrics](#restart-metrics)): turns cut per restart and per window, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session and kernel memory and CPU; a text summary per window, or the whole document as JSON |
 | `romp mail …` | The postal service from the shell (below) |
-| `romp send <session> [--tag <label>] <text>` | Hand a session a message, on either backend. Anything a script, cron job, or launcher composes SHOULD carry a tag (one word, letters/digits/dashes, up to 24 chars): the chat then renders it as machine-sent under that label instead of as the user's typed words. Raw POST /send callers pass it as the JSON `tag` field (`{name, text, tag}`; a malformed tag fails the whole send, loudly); `--tag` is the CLI's equivalent. Both resolve to the `<!-- romp-tag: <label> -->` marker in the delivered text |
+| `romp send [--from-user] <session> [--tag <label>] <text>` | Hand a session a message, on either backend. Anything a script, cron job, or launcher composes SHOULD carry a tag (one word, letters/digits/dashes, up to 24 chars): the chat then renders it as machine-sent under that label instead of as the user's typed words. Raw POST /send callers pass it as the JSON `tag` field (`{name, text, tag}`; a malformed tag fails the whole send, loudly); `--tag` is the CLI's equivalent. Both resolve to the `<!-- romp-tag: <label> -->` marker in the delivered text. `--from-user` (POST /send's `fromUser: true`, the only value accepted) marks the text as the person's own words, as the chat page relays them: the session queues it ahead of peer mail and other sends, behind the person's earlier lines and any queued slash command. It cannot be combined with a tag |
 | `romp new --env NAME=VALUE <name>` | A per-session env var for the SDK session, repeatable; a re-run against a running `<name>` replaces the whole set; vars not re-named are dropped |
 | `romp new --no-env <name>` | Clear a running SDK session's per-session env (declares the empty set) |
 | `romp new --in <tag> <name>` | Put the new SDK or Codex session in `<tag>`, so its tab lands in that group (repeatable; a name that does not exist yet creates the tag). Applies to `<name>` if it already runs. The kernel echoes `tags` (the session's tags) and, per `--in`, the stored name it landed as (`tagsApplied`, beside `tagsRequested`): a name the store trimmed or clamped prints as "applied as"; a missing echo, or a tag the kernel refused, prints a warning |
@@ -829,6 +829,29 @@ through to `install.sh`:
   and follows to every connected machine like the other judge settings; its
   Default option clears the setting back to the variable, else 6.
 
+### Captions and gists without a CLI process per call
+
+The captioner and the gister, the two highest-volume judges, call the
+Messages API straight from the judge process when the call bills the API key
+the judges hold and the Indexing model is a Haiku. They reuse one connection
+per worker thread instead of starting `claude -p` for each call, which saves
+about a core-second per call. The request keeps the CLI's model, max tokens
+(32,000), thinking setting (off) and the judge's own prompts. It leaves out
+the CLI's boilerplate around them: its billing and agent lines and its
+working-directory, model and date reminders. Usage rows keep their fields,
+with the API's token counts, and carry `"route": "api"`.
+
+Every other call still starts the CLI: other judges, login-billed calls, a
+key the CLI resolves itself, models other than Haiku, and a box whose
+environment sets a proxy, `ANTHROPIC_CUSTOM_HEADERS`, Bedrock or Vertex (said
+once on the kernel's stderr). Rate limits and overloads get up to three
+retries with backoff inside the same two-minute call alarm.
+
+- `ROMP_JUDGE_DIRECT_API=off` puts the captioner and gister back on the CLI.
+  It is read on every call.
+- `scripts/judge_direct_api_bench.py` measures both roads against a local
+  stand-in API, with a dummy key and synthetic captions.
+
 ### Fast mode for the judges
 
 - **Fast mode** (a checkbox beside each of the gear's judge model pickers:
@@ -1012,11 +1035,15 @@ runs `node` without replacing itself leaks nothing.
 
 The installed unit also sets `MALLOC_ARENA_MAX=2` for the manager and every kernel it spawns (2026-09-11): the kernel is a many-threaded Python process that rebuilds large record lists, and the allocator's per-thread arenas kept hundreds of megabytes of freed memory between restarts; two arenas return it. A line in `service.env` overrides it.
 
-Romp holds no API key (the user 2026-09-08, who wants romp to hold no key). A
-session's credential is Claude Code's own resolution: the `apiKeyHelper` in its
-settings (the helper) for a key, the login otherwise. Romp injects no credential
-into a session or a judge child, runs no key command, reads no
-secret-manager reference, and keeps no key in `service.env`.
+Romp holds no API key for its sessions (the user 2026-09-08, who wants romp to
+hold no key). A session's credential is Claude Code's own resolution: the
+`apiKeyHelper` in its settings (the helper) for a key, the login otherwise.
+Romp injects no credential into a session, reads no secret-manager reference,
+and keeps no key in `service.env`. The one exception is the judges (the user
+2026-10-05, after one helper run per judge call exhausted a secret manager's
+read quota): the judge process runs the same helper once and holds the key in
+memory for its key-billed children (see [A key from a secret
+manager](#a-key-from-a-secret-manager)).
 
 A retired key path stops the kernel at boot. A `service.env` that still carries
 `ROMP_API_KEY_CMD`, `ROMP_API_KEY_REF` or `ANTHROPIC_API_KEY`, or one of the
@@ -1049,10 +1076,12 @@ Claude Code's own credential resolution is the only key path. Point Claude
 Code's [`apiKeyHelper`](https://code.claude.com/docs/en/settings-reference#apikeyhelper)
 at your secret manager: the CLI runs the helper, holds what it prints, and
 re-runs it after `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` (five minutes by default)
-and on a 401 or 403. Every session and every key-billed judge call runs the
-helper inside its own Claude Code process. Romp never sees the key: the
-Billing picker and the tooltip row read the setting to know that a key exists,
-and no surface of romp's fetches it.
+and on a 401 or 403. Every session runs the helper inside its own Claude Code
+process. The judges are the one exception: the judge process runs the helper
+once and hands the key to its key-billed children (below), because one helper
+run per judge call can exhaust a secret manager's read quota. No surface of
+romp's shows the key: the Billing picker and the tooltip row read the setting
+to know that a key exists.
 
 1. Write a script that prints the key from your secret manager, and make it
    executable. The script fetches its own credential: the CLI runs the helper
@@ -1118,15 +1147,23 @@ and no surface of romp's fetches it.
 4. Restart the service once, for the declaration; `service.env` loads at
    manager startup. Sessions and judges run the helper from their next launch.
 
-Judges (`claude -p` children of the kernel) launch with no credential in their
-environment. A key-billed judge call resolves the helper itself, inside its own
-CLI, the way a session does. A login-billed call passes the same helper
-suppression (`--settings '{"apiKeyHelper": ""}'`) and gets back the login
-tokens the kernel claimed at boot. A helper that fails inside a judge's CLI
-fails that call with a credential error, which latches the session's
-judge-auth-down state like any other credential failure (see
-[judges.md](judges.md#billing-and-when-the-credential-itself-is-broken)); it
-never falls back to the login.
+Judges (`claude -p` children of the kernel) launch with the ambient credentials
+stripped from their environment. For key-billed judge calls the judge process
+holds the key: it runs the helper from the user's settings once, keeps what it
+printed in memory, and hands it to each key-billed child as `ANTHROPIC_API_KEY`
+together with the helper suppression (`--settings '{"apiKeyHelper": ""}'`), so
+no child runs the helper again. It runs the helper again when a child reports
+the key refused, when the helper command changes, and after
+`CLAUDE_CODE_API_KEY_HELPER_TTL_MS` when that variable is set (unset, a key is
+held until it is refused); never more than once a minute, a failed run included.
+A refused child is retried once with the new value. A helper that fails, or a
+key refused again inside the minute, latches the session's judge-auth-down
+state like any other credential failure (see
+[judges.md](judges.md#billing-and-when-the-credential-itself-is-broken)), with
+one line in the service log; it never falls back to the login or to the child's
+own helper. A helper in managed settings is left to each child, since the
+suppression cannot turn it off there. A login-billed call passes the same
+suppression and gets back the login tokens the kernel claimed at boot.
 
 The kernel makes two API calls of its own: the model catalog refresh and the
 fast-mode organisation probe. Both read the helper from the settings files
@@ -1490,7 +1527,14 @@ document over a tail read instead of reading the file whole, provided the
 document's cursor carries a state: against a state the process holds, a cursor
 without one (an over-cap, cold or legacy bare write) is refused and the fold
 reads whole as before, so a complete state is never replaced by a tail-only one.
-The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
+For that reason a live session's main transcript is not popped while any fold
+over it lacks a state in its document (the background view of a long
+transcript is over the cap): the jobs pass folds every live session's
+transcript on every pass, so the pop would only come back as a whole read. Its
+document is still written, its drop stays owed, and it is paid at the first
+cycle start after the session leaves the live map (`recordCache.dropKept`
+counts the holds, `recordCache.keptWhole` the transcripts held now). The
+knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
 it (the drop then pops as it did before the write existed, except under the
 incident scan's memo, which keeps a walked file's records resident when the
 document write is off, since its memo cannot reach the disk); `ROMP_CKPT_CONVERGE_MB`
@@ -2204,10 +2248,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `msSum`, `msMax` and `msLast` (their summed, largest and last pause) and
   `collectedLast` (the objects the last one freed). `thresholds` and `counts`
   are `gc.get_threshold()` and `gc.get_count()`, repeated from `heap.gc` so
-  the block reads on its own (how near the next collection is); `frozen`
-  counts the objects moved out of the collector's reach by `gc.freeze`, which
-  it never scans (reading the count is a linear walk of the frozen generation,
-  about 7 ms per million frozen, paid by the `/perf` read); `errors` counts callback failures (counted, never raised
+  the block reads on its own (how near the next collection is);
+  `frozenAsOfCleanup` counts the objects moved out of the collector's reach by
+  `gc.freeze`, which it never scans, AS OF THE LAST CLEANUP (a reclaim), and
+  `frozenAsOfCleanupAt` is that cleanup's time (epoch seconds); both are null
+  until the first cleanup. Reading the count is a linear walk of the frozen
+  generation (about 7 ms per million frozen), so the freeze controller reads it
+  only inside a reclaim's pause, never on the `/perf` read and never at a freeze
+  (2026-10-07); `errors` counts callback failures (counted, never raised
   into the collector; the first in the process is said once on stderr, a
   line prefixed `perf: gc hook:`, the rest counted only); `hooked` says
   whether the kernel's `gc.callbacks` hook is installed, so zeros with
@@ -2240,7 +2288,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   measured ~97 fold-ins an hour), so a cycle released by an owner nobody
   registered is bounded by the next thousand loads, not the process lifetime. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
-  apart from the integer `frozen` above, which is `gc.get_freeze_count()`),
+  apart from the integer `frozenAsOfCleanup` above, which this sub-block repeats with
+  `frozenAsOfCleanupAt`),
   `loadTrees` and `backstopFoldins` (the two thresholds), `freezes` and
   `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
   release that unfroze runs TWO generation-2 collections for its one reclaim, so
@@ -2288,6 +2337,28 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   stderr, as in `heap`; the tallies themselves need none. The kernel-samples
   rows carry the same generation-2 tallies as `gcGen2Collections` and
   `gcGen2MsSum`, cumulative, to difference per interval beside `rssKb`.
+  The FULL-COLLECTION freeze (2026-10-07; `ROMP_GC_FREEZE_FULL_MS`, default 250, `off`
+  restores the collector as before) freezes from the collector's own stop callback after
+  an organic full collection that paused at least `fullFreezeMs`, and raises the third
+  collection threshold to `fullT2` (`ROMP_GC_FREEZE_FULL_T2`, default 100). Its fields:
+  `fullFreezes` (freezes it ran), `lastFullMs` (the pause that last froze),
+  `fullSinceReclaim` (its freezes since the last reclaim), `fullMsSinceReclaim` and
+  `fullRefMs` (organic full-collection pause since the last reclaim, and the largest walk
+  seen, about the whole heap): a backstop reclaim is owed once the first reaches
+  `fullBackstopRatio` times the second. While one is owed nothing more is frozen
+  (`fullFreezeSkips`); `owedForS` says how long it has been owed (null when not), and once
+  it reaches `fullForceS` (`ROMP_GC_FREEZE_FULL_FORCE_S`, default 600, `off` waits for an
+  idle tick only) a BUSY pusher cycle runs it, counted in `forced`. A reclaim whose
+  collection did not actually run (another thread was inside a collection, so
+  `gc.collect()` returned at once) is re-frozen and left owed, counted in `reclaimSkips`.
+  While the full-collection freeze is on and anything is frozen, a cleanup is also owed
+  `cleanupMaxS` after the last one
+  (`ROMP_GC_FREEZE_CLEANUP_MAX_S`, default 3000, `off` for none), because the cost rule's
+  reference is the last cleanup's own walk and so stretched the interval as the pinned heap
+  grew; with the forced bound, a frozen heap goes at most about an hour between cleanups. The same owed clock and
+  forced run cover the fold-in backstop (`backstopFoldins` load fold-ins), with or without
+  the full-collection freeze. `callbackErrors`
+  counts failures inside the callback, never raised into the collector.
 - `jobs`: the jobs thread, which runs the housekeeping (the sweeps, the
   reminder walk, the interrupt tick, the persists, the pause and retry
   family) off the pusher since 2026-09-13, so no browser frame waits on a
@@ -2554,7 +2625,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   leaves the pass primed and the drop wrote), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
-  serializes reads per path, so this should stay at zero), `documentBytes`
+  serializes reads per path, so this should stay at zero), `cursorOutside`
+  (per fold name, restores refused because the document's cursor, or its cut,
+  lay outside the records the reader holds for the file; each such fold then
+  refolds from record 0, so this should stay at zero), `refoldWalks` (per fold
+  name, `count` and `records` of every refold's walk from record 0, including
+  one that read nothing because the file was already indexed whole), `documentBytes`
   (what reading the checkpoint documents themselves cost since boot),
   `fallbacks` per reason (`version`, `path`, `shrunk`, `guard`, `rewrite`,
   `corrupt`), `dirty` (files whose folds moved since their last write),
@@ -2610,10 +2686,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `ROMP_PERF_STACKS` set (a debugging aid for a served test on a runner
   nobody can log into) or when the request says `?stacks=1` (`romp perf
   stacks`, T401); `null` otherwise.
-- `recordCache`: the reader's record cache (the JSONL records held in memory):
+- `recordCache`: the reader's record cache (the JSONL records held in memory).
+  Its byte figures (`bytes`, `budgetBytes`, `evictedBytes`, `droppedBytes`)
+  are estimated resident bytes: each entry weighs the file bytes whose records
+  it holds times 3, the measured cost of parsed records. The budget defaults to
+  a quarter of the machine's memory, at least 4 GiB and at most 64 GiB, and
+  `ROMP_RECORD_CACHE_BUDGET_MB` sets it outright. A budget below the working
+  set shows as `budgetEvictions` and `wholeReads` climbing together. The keys:
   `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
   `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop), `released` (every pop that removed an entry, whatever the
+  quiescence drop), `dropKept` and `keptWhole` (drops held for a live session's
+  main transcript, counted once per hold, and the transcripts held now), `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
@@ -2625,7 +2708,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the stage being the pusher thread's current tick job (`jobs.<job>`) or
   `push`, `connect` for a fresh client's full push on its handler thread (a
   browser reload or reconnect), `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
-  does the same for the hydration rows.
+  does the same for the hydration rows. `tailOnly` counts the transcripts held
+  tail-only (see "The record cache holds a large transcript's tail" below):
+  `entries`, `windowBytes` (the file bytes their windows hold), `fileBytes`
+  (their files' sizes) and the two knobs; `coldReads` counts the reads of
+  records before a window: `passes` (one per streaming pass or single-record
+  read), `records`, `bytes`, `byCaller` (the same per first calling function
+  outside the event model), `rewrites` (reads refused because the file was
+  rewritten under the index) and `skeleton` (walks served by record skeletons,
+  their records, and misses).
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
   row fails its shape check at load, or fails its decode at the first read
@@ -2902,10 +2993,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   boots on; either way a `main-converge-declined` row stands in the
   restart-audit ledger where a second sigterm used to); `sessionsListing` is
   the kept GET /sessions listing (`built` by the pusher's cycle when its key
-  moved, `served` to requests from memory, `requestBuilt` once before the first
-  cycle, `faultBuilt` per request while a cycle's build failed and the kept
-  listing may be stale, `missBy` the key input that moved: rows, names, notes
-  or registry); `nudgeWalk` is the auto-nudge walk's
+  moved, `served` to requests from memory, `requestBuilt` by a request before
+  the first cycle, `faultBuilt` by a request while a cycle's build failed and
+  the kept listing may be stale, `missBy` the key input that moved: rows, names,
+  notes or registry, and `requestShared` the one build those requests share:
+  `built`, `joined` by a caller that waited for a build in flight, `reused` by
+  one served a build that landed under 1.5 s before, `busy` for a caller
+  answered 503 because 32 were already waiting, `timedOut` for one answered 503
+  after waiting 9 s, `failed`, `peakWaiting` and `waiting`); `nudgeWalk` is the auto-nudge walk's
   parse gate (T401): `looks`, `skippedParses` (a session whose files are
   unchanged since its last completed look and whose clock legs, noted by that
   look with the instant each could flip, have not come due; the skip repeats
@@ -3333,6 +3428,69 @@ a copy of a state directory and with no live kernel, `tools/perf-bench.py`
 loads a checkout's kernel in-process and reports each builder's cost on
 real-sized data; two checkouts can run against one copy for a before-and-after
 comparison. Its module docstring is the reference.
+
+### The record cache holds a large transcript's tail
+
+A transcript (a file under the Claude projects root) whose held records span
+64 MiB or more keeps only its newest records decoded in memory: the last
+32 MiB of the file or the last 2,000 records, whichever holds more (the record
+floor reaches back at most 64 MiB, so large records cannot stretch it). Every
+older record stays indexed by its byte offset and length and the CRC-32 of its
+bytes (20 bytes a record).
+The entry's record list is then a read-only sequence with the whole list's
+length, order, indexing and slicing; a record before the window is read off
+disk when asked for, one seek for a single record and a streaming pass in runs
+of about 4 MiB for a walk, each run freed as the walk moves on. The entry's
+base, generation, offsets and count are a whole read's, so every consumer sees
+every record.
+
+- The window follows appends. A read always keeps what it appended (up to
+  64 MiB), so a fold that was current steps the new records from memory; once
+  the window holds more than one and a half times 32 MiB it slides forward.
+  A from-zero read never builds the whole list: it decodes every line, keeps
+  the window and drops the rest as it goes.
+- Who reads before the window: a fold with no cursor to resume from (a refold
+  from record 0) streams the file once; the assembly's whole parse streams it
+  into its adapter, which keeps its own list until the entry is re-seated on its
+  document, so the document writer never walks the disk. A second whole adapter
+  over the same entry (a rebuild beside the old one) shares that list, extended
+  from the window after an append, rather than reading and holding a second copy
+  (`coldReads.wholeLists`: shared, extended, built). Chat scroll-back reads
+  the assembly's atoms, or the lazy atoms a document restored, and hydrates
+  bodies by offset as before. Each such read is counted under
+  `recordCache.coldReads` by caller.
+- The chain walks read nothing before the window. Each older record also
+  keeps a skeleton: only the fields the rewind, membership and document-chain
+  walks read (ids, parent links, type, the flags, the compaction segment, a
+  queued prompt, the content blocks' ids, a user record's text, and whether an
+  assistant record's text is non-empty). Each is counted in the entry's weight
+  by what it holds once its record is freed (its containers and strings, a
+  user record's text by its length): about 850 to 1,050 bytes a record on
+  typical records (`tailOnly.skeletonBytes` and `tailOnly.skeletons`). Skeletons are built from records already in memory (the
+  scan's dropped records and the window's records as it slides), never by a
+  read, so the judges' per-pass walks over a growing leaf cost no disk pass. A
+  skeleton asked for a field it does not keep raises; the walk is then run
+  over the full records once and counted under `coldReads.skeleton.misses`
+  (`walks` and `records` count the walks skeletons served).
+  `ROMP_RECORD_CACHE_SKELETON=0` turns skeletons off.
+- A read before the window checks, on each open, that the file is the one
+  indexed (its device and inode) and that the entry's 64-byte guard stands, and
+  checks each record's CRC before decoding it. A file rewritten, replaced or
+  edited in place since it was indexed (even at equal length with its last bytes
+  unchanged) raises an error naming the path (an OSError) instead of serving a
+  wrong record; the refusal drops the cached entry of that generation, so the
+  next read through the reader reads it afresh even when the file's size and
+  modification time did not change (counted under `coldReads.dropped`). A
+  transcript that grows past the threshold in one kernel life has no CRCs for
+  the records it held whole: their bytes are read once and each must decode to
+  the record in memory before its CRC is taken, or the entry stays whole.
+- Other large logs stay whole: the postal log is walked from its first record
+  by every parse. `entry_whole_resident` answers false for a tail-only entry (a
+  fold from record 0 over it reads), so the converge pass does not prime folds
+  over it; the assembly converge pass asks `entry_indexed_whole` instead.
+- `ROMP_RECORD_CACHE_TAIL_MB` sets the window (0 turns the rule off, every entry
+  whole as before), `ROMP_RECORD_CACHE_TAIL_RECORDS` the record floor, and
+  `ROMP_RECORD_CACHE_TAIL_ROOTS` (a path list) the directories it applies to.
 
 ### The chat wire's two protocols
 

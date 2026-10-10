@@ -111,7 +111,7 @@ class AwaitingLift(unittest.TestCase):
         km._mark_views_dirty = lambda *a, **k: None
         km._SESSION_STAMP_CACHE.clear()
         km._lift_seen.clear()          # stores are re-seeded in place under recycled tempdir inodes
-        km._bgall_cache.clear()
+        km._bgall_cache.clear(); km._bglift_cache.clear()
         km._bgtasks_cache.clear()
         _clear_placement_memos()
         self.gid = SID + ":g1"
@@ -120,7 +120,7 @@ class AwaitingLift(unittest.TestCase):
         for k, v in self.saved.items():
             setattr(km, k, v)
         km.jd.STATE, km.jd.GOALDIR = self.saved_jd
-        km._SESSION_STAMP_CACHE.clear(); km._lift_seen.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._lift_seen.clear(); km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
         _clear_placement_memos()
         self.td.cleanup()
 
@@ -128,7 +128,7 @@ class AwaitingLift(unittest.TestCase):
         with open(self.path, "w") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
-        km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
 
     def _seed(self, why="waiting on two dispatched investigations; will act when they return",
               born=BORN, anchor=STAMP, written=None, kind=None):
@@ -500,21 +500,21 @@ class RestartReconcile(unittest.TestCase):
         km._mark_views_dirty = lambda *a, **k: None
         km._sdk_spawned_at = lambda sid: self.spawn      # the CLI epoch — the restart moment
         self.spawn = BACK                                # default: the backend respawned after the stamp
-        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
         self.gid = SID + ":g1"
 
     def tearDown(self):
         for k, v in self.saved.items():
             setattr(km, k, v)
         km.jd.STATE, km.jd.GOALDIR = self.saved_jd
-        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
         self.td.cleanup()
 
     def _transcript(self, recs):
         with open(self.path, "w") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
-        km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
 
     def _seed(self, kind, why="waiting on a dispatched investigation", anchor=STAMP, written=None):
         nd = {"id": self.gid, "text": "a goal", "parentId": None, "nodeComplete": False,
@@ -656,7 +656,7 @@ class _HorizonBase(unittest.TestCase):
         km._postal_wait_maps = lambda: ({}, {}, {})   # main returns (last_any, last_ask, last_await) since #1056
         self._saved_watches = list(km._pr_watches)
         km._lift_seen.pop(self.PSID, None)
-        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
 
     def tearDown(self):
         for k, v in self.saved.items():
@@ -668,14 +668,14 @@ class _HorizonBase(unittest.TestCase):
             pass
         km.jd.STATE, km.jd.GOALDIR = self.saved_jd
         km._lift_seen.pop(self.PSID, None)
-        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
         self.td.cleanup()
 
     def _transcript(self, recs):
         with open(self.path, "w") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
-        km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
 
     def _write(self, nd):
         (km.jd.GOALDIR / (self.PSID + ".json")).write_text(json.dumps(
@@ -1556,7 +1556,7 @@ class InHarnessWaitLift(unittest.TestCase):
         # the planner placed every launch on the SIBLING top: this goal owns no dispatch
         km._bg_placed_tops = lambda sid, path, tids, store=None: {t: self.other for t in tids}
         self._saved_watches = list(km._pr_watches)
-        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
 
     def tearDown(self):
         for k, v in self.saved.items():
@@ -1567,14 +1567,14 @@ class InHarnessWaitLift(unittest.TestCase):
         except OSError:
             pass
         km.jd.STATE, km.jd.GOALDIR = self.saved_jd
-        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
         self.td.cleanup()
 
     def _transcript(self, recs):
         with open(self.path, "w") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
-        km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._bgall_cache.clear(); km._bglift_cache.clear(); km._bgtasks_cache.clear()
 
     def _seed(self, kind, anchor=STAMP, why="watching the rebuild; will pick the result up when it lands"):
         nd = {"id": self.gid, "text": "rebuild the notes-api index", "parentId": None,

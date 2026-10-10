@@ -288,6 +288,72 @@ class RepeatedPromptAfterBoundary(unittest.TestCase):
                          "each card carries its own summary; the auto pair's never lands on the manual card")
 
 
+def _live_compaction(t, tag, logical_parent, text, attachments=3):
+    """A compaction as the Claude CLI writes it since about 2026-10 (counts read on one machine, 2026-10-09): the boundary,
+    attachment records chained on it, then the summary parented on the LAST attachment and stamped a second BEFORE the
+    boundary. Returns (records in file order, the summary's uuid)."""
+    b = "cb" + tag
+    out, p = [_claude_boundary(t, b, logical_parent)], b
+    for j in range(attachments):
+        u = "at%s_%d" % (tag, j)
+        out.append({"type": "attachment", "timestamp": _iso(t), "uuid": u, "parentUuid": p,
+                    "attachment": {"type": "context_note_%d" % j, "content": "restored context item %d" % j}})
+        p = u
+    s = _claude_summary(t - 1, "cs" + tag, p)
+    s["message"] = {"role": "user", "content": text}
+    out.append(s)
+    return out, s["uuid"]
+
+
+class SummaryThroughAttachments(unittest.TestCase):
+    """The summary reaches its own boundary through the attachment records between them (2026-10-09). With its direct parent
+    required to be the boundary, the pre-pass fell back to the last boundary walked, and the summary is walked first (stamped
+    a second early): a transcript's first compaction kept no summary and opened no replay window, and a later one filed its
+    summary on the PREVIOUS compaction's card."""
+    _flat = RepeatedPromptAfterBoundary._flat
+    _cards = RepeatedPromptAfterBoundary._cards
+
+    def _recs(self):
+        now = int(time.time())
+        t0, t1, t2 = now - 7200, now - 3600, now - 60
+        c1, s1 = _live_compaction(t1, "1", "a1", "first summary: the build is green")
+        c2, s2 = _live_compaction(t2, "2", "a3", "second summary: the retry cap is tuned")
+        return ([_user(t0, "u1", None, "continue"),
+                 _assistant(t0 + 30, "a1", "u1", "done.")]
+                + c1
+                + [_user(t1 + 1, "u1r", s1, "continue"),           # the restored tail: a copy of u1
+                   _assistant(t1 + 20, "a2", "u1r", "resuming"),
+                   _user(t1 + 100, "u3", "a2", "tune the retry cap"),
+                   _assistant(t1 + 130, "a3", "u3", "tuned")]
+                + c2
+                + [_user(t2 + 1, "u3r", s2, "tune the retry cap"),  # the restored tail: a copy of u3
+                   _assistant(t2 + 20, "a4", "u3r", "resuming again")])
+
+    def test_each_summary_sits_on_its_own_card(self):
+        turns = _turns(self._recs())
+        self.assertEqual([(c["uuid"], c.get("summary")) for c in self._cards(turns)],
+                         [("cb1", "first summary: the build is green"),
+                          ("cb2", "second summary: the retry cap is tuned")],
+                         "each compaction's card carries its own summary, reached through the attachments")
+
+    def test_the_replay_window_opens_at_each_summary(self):
+        uuids = [a.get("uuid") for a in self._flat(_turns(self._recs()))]
+        self.assertNotIn("u1r", uuids, "the first compaction's replayed copy is restored context, not a second ask")
+        self.assertNotIn("u3r", uuids, "the second compaction's replayed copy too")
+        self.assertIn("u1", uuids)
+        self.assertIn("u3", uuids)
+
+    def test_a_chain_through_a_prompt_falls_back_as_before(self):
+        # the walk passes attachments only: a summary whose chain meets a prompt first keeps the old fallback (the last
+        # boundary walked), here the first compaction's card, since the summary is stamped before its own boundary
+        recs = self._recs()
+        i = next(k for k, r in enumerate(recs) if r.get("uuid") == "cs2")
+        recs.insert(i, _user(int(time.time()) - 60, "ux", "at2_2", "a prompt between the attachments and the summary"))
+        recs[i + 1] = dict(recs[i + 1], parentUuid="ux")
+        cards = {c["uuid"]: c.get("summary") for c in self._cards(_turns(recs))}
+        self.assertIsNone(cards.get("cb2"), "an orphan summary is never attached to a boundary its chain does not reach")
+
+
 PID = "aaaaaaaa-1111-2222-3333-444444444444"
 
 

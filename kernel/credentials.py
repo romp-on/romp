@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""romp holds no API key. This module is the whole of romp's contact with API credentials since
-2026-09-08 (the user, after a contributor PR's test printed a key from a session's environment: remove
-whatever let a less secure key path exist, and keep only the most secure one):
+"""romp holds no API key for its sessions. This module is the whole of romp's contact with API credentials
+since 2026-09-08 (the user, after a contributor PR's test printed a key from a session's environment: remove
+whatever let a less secure key path exist, and keep only the most secure one). One exception since
+2026-10-05: the kernel holds the key for its own judge children (HeldKey, at the bottom), because one
+helper run per judge call exhausted the operator's secret-manager quota:
 
-- Sessions and judge children authenticate through Claude Code's OWN credential resolution. The user
+- Sessions authenticate through Claude Code's OWN credential resolution, and so do judge children except
+  a key-billed one on a box whose helper sits in the user's settings, which gets the kernel's HeldKey in
+  its environment with its own helper turned off. The user
   configures `apiKeyHelper` in Claude Code's settings; the CLI runs it and holds the key. A login-billed
   launch gets `"apiKeyHelper": ""` in its per-session settings layer (the SDK's settings option, the
   CLI's --settings), which disables the helper for that one process: verified on Claude Code 2.1.257
@@ -402,3 +406,176 @@ def forget_helper_key() -> None:
         if t is not None:
             t.cancel()
             _HELPER_TIMER[0] = None
+
+
+# ---------------------------------------------------------------------------
+# The key the kernel holds for its judge children (2026-10-05)
+# ---------------------------------------------------------------------------
+# Until 2026-10-05 every key-billed judge child (`claude -p`, about 90 a minute on a busy box) ran the
+# apiKeyHelper inside its own CLI, so every judge call was one read from the operator's secret manager, and
+# when the secret manager's read quota refused most of them the cards went stale. The machine's owner ruled
+# that the kernel holds the key for its judge children (the user 2026-10-05, who wanted one helper run where
+# there had been one per call). HeldKey is that holder: it runs a command once, keeps what it printed in
+# process memory, and hands it to each child through the child's environment, while the child's per-call
+# settings layer turns its own helper off (judge._judge_cmd). Sessions are untouched: they still run the
+# helper inside their own CLI, and nothing here reaches the kernel's own environment.
+
+HELD_KEY_REFRESH_GAP_S = 60.0   # the command runs at most once per this many seconds, whatever asks for it
+
+
+class HeldKey:
+    """One credential the kernel holds in memory for the children it spawns. Its source is only a command: run
+    it, read one line of stdout (run_helper's contract), so a static API key's helper and a short-lived token's
+    command plug in the same way; `env_name` is the variable the child reads it from (ANTHROPIC_API_KEY for a
+    key, sent as x-api-key; ANTHROPIC_AUTH_TOKEN for a bearer token).
+
+    The command runs:
+      - on the first value() call (lazily, never at import or boot);
+      - when the command itself changes (the operator edited the settings): at once, nothing held for the old
+        command counts;
+      - when the held value is older than max_age_fn() seconds (None: no age limit, a static key);
+      - after a child reports the held value refused (refused()).
+    and never more than once per `refresh_gap_s` (60 s), counted from the start of the last run whatever its
+    outcome. Runs hold a lock, so a pool of callers asking at once waits for one run instead of starting one
+    each. A failed run is remembered for the gap: callers in it get the same CredentialError without a new
+    run, so a secret manager that refuses is not asked again at the judges' call rate.
+
+    The value lives in this object only: never an environment variable of this process, a file or a log line.
+    scrub() blanks the values it has held out of text a caller is about to write anywhere. No value is
+    logged, and CredentialError messages are run_helper's static words."""
+
+    def __init__(self, command_fn, env_name="ANTHROPIC_API_KEY", label=HELPER_KEY, max_age_fn=None,
+                 refresh_gap_s=HELD_KEY_REFRESH_GAP_S, clock=None, runner=None):
+        self.command_fn = command_fn                  # () -> the command, or None/"" when there is none
+        self.env_name = env_name
+        self.label = label
+        self.max_age_fn = max_age_fn or (lambda: None)
+        self.refresh_gap_s = float(refresh_gap_s)
+        self._clock = clock or time.monotonic
+        self._runner = runner or (lambda cmd: run_helper(cmd, label=self.label))
+        self._lock = threading.Lock()
+        self.runs = 0                                 # how many times the command has run (for tests and diagnosis)
+        self._recent = []                             # the last two values held, for scrub()
+        self._drop_locked(None)
+
+    def value(self) -> str:
+        """The credential for the next child, or "" when the source names no command (the caller keeps the old
+        road: the child resolves its own credential). Raises CredentialError when the command fails, when the
+        last run failed less than a gap ago, or when a child reported the held value refused less than a gap
+        after the last run (the next run is due when the gap ends)."""
+        cmd = self.command_fn()
+        with self._lock:
+            if not cmd:
+                self._drop_locked(None)               # the source is gone: so is what it printed
+                return ""
+            if cmd != self._cmd:
+                self._drop_locked(cmd)
+            now = self._clock()
+            if self._value and not self._refused and not self._expired_locked(now):
+                return self._value
+            if self._in_gap_locked(now):
+                if self._error is not None:
+                    raise CredentialError(str(self._error))
+                if self._refused:
+                    raise CredentialError("the API refused the key %s printed; romp runs %s again at most once "
+                                          "every %d s" % (self.label, self.label, self.refresh_gap_s))
+                if self._value:
+                    return self._value                # past its age limit inside the gap: the gap is the floor
+            return self._run_locked(cmd, now)
+
+    def refused(self, used, allow_run=True) -> str:
+        """A child given `used` reported a credential failure (a 401 or the CLI's words for one). Returns the
+        value to retry that child with once, or "" for no retry. When another caller already replaced the value,
+        the replacement is returned and nothing runs. Otherwise the held value is marked refused and the command
+        runs again, unless it ran less than a gap ago or `allow_run` is False (a retry that was itself refused:
+        then "", and value() refuses until the gap ends). Raises CredentialError when that run fails."""
+        cmd = self.command_fn()
+        with self._lock:
+            if not used or not cmd or cmd != self._cmd:
+                return ""
+            if self._value and self._value != used and not self._refused:
+                return self._value                    # another child's refusal already brought a new value
+            if self._value != used:
+                return ""
+            self._refused = True
+            now = self._clock()
+            if not allow_run or self._in_gap_locked(now):
+                return ""
+            return self._run_locked(cmd, now)
+
+    def forget(self) -> None:
+        with self._lock:
+            self._drop_locked(None)
+
+    def scrub(self, text):
+        """`text` with every value this holder has held replaced by a placeholder, in its raw and its
+        JSON-escaped form: for any writer about to put a child's output in a file or a log line."""
+        if not text or not self._recent:
+            return text
+        s = str(text)
+        for v in list(self._recent):
+            for form in {v, json.dumps(v)[1:-1]}:
+                if form:
+                    s = s.replace(form, "[key withheld]")
+        return s
+
+    def _drop_locked(self, cmd):
+        self._cmd = cmd
+        self._value = ""
+        self._at = None                               # clock reading of the run that produced _value
+        self._ran_at = None                           # clock reading of the last run, whatever its outcome
+        self._error = None                            # that run's CredentialError, kept for the gap
+        self._refused = False
+
+    def _expired_locked(self, now):
+        age = self.max_age_fn()
+        return age is not None and self._at is not None and now - self._at >= age
+
+    def _in_gap_locked(self, now):
+        return self._ran_at is not None and now - self._ran_at < self.refresh_gap_s
+
+    def _run_locked(self, cmd, now):
+        self._ran_at = now
+        self.runs += 1
+        self._value = ""                              # nothing stale is held while it runs or after it fails
+        self._at = None
+        self._refused = False
+        try:
+            value = self._runner(cmd)
+        except CredentialError as e:
+            self._error = e
+            raise
+        except Exception:
+            # anything else is the runner's own fault; it is remembered for the gap like a failed run, in static
+            # words (an exception's text could quote what the command printed), so the gap holds whatever broke
+            self._error = CredentialError("%s could not be run" % self.label)
+            raise self._error from None
+        if not isinstance(value, str) or not value:
+            self._error = CredentialError("%s printed an empty or invalid key (one line on stdout, exit 0)" % self.label)
+            raise self._error
+        self._error = None
+        self._value = value
+        self._at = now
+        self._recent = ([v for v in self._recent if v != value] + [value])[-2:]
+        return value
+
+
+def child_key_helper():
+    """The helper command the kernel may run on behalf of its judge children: the operator's own, from the
+    USER settings file. A helper set in MANAGED settings outranks the per-call settings layer that turns a
+    child's helper off, so the child would run it anyway: None there, and those children keep resolving the
+    helper themselves. A project's helper is never run by the kernel (key_available). An unreadable settings
+    file raises CredentialError, the caller's loud road."""
+    if helper_source() != "user":
+        return None
+    return api_key_helper(None, operator_only=True) or None
+
+
+def helper_ttl_if_set():
+    """The age limit for the judges' held key: the helper's TTL when the operator set
+    CLAUDE_CODE_API_KEY_HELPER_TTL_MS, else None. Unset, the key is held until the API refuses it (a static key
+    lasts until it is rotated, and a rotated key's refusal brings the new one); the CLI's five-minute default
+    would mean twelve secret-manager reads an hour for nothing."""
+    if not (os.environ.get(HELPER_TTL_VAR) or "").strip():
+        return None
+    return helper_ttl_s()

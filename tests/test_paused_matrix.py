@@ -78,6 +78,7 @@ class _Base(unittest.TestCase):
         km._SESSION_STAMP_CACHE.clear()
         km._autonudge_cache.clear()
         km._bgall_cache.clear()
+        km._bglift_cache.clear()
         km._bgtasks_cache.clear()
 
     def _log(self, rows):

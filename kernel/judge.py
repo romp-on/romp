@@ -16,6 +16,7 @@ CLI:
 import collections
 import shlex
 import contextlib, copy, hashlib, json, os, pickle, re, secrets, shutil, signal, stat, sys, time, subprocess, threading, traceback, importlib.util
+import http.client, random, ssl, urllib.parse   # the direct Messages API road (_direct_api_run)
 
 SESSION_FILE_WRITES = {"all": 0, "by": {}}   # this module's writes of a session's keyed files since load: a count per session id
 #                                               (the goal store, its override journal and archive, the episode log) and one for the
@@ -928,7 +929,7 @@ UNTRUSTED_SYS = (
     "prompt and from text outside the marked sections.")
 
 
-def _judge_cmd(model, sys_prompt, effort=None, auth=None, tier="triage"):
+def _judge_cmd(model, sys_prompt, effort=None, auth=None, tier="triage", key_held=False):
     """The `claude -p` argv for ONE judge call, isolated so the model sees ONLY its own prompt. Three
     flags do it (verified by token count: a probe call drops 8334 -> ~165 input tokens):
       --system-prompt (REPLACE, not --append) — drops Claude Code's static base prompt (~6k tokens);
@@ -963,6 +964,13 @@ def _judge_cmd(model, sys_prompt, effort=None, auth=None, tier="triage"):
         # lever a login-picked session's launch uses (sdk_backend.flag_settings_path). The machine's own login
         # and a STORED login alike: a stored login's token rides the child's environment (_judge_env, the
         # environment road since 2026-09-14), where a helper would outrank it.
+        overlay["apiKeyHelper"] = ""
+    elif key_held:
+        # A key-billed call carrying the kernel's held key in its environment (_judge_env, 2026-10-05): the same
+        # empty value turns the child's own helper off. Without it the CLI 2.1.284 still runs the helper once per
+        # call even though it then sends the environment's key, so every call stayed one secret-manager read
+        # (measured with a counting stand-in helper and a local stand-in API: helper on, 1 run per call; helper
+        # off, 0 runs, the environment's key sent as x-api-key).
         overlay["apiKeyHelper"] = ""
     if overlay:
         cmd += ["--settings", json.dumps(overlay)]
@@ -1116,8 +1124,9 @@ def _log_judge_error(judge, fsid, err, note=None, goal=None, seg=None):
             last = getattr(_judge_ctx, "last", None)
             if isinstance(last, dict) and last.get("judge") == judge:
                 rec["debug"] = {"input": last.get("input"), "reply": last.get("reply")}
+        line = _held_scrub(json.dumps(rec))           # a held key never reaches the error log, whatever quoted it
         with open(ERRORS, "a") as f:
-            f.write(json.dumps(rec) + "\n")
+            f.write(line + "\n")
     except Exception:
         pass
 
@@ -1554,30 +1563,73 @@ def active_runs():
         return [dict(v) for v in _active.values()]
 
 
-_USAGE_PRUNE_BYTES = 128 * 1024 * 1024  # prune trigger — must sit comfortably ABOVE what the
-                                         # 31-day retention below keeps, or every prune is a full
-                                         # rewrite that lands back over the trigger and re-fires
-                                         # forever (the T142 finding: a 48MB trigger against a
-                                         # ~65MB retained month rewrote 67MB per pass and could
-                                         # never shrink the file). Retention is consumer-driven
-                                         # (the kernel's 30-day analytics view) and is the side
-                                         # that must NOT move; the trigger exists only for
-                                         # pathological growth beyond it — 2x the observed
-                                         # steady-state month, with T142's memo shrinking judge
-                                         # volume (and so the month) from here.
+_USAGE_PRUNE_BYTES = 128 * 1024 * 1024  # the prune trigger's FLOOR. It once had to sit above what the
+                                         # 31-day retention below keeps, or every prune was a full rewrite
+                                         # that landed back over the trigger and re-fired (the T142 finding:
+                                         # a 48MB trigger against a ~65MB retained month). A fixed number
+                                         # cannot keep that promise, since the retained month grows with
+                                         # judge volume: by 2026-09-29 the month weighed ~134MB against this
+                                         # 128MiB line, and every judge call (11-16 a minute) rewrote the
+                                         # whole file inside the kernel, ~2.7s of CPU each, and made the
+                                         # kernel's reader re-read it. So the trigger now FOLLOWS what the
+                                         # last prune kept (_usage_prune_trigger); this is only its floor.
+                                         # Retention is consumer-driven (the kernel's 30-day analytics view)
+                                         # and is the side that must NOT move.
+_USAGE_PRUNE_GROWTH = 1.5                # prune again only once the file has grown half again past what the
+                                         # last prune kept: a rewrite can never re-fire on the next call, and
+                                         # the rewrites are paid once per third of the file's growth
+_USAGE_KEPT = {}                         # str(USAGE) -> bytes the last prune in this process kept
+_USAGE_RETRY_GROWTH = 1.1                # a prune that FAILED tries again once the file has grown a tenth past the
+                                         # size it failed at: before, the failure recorded nothing, and every judge
+                                         # call re-read and re-parsed the whole file only to fail again (disk full,
+                                         # quota, a read-only mount: review of 2026-09-29)
+_USAGE_RETRY_AT = {}                     # str(USAGE) -> the size a failed prune waits for (this process)
+_USAGE_FAIL_SAID = set()                 # str(USAGE) whose failing prune has been said, once per spell of failures
 _USAGE_RETAIN_S = 31 * 86400             # matches the kernel reader's widest consumer window
                                          # (_JUDGE_USAGE_RETAIN, the 30-day analytics view + slack)
 
 
+def _usage_kept_path():
+    """Where the last prune's kept size is written, beside USAGE, so a fresh process (a kernel restart, the judges'
+    own process, a hand-run romp-judge) keeps the trigger the last prune set instead of re-pruning at the floor."""
+    return USAGE.with_name(USAGE.name + ".kept")
+
+
+def _usage_prune_trigger(size):
+    """The size USAGE must pass before a prune: the floor, or _USAGE_PRUNE_GROWTH times what the last prune kept,
+    whichever is larger. This process's own memory answers first; the sidecar is read only when that memory would let
+    a file of `size` prune (another process may have pruned since, or this one never has)."""
+    kept = _USAGE_KEPT.get(str(USAGE), 0)
+    if size > kept * _USAGE_PRUNE_GROWTH:
+        try:
+            kept = max(kept, int(_usage_kept_path().read_text().strip() or 0))
+        except (OSError, ValueError):
+            pass                             # no sidecar yet (or unreadable): the floor and this process's memory
+    return max(_USAGE_PRUNE_BYTES, int(kept * _USAGE_PRUNE_GROWTH))
+
+
 def _prune_usage_log():
-    """Rewrite USAGE keeping the newest 31 days once it outgrows the cap. The kernel's incremental
-    reader detects the shrink (size < offset) and re-reads cleanly. Best-effort and racy by design:
-    an append from a concurrent judge process during the rewrite window can be lost — this is
-    telemetry whose consumers read a bounded window, and the trigger only fires in pathological
-    growth. The prune says what it did (one stderr line), never silently."""
+    """Rewrite USAGE keeping the newest 31 days once it outgrows the trigger (_usage_prune_trigger: the floor, or
+    half again past what the last prune kept). The kernel's incremental reader detects the shrink (size < offset) and
+    re-reads cleanly. Best-effort and racy by design: an append from a concurrent judge process during the rewrite
+    window can be lost — this is telemetry whose consumers read a bounded window, and a rewrite is rare by
+    construction. The prune says what it did (one stderr line), never silently, and says so too when the kept size
+    could not be written down (the next process may then prune once at the floor).
+
+    A prune that FAILS once it has begun reading (the read, the temp file's write, the rename: a full disk, a quota, a
+    read-only mount) removes its half-written temp file, and waits for the file to grow a tenth past the size it failed
+    at before it reads the file again (_USAGE_RETRY_AT); the first failure of a spell says so in one stderr line, and a
+    prune that lands ends the spell. Before, the failure recorded nothing, and every judge call re-read and re-parsed
+    the whole file (review of 2026-09-29)."""
+    key = str(USAGE)
     try:
-        if USAGE.stat().st_size <= _USAGE_PRUNE_BYTES:
+        size = USAGE.stat().st_size
+        if size <= _USAGE_PRUNE_BYTES or size <= _USAGE_RETRY_AT.get(key, 0) or size <= _usage_prune_trigger(size):
             return
+    except Exception:
+        return
+    tmp = USAGE.with_name(USAGE.name + ".tmp")
+    try:
         parsed = []
         for ln in USAGE.read_text(errors="replace").splitlines():
             try:
@@ -1588,11 +1640,42 @@ def _prune_usage_log():
                 parsed.append((o.get("t") or 0, ln))
         floor = max((t for t, _ in parsed), default=0) - _USAGE_RETAIN_S
         keep = [ln for t, ln in parsed if t >= floor]
-        tmp = USAGE.with_name(USAGE.name + ".tmp")
-        tmp.write_text("\n".join(keep) + ("\n" if keep else ""))
+        data = ("\n".join(keep) + ("\n" if keep else "")).encode("utf-8")
+        tmp.write_bytes(data)
         os.replace(tmp, USAGE)
+    except Exception as e:
+        _USAGE_RETRY_AT[key] = int(size * _USAGE_RETRY_GROWTH)
+        try:
+            tmp.unlink()                         # a half-written copy on a full disk only fills it further
+        except OSError:
+            pass
+        if key not in _USAGE_FAIL_SAID:
+            _USAGE_FAIL_SAID.add(key)
+            try:
+                sys.stderr.write("romp-judge: judge-usage.jsonl (%dMB) could not be pruned (%s: %s); it is left as it "
+                                 "was, and the next attempt waits until it passes %dMB\n"
+                                 % (size // (1024 * 1024), type(e).__name__, e,
+                                    _USAGE_RETRY_AT[key] // (1024 * 1024)))
+            except Exception:
+                pass
+        return
+    _USAGE_RETRY_AT.pop(key, None)
+    _USAGE_FAIL_SAID.discard(key)
+    try:
+        _USAGE_KEPT[key] = len(data)
+        note = ""
+        try:
+            side = _usage_kept_path()
+            stmp = side.with_name(side.name + ".tmp")
+            stmp.write_text("%d\n" % len(data))
+            os.replace(stmp, side)
+        except OSError as e:
+            note = "; the kept size could not be written down (%s), so another process may prune once more" % (
+                type(e).__name__,)
         sys.stderr.write("romp-judge: judge-usage.jsonl outgrew %dMB — pruned to the newest 31 days "
-                         "(%d rows kept)\n" % (_USAGE_PRUNE_BYTES // (1024 * 1024), len(keep)))
+                         "(%d rows kept, %dMB); the next prune waits for %dMB%s\n"
+                         % (size // (1024 * 1024), len(keep), len(data) // (1024 * 1024),
+                            _usage_prune_trigger(len(data)) // (1024 * 1024), note))
     except Exception:
         pass
 
@@ -1624,6 +1707,9 @@ def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None, err=F
                                 # 'login:<id>' (a stored login), so the cost rollups split by login; absent on rows
                                 # written before the stamp existed
                                 **({"auth": auth} if auth else {}),
+                                # 'api' on a call the judge sent to the Messages API itself (2026-10-06,
+                                # _direct_api_run); absent on a CLI child's row, as on every row before it
+                                **({"route": wrap["route"]} if wrap.get("route") else {}),
                                 "cost": wrap.get("total_cost_usd")}) + "\n")
     except Exception:
         pass
@@ -1731,9 +1817,10 @@ _LOGIN_AUTH_ENV_FN = None      # login tokens claimed out of the manager's ambie
 
 def _key_available():
     """Whether an unpicked judge call bills the key: an apiKeyHelper is configured in Claude Code's settings
-    in the operator's settings, managed or user (credentials.key_available: read, never run). romp holds no key of
-    its own since 2026-09-08 (the user, after a contributor PR's test printed a key from a session's
-    environment); the child resolves the helper itself. An unreadable settings file reads as no helper here;
+    in the operator's settings, managed or user (credentials.key_available: read, never run). romp holds no key for
+    its sessions since 2026-09-08 (the user, after a contributor PR's test printed a key from a session's
+    environment); the judges' held key (_KEY_SOURCE, 2026-10-05) runs the helper later, when a key-billed child is
+    built, never here. An unreadable settings file reads as no helper here;
     said once per process on stderr (the SDK backend says the same once in its problem ring)."""
     try:
         return _cred.key_available()
@@ -1745,6 +1832,52 @@ def _key_available():
 
 
 _SETTINGS_UNREADABLE_SAID = set()   # the unreadable-settings line: once per process, never silent
+
+# The key the kernel holds for key-billed judge children (the user 2026-10-05, after the secret manager's read
+# quota refused most of the one-run-per-call helper reads): credentials.HeldKey runs the operator's user-settings
+# apiKeyHelper once, keeps the value in this process's memory, and _judge_env hands it to each key-billed child
+# while _judge_cmd turns that child's own helper off. A refused key re-runs the helper at most once a minute
+# across every judge thread (_held_key_retry). Pluggable: the holder knows only "run this command, read stdout",
+# so a short-lived token's command replaces it by assigning another HeldKey here (env_name ANTHROPIC_AUTH_TOKEN
+# for a bearer token, a max_age_fn for its lifetime). No helper in the user's settings (none at all, or one in
+# managed settings, which the per-call layer cannot turn off): the holder has no command and the children
+# resolve their own credential as before.
+_KEY_SOURCE = _cred.HeldKey(_cred.child_key_helper, env_name="ANTHROPIC_API_KEY", label="apiKeyHelper",
+                            max_age_fn=_cred.helper_ttl_if_set)
+_HELD_FAIL_SAID = {}                # the holder's last failure said on stderr: once per distinct reason, cleared when it works
+
+
+def _held_scrub(text):
+    """`text` with any key the judges' holder has held blanked: for every writer that can put a child's output
+    in a file (the error rows, the auth latch, the API-health note). Never raises."""
+    try:
+        return _KEY_SOURCE.scrub(text)
+    except Exception:
+        return text
+
+
+def _envelope_auth_refused(p):
+    """Whether a finished judge child answered with a credential-class error envelope (a 401 from the API reads
+    "Invalid API key · Fix external API key" on CLI 2.1.284, at once: the API marks it not worth retrying)."""
+    try:
+        w = json.loads(getattr(p, "stdout", "") or "")
+    except Exception:
+        return False
+    return isinstance(w, dict) and bool(w.get("is_error")) and _is_auth_error(str(w.get("result") or w.get("subtype") or ""))
+
+
+def _held_key_retry(used, judge, fsid):
+    """A key-billed child given the held key `used` came back refused. Asks the holder for a value to retry that
+    child with once: a value another thread already fetched, or one fresh helper run when none ran in the last
+    minute. Returns (value or "", note): note is the helper's own failure in static words when the run failed,
+    filed loudly here (an "auth" error row) and handed back so the session's auth latch names it rather than
+    the API's refusal it caused. Never a fall onto the child's own helper."""
+    try:
+        return _KEY_SOURCE.refused(used), ""
+    except Exception as e:
+        note = _credential_error_note(e)
+        _log_judge_error(judge, fsid, "auth", note=note)
+        return "", note
 
 
 def _login_auth_env():
@@ -1833,7 +1966,7 @@ def _note_api_health(kind, auth, model, msg, fsid):
     if fn is None or auth == "codex":
         return
     try:
-        fn(kind, auth, model, msg, fsid)
+        fn(kind, auth, model, _held_scrub(msg), fsid)
     except Exception:
         pass
 
@@ -1845,6 +1978,8 @@ def _is_auth_error(text):
     low = (text or "").lower()
     return ("not logged in" in low
             or "api key is invalid" in low
+            or "invalid api key" in low                # the CLI's own words for a 401 on a key (2.1.284)
+            or "invalid auth token" in low             # …and on a bearer token in ANTHROPIC_AUTH_TOKEN
             or "invalid x-api-key" in low
             or "failed to authenticate" in low
             or ("oauth token" in low and ("expired" in low or "revoked" in low))
@@ -1892,7 +2027,7 @@ def _auth_down_mark(fsid, mode, note):
     without a session to pin it on (fleet-level rows stay in judge-errors.jsonl)."""
     if not fsid:
         return
-    note = str(note or "")[:300]
+    note = _held_scrub(str(note or ""))[:300]
     mode = str(mode or "")
     login = mode[6:] if mode.startswith("login:") else ""    # a stored login's id (T346); the mode stays the side word
     if login:
@@ -2077,9 +2212,12 @@ def _judge_env(tier, auth="login", model=None):
     latency-safe.
 
     `auth` is the call's resolved billing (_judge_auth). The three credential names are stripped
-    unconditionally, and a KEY-billed call injects nothing back (2026-09-08: romp holds no key; the child
-    resolves Claude Code's apiKeyHelper itself, and the first pass after boot runs exactly like every later
-    one). A LOGIN-billed call gets the claimed login tokens back and, in _judge_cmd, the helper suppression.
+    unconditionally, and a KEY-billed call gets back exactly one: the kernel's held key (_KEY_SOURCE, 2026-10-05:
+    one apiKeyHelper run for every child, where from 2026-09-08 each child ran the helper itself and the
+    secret manager's read quota ran out), with the helper turned off in _judge_cmd. No helper the kernel runs for
+    its children (none, or a managed one): nothing is injected and the child resolves its own, as before. A helper
+    that fails raises CredentialError, said once per reason on stderr and filed loudly by _judge_run.
+    A LOGIN-billed call gets the claimed login tokens back and, in _judge_cmd, the helper suppression.
     A call billed to a STORED login ('login:<id>', T346) gets that login's setup-token instead, read by running
     the record's token command now, the way the session's own launch runs it (the environment road, 2026-09-14:
     a setup-token through an apiKeyHelper hangs the CLI's request; through CLAUDE_CODE_OAUTH_TOKEN it is
@@ -2099,6 +2237,23 @@ def _judge_env(tier, auth="login", model=None):
             env.pop(k, None)
     if auth == "login":
         env.update(_login_auth_env())
+    elif auth == "key":
+        # The kernel's held key (2026-10-05): fetched by one helper run and reused for every key-billed child, which
+        # turns its own helper off (_judge_cmd key_held). "" when the box's helper is not one the kernel runs for
+        # its children (none, or a managed one): the child resolves its own, as before. A helper that fails raises
+        # CredentialError, which _judge_run files loudly (the auth latch and an "auth" row); never a fall onto the
+        # child's own helper run.
+        try:
+            held = _KEY_SOURCE.value()
+        except _cred.CredentialError as e:
+            if _HELD_FAIL_SAID.get("why") != str(e):     # the service log too, once per distinct reason (static words)
+                _HELD_FAIL_SAID["why"] = str(e)
+                sys.stderr.write("romp-judge: %s; key-billed judge calls stand down until it works (romp runs the "
+                                 "helper again at most once a minute)\n" % e)
+            raise
+        _HELD_FAIL_SAID.pop("why", None)
+        if held:
+            env[_KEY_SOURCE.env_name] = held
     elif str(auth or "").startswith("login:"):
         try:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = _logins.token_value(STATE, str(auth)[6:],
@@ -2223,6 +2378,279 @@ def _call_shape(model, sys_prompt, user, sent):
     with the shape on the failure row itself, that diagnosis is a grep over judge-errors.jsonl."""
     return "model=%s chars=%d ms=%d" % (model, len(sys_prompt or "") + len(user or ""),
                                         int((time.time() - sent) * 1000))
+
+
+# ── the direct Messages API road for the high-volume Haiku index judges (2026-10-06) ─────────────────────────
+# The captioner (about 7,000 calls an hour at peak) and the gister (about 1,000) each started one `claude -p`
+# process per call, and a CLI start costs about a core-second before the request leaves (the measurement harness,
+# scripts/judge_direct_api_bench.py, replays a synthetic batch against a local stand-in API); on a shared machine
+# near its load line that start-up was most of the judges' CPU. A KEY-billed call on a Haiku model now goes from
+# this process straight to the Messages API instead, reusing keep-alive connections from a small shared pool (the
+# index pass makes a fresh thread pool every pass, so a per-thread connection would die with its thread), and
+# comes back as an envelope in the CLI's own shape, so everything downstream of the child in _judge_run_impl
+# (the error envelope, the limit and auth latches, the content-refusal matcher, the held key's one refresh and
+# one retry on a 401, the usage row, the served-model check) runs exactly as it does for a CLI child.
+# What the request keeps from the CLI's (read off CLI 2.1.284 against a stand-in server): the dated model id the
+# CLI resolves `haiku` to, max_tokens 32000, thinking disabled (the index tier's lever, see _judge_env),
+# temperature 1, no cache_control (DISABLE_PROMPT_CACHING), the judge's own system prompt and user text. What it
+# drops: the CLI's boilerplate around them (its billing line and agent line in the system prompt, and four
+# reminders it adds to the user turn: working directory and OS, the model's own name, a token budget, the date),
+# none of which the judge wrote or a caption uses, about 150 input tokens a call.
+# Who stays on the CLI: every other judge; any call billed to a login (only the CLI can use a subscription
+# login); a key-billed call with no held key (the box's key comes from a helper the CLI resolves itself); a model
+# that is not a Haiku this road can price, or one with adaptive thinking; a routing setting the CLI would honour
+# and this road does not (a proxy, custom headers, Bedrock or Vertex), said once on stderr; and every call when
+# ROMP_JUDGE_DIRECT_API=off. The archiver and the titler make calls of the same single-turn shape on the same
+# tier and are left on the CLI on purpose: widening is one entry each in _DIRECT_API_JUDGES.
+# The key: the held key (_KEY_SOURCE) as _judge_env resolved it for this call, sent only in the x-api-key header.
+# It is never logged, printed, written or put in this process's environment, and every reply is scrubbed
+# (_held_scrub) before anything reads it.
+# Retries: the CLI's SDK retried overloads and rate limits inside the child; this road does the same, bounded: up
+# to _DIRECT_API_RETRIES more attempts on 408/409/429/5xx/529 or a dropped connection, honouring retry-after and
+# x-should-retry, all inside the same CALL_ALARM_S the CLI child ran under. A call that runs to that alarm comes
+# back in the alarm-kill shape (empty output, exit -SIGALRM), as a killed child does.
+_DIRECT_API_JUDGES = frozenset({"captioner", "gister"})
+_DIRECT_API_ALIAS = {"haiku": "claude-haiku-4-5-20251001"}   # what CLI 2.1.284 sends for the bare alias
+_DIRECT_API_PRICES = {(4, 5): {"in": 1e-6, "out": 5e-6, "cache_w": 1.25e-6, "cache_r": 0.1e-6}}   # Haiku, $/token
+#   (the kernel's DEFAULT_MODEL_PRICES row and the CLI's own catalog agree): a Haiku version not listed here has no
+#   price this road can stamp on its usage row, so it stays on the CLI, whose envelope carries the cost
+_DIRECT_API_MAX_TOKENS = 32000     # the CLI's max_tokens for Haiku 4.5 (its modelUsage says maxOutputTokens 32000)
+_DIRECT_API_RETRIES = 3
+_DIRECT_API_RETRY_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+_DIRECT_API_BACKOFF_S = (0.5, 8.0)   # first delay and ceiling, doubled per attempt, jittered +-25%
+_DIRECT_API_RETRY_AFTER_CAP_S = 30.0
+_DIRECT_API_ROUTE_ENV = ("ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                         "CLAUDE_CODE_USE_FOUNDRY", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                         "ALL_PROXY", "all_proxy")
+_DIRECT_API_SAID = set()           # stderr lines already said this process (one per distinct reason)
+_DIRECT_POOL = {}                  # (scheme, host, port) -> idle keep-alive connections, taken one per call
+_DIRECT_POOL_LOCK = threading.Lock()
+_DIRECT_POOL_IDLE_MAX = 16         # idle connections kept per host: the concurrency cap's ceiling (16)
+_DIRECT_SSL = []                   # the one TLS context every connection shares (made on first use)
+
+
+class _DirectReply:
+    """The direct road's answer in the shape _judge_run_impl reads off a finished CLI child."""
+
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+def _direct_api_say(key, line):
+    if key not in _DIRECT_API_SAID:
+        _DIRECT_API_SAID.add(key)
+        sys.stderr.write("romp-judge: " + line + "\n")
+
+
+def _direct_api_switch_on():
+    """ROMP_JUDGE_DIRECT_API, read at call time: off / 0 / false / no puts every judge back on the CLI."""
+    return str(os.environ.get("ROMP_JUDGE_DIRECT_API") or "").strip().lower() not in ("off", "0", "false", "no")
+
+
+def _direct_api_model(model):
+    """(the API model id, its price row) when `model` is a Haiku this road can send and price, else None."""
+    fam, ver = _model_family_version(model)
+    if fam != "haiku" or ver == () or _adaptive_thinking(model):
+        return None
+    if ver is None:                                    # the bare alias: the id the CLI resolves it to
+        mid = _DIRECT_API_ALIAS.get(fam)
+        ver = _model_family_version(mid)[1] if mid else None
+    else:                                              # a pinned id is sent as pinned, less any [1m]-style suffix
+        mid = re.sub(r"\[.*$", "", str(model).strip())
+    price = _DIRECT_API_PRICES.get(ver)
+    return (mid, price) if mid and price else None
+
+
+def _direct_api_route(judge, tier, model, auth, held, env, fast_asked):
+    """The direct road's plan for this call ({model, price, scheme, host, port, path}), or None for the CLI."""
+    if judge not in _DIRECT_API_JUDGES or tier != "index" or fast_asked or not _direct_api_switch_on():
+        return None
+    if auth != "key":
+        return None                                    # a login bills through the CLI and nothing else
+    if not held:
+        _direct_api_say("no-held-key", "no held API key (the CLI resolves this box's key itself), so the captioner "
+                                       "and gister keep starting the CLI per call")
+        return None
+    blocked = sorted(k for k in _DIRECT_API_ROUTE_ENV if (env or {}).get(k))
+    if blocked:
+        _direct_api_say(("routing",) + tuple(blocked),
+                        "%s is set, which the CLI honours and the direct Messages API road does not, so the captioner "
+                        "and gister keep starting the CLI per call" % ", ".join(blocked))
+        return None
+    m = _direct_api_model(model)
+    if m is None:
+        return None
+    base = str((env or {}).get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").strip()
+    try:
+        u = urllib.parse.urlsplit(base)
+        port = u.port or (443 if u.scheme == "https" else 80)
+    except ValueError:
+        u, port = None, None
+    if u is None or u.scheme not in ("http", "https") or not u.hostname:
+        _direct_api_say(("base-url", base[:80]), "ANTHROPIC_BASE_URL is not an http(s) URL this road can use, so the "
+                                                 "captioner and gister keep starting the CLI per call")
+        return None
+    _direct_api_say(("on", m[0]), "captioner and gister calls on %s go straight to the Messages API, no CLI process "
+                                  "per call (ROMP_JUDGE_DIRECT_API=off restores the CLI)" % m[0])
+    return {"model": m[0], "price": m[1], "scheme": u.scheme, "host": u.hostname, "port": port,
+            "path": u.path.rstrip("/") + "/v1/messages"}
+
+
+def _direct_api_ssl():
+    with _DIRECT_POOL_LOCK:
+        if not _DIRECT_SSL:
+            _DIRECT_SSL.append(ssl.create_default_context())
+        return _DIRECT_SSL[0]
+
+
+def _direct_api_close(conn):
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _direct_api_post(route, body, key, timeout):
+    """POST one request on an idle pooled keep-alive connection to the route's host (a new one when none is idle):
+    (status, headers, bytes). The connection goes back to the pool after a whole response. One the server already
+    closed (a stale keep-alive) gets ONE fresh connection at once, which is not an API retry; anything else raises
+    to the caller's bounded policy."""
+    k = (route["scheme"], route["host"], route["port"])
+    for fresh in (False, True):
+        conn = None
+        if not fresh:
+            with _DIRECT_POOL_LOCK:
+                idle = _DIRECT_POOL.get(k)
+                conn = idle.pop() if idle else None
+        reused = conn is not None
+        if conn is None:
+            if route["scheme"] == "https":
+                conn = http.client.HTTPSConnection(route["host"], route["port"], timeout=timeout,
+                                                   context=_direct_api_ssl())
+            else:
+                conn = http.client.HTTPConnection(route["host"], route["port"], timeout=timeout)
+        else:
+            conn.timeout = timeout
+            if conn.sock is not None:
+                conn.sock.settimeout(timeout)
+        try:
+            conn.request("POST", route["path"], body=body,
+                         headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                                  "content-type": "application/json", "accept": "application/json",
+                                  "user-agent": "romp-judge (direct Messages API)"})
+            resp = conn.getresponse()
+            data = resp.read()
+            hdrs = {str(h).lower(): v for h, v in resp.getheaders()}
+        except (http.client.RemoteDisconnected, http.client.CannotSendRequest, http.client.BadStatusLine,
+                BrokenPipeError, ConnectionResetError):
+            _direct_api_close(conn)
+            if reused:
+                continue
+            raise
+        except BaseException:
+            _direct_api_close(conn)
+            raise
+        if resp.will_close:
+            _direct_api_close(conn)
+        else:
+            with _DIRECT_POOL_LOCK:
+                idle = _DIRECT_POOL.setdefault(k, [])
+                if len(idle) < _DIRECT_POOL_IDLE_MAX:
+                    idle.append(conn)
+                    conn = None
+            if conn is not None:
+                _direct_api_close(conn)
+        return resp.status, hdrs, data
+    raise http.client.RemoteDisconnected("the API closed the connection")   # not reached: the fresh pass raises
+
+
+def _direct_api_envelope(route, data, ms, attempts):
+    """A 200 response's JSON, as the CLI's result envelope: the reply text, the API's own token counts, the cost
+    from them, and the served id under modelUsage (where _note_served_model reads it). A `refusal` stop is the
+    content refusal the CLI renders as "<model> can't help with this", an error envelope here as there."""
+    msg = json.loads(data.decode("utf-8", "replace"))
+    served = str(msg.get("model") or route["model"])
+    if msg.get("stop_reason") == "refusal":
+        return {"type": "result", "subtype": "error", "is_error": True, "route": "api",
+                "result": "%s can't help with this (stop_reason: refusal)" % served}
+    text = "".join(str(b.get("text") or "") for b in (msg.get("content") or [])
+                   if isinstance(b, dict) and b.get("type") == "text")
+    u = msg.get("usage") or {}
+    n = {f: int(u.get(f) or 0) for f in ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                                         "cache_read_input_tokens")}
+    p = route["price"]
+    cost = (n["input_tokens"] * p["in"] + n["output_tokens"] * p["out"]
+            + n["cache_creation_input_tokens"] * p["cache_w"] + n["cache_read_input_tokens"] * p["cache_r"])
+    return {"type": "result", "subtype": "success", "is_error": False, "result": text, "route": "api",
+            "stop_reason": msg.get("stop_reason"), "duration_ms": ms, "duration_api_ms": ms, "num_turns": 1,
+            "attempts": attempts, "usage": n, "total_cost_usd": cost,
+            "modelUsage": {served: {"inputTokens": n["input_tokens"], "outputTokens": n["output_tokens"],
+                                    "cacheReadInputTokens": n["cache_read_input_tokens"],
+                                    "cacheCreationInputTokens": n["cache_creation_input_tokens"], "costUSD": cost}}}
+
+
+def _direct_api_error_text(status, data):
+    """An API error response in the CLI's words where the latches key on them (a 401 reads "Invalid API key", the
+    words _is_auth_error and the held key's refresh look for), else "API Error: <status> <type>: <message>"."""
+    try:
+        e = (json.loads(data.decode("utf-8", "replace")) or {}).get("error") or {}
+        etype, emsg = str(e.get("type") or ""), str(e.get("message") or "")
+    except Exception:
+        etype, emsg = "", (data or b"")[:200].decode("utf-8", "replace")
+    if status == 401:
+        return "Invalid API key · Fix external API key (Messages API 401 %s)" % (etype or "authentication_error")
+    return ("API Error: %d %s: %s" % (status, etype or "error", emsg)).strip()[:400]
+
+
+def _direct_api_run(route, sys_prompt, user, key, deadline_s=None, sleep=time.sleep):
+    """ONE judge call over the direct Messages API road, returned as a _DirectReply shaped like the finished CLI
+    child it replaces: stdout is the CLI's JSON envelope (a result, or an error envelope), and a call that runs to
+    the alarm comes back empty with the alarm's exit code. Never raises; the key rides the header and nothing else."""
+    if not key:                                        # _direct_api_route sends only a held key: this is a belt
+        return _DirectReply(json.dumps({"type": "result", "subtype": "error", "is_error": True, "route": "api",
+                                        "result": "Not logged in · no API key held for the direct Messages API"}), "", 1)
+    deadline_s = CALL_ALARM_S if deadline_s is None else deadline_s
+    body = json.dumps({"model": route["model"], "max_tokens": _DIRECT_API_MAX_TOKENS, "system": sys_prompt or "",
+                       "messages": [{"role": "user", "content": user or ""}],
+                       "thinking": {"type": "disabled"}, "temperature": 1}).encode("utf-8")
+    t0 = time.monotonic()
+    attempt = 0
+    while True:
+        left = deadline_s - (time.monotonic() - t0)
+        if left <= 0:
+            return _DirectReply("", "the direct Messages API call ran to the %ds call alarm" % deadline_s, _KILL_RC)
+        try:
+            status, hdrs, data = _direct_api_post(route, body, key, left)
+            failure = None
+        except (TimeoutError, OSError, http.client.HTTPException) as e:
+            if isinstance(e, TimeoutError) or deadline_s - (time.monotonic() - t0) <= 0:
+                return _DirectReply("", "the direct Messages API call ran to the %ds call alarm (%s)"
+                                    % (deadline_s, type(e).__name__), _KILL_RC)
+            status, hdrs, data, failure = None, {}, b"", "API Error: Connection error (%s)" % type(e).__name__
+        if status == 200:
+            ms = int((time.monotonic() - t0) * 1000)
+            try:
+                return _DirectReply(json.dumps(_direct_api_envelope(route, data, ms, attempt + 1)), "", 0)
+            except Exception as e:                     # a 200 whose body is not a Messages response
+                return _DirectReply(json.dumps({"type": "result", "subtype": "error", "is_error": True, "route": "api",
+                                                "result": "API Error: unreadable response (%s)" % type(e).__name__}), "", 1)
+        should = str(hdrs.get("x-should-retry") or "").lower()
+        retry = (status is None or status in _DIRECT_API_RETRY_STATUS or should == "true") and should != "false"
+        if retry and attempt < _DIRECT_API_RETRIES:
+            delay = min(_DIRECT_API_BACKOFF_S[1], _DIRECT_API_BACKOFF_S[0] * (2 ** attempt)) * random.uniform(0.75, 1.25)
+            try:
+                ra = float(hdrs.get("retry-after"))
+                if 0 <= ra <= _DIRECT_API_RETRY_AFTER_CAP_S:
+                    delay = ra
+            except (TypeError, ValueError):
+                pass
+            if delay < deadline_s - (time.monotonic() - t0):
+                sleep(delay)
+                attempt += 1
+                continue
+        msg = failure or _direct_api_error_text(status, data)
+        return _DirectReply(json.dumps({"type": "result", "subtype": "error", "is_error": True, "route": "api",
+                                        "api_error_status": status, "attempts": attempt + 1, "result": msg}), "", 1)
 
 
 def _judge_run(model, sys_prompt, user, effort=None, judge=None, tier="triage", mark=None):
@@ -2423,13 +2851,41 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
             # passes — irreversible content loss from a permissions problem.
             _judge_ctx.paused = True
             return ""
+        held = env.get(_KEY_SOURCE.env_name, "") if auth == "key" else ""   # the kernel's held key, when it rides
+        auth_note = ""          # the helper's own failure, when refreshing a refused held key failed (_held_key_retry)
         try:
             fast_asked = _tier_fast(tier, model)
             if fast_asked and not _is_login_auth(auth):
                 env = dict(env, **_fast_org_env())    # permission follows billing (the sessions' rule, T300)
-            p = subprocess.run(_judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier), input=user,
-                               capture_output=True, text=True, cwd=JUDGE_SCRATCH, env=env,
-                               timeout=CALL_ALARM_S + 5)
+            cmd = _judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier, key_held=bool(held))
+            route = _direct_api_route(judge, tier, model, auth, held, env, fast_asked)
+
+            def _child(child_env):
+                # ONE model call: the direct Messages API road for a key-billed Haiku index judge (2026-10-06,
+                # _direct_api_route), else the CLI child; both answer in the CLI child's shape, read below
+                if route is not None:
+                    return _direct_api_run(route, sys_prompt, user, child_env.get(_KEY_SOURCE.env_name, ""))
+                return subprocess.run(cmd, input=user, capture_output=True, text=True, cwd=JUDGE_SCRATCH,
+                                      env=child_env, timeout=CALL_ALARM_S + 5)
+            p = _child(env)
+            if held and _envelope_auth_refused(p):
+                # The API refused the held key (2026-10-05): ask the holder for another, which is either a value a
+                # sibling thread already fetched or ONE helper run when none ran in the last minute, then run THIS
+                # child once more with it. A retry refused again marks the key refused without another run, so the
+                # next calls stand down loudly (_judge_env) until the minute is up instead of spending API calls.
+                fresh, auth_note = _held_key_retry(held, judge or tier, fsid)
+                if fresh:
+                    env = dict(env, **{_KEY_SOURCE.env_name: fresh})
+                    p = _child(env)
+                    if _envelope_auth_refused(p):
+                        try:
+                            _KEY_SOURCE.refused(fresh, allow_run=False)
+                        except Exception:
+                            pass
+            if held:
+                # whatever the child printed is about to be parsed, stashed and logged: a held key in it goes now
+                p.stdout = _held_scrub(getattr(p, "stdout", "") or "")
+                p.stderr = _held_scrub(getattr(p, "stderr", "") or "")
         except Exception as e:
             # _judge_run owns ALL call-level logging (this, the error envelope below, the rate gate above)
             # so callers never double-log: to a caller every failed call is just "", and "call" rows always
@@ -2495,8 +2951,9 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
                             pass
                 if _is_auth_error(msg):
                     # credential-class: only the user can fix it — latch, so build_feed floors this
-                    # session's focus card instead of leaving the board silently frozen (2026-08-12)
-                    _auth_down_mark(fsid, auth, msg[:160])
+                    # session's focus card instead of leaving the board silently frozen (2026-08-12); when the
+                    # held key's refresh failed, the helper's own failure is the fix to name (_held_key_retry)
+                    _auth_down_mark(fsid, auth, auth_note or msg[:160])
                 _note_api_health("gaveup", auth, model, msg, fsid)   # the judges' half of the login's bucket (T346)
                 return ""
             if isinstance(wrap, dict) and isinstance(wrap.get("result"), str):
@@ -3974,7 +4431,11 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
         stats["miss"] = True
         stats["key"] = key                             # the key the fresh tree is stored under (None when a stat failed)
     _PARSE_MISSES[0] += 1                                  # a cold parse (T323: /perf parses)
-    if key is not None:
+    released = em.asm_reseat_due(files[0], fsid, human) if hasattr(em, "asm_reseat_due") else False
+    if key is not None and not released:                   # (2026-10-08) a parse whose whole entry was released at a document
+        #                                                    write in the same call (the rewrite after a restore's refusal) built
+        #                                                    this tree from that entry: stored, it would hold every body for as long
+        #                                                    as the leaf stands; the next ask restores from the new document instead
         _parse_store(fsid, cut, key, session, leaf, human, (_am[-1] if _am else "full"))   # LRU, never a wholesale clear
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next

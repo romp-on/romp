@@ -7,9 +7,11 @@ failure. `resets_at` makes the gate self-expiring (a stale "limited" stops gatin
 resets: event-based, no age heuristics); a missing/unreadable usage.json never gates.
 
 The gate scopes to LOGIN-billed calls (2026-08-28), and a call's billing follows the judged session's
-pick, else Claude Code's settings (2026-09-08: romp holds no key of its own; an apiKeyHelper in those
-settings means the key, read and never run). So "login billing" here is an empty CLAUDE_CONFIG_DIR and
-"key billing" a settings.json naming a helper, each staged per test. Synthetic fixtures."""
+pick, else Claude Code's settings (an apiKeyHelper in those settings means the key, read for the billing
+decision). So "login billing" here is an empty CLAUDE_CONFIG_DIR and "key billing" a settings.json naming a
+helper, each staged per test. Since 2026-10-05 the judges hold the key for their key-billed children and run
+the helper to get it; these tests are about the gate, so the holder's runner is a stub that prints an invented
+value (tests/test_judge_held_key.py pins the real run). Synthetic fixtures."""
 import json
 import shutil
 import tempfile
@@ -50,6 +52,8 @@ class RateLimitGate(unittest.TestCase):
         self._managed_before = jd._cred.managed_settings_path
         jd._cred.managed_settings_path = lambda: os.path.join(self.cfg, "no-managed-settings.json")
         jd._judge_ctx.fsid = None
+        self._source_before = jd._KEY_SOURCE          # the judges' held key, with a stub runner: no shell, no real helper
+        jd._KEY_SOURCE = jd._cred.HeldKey(jd._cred.child_key_helper, runner=lambda cmd: "synthetic-held-value")
 
         class _FakeDone:
             stdout = '{"result": "the-model-reply"}'
@@ -61,6 +65,7 @@ class RateLimitGate(unittest.TestCase):
 
     def tearDown(self):
         jd.subprocess.run = self._saved_run
+        jd._KEY_SOURCE = self._source_before
         jd._cred.managed_settings_path = self._managed_before
         if self._cfg_before is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
@@ -154,7 +159,7 @@ class GateScopedToLoginBilling(RateLimitGate):
 
     def _key_billed(self):
         # no per-session pick on file and an apiKeyHelper in Claude Code's settings: the key default. The
-        # setting is read, never run, so the path need not exist.
+        # holder's runner is a stub (setUp), so the path need not exist.
         Path(self.cfg, "settings.json").write_text(json.dumps({"apiKeyHelper": "/synthetic/helper.sh"}))
 
     def _login_billed(self):

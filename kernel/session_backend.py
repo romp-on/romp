@@ -97,6 +97,18 @@ def echo_keys(text) -> tuple:
     return tuple(keys)
 
 
+def echo_lookup_keys(a) -> tuple:
+    """The keys a live input ECHO atom is looked up under: echo_keys of its own text and, when the send was fed inside
+    a joined text (the SDK backend's SdkSession._join_queued_locked stamps `_joined_text`), echo_keys of that text too,
+    since the CLI writes one record for the joined text and none of the part's own. Read by every echo-side reader
+    that asks whether an echo landed or is still owed (SdkBackend.prune_live, settle_echoes, and the kernel's chat build)."""
+    keys = list(echo_keys(a.get("_echo_text")))
+    jt = a.get("_joined_text")
+    if isinstance(jt, str) and jt:
+        keys += [k for k in echo_keys(jt) if k not in keys]
+    return tuple(keys)
+
+
 class SessionBackend(ABC):
 
     # ── liveness / identity ──────────────────────────────────────────────────────────────────────
@@ -390,6 +402,12 @@ class SessionBackend(ABC):
         an idle recipient surfaces the mail NOW instead of on its next turn. The SDK enqueues it. True iff
         delivered. Default: not delivered (the postal bus then leaves the mail for its maildir-drain
         backstop). The bus reaches this via the kernel's POST /deliver so it never drives a session itself."""
+        return False
+
+    def reports_postal_takes(self, sid: str) -> bool:
+        """Will this backend tell the bus when `sid`'s agent actually TAKES a delivered banner (the model has it), so
+        the bus writes the sender's read stamp then rather than at the delivery (2026-10-03)? The kernel's /deliver
+        answers it as `reportsTake`. Default False: the bus stamps at its answer, the old reading of a delivery."""
         return False
 
     # ── chat tail ────────────────────────────────────────────────────────────────────────────────

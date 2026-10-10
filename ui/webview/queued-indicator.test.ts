@@ -205,13 +205,16 @@ test("the kernel parks every drive op while the account can't serve one, and dra
   assert.match(KERNEL, /or _limit_hold\(sid\) is not None\)/, "the gate /model, /effort and /compact pass");
   // the send path needs its OWN arm, ahead of the forwards_sends handoff: an SDK backend takes a send even
   // mid-turn, so without this the message goes straight out and comes back an API error
-  assert.match(KERNEL, /if _compacting_now\(sid\) or _pending_ops\.get\(sid\) or _limit_hold\(sid\):/);
+  // a plain send to a forwarding backend may pass parked settings (2026-10-08), so the queue arm reads `passes`;
+  // the compacting and account arms still park every send
+  assert.match(KERNEL, /if _compacting_now\(sid\) or \(_pending_ops\.get\(sid\) and not passes\) or _limit_hold\(sid\):/);
   // the drain's account gate is its own step, checked before the transcript refresh and the compacting/working
   // reads (2026-09-05): a held session is not re-parsed for a verdict the hold already decided
   assert.match(KERNEL, /if _limit_hold\(sid\):\n\s+continue\s+# the account can't serve a request yet/, "the drain gate");
   // the two quiet gates stand on their own lines since 2026-09-19: the compacting gate, then the working gate with the
-  // held-working belt behind it (a stale open-turn count holding a queue is said once per hold, never delivered)
-  assert.match(KERNEL, /if _compacting_now\(sid\):\n\s+_held_working\.pop\(sid, None\)[^\n]*\n\s+continue\n\s+if _working_now\(sid\):\n\s+_mark_held_working\(sid, now\)[^\n]*\n\s+continue/,
+  // held-working belt behind it (a stale open-turn count holding a queue is said once per hold, never delivered); since
+  // 2026-10-08 the working gate first hands parked sends to a forwarding backend mid-turn, and holds only what is left
+  assert.match(KERNEL, /if _compacting_now\(sid\):\n\s+_held_working\.pop\(sid, None\)[^\n]*\n\s+continue\n\s+if _working_now\(sid\):\n\s+_drain_sends_midturn\(sid\)[^\n]*\n\s+if _pending_ops\.get\(sid\):\n\s+_mark_held_working\(sid, now\)[^\n]*\n\s+continue/,
     "the drain's quiet gates");
   // RELEASE rides the API's own stamp — no romp-invented timer, and no clock promised without one
   assert.match(KERNEL, /"resetsAt": max\(known\) if len\(known\) == len\(resets\) else None,/);

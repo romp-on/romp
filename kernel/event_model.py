@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, weakref
+import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, weakref, zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -383,7 +383,7 @@ def _scan_bg_tasks(path, want_all=False):
     return _bg_finish(state, want_all)
 
 
-def _bg_fresh(want_all=False):
+def _bg_fresh(want_all=False, slim=False):
     """A fresh pairing state. `all`: keep every task's row (the launch-ordered history view); otherwise a
     task that reaches a terminal status is dropped from the state at once — the running-only view can
     never show it again (no record the harness emits returns an existing task to "running"; a literal
@@ -393,8 +393,58 @@ def _bg_fresh(want_all=False):
     tombstone set: transcripts DO replay records — a duplicate async ack (same tool-use id, even the same
     uuid) can land after the terminal notification — and with the row gone such a replay would pass the
     `tid not in tasks` creation guards and resurrect the task as running, where a retained row ignored it.
-    The tombstone keeps that answer while releasing the row and its prompt text."""
-    return {"tasks": {}, "order": [], "dispatch": {}, "all": bool(want_all), "done": set()}
+    The tombstone keeps that answer while releasing the row and its prompt text.
+    `slim` (2026-10-03): every row keeps only _BG_SLIM_KEYS, the fields the awaiting-stamp lift rules on, and a remembered
+    dispatch only its type. The every-task view's rows carry each agent's closing report (up to _RESULT_CAP characters),
+    its brief or command and its summaries; on a long transcript that state was over the checkpoint's per-fold cap, so it
+    was written as a cursor without its state, and after every drop of the reader's entry the lift's next fold read the
+    whole transcript again (live: 97 reads, 85.5 GB in 15.7 hours). The slim state is about 170 bytes a task (under 200
+    is pinned). The key is present only on a slim state, so the every-task and running-only states keep their shape (and
+    the documents already on disk still decode as what they are)."""
+    state = {"tasks": {}, "order": [], "dispatch": {}, "all": bool(want_all), "done": set()}
+    if slim:
+        state["slim"] = True
+    return state
+
+
+# The fields a slim pairing state keeps per task (_bg_fresh's `slim`): what the awaiting-stamp lift reads off every row,
+# returned ones included (_lift_spent_awaiting, _lift_decisions, _bg_ended_after, _bg_expired).
+_BG_SLIM_KEYS = frozenset(("id", "status", "t", "endT", "type", "deadline", "monitor"))
+
+
+def bg_slim_encoded(enc):
+    """An every-task pairing state in its checkpointed form (_ckpt_encode) narrowed to what a slim state's own steps would
+    hold over the same records: every row on _BG_SLIM_KEYS, every remembered dispatch its type alone, `slim` set. The slim
+    step is the every-task step plus that narrowing (no branch reads a narrowed field), so the two agree record for record
+    (tests/test_bg_lift_fold_size.py). None for anything not of that shape. The seed of the lift's fold (_FOLD_SEEDS)."""
+    if not (isinstance(enc, dict) and enc.get("all") is True and not enc.get("slim") and isinstance(enc.get("tasks"), dict)
+            and isinstance(enc.get("order"), list) and isinstance(enc.get("dispatch"), dict)):
+        return None
+    if any(str(k).startswith("~") for k in list(enc["tasks"]) + list(enc["dispatch"])):
+        return None                                       # a tagged (non-string-keyed) encoding: not a shape this step writes
+    tasks = {}
+    for tid, row in enc["tasks"].items():
+        if not isinstance(row, dict):
+            return None
+        tasks[tid] = {k: v for k, v in row.items() if k in _BG_SLIM_KEYS}
+    dispatch = {}
+    for tid, d in enc["dispatch"].items():
+        if not isinstance(d, dict):
+            return None
+        dispatch[tid] = {"type": d.get("type")}
+    out = dict(enc)
+    out.update(tasks=tasks, dispatch=dispatch, slim=True)
+    return out
+
+
+def _bg_slim_rows(state, tids):
+    """Narrow the rows `tids` name to _BG_SLIM_KEYS, in place (a slim state's step ends here)."""
+    tasks = state["tasks"]
+    for tid in tids:
+        row = tasks.get(tid)
+        if row is not None:
+            for k in [k for k in row if k not in _BG_SLIM_KEYS]:
+                del row[k]
 
 
 def _bg_forget_terminal(state, tid):
@@ -411,6 +461,8 @@ def _bg_step(state, o):
     """One transcript record of the pairing — see _scan_bg_tasks. Returns the state (the fold_records
     contract)."""
     tasks, order, dispatch, done = state["tasks"], state["order"], state["dispatch"], state["done"]
+    slim = state.get("slim")
+    touched = []                           # the rows this record created or changed: a slim state narrows them at the end
 
     def _mark(note, end_t=None):
         # a notification keyed by its INNER <tool-use-id> (the string/queue shapes have no wrapper block)
@@ -419,11 +471,12 @@ def _bg_step(state, o):
             if tasks[tid].get("monitor") and not note.get("has_status"):
                 return                     # a monitor EVENT (no <status> tag) — the watch is still live
             tasks[tid].update(status=note["status"], outputFile=note["output_file"],
-                              summary=note["summary"] or tasks[tid]["summary"])
+                              summary=note["summary"] or tasks[tid].get("summary"))
             if note.get("result"):         # an agent's closing message → the Agent head's report fold
                 tasks[tid]["result"] = note["result"]
             if end_t:                      # WHEN the result landed — the awaiting-stamp lift keys the
                 tasks[tid]["endT"] = end_t  # "returned after the stamp was written" test on it (2026-08-16)
+            touched.append(tid)
             _bg_forget_terminal(state, tid)
 
     t = o.get("type")
@@ -440,13 +493,14 @@ def _bg_step(state, o):
                 # real Agent shape, which registers via the launch branch below instead). A
                 # replayed launch record for a task already registered or already returned can
                 # never be consumed (both creation paths refuse the id), so it is not captured.
-                dispatch[b["id"]] = {
+                kind = "local_workflow" if b.get("name") == "Workflow" else "local_agent"
+                dispatch[b["id"]] = {"type": kind} if slim else {   # a slim state keeps the type alone (_bg_fresh)
                     "desc": str(inp.get("description") or "").strip(),
                     "launchDesc": _launch_desc(b.get("name"), inp),
                     "detail": _clip_detail(inp.get("prompt") or inp.get("script")
                                            or ("script: " + str(inp["scriptPath"])
                                                if inp.get("scriptPath") else "")),
-                    "type": "local_workflow" if b.get("name") == "Workflow" else "local_agent"}
+                    "type": kind}
             # The THIRD durable launch shape: a Monitor tool_use. A non-persistent monitor is
             # dispatched background work exactly like a backgrounded Bash — a session idle
             # behind one read as plain 'ready', its goal stamps could lift only by the 6h
@@ -468,7 +522,7 @@ def _bg_step(state, o):
                 d = dispatch.pop(tid, None)
                 if d:   # an Agent/Task/Workflow with an explicit run_in_background lands
                         # HERE, not at its ack (tid already registered) — same enrichment
-                    tasks[tid]["command"] = tasks[tid]["command"] or d["detail"]
+                    tasks[tid]["command"] = tasks[tid]["command"] or d.get("detail", "")
                     tasks[tid]["type"] = d["type"]
                 if is_mon:
                     tasks[tid]["monitor"] = True
@@ -479,6 +533,7 @@ def _bg_step(state, o):
                     if tasks[tid]["t"]:
                         tasks[tid]["deadline"] = tasks[tid]["t"] + min(max(tmo, 1000.0), 3600000.0) / 1000.0
                 order.append(tid)
+                touched.append(tid)
     elif t == "user" and isinstance(c, list):
         tur = o.get("toolUseResult")
         tur = tur if isinstance(tur, dict) else {}
@@ -514,6 +569,7 @@ def _bg_step(state, o):
                     if tur.get("agentId"):   # the ack names the agent whose own transcript this launch writes
                         tasks[tid]["agentId"] = str(tur["agentId"])   # (plans/subagent-transcripts.md)
                     order.append(tid)
+                    touched.append(tid)
                     continue
                 if async_launch and tid in tasks and not b.get("is_error") \
                         and tasks[tid]["status"] == "running":
@@ -521,27 +577,29 @@ def _bg_step(state, o):
                     # run_in_background): the ack still owns outputFile/taskType — fill what
                     # the launch row lacks, never overwrite what it has
                     tk = tasks[tid]
-                    tk["outputFile"] = tk["outputFile"] or tur.get("outputFile") or ""
+                    tk["outputFile"] = tk.get("outputFile") or tur.get("outputFile") or ""
                     if not tk.get("launchDesc") and tur.get("description"):
                         tk["launchDesc"] = str(tur["description"]).strip()[:200]
                     if tur.get("taskType"):
                         tk["type"] = tur["taskType"]
                     if tur.get("agentId") and not tk.get("agentId"):
                         tk["agentId"] = str(tur["agentId"])
-                    if not tk["command"]:
+                    if not tk.get("command"):
                         tk["command"] = _clip_detail(tur.get("prompt") or "")
+                    touched.append(tid)
                     continue
                 note = _parse_task_notification(_result_text(b.get("content")))
                 if tid in tasks and note:      # its result landed → mark it done; the keep-filter drops it
                     if tasks[tid].get("monitor") and not note.get("has_status"):
                         continue               # a wrapped monitor EVENT — not a terminal (see _mark)
                     tasks[tid].update(status=note["status"], outputFile=note["output_file"],
-                                      summary=note["summary"] or tasks[tid]["summary"])
+                                      summary=note["summary"] or tasks[tid].get("summary"))
                     if note.get("result"):
                         tasks[tid]["result"] = note["result"]
                     et = parse_z(o.get("timestamp"))
                     if et:                     # the return's moment (see _mark)
                         tasks[tid]["endT"] = et
+                    touched.append(tid)
                     _bg_forget_terminal(state, tid)
                 elif tid in tasks and note is None and b.get("is_error") \
                         and tasks[tid]["status"] == "running":
@@ -552,11 +610,14 @@ def _bg_step(state, o):
                     et = parse_z(o.get("timestamp"))
                     if et:
                         tasks[tid]["endT"] = et
+                    touched.append(tid)
                     _bg_forget_terminal(state, tid)
     elif t == "user" and isinstance(c, str):
         _mark(_parse_task_notification(c), parse_z(o.get("timestamp")))
     elif t == "queue-operation" and o.get("operation") == "enqueue":
         _mark(_parse_task_notification(o.get("content") or ""), parse_z(o.get("timestamp")))
+    if slim and touched:
+        _bg_slim_rows(state, touched)
     return state
 
 
@@ -576,18 +637,22 @@ def _bg_finish(state, want_all=False):
     return keep[:60]
 
 
-def scan_bg_tasks_cached(path, cache, want_all=False, ckpt=None):
+def scan_bg_tasks_cached(path, cache, want_all=False, ckpt=None, slim=False):
     """_scan_bg_tasks folded append-incrementally through `cache` (fold_records): a changed transcript
     steps only its appended records instead of re-pairing the whole file — the kernel's chat box, awaiting
     source and awaiting-stamp lift, and the judge's settled gate, all asked per push per session, and
     each re-walked a working session's entire transcript on every streamed record (measured live
     2026-09-02: four such readers over one 180 MB transcript held the push loop at a full core). `cache`
-    is the caller's dict (the kernel keeps a running-only and an every-task cache; the judge its own), so
-    the two views never invalidate each other and a test's `.clear()` still forces a re-fold."""
-    state = fold_records(cache, path, lambda: _bg_fresh(want_all), _bg_step, ckpt=ckpt)
+    is the caller's dict (the kernel keeps a running-only, an every-task and a slim every-task cache for
+    the awaiting-stamp lift; the judge its own), so the views never invalidate each other and a test's
+    `.clear()` still forces a re-fold. `slim`: rows narrowed to _BG_SLIM_KEYS (see _bg_fresh)."""
+    state = fold_records(cache, path, lambda: _bg_fresh(want_all, slim), _bg_step, ckpt=ckpt)
     if state["all"] != bool(want_all):                    # the view is baked into the state at init: a cache handed to
         raise ValueError("bg fold cache for %s is shaped for want_all=%r, asked for %r"   # both views would answer
                          % (path, state["all"], bool(want_all)))                          # one of them wrong
+    if bool(state.get("slim")) != bool(slim):             # so is the slim narrowing: a slim state has no reports to give
+        raise ValueError("bg fold cache for %s is shaped for slim=%r, asked for %r"
+                         % (path, bool(state.get("slim")), bool(slim)))
     return _bg_finish(state, want_all)
 
 
@@ -655,19 +720,32 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache. What is not needed until looked at
 # (subagent transcripts) leaves through drop_after="quiescent" folds instead; the budget is the backstop, not the
 # mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright.
+# Counted in MEMORY since 2026-09-28, not file bytes. The "about 1.7" above was an estimate; measured through RSS in a fresh
+# process, this reader holds about 3 bytes per file byte (live transcripts of 14, 287 and 599 MiB: 2.66, 3.07, 3.05; the
+# postal log's flatter rows 1.54, a captions log's tiny ones 3.82). So a budget of half of MemTotal in FILE bytes (about
+# 126 GiB on a 252 GiB devbox) let the cache hold about three times the machine's memory: it never evicted, and the kernel
+# held every file it had ever read. Each entry now weighs its file bytes times RECORD_CACHE_RESIDENT_PER_FILE_BYTE, and the
+# default is a quarter of MemTotal, never under the floor and never over RECORD_CACHE_BUDGET_CAP_BYTES. The cap is not set
+# lower on purpose: the budget must stay above the live working set or it thrashes (the 1 GiB lesson above), and on that
+# devbox the 28 live sessions' current transcripts alone were 13.8 GiB on disk, about 41 GiB weighed (2026-09-28). A
+# working set past the cap is not a budget problem; the remedy is holding a large transcript's tail only, not a smaller cap.
 RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3
-RECORD_CACHE_BUDGET_FRACTION = 0.5
+RECORD_CACHE_BUDGET_FRACTION = 0.25
+RECORD_CACHE_BUDGET_CAP_BYTES = 64 * 1024 ** 3
+RECORD_CACHE_RESIDENT_PER_FILE_BYTE = 3.0
 
 
 def _record_cache_default_budget_bytes(meminfo_text=None):
-    """Half of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB; the floor alone when the file
-    is unreadable (macOS, a container without procfs)."""
+    """A quarter of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB and capped at 64 GiB, in the
+    entries' resident estimate (_entry_weight); the floor alone when the file is unreadable (macOS, a container
+    without procfs)."""
     try:
         text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
         for line in text.splitlines():
             if line.startswith("MemTotal:"):
                 kb = int(line.split()[1])
-                return max(RECORD_CACHE_BUDGET_FLOOR_BYTES, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
+                return min(RECORD_CACHE_BUDGET_CAP_BYTES,
+                           max(RECORD_CACHE_BUDGET_FLOOR_BYTES, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION)))
     except Exception:
         pass
     return RECORD_CACHE_BUDGET_FLOOR_BYTES
@@ -677,6 +755,8 @@ _JSONL_CACHE_BUDGET_BYTES = (int(float(os.environ["ROMP_RECORD_CACHE_BUDGET_MB"]
                              if os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB") else _record_cache_default_budget_bytes())
 _JSONL_CACHE_BYTES = [0]          # the sum of every held entry's weight, kept in step with _JSONL_CACHE under its lock
 _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetEvictions": 0, "dropped": 0, "droppedBytes": 0,
+                       "dropKept": 0,   # 2026-10-03: quiescence drops held because a live session's jobs fold the file every pass and a
+                       #                   fold over it cannot restore from its document (counted once per hold; keptWhole is the gauge)
                        "released": 0,   # #1735: EVERY pop that removed an entry, whatever the cause (eviction, a re-read
                        #                   replacement, an OSError pop, a quiescent drop). A /perf STATISTIC only, never a
                        #                   gc-freeze reclaim trigger: these entries are decoded json, acyclic, freed by refcount
@@ -692,7 +772,9 @@ _DROP_AFTER_QUIESCENT_S = float(os.environ.get("ROMP_RECORD_CACHE_DROP_QUIESCENT
 
 
 def _entry_weight(ent) -> int:
-    """The bytes an entry holds, the unit the byte budget and recordCache.bytes count: a whole entry (base 0) the
+    """The memory an entry holds, estimated, the unit the byte budget and recordCache.bytes count: the FILE bytes whose
+    records it holds times RECORD_CACHE_RESIDENT_PER_FILE_BYTE (2026-09-28; the weight was the file bytes alone, a third
+    of what the records take). The file bytes it holds: a whole entry (base 0) the
     file's size; a TAIL entry (base > 0, the records past a checkpoint's cut) the file's size less the offset its
     FIRST held record sits at, offs[0], and nothing while it holds no record (a checkpoint's bare cut before its
     first read, a tail of blank lines); a tail that holds records but carries no offsets to say where they start
@@ -705,14 +787,80 @@ def _entry_weight(ent) -> int:
     pop subtract what they added."""
     try:
         size, base = int(ent[1]), int(ent[5])
+        recs = ent[4] if len(ent) > 4 else None
+        if type(recs) is _TailRecords:                    # tail-only (2026-10-07): the window's bytes, plus the offsets and CRCs
+            held = max(0, size - recs.hot_offset())       #  of every record (20 bytes a record, held as they are, not decoded)
+            offs, crcs = recs.offs, recs.crcs
+            sk = recs.skel                                #  and the walk skeletons of the records before the window (_skel), each
+            return int(held * RECORD_CACHE_RESIDENT_PER_FILE_BYTE) + len(offs) * offs.itemsize + len(crcs) * crcs.itemsize \
+                + (min(len(sk), recs.ncold) * 8 + int(recs.skel_bytes) if sk is not None else 0)   #  by what it holds
         if base <= 0:
-            return size
-        offs = ent[7] if len(ent) > 7 else None
-        if offs:
-            return max(0, size - int(offs[0]))
-        return size if (len(ent) > 4 and ent[4]) else 0
+            held = size
+        else:
+            offs = ent[7] if len(ent) > 7 else None
+            if offs:
+                held = max(0, size - int(offs[0]))
+            else:
+                held = size if (len(ent) > 4 and ent[4]) else 0
+        return int(held * RECORD_CACHE_RESIDENT_PER_FILE_BYTE)
     except Exception:
         return 0
+
+
+# The record cache's decoded json is kept OUT of the cyclic collector's view (2026-10-06). A full (generation-two)
+# collection visits every container the collector tracks and touches everything those containers point at, so with the
+# cache in view each full pause grew with the cache: the live kernel paused about 28 s per full collection over 61.8 GB
+# of cached records, 14.6% of its wall time. The freeze controller (gc_freeze.py) keeps them out only once an idle pusher
+# cycle has folded them in, and every reclaim's unfreeze puts the whole cache back in the walk. The records are decoded json:
+# dicts, lists and scalars, acyclic, freed by reference counting, so the collector has nothing to find in them. Each
+# record's containers are untracked right after its decode (PyObject_GC_UnTrack, the call every container's own
+# deallocator makes), and the entry's outer list where the entry is built, so no collection walks them, frozen or not,
+# and an eviction still frees them by reference counting. Measured with scripts/bench_record_cache_gc.py (synthetic
+# transcripts through this reader); the figures are in the commit that added this. Safe for the collector's
+# correctness: an untracked container's references count as external, so nothing it points at is ever freed early. The
+# one cost is a leak, never a crash: a cycle closed later THROUGH a cached list would not be collected (a dict re-tracks
+# itself when a container is put in it; a list does not), and no caller puts one there (the reader never extends a
+# served list in place). ROMP_RECORD_CACHE_GC_UNTRACK=off (or 0/false) turns it off.
+try:
+    import ctypes as _ctypes
+    import gc as _gc
+    _PY_GC_UNTRACK = _ctypes.pythonapi.PyObject_GC_UnTrack
+    _PY_GC_UNTRACK.argtypes = (_ctypes.py_object,)
+    _PY_GC_UNTRACK.restype = None
+except Exception:                 # no ctypes or no C API symbol (another interpreter): the records stay tracked, as before
+    import gc as _gc
+    _PY_GC_UNTRACK = None
+
+
+def _record_cache_gc_untrack_enabled(env=None):
+    """Whether cached records are untracked: on unless ROMP_RECORD_CACHE_GC_UNTRACK names an off value, and only where
+    the C call resolved."""
+    v = (env if env is not None else os.environ).get("ROMP_RECORD_CACHE_GC_UNTRACK")
+    return _PY_GC_UNTRACK is not None and not (v is not None and v.strip().lower() in ("off", "0", "false"))
+
+
+_GC_UNTRACK_ON = _record_cache_gc_untrack_enabled()
+
+
+def _gc_untrack_json(obj):
+    """Untrack every dict and list in one decoded json value, iteratively (no recursion limit). A container already
+    untracked is skipped with its contents: CPython creates a dict untracked while it holds only scalars and keeps it
+    so until a container is put in it, and a list only becomes untracked here, after its contents were walked. Runs on
+    the reading thread before the entry is published, so no other thread sees the value yet."""
+    untrack, is_tracked = _PY_GC_UNTRACK, _gc.is_tracked
+    stack = [obj]
+    pop, push = stack.pop, stack.append
+    while stack:
+        o = pop()
+        t = type(o)
+        if t is dict or t is list:
+            if not is_tracked(o):
+                continue
+            untrack(o)
+            for v in (o.values() if t is dict else o):
+                tv = type(v)
+                if tv is dict or tv is list:
+                    push(v)
 
 
 def _cache_pop_locked(path):
@@ -750,7 +898,17 @@ def record_cache_stats() -> dict:
     budget, evicted bytes, drop-after-fold drops)."""
     with _JSONL_CACHE_LOCK:
         out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
-               "countCap": _JSONL_CACHE_MAX, **_RECORD_CACHE_STATS}
+               "countCap": _JSONL_CACHE_MAX, **_RECORD_CACHE_STATS, "keptWhole": len(_DROP_KEPT)}
+        tails = [e for e in _JSONL_CACHE.values() if type(e[4]) is _TailRecords]   # 2026-10-07: the entries held tail-only
+        out["tailOnly"] = {"entries": len(tails), "windowBytes": sum(max(0, int(e[1]) - e[4].hot_offset()) for e in tails),
+                           "skeletonBytes": sum(int(e[4].skel_bytes) for e in tails if e[4].skel is not None),
+                           "skeletons": sum(min(len(e[4].skel), e[4].ncold) for e in tails if e[4].skel is not None),
+                           "fileBytes": sum(int(e[1]) for e in tails), "tailBytes": _TAIL_BYTES, "tailRecords": _TAIL_RECORDS}
+    out["tailOnly"]["pins"] = len(tail_pin_stats())        # leaves whose window a restored assembly entry's cut holds (_tail_pin)
+    with _ASM_LOCK:
+        out["tailOnly"]["reseatDue"] = len(_ASM_RESEAT_DUE)   # whole entries released at a document write, not yet restored
+    out["coldReads"] = cold_read_stats()
+    with _JSONL_CACHE_LOCK:
         table = _RECORD_CACHE_STATS.get("wholeReads")
         out["wholeReads"] = {k: dict(v) for k, v in table.items()} if isinstance(table, dict) else {}
         bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")             # T401: the same reads per (stage, caller)
@@ -823,6 +981,10 @@ _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None
 _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
                "docConsults": 0,      # fold documents loaded by the shared validated read (seeded: the key stands before the first load)
                "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {},
+               "cursorOutside": {},   # per fold name: restores refused because the document's cursor (or its cut) lay outside the
+#                                       reader entry's held records (2026-10-10: silent before; each such fold then refolded)
+               "refoldWalks": {},     # per fold name: {"count", "records"} of every refold's walk from record 0, a walk that read
+#                                       nothing (the entry already indexed from 0) included; `refolds` counts only the ones that read
                "refolds": {},         # per fold name: {"count", "bytes"} of whole refolds that READ (a fold with no cursor and nothing to
 #                                       restore over a tail entry reads the file whole; T377 named the boot's whole reads this way)
                "converge": {"passes": 0, "writes": 0, "bytes": 0, "heals": 0, "healBytes": 0, "primed": 0, "deferred": 0,
@@ -909,9 +1071,17 @@ _DROP_OWED = {}                   # path -> when its quiescence drop was deferre
 _DROP_OWED_MAX = 4096             # over it the OLDEST owed entry is popped unwritten (its memory released), never the table cleared
 _DROP_HOLD = threading.local()    # the converge pass holds this thread's quiescence drops while it heals and primes a leaf, then pays
 #                                   them once (T362 follow-up review, low 2): {path: pop} of the drops held, or absent
+_KEEP_WHOLE = [frozenset()]       # the main transcripts of the sessions in the live map, as the kernel's jobs pass last published them
+#                                   (set_keep_whole_paths): the pass folds every one of them on every pass (the awaiting lift's
+#                                   background view), so a quiescence drop of one that a fold cannot restore is undone by a whole
+#                                   read within a pass (2026-10-03, see _drop_rereads)
+_DROP_KEPT = set()                # the paths whose drop is held for that reason: owed (in _DROP_OWED), so every cycle's start and the
+#                                   next fold over the file retry it, and paid once the session leaves the live map
 _CKPT_LOCK = threading.Lock()
 _CKPT_PENDING = {}                # path -> {"count": N, "gen": g, "folds": {name: {"count", "state"}}} restores not yet taken
 _CKPT_SEQ = {}                    # path -> the seq of the last checkpoint read or written for it
+_CKPT_OUTSIDE = {}                # path -> the fold names of a document whose cut lay outside the reader entry's held records
+#                                   (_ckpt_pending), each counted once under cursorOutside by its fold's _restored_cursor
 _FOLD_DIRTY = set()               # paths whose fold cursors moved since their checkpoint was last written
 _FOLD_REG = {}                    # checkpoint name -> the fold's cursor dict (fold_records registers at first call)
 _GEN = [0]                        # the reader's generation counter: every from-zero read and every restored entry takes the
@@ -952,8 +1122,17 @@ def cold_fold_reasons(path):
 
 
 def entry_whole_resident(path):
-    """True when the reader holds `path`'s WHOLE file in memory (an entry read from byte zero): a fold over it costs
-    no read. False for a tail entry or none."""
+    """True when the reader holds `path`'s WHOLE file in memory (an entry read from byte zero, every record decoded): a fold
+    over it costs no read. False for a tail entry, a tail-only one (2026-10-07: its records before the window are on disk,
+    so a fold from record 0 reads them) or none."""
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(str(path))
+    return ent is not None and ent[5] == 0 and type(ent[4]) is not _TailRecords
+
+
+def entry_indexed_whole(path):
+    """True when the reader's entry for `path` indexes the file from record 0 (a whole entry, or a tail-only one, whose
+    offsets start at record 0): what the assembly writer needs of it (_entry_offsets_gen). False for a tail entry or none."""
     with _JSONL_CACHE_LOCK:
         ent = _JSONL_CACHE.get(str(path))
     return ent is not None and ent[5] == 0
@@ -966,6 +1145,38 @@ def fold_cursor_appendable(cache, path):
         ent = _JSONL_CACHE.get(str(path))
     cur = cache.get(str(path))
     return ent is not None and cur is not None and cur[1] == ent[6]
+
+
+# Folds that are a narrowing of another fold: name -> (source fold name, project(source's encoded state) -> encoded state or
+# None). A fold new to the documents on disk has no entry in any of them, and its first run after the boot that introduces
+# it would read every file whole: for the awaiting-stamp lift's narrow background view (the kernel's bgLift, a narrowing of
+# its every-task view bgAll, 2026-10-03) that is every alive transcript in the first pusher cycle. Declared here, beside the
+# pairing it projects, rather than registered by the kernel: every kernel, judge and test load re-executes this module into
+# the same object, which would reset a registry filled from outside.
+_FOLD_SEEDS = {"bgLift": ("bgAll", bg_slim_encoded)}
+
+
+def _pending_folds(doc):
+    """The document's fold entries for a pending restore. Where the document carries a seed's source (_FOLD_SEEDS) but not
+    the seeded fold, it gains an entry for that fold at the source's count: the projection of the source's state when the
+    source carries one and the projection answers (a warm restore: the state the fold's own steps would have held), else a
+    cursor without a state, which restarts cold over the tail exactly as the source would and is healed once by a whole
+    refold at the next settle (T359). The document on disk is unchanged (the converge pass still sees the fold missing and
+    writes it); the fold's own entry, once written, is the one every later restore takes."""
+    folds = dict(doc.get("folds") or {})
+    for name, (source, project) in list(_FOLD_SEEDS.items()):
+        src = folds.get(source)
+        if name in folds or not isinstance(src, dict) or "count" not in src:
+            continue
+        seeded = None
+        if "state" in src:
+            try:
+                seeded = project(src["state"])
+            except Exception:
+                seeded = None
+        folds[name] = ({"count": src["count"], "state": seeded} if seeded is not None
+                       else {"count": src["count"], "cold": 1, "seededFrom": source})
+    return folds
 
 
 def name_fold_cache(cache, name):
@@ -986,7 +1197,8 @@ def set_checkpoint_dir(fn):
         _ASM_LAST_WRITE_CUT.clear()
         _ASM_DOC_MEMO.clear(); _ASM_DOC_MEMO_BYTES[0] = 0   # nor does a memoized assembly document, the seeded walk's or the restore's (round two)
     with _CKPT_LOCK:
-        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear(); _DROP_OWED.clear()
+        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear(); _DROP_OWED.clear(); _DROP_KEPT.clear()
+        _CKPT_OUTSIDE.clear()
         _RETIRED_FOLDS.clear()                            # a retirement never outlives a state rebind (round two, low 2)
         _DOC_MEMO.clear(); _DOC_MEMO_BYTES[0] = 0         # nor does a memoized document (the harnesses' fresh process is this setter)
         _CKPT_CYCLE["cap"] = _ckpt_cycle_default_cap(); _CKPT_CYCLE["spent"] = 0
@@ -1111,10 +1323,51 @@ def _checkpoint_entry(path, st):
     if verdict is not None:
         _ckpt_fallback(path, verdict, "size %d, recorded %d at offset %d" % (st.st_size, int(doc["size"]), offset)); return None
     gen = _next_gen()
+    folds = _pending_folds(doc)                           # a seed's projection runs outside the lock (it walks a state)
     with _CKPT_LOCK:
-        _CKPT_PENDING[str(path)] = {"count": count, "gen": gen, "folds": dict(doc.get("folds") or {})}
+        _CKPT_PENDING[str(path)] = {"count": count, "gen": gen, "folds": folds}
         _CKPT_SEQ[str(path)] = int(doc.get("seq") or 0)
     return (float(doc.get("mtime") or 0), int(doc["size"]), offset, bytes.fromhex(doc.get("guard") or ""), [], count, gen)
+
+
+def _entry_start(path, cut):
+    """Where a restore that reads `path` from the assembly document's cut `cut` (byte offset, record count, guard bytes)
+    starts the reader's entry: the EARLIER of that cut and the file's fold document's cut, so every fold the document
+    carries resumes over the entry (2026-10-10). The fold document's cut is the lowest cursor it wrote; on 7 of 8 big live
+    transcripts it lay a few hundred records before the assembly cut (each written at its own event), and an entry begun at
+    the assembly cut held none of the records from there, so each fold's restore found its cursor outside the held records
+    and the fold read the whole file and walked every record from 0. The assembly keeps its own cut: the adapter and the
+    chain proof ingest from it over an entry that starts earlier (FileAdapter, _tail_chains_over). The fold document is read
+    through the shared memo (no fresh read when a consult already loaded it); its cut is taken only when the stat stands for
+    it and its guard bytes verify on disk (one 64-byte read), else the assembly cut alone, so a stale fold document never
+    turns the assembly's restore into a whole read. No read at all when the reader's entry already holds the fold's cut."""
+    if _CKPT_DIR_FN is None:
+        return cut
+    key = str(path)
+    doc = _ckpt_doc_shared(key)
+    if doc is None:
+        return cut
+    try:
+        off, count, guard = int(doc["offset"]), int(doc["count"]), bytes.fromhex(doc.get("guard") or "")
+    except (KeyError, TypeError, ValueError):
+        return cut
+    if count >= int(cut[1]) or off >= int(cut[0]) or count <= 0:
+        return cut                                        # the assembly cut is the earlier (or the fold's is the file's start)
+    with _JSONL_CACHE_LOCK:
+        hit = _JSONL_CACHE.get(key)
+    if hit is not None and hit[5] <= count:
+        return (off, count, guard)                        # the entry holds it already: the reader serves or extends it, no guard
+    try:
+        st = os.stat(key)
+        if _ckpt_verdict(doc, st.st_size, st.st_mtime) is not None:
+            return cut                                    # the fold document's own restore will name the verdict; not here
+        with open(key, "rb") as fh:
+            fh.seek(max(0, off - len(guard)))
+            ok = fh.read(len(guard)) == guard
+        _count_read(key, len(guard))
+    except OSError:
+        return cut
+    return (off, count, guard) if ok else cut
 
 
 def _ckpt_pending(path, ent):
@@ -1152,11 +1405,14 @@ def _ckpt_pending(path, ent):
     if not ok:
         _ckpt_fallback(path, "guard", "whole reader first"); return None
     if count < ent[5] or count > ent[5] + len(ent[4]):
+        folds = doc.get("folds") if isinstance(doc.get("folds"), dict) else {}
         with _CKPT_LOCK:
             _CKPT_SEQ[key] = int(doc.get("seq") or 0)
+            _CKPT_OUTSIDE[key] = set(folds)               # counted per fold as each asks (_restored_cursor): no longer silent
         return None                                       # the fold's count is outside the held records: a cold fold, no fallback
-    pend = {"count": count, "gen": ent[6], "folds": dict(doc.get("folds") or {})}
+    pend = {"count": count, "gen": ent[6], "folds": _pending_folds(doc)}
     with _CKPT_LOCK:
+        _CKPT_OUTSIDE.pop(key, None)
         _CKPT_PENDING[key] = pend
         _CKPT_SEQ[key] = int(doc.get("seq") or 0)
         _CKPT_STATS["restored"] += 1
@@ -1177,6 +1433,13 @@ def _restored_cursor(key, name, ent):
     the current entry can resume from; None otherwise. Each fold's restore is taken once."""
     pend = _ckpt_pending(key, ent)
     if pend is None:
+        with _CKPT_LOCK:
+            outside = _CKPT_OUTSIDE.get(key)
+            mine = outside is not None and name in outside
+            if mine:
+                outside.discard(name)
+        if mine:                                          # the document's cut lay outside the entry's held records
+            _cursor_outside(key, name, "the document's cut lies outside the reader entry's records %d..%d" % (ent[5], ent[5] + len(ent[4])))
         return None
     f = pend["folds"].pop(name, None)
     if not isinstance(f, dict):
@@ -1193,6 +1456,7 @@ def _restored_cursor(key, name, ent):
                 pass
             return None
         if count < base or count > base + len(ent[4]):
+            _cursor_outside(key, name, "its cursor %d lies outside the reader entry's records %d..%d" % (count, base, base + len(ent[4])))
             return None                                   # a fold's count may differ from the document's cut (T359: the cut is the
         if "state" not in f:                              #  lowest written cursor): inside the entry's held records it is an append
             reason = "over" if f.get("over") else "cold"  #  from there; outside them it is nothing to resume from
@@ -1204,6 +1468,10 @@ def _restored_cursor(key, name, ent):
             if reason == "over":
                 _say_once("checkpoint: fold %s of %s restarts cold over the tail: its state was %d KB, over the %d KB cap"
                           % (name, key, int(f["over"]), _CKPT_FOLD_CAP // 1024))
+            elif f.get("seededFrom"):
+                _say_once("checkpoint: fold %s of %s restarts cold over the tail: its document predates it and carries "
+                          "fold %s without a state; one whole refold heals it at the session's next settle"
+                          % (name, key, f["seededFrom"]))
             else:
                 _say_once("checkpoint: fold %s of %s restarts cold over the tail: its document carries its cursor without a state "
                           "(a tail-only state, or an older kernel's cursor-only entry); one whole refold heals it, at the session's "
@@ -1215,6 +1483,15 @@ def _restored_cursor(key, name, ent):
         return (count, ent[6], state)
     except (KeyError, TypeError, ValueError) as e:
         _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e)); return None
+
+
+def _cursor_outside(key, name, why):
+    """A fold's restore refused because its cursor lay outside the reader entry's held records: counted under
+    checkpoints.cursorOutside per fold and said once on stderr (2026-10-10: this return was silent, and the fold that met it
+    read the file whole and walked every record from 0, about a million records per big transcript per fold)."""
+    with _CKPT_LOCK:
+        _CKPT_STATS["cursorOutside"][name] = _CKPT_STATS["cursorOutside"].get(name, 0) + 1
+    _say_once("checkpoint: fold %s of %s refolds from record 0: %s" % (name, key, why))
 
 
 _CKPT_LAG_FLOOR = 64                # a fold's count may lag the entry's by this many records, or an eighth of the entry, whichever
@@ -1281,6 +1558,17 @@ def checkpoint_cycle_take(n):
         return True
 
 
+def checkpoint_cycle_take_floor(n):
+    """The converge pass's floor of one write a cycle (2026-10-08): `n` bytes charged even past the budget, so a leaf whose
+    estimate alone exceeds the cap still writes, once, as the pass's first candidate of a cycle (the caller's rule). False when
+    the cycle has no budget at all (the pass off)."""
+    with _CKPT_LOCK:
+        if _CKPT_CYCLE["cap"] <= 0:
+            return False
+        _CKPT_CYCLE["spent"] += int(n)
+        return True
+
+
 def checkpoint_drop_writes_on():
     """Whether the quiescence drop writes documents this cycle (a cap above zero)."""
     with _CKPT_LOCK:
@@ -1339,7 +1627,7 @@ def checkpoint_pay_owed_drops():
             ent = _JSONL_CACHE.get(key)
         if ent is None or not os.path.exists(key):
             with _CKPT_LOCK:
-                _DROP_OWED.pop(key, None)
+                _DROP_OWED.pop(key, None); _DROP_KEPT.discard(key)
             if ent is not None:                           # the file is gone: nothing to write, everything to release (round two,
                 _pop_owed_entry(key)                      #  low 2: the memory the drop was owed for)
             continue
@@ -1348,6 +1636,29 @@ def checkpoint_pay_owed_drops():
             if key not in _DROP_OWED:
                 paid += 1
     return paid
+
+
+def set_keep_whole_paths(paths):
+    """Kernel wiring, once per jobs pass: the main transcripts of the sessions in the live map. The pass folds each of them on
+    every pass (the awaiting lift's background view, before its skip gate), so the quiescence drop holds such a file's whole
+    entry while a fold over it cannot take its state back from the document (_drop_rereads), and pays the drop once the file
+    is no longer listed here or every fold restores (2026-10-03)."""
+    _KEEP_WHOLE[0] = frozenset(str(p) for p in paths)
+
+
+def keep_whole_paths():
+    """The live main transcripts as last published (set_keep_whole_paths)."""
+    return _KEEP_WHOLE[0]
+
+
+def _drop_rereads(key):
+    """The folds holding a cursor over `key` that the file's document cannot give a state back to: none recorded for the file,
+    or the fold's entry a cursor without a state (over the cap, tail-only or bare), or no entry for it. After a drop each one's
+    next run meets a tail entry with a cursor at a gone generation and nothing to restore, so it refolds from record 0, which
+    reads the file whole (fold_records). Empty when every fold over the file restores warm: the drop the T362 write is for."""
+    with _CKPT_LOCK:
+        shapes = dict(_CKPT_DOC_FOLDS.get(key) or {})
+    return sorted(n for n, cache in list(_FOLD_REG.items()) if cache.get(key) is not None and shapes.get(n) != "state")
 
 
 def checkpoint_cycle_charge(n):
@@ -1675,6 +1986,8 @@ def checkpoint_stats():
         out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"]); out["coldFolds"] = dict(_CKPT_STATS["coldFolds"])
         out["coldWrites"] = dict(_CKPT_STATS["coldWrites"]); out["converge"] = dict(_CKPT_STATS["converge"])
         out["refolds"] = {k: dict(v) for k, v in _CKPT_STATS["refolds"].items()}
+        out["refoldWalks"] = {k: dict(v) for k, v in _CKPT_STATS["refoldWalks"].items()}
+        out["cursorOutside"] = dict(_CKPT_STATS["cursorOutside"])
         out["rewoundMemo"] = dict(_REWOUND_STATS)
         out["docMemo"] = {"entries": len(_DOC_MEMO), "bytes": _DOC_MEMO_BYTES[0], "capBytes": _DOC_MEMO_CAP,
                           "parseMultiple": _DOC_MEMO_PARSE_MULTIPLE}
@@ -1719,7 +2032,7 @@ def _scan_jsonl_bytes(data, base_offset, offsets=None):
     return records, base_offset + end + 1
 
 
-def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None):
+def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None, tail=None):
     """(records, consumed, bytes_read) for the jsonl from `fh`'s CURRENT position to its end, decoded line by line off
     the open binary file: the parsed objects of every COMPLETE line, the byte offset just past the last complete line
     (a trailing line with no newline yet is a writer caught mid-append and is left for the next read, as
@@ -1755,8 +2068,26 @@ def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None):
     \\r under both. Splitting the concatenation equals concatenating the splits, since b"\\n" is itself a boundary, so
     records, consumed offset and offsets are identical for every input, valid or not (review find, 2026-09-15: the
     first cut split at b"\\n" alone and documented the bare-\\r case as a difference; parity costs one splitlines call
-    per line). tests/test_reader_stream_peak.py pins the equivalence, the bare-\\r case included."""
+    per line). tests/test_reader_stream_peak.py pins the equivalence, the bare-\\r case included.
+
+    `tail` (2026-10-07, the tail-only rule above _TailRecords; tail["crcs"] receives every parsed record's CRC-32, aligned
+    with `offsets`): a dict with "keep_from", a byte offset, and "keep_last", a
+    count. A record starting before keep_from is decoded (the count and the offsets stay the reference's) but not kept: it
+    goes into a ring of the last keep_last such records, tail["ring"], and is counted in tail["dropped"], so a large read
+    never holds more than the window and the ring. "ring_from", when given, is the earliest byte a ring record may start
+    at (the ring then holds at most the bytes between it and keep_from). The offsets of every record, kept or not, go into
+    `offsets`."""
     records = []
+    keep_from = ring = crcs = dskel = None
+    ring_from = 0
+    if tail is not None:
+        keep_from = int(tail.get("keep_from") or 0)
+        ring_from = int(tail.get("ring_from") or 0)
+        crcs = tail["crcs"] = array.array("I")           # the CRC-32 of every parsed record's bytes, aligned with `offsets`
+        ring = tail["ring"] = collections.deque(maxlen=max(1, int(tail.get("keep_last") or 0)))   # at least the newest
+        tail["dropped"] = 0
+        dskel = tail["skel"] = [] if _SKEL_ON else None  # the walk skeleton of every dropped record, in order (see _skel)
+    last_dropped = None
     seen = 0                                              # bytes iterated so far, complete lines and the trailing partial alike
     consumed = 0                                          # bytes of complete lines: what the next read resumes after
     remaining = limit
@@ -1777,13 +2108,989 @@ def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None):
             if not piece_s:
                 continue
             try:
-                records.append(json.loads(piece_s.decode("utf-8", "replace")))
+                rec = json.loads(piece_s.decode("utf-8", "replace"))
             except Exception:
                 continue
+            if _GC_UNTRACK_ON:
+                _gc_untrack_json(rec)                     # out of the cyclic collector's walk while it is hot (see _gc_untrack_json)
+            if keep_from is not None and base_offset + at < keep_from:
+                tail["dropped"] += 1                      # before the window: indexed, not kept (the ring holds the newest few)
+                if dskel is not None:
+                    dskel.append(_skel(rec))              # what the chain walks read of it, from the record in hand (no re-read)
+                if base_offset + at >= ring_from:
+                    ring.append(rec)
+                last_dropped = rec
+            else:
+                records.append(rec)
             if offsets is not None:
                 offsets.append(base_offset + at); offsets.append(len(piece))
+            if crcs is not None:
+                crcs.append(zlib.crc32(piece))
         consumed = seen
+    if last_dropped is not None and (not ring or ring[-1] is not last_dropped):
+        ring.append(last_dropped)                         # the newest dropped record whatever its size: a window never ends empty
     return records, base_offset + consumed, seen
+
+
+# ───────────────────────── tail-only entries for large files (2026-10-07) ─────────────────────────
+# The record cache held every live transcript WHOLE: about 3 bytes of memory per file byte, so 23 live transcripts of 0.7
+# to 1.9 GiB (20.2 GiB on disk) weighed about 61 GiB against a 64 GiB budget and the kernel reached 85 to 92 GB resident
+# within hours of each restart. The comment above RECORD_CACHE_BUDGET_FLOOR_BYTES named the remedy: a working set past the
+# cap is not a budget problem; hold a large transcript's tail only.
+#
+# The rule. A file whose held span (the bytes from its first held record to the consumed end) reaches _TAIL_MIN_FILE_BYTES
+# keeps in memory only its newest records: the last _TAIL_BYTES of the file or the last _TAIL_RECORDS records, whichever
+# holds more. Every record before that window stays INDEXED (its byte offset and length, the array the entry always carried
+# as ent[7], and the CRC-32 of its bytes: 20 bytes a record) but not decoded. The entry's records field is then a _TailRecords: a read-only sequence
+# of the SAME length, indexing and order as the whole list it replaces, which serves a record inside the window from
+# memory and one before it by reading its bytes off disk (one seek-read, or a sequential streaming pass for a run of them,
+# freeing each record as the caller moves on). Nothing about the entry's shape changes: base, gen, the offsets and the
+# count are exactly a whole read's, so every consumer (the folds and their cursors, the checkpoint writer, the assembly's
+# gates and its whole parse, the chat build) sees the complete record list and no consumer can get a truncated view.
+#
+# The window follows appends: each append adds its records to the window, and once the window holds more than one and a half
+# times _TAIL_BYTES it slides forward to _TAIL_BYTES (the hysteresis keeps the hot list from being re-cut on every append).
+# A from-zero read of a large file never builds the whole list either: the scan decodes every line (the record count and
+# the offsets must be the reference scanner's exactly), keeps the ones inside the window and a ring of the last
+# _TAIL_RECORDS before it, and drops the rest as it goes, so the read peaks at the window plus one line.
+#
+# What reads before the window. A fold whose cursor stands inside the window (every fold the pusher runs every cycle, on
+# a file whose entry stays put) steps appended records from memory. A refold from record 0 (a fold with no cursor and no
+# state to restore, bgAll after a drop) streams the file once and frees as it goes. The assembly's whole parse ingests
+# every record into its adapter, as it always did; its records come off disk instead of out of the cache. Chat scroll-back
+# reads the atoms the assembly built (or the lazy pre-cut atoms an assembly checkpoint restored), never the record cache.
+# Every such read is counted under /perf recordCache.coldReads by the caller that asked (the first frame outside this
+# module), so a consumer that turned a cached walk into a disk walk shows up by name rather than as unexplained CPU.
+#
+# Correctness of a read before the window rests on the bytes being the ones the entry indexed. Every record of a tail-only
+# entry carries the CRC-32 of its bytes as scanned (4 bytes a record, beside its offsets), and every read before the
+# window checks the record's CRC before decoding it, the file's identity (device and inode) and the entry's witness (the
+# up-to-64 bytes before its consumed offset) on each open. A held view whose file was rewritten, replaced or edited in
+# place since it was indexed raises TailRecordsRead naming the path, even when the edit kept a record's length and the
+# file's last bytes: loud, never a wrong record (review find, 2026-10-07: the witness alone passed a same-length edit of
+# an old record, and a held view would have served it under its old generation where a held whole list kept serving the
+# original). A whole list turning into a window for the first time (a transcript that grew past the threshold in this
+# process) has no CRCs for the records it already held: their bytes are read once and each must decode to the record held
+# in memory before its CRC is taken; a mismatch leaves the entry whole. ROMP_RECORD_CACHE_TAIL_MB=0 turns the rule off.
+_TAIL_BYTES = int(float(os.environ.get("ROMP_RECORD_CACHE_TAIL_MB", "32")) * 1024 * 1024)
+_TAIL_RECORDS = int(os.environ.get("ROMP_RECORD_CACHE_TAIL_RECORDS", "2000") or 0)
+_TAIL_MIN_FILE_BYTES = 2 * _TAIL_BYTES            # a file whose held span is under this is held whole (no window)
+_TAIL_SLIDE_FACTOR = 1.5                          # the window slides once it holds this many times _TAIL_BYTES
+_COLD_CHUNK_BYTES = 4 * 1024 * 1024               # a streaming pass reads before the window in runs of about this many bytes
+_COLD_STATS = {"passes": 0, "records": 0, "bytes": 0, "byCaller": {}, "rewrites": 0}   # /perf recordCache.coldReads
+_COLD_STATS_LOCK = threading.Lock()
+
+
+_TAIL_ROOTS = [tuple(r.rstrip(os.sep) + os.sep for r in os.environ["ROMP_RECORD_CACHE_TAIL_ROOTS"].split(os.pathsep) if r)
+               if os.environ.get("ROMP_RECORD_CACHE_TAIL_ROOTS") else None]
+#                                   the directories whose files the rule may window (set_tail_roots, or the environment's
+#                                   ROMP_RECORD_CACHE_TAIL_ROOTS, os.pathsep-separated); None = the Claude transcripts
+#                                   root, PROJECTS, read at call time. The rule is for TRANSCRIPTS: their consumers read the tail and
+#                                   fold the rest (see above). Other large logs stay whole: the postal log (timeline/messages.jsonl,
+#                                   1.0 GB on the devbox that motivated this) is walked from record 0 by every parse (_load_postal_index)
+#                                   and by the kernel's postal readers, so windowing it would turn each walk into a disk pass.
+
+
+def set_tail_roots(roots):
+    """The directories whose files may be held tail-only (absolute paths); None restores the default, PROJECTS."""
+    _TAIL_ROOTS[0] = None if roots is None else tuple(str(r).rstrip(os.sep) + os.sep for r in roots)
+
+
+def _tail_eligible(path):
+    roots = _TAIL_ROOTS[0]
+    if roots is None:
+        roots = (str(PROJECTS).rstrip(os.sep) + os.sep,)
+    p = str(path)
+    return any(p.startswith(r) for r in roots)
+
+
+def tail_rule_on():
+    """Whether large files are held tail-only (ROMP_RECORD_CACHE_TAIL_MB above 0)."""
+    return _TAIL_BYTES > 0
+
+
+# ───── the window pinned to a restored assembly entry's cut (2026-10-08) ─────
+# A restored assembly entry (_asm_restore) parses its leaf from the document's cut: its adapter ingests, and holds by uuid, every
+# record past the cut, and every restore after a demotion reads that span again. Where the span reaches back before the record
+# window, each of those reads went to disk record by record (coldReads), and the adapter held a private copy of what it read. So
+# while such an entry stands, the window of its leaf never starts after the cut: a read keeps every record from the cut on
+# (_tail_scan_info) and an append never slides past it (_tail_shape). The records the window keeps are the very dicts the adapter
+# holds, so the pin costs the uuid-less records and nothing else, and the churn bound (_restore_bounded) keeps the span under
+# its share of the pre-cut bytes. The pin is owned by a token the entry holds (entry["pin"]): released with the entry
+# (_asm_release), and gone with it if the entry is dropped by any other road (the registry holds the token weakly).
+_TAIL_PINS = {}                   # str(path) -> tuple of (weakref to a pin token, byte offset): replaced whole on every change
+_TAIL_PINS_LOCK = threading.Lock()
+
+
+class _PinToken:
+    """What a restored assembly entry holds for its window pin (see the block above); weakly referenced by the registry."""
+    __slots__ = ("path", "off", "__weakref__")
+
+    def __init__(self, path, off):
+        self.path, self.off = path, int(off)
+
+
+def _tail_pin(path):
+    """The byte offset before which `path`'s record window may not start, or None: the earliest cut among the live restored
+    entries over it."""
+    pins = _TAIL_PINS.get(str(path))
+    if not pins:
+        return None
+    live = [off for ref, off in pins if ref() is not None]
+    return min(live) if live else None
+
+
+def _tail_pin_set(path, off):
+    """Pin `path`'s window at byte `off`; returns the token the caller's entry holds."""
+    tok = _PinToken(str(path), off)
+    with _TAIL_PINS_LOCK:
+        keep = tuple(x for x in _TAIL_PINS.get(tok.path, ()) if x[0]() is not None)
+        _TAIL_PINS[tok.path] = keep + ((weakref.ref(tok), tok.off),)
+    return tok
+
+
+def _tail_pin_clear(tok):
+    """Release the pin `tok` holds (a no-op for None or a pin already gone)."""
+    if tok is None:
+        return
+    with _TAIL_PINS_LOCK:
+        keep = tuple(x for x in _TAIL_PINS.get(tok.path, ()) if x[0]() is not None and x[0]() is not tok)
+        if keep:
+            _TAIL_PINS[tok.path] = keep
+        else:
+            _TAIL_PINS.pop(tok.path, None)
+
+
+def _widen_entry_to(path, off):
+    """Bring a tail-only record entry's window back to byte `off` (a pin just set, _tail_pin) when the window had already slid
+    past it: the records between are read off disk ONCE (counted under coldReads by the caller, as any read before a window)
+    and the entry is re-inserted holding them, so every later restore and refold over the pinned span reads memory. Same
+    generation, offsets, CRCs and witness: only the window's start moves back. A no-op when there is no tail-only entry, the
+    window already reaches `off`, or the entry changed meanwhile. Returns the records brought back."""
+    path = str(path)
+    with _read_stripe(path):
+        with _JSONL_CACHE_LOCK:
+            ent = _JSONL_CACHE.get(path)
+        if ent is None or type(ent[4]) is not _TailRecords:
+            return 0
+        recs = ent[4]
+        i = _first_within(recs.offs, 0, recs.ncold, recs.guard_off, max(0, recs.guard_off - int(off)))
+        if i >= recs.ncold or i <= 0:
+            return 0                                      # the window reaches the pin already (or the pin is the file's start)
+        gap = []
+        try:
+            for batch in recs._cold_batches(i, recs.ncold, _caller_outside_module()):   # runs of about _COLD_CHUNK_BYTES,
+                gap.extend(batch)                         #  never the whole span in one buffer
+        except OSError:
+            return 0                                      # a refused read drops the entry itself (TailRecordsRead): nothing to widen
+        new = _TailRecords(path, recs.offs, i, gap + list(recs.hot), recs.guard_off, recs.guard, recs.crcs, recs.ident)
+        new.gen = recs.gen
+        if recs.skel is not None:
+            new.skel = recs.skel[:i]
+            new.skel_bytes = max(0, int(recs.skel_bytes) - sum(_skel_bytes(x) for x in recs.skel[i:recs.ncold]))
+            if _GC_UNTRACK_ON and _gc.is_tracked(new.skel):
+                _PY_GC_UNTRACK(new.skel)
+        if _GC_UNTRACK_ON and _gc.is_tracked(new.hot):
+            _PY_GC_UNTRACK(new.hot)
+        with _JSONL_CACHE_LOCK:
+            if _JSONL_CACHE.get(path) is not ent:
+                return 0                                  # another read replaced it: that read decided the window
+            _cache_insert_locked(path, ent[:4] + (new,) + ent[5:])
+        with _COLD_STATS_LOCK:
+            _COLD_STATS["widened"] = _COLD_STATS.get("widened", 0) + (recs.ncold - i)
+        return recs.ncold - i
+
+
+def tail_pin_stats():
+    """{path: pinned offset} for every path with a live pin (/perf recordCache.tailOnly.pins counts them)."""
+    return {p: v for p in list(_TAIL_PINS) for v in (_tail_pin(p),) if v is not None}
+
+
+class TailRecordsRead(OSError):
+    """A record before a tail-only entry's window was asked for and the file no longer holds the bytes the entry indexed
+    (it was rewritten since the read): raised, never answered with a wrong record. An OSError, so every handler that
+    treats a failed read of the file as a failed read (the reader's own pop and on_fail, the assembly's fallback to a
+    whole parse) treats this one the same way. Raising it drops the reader's cached entry of the same generation
+    (_TailRecords._drop_entry), so the next read through the reader reads the file afresh even when its stat did not move."""
+
+
+def _caller_outside_module():
+    """The first frame's function name outside this module, past the whole-read passthrough family and synthetic scopes
+    (the attribution the whole-read row uses), or "?"."""
+    try:
+        fr = sys._getframe(2)
+        while fr is not None and (fr.f_code.co_filename == __file__ or fr.f_code in _WHOLE_READ_PASSTHROUGH
+                                  or _synthetic_scope(fr)):
+            fr = fr.f_back
+        return fr.f_code.co_name if fr is not None else "?"
+    except Exception:
+        return "?"
+
+
+def _count_cold(who, nrec, nbytes, passes=1):
+    with _COLD_STATS_LOCK:
+        _COLD_STATS["passes"] += passes; _COLD_STATS["records"] += nrec; _COLD_STATS["bytes"] += nbytes
+        row = _COLD_STATS["byCaller"].setdefault(who, {"passes": 0, "records": 0, "bytes": 0})
+        row["passes"] += passes; row["records"] += nrec; row["bytes"] += nbytes
+
+
+def cold_read_stats():
+    """recordCache.coldReads for /perf: the passes that read records before a tail-only entry's window, their records and
+    bytes, per caller, and the rewrites they refused."""
+    with _COLD_STATS_LOCK:
+        out = {k: v for k, v in _COLD_STATS.items() if k not in ("byCaller", "skeleton")}
+        out["byCaller"] = {k: dict(v) for k, v in _COLD_STATS["byCaller"].items()}
+        out["skeleton"] = dict(_COLD_STATS.get("skeleton") or {"walks": 0, "records": 0, "misses": 0})
+        out["wholeLists"] = dict(_WHOLE_STATS)
+        return out
+
+
+class _TailRecords:
+    """The records of a large file whose cache entry holds only its newest records (see the block above): a read-only
+    sequence with the whole list's length, indexing, slicing and iteration. Index i is the file's record base + i, as in
+    any entry. `offs` holds (byte offset, byte length) for EVERY record from index 0 (the entry's ent[7]); the first
+    `ncold` are read from disk on demand, the rest are `hot`, a plain list in memory. `guard_off` and `guard` are the
+    entry's witness (its consumed offset and the bytes before it), verified on disk before any read before the window.
+
+    Deliberately not a list subclass: the C json encoder and other C fast paths read a list subclass's storage directly,
+    which here would be the window alone, a silent truncation. A caller that needs a real list fails loudly instead.
+    Immutable once built, like every list the reader serves (the reader builds a new one per append)."""
+    __slots__ = ("path", "offs", "ncold", "hot", "guard_off", "guard", "crcs", "ident", "skel", "skel_bytes", "gen",
+                 "__weakref__")
+
+    def __init__(self, path, offs, ncold, hot, guard_off, guard, crcs, ident):
+        self.skel = None                                  # the walk skeletons of records 0..ncold (see _skel), or None
+        self.skel_bytes = 0                               # what those skeletons hold (_skel_bytes, summed as they are built)
+        self.gen = None                                   # the reader's generation for the entry (set by the reader): _refuse drops
+        #                                                   the cached entry of the same generation, the lineage that indexed it
+        self.path = path
+        self.offs = offs
+        self.ncold = int(ncold)
+        self.hot = hot
+        self.guard_off = int(guard_off)
+        self.guard = bytes(guard)
+        self.crcs = crcs                                  # array("I"): the CRC-32 of every record's bytes, aligned with offs
+        self.ident = ident                                # (st_dev, st_ino) of the file the records were read from
+
+    def __len__(self):
+        return self.ncold + len(self.hot)
+
+    def __bool__(self):
+        return self.ncold > 0 or bool(self.hot)
+
+    def __repr__(self):
+        return "<tail records of %s: %d before the window, %d in memory>" % (self.path, self.ncold, len(self.hot))
+
+    def hot_offset(self):
+        """The byte offset of the first record held in memory (the consumed end when the window is empty)."""
+        return int(self.offs[2 * self.ncold]) if self.hot else self.guard_off
+
+    def __getitem__(self, i):
+        n = self.ncold + len(self.hot)
+        if isinstance(i, slice):
+            start, stop, step = i.indices(n)
+            if step != 1:
+                return [self[j] for j in range(start, stop, step)]   # never asked of the reader's lists; correct if it is
+            if stop <= start:
+                return []
+            if start >= self.ncold:
+                return self.hot[start - self.ncold:stop - self.ncold]   # inside the window: a plain list, as before
+            return _RecordsView(self, start, stop)
+        try:
+            i = i.__index__()
+        except AttributeError:
+            raise TypeError("record indices must be integers or slices, not %s" % type(i).__name__)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError("record index out of range")
+        if i >= self.ncold:
+            return self.hot[i - self.ncold]
+        return self._read_cold(i, i + 1, _caller_outside_module())[0]
+
+    def __iter__(self):
+        return self._iter_range(0, self.ncold + len(self.hot))
+
+    def __reversed__(self):
+        return self._reversed_range(0, self.ncold + len(self.hot))
+
+    def _iter_range(self, start, stop):
+        if start < self.ncold:
+            who = _caller_outside_module()
+            for batch in self._cold_batches(start, min(stop, self.ncold), who):
+                yield from batch
+                del batch
+        if stop > self.ncold:
+            yield from self.hot[max(0, start - self.ncold):stop - self.ncold]
+
+    def _reversed_range(self, start, stop):
+        if stop > self.ncold:
+            yield from reversed(self.hot[max(0, start - self.ncold):stop - self.ncold])
+        if start < self.ncold:
+            who = _caller_outside_module()
+            hi = min(stop, self.ncold)
+            while hi > start:                                  # runs of about _COLD_CHUNK_BYTES, newest first
+                lo = hi - 1
+                while lo > start and int(self.offs[2 * hi - 2]) + int(self.offs[2 * hi - 1]) - int(self.offs[2 * lo - 2]) \
+                        <= _COLD_CHUNK_BYTES:
+                    lo -= 1
+                batch = self._read_cold(lo, hi, who)
+                yield from reversed(batch)
+                del batch
+                hi = lo
+
+    def _verify(self, fh):
+        """The file is the one indexed (its device and inode) and the entry's witness stands on disk (the bytes before its
+        consumed offset are the ones it captured). Each record's own bytes are checked by its CRC as it is decoded."""
+        if self.ident is not None:
+            st = os.fstat(fh.fileno())
+            if (st.st_dev, st.st_ino) != self.ident:
+                return False
+        g = self.guard
+        if not g:
+            return True
+        fh.seek(max(0, self.guard_off - len(g)))
+        return fh.read(len(g)) == g
+
+    def _refuse(self):
+        with _COLD_STATS_LOCK:
+            _COLD_STATS["rewrites"] += 1
+        self._drop_entry()
+        raise TailRecordsRead("%s: the file was rewritten since its records were indexed; re-read it through the reader"
+                              % self.path)
+
+    def _drop_entry(self):
+        """Pop the reader's cached entry for this path when it is of this view's generation (this view, or a later append
+        of the same lineage, which carried the same CRCs forward), so the next read re-reads the file from zero under a
+        fresh generation instead of raising again until a restart (review find, 2026-10-07: a byte-identical copy restored
+        with its mtime, or a same-length edit followed by an append, left the entry refusing on every read). An entry
+        another reader already re-read (a fresh generation) is left alone. Bounded wait on the cache lock: a refusal never
+        hangs a reader."""
+        if self.gen is None or not _JSONL_CACHE_LOCK.acquire(timeout=2.0):
+            return
+        try:
+            ent = _JSONL_CACHE.get(self.path)
+            if ent is not None and ent[6] == self.gen:
+                _cache_pop_locked(self.path)
+                with _COLD_STATS_LOCK:
+                    _COLD_STATS["dropped"] = _COLD_STATS.get("dropped", 0) + 1
+        finally:
+            _JSONL_CACHE_LOCK.release()
+
+    def _decode_run(self, fh, lo, hi):
+        """Records lo..hi (all before the window) from ONE contiguous read, decoded the way the scanner decoded them."""
+        offs = self.offs
+        a0 = int(offs[2 * lo])
+        a1 = int(offs[2 * hi - 2]) + int(offs[2 * hi - 1])
+        fh.seek(a0)
+        blob = fh.read(a1 - a0)
+        if len(blob) != a1 - a0:
+            self._refuse()
+        out = []
+        crcs = self.crcs
+        for j in range(lo, hi):
+            at = int(offs[2 * j]) - a0
+            piece = blob[at:at + int(offs[2 * j + 1])]
+            if zlib.crc32(piece) != crcs[j]:
+                self._refuse()                                   # these are not the bytes the record was indexed from
+            piece = piece.strip()
+            try:
+                rec = json.loads(piece.decode("utf-8", "replace"))
+            except Exception:
+                self._refuse()                                   # it decoded when it was indexed: the bytes moved
+            if _GC_UNTRACK_ON:
+                _gc_untrack_json(rec)                            # as the scan does: a whole adapter may hold it for a while
+            out.append(rec)
+        return out, a1 - a0
+
+    def _read_cold(self, lo, hi, who):
+        with open(self.path, "rb") as fh:
+            if not self._verify(fh):
+                self._refuse()
+            out, n = self._decode_run(fh, lo, hi)
+        _count_read(self.path, n + len(self.guard))
+        _count_cold(who, hi - lo, n)
+        return out
+
+    def _cold_batches(self, lo, hi, who):
+        """Records lo..hi before the window, in runs of about _COLD_CHUNK_BYTES off one open file: the streaming pass a
+        refold or a whole parse takes. Each run is handed over and released before the next is read."""
+        if hi <= lo:
+            return
+        nrec = nbytes = 0
+        try:
+            with open(self.path, "rb") as fh:
+                if not self._verify(fh):
+                    self._refuse()
+                nbytes += len(self.guard)
+                offs = self.offs
+                j = lo
+                while j < hi:
+                    k = j + 1
+                    a0 = int(offs[2 * j])
+                    while k < hi and int(offs[2 * k]) + int(offs[2 * k + 1]) - a0 <= _COLD_CHUNK_BYTES:
+                        k += 1
+                    batch, n = self._decode_run(fh, j, k)
+                    nrec += k - j; nbytes += n
+                    yield batch
+                    j = k
+        finally:
+            _count_read(self.path, nbytes)
+            _count_cold(who, nrec, nbytes)
+
+
+class _RecordsView:
+    """A slice of a _TailRecords that starts before its window (records start..stop): iterable as many times as asked, each
+    iteration a streaming pass, never a list of every record. Indexing and slicing answer as the slice of a list would."""
+    __slots__ = ("parent", "start", "stop")
+
+    def __init__(self, parent, start, stop):
+        self.parent, self.start, self.stop = parent, int(start), int(stop)
+
+    def __len__(self):
+        return self.stop - self.start
+
+    def __bool__(self):
+        return self.stop > self.start
+
+    def __repr__(self):
+        return "<records %d..%d of %r>" % (self.start, self.stop, self.parent)
+
+    def __iter__(self):
+        return self.parent._iter_range(self.start, self.stop)
+
+    def __reversed__(self):
+        return self.parent._reversed_range(self.start, self.stop)
+
+    def __getitem__(self, i):
+        n = self.stop - self.start
+        if isinstance(i, slice):
+            start, stop, step = i.indices(n)
+            if step != 1:
+                return [self[j] for j in range(start, stop, step)]
+            return self.parent[self.start + start:self.start + max(start, stop)]
+        i = i.__index__()
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError("record index out of range")
+        return self.parent[self.start + i]
+
+
+# ───── the walk skeleton of a tail-only entry's older records (2026-10-07, review fix) ─────
+# The chain walks (the judges' rewound reconcile, file_rewound, chain_membership, the document chain check) build an adapter
+# over a leaf's records every pass a session's leaf grew, and read only each record's GRAPH fields. Over a tail-only entry
+# their adapter took every record before the window off disk, so each pass re-read and re-decoded the transcript (a review
+# measured 0.6 to 0.8 s and 168 MiB per pass for a 200 MB leaf; on a 1.9 GiB leaf, seconds and gigabytes). A tail-only
+# entry therefore also keeps, for every record before its window, a SKELETON: a small dict holding only the fields those
+# walks read (ids, parent links, type, the flags, the compaction segment, a queued prompt, the block ids, a user record's
+# text, and whether an assistant record's text is non-empty). Skeletons are built from records already in memory: the
+# scan's dropped records as it decodes them, and the window's records as they slide out of it, so building them reads
+# nothing more off disk, and an append shares the earlier entry's list. A walk-only adapter (FileAdapter walk_only=True)
+# ingests the skeletons and the window's real records: no read per pass.
+#
+# A skeleton refuses to answer a field it does not keep: get, [] and `in` raise _SkelMiss for any key outside its kept set,
+# so a walk that starts reading a new field fails loudly in the tests (and, in production, the walk's caller falls back to
+# the full read and counts it under coldReads.skeletonMisses) rather than silently seeing None. ROMP_RECORD_CACHE_SKELETON=0
+# turns skeletons off (the walks then read before the window as before).
+_SKEL_ON = os.environ.get("ROMP_RECORD_CACHE_SKELETON", "1") != "0"
+
+
+class _SkelMiss(LookupError):
+    """A walk asked a skeleton record for a field it does not keep (see the block above)."""
+
+
+class _Skel(dict):
+    """A dict that answers only its kept keys (_ALLOW): a kept key that is absent answers as absent, any other key raises
+    _SkelMiss. Subclasses name the kept set per level (record, message, block, attachment, compaction metadata)."""
+    __slots__ = ()
+    _ALLOW = frozenset()
+
+    def get(self, k, default=None):
+        if dict.__contains__(self, k):
+            return dict.__getitem__(self, k)
+        if k in self._ALLOW:
+            return default
+        raise _SkelMiss(k)
+
+    def __getitem__(self, k):
+        if dict.__contains__(self, k):
+            return dict.__getitem__(self, k)
+        if k in self._ALLOW:
+            raise KeyError(k)
+        raise _SkelMiss(k)
+
+    def __contains__(self, k):
+        if dict.__contains__(self, k):
+            return True
+        if k in self._ALLOW:
+            return False
+        raise _SkelMiss(k)
+
+
+_SKEL_SCALARS = ("type", "subtype", "uuid", "parentUuid", "logicalParentUuid", "timestamp", "promptId", "isCompactSummary",
+                 "isMeta", "isApiErrorMessage", "sourceToolUseID")
+
+
+class _SkelRec(_Skel):
+    __slots__ = ()
+    _ALLOW = frozenset(_SKEL_SCALARS + ("message", "attachment", "compactMetadata"))
+
+
+class _SkelMsg(_Skel):
+    __slots__ = ()
+    _ALLOW = frozenset(("id", "content"))
+
+
+class _SkelBlock(_Skel):
+    __slots__ = ()
+    _ALLOW = frozenset(("type", "id", "name", "tool_use_id", "text"))
+
+
+class _SkelAtt(_Skel):
+    __slots__ = ()
+    _ALLOW = frozenset(("type", "prompt"))
+
+
+class _SkelCM(_Skel):
+    __slots__ = ()
+    _ALLOW = frozenset(("preservedSegment",))
+
+
+_SKEL_WORDS = {}                  # the small vocabulary skeletons repeat (types, subtypes, roles, tool names), one object each
+
+
+def _skel_word(v):
+    if type(v) is str and len(v) <= 64:
+        w = _SKEL_WORDS.get(v)
+        if w is not None:
+            return w
+        if len(_SKEL_WORDS) < 8192:
+            _SKEL_WORDS[v] = v
+    return v
+
+
+def _skel_text_mark(t):
+    """An assistant (or other non-user) text, reduced to what the walks read of it: whether it holds a non-blank character
+    (_text_of(...).strip(), joined across blocks, is non-empty exactly when one block's text is)."""
+    if type(t) is not str:
+        return t
+    return "x" if t.strip() else ""
+
+
+_SKEL_BARE = {}                   # type -> the one shared skeleton of a record with no uuid (a walk indexes nothing for it)
+
+
+def _skel_bare(r):
+    t = r.get("type")
+    key = t if type(t) is str and len(t) <= 64 else None
+    s = _SKEL_BARE.get(key) if key is not None else None
+    if s is None:
+        s = _SkelRec()
+        dict.__setitem__(s, "type", t)
+        if "uuid" in r:
+            dict.__setitem__(s, "uuid", r["uuid"])        # a present but empty uuid stays present, as the parse sees it
+        if _GC_UNTRACK_ON:
+            _PY_GC_UNTRACK(s)
+        if key is not None and "uuid" not in r and len(_SKEL_BARE) < 256:
+            _SKEL_BARE[key] = s
+    return s
+
+
+def _skel_val_bytes(v):
+    """The memory a skeleton's field value holds that nothing else does once the decoded record is freed: a shared word
+    (_skel_word), a shared bare skeleton and the singletons hold nothing; a string by its length (a user record's text
+    counts in full); a skeleton, list or dict by its own size plus its contents'."""
+    t = type(v)
+    if v is None or t is bool:
+        return 0
+    if t is str:
+        return 0 if _SKEL_WORDS.get(v) is v else sys.getsizeof(v)
+    if t is _SkelRec and _SKEL_BARE.get(dict.get(v, "type")) is v:
+        return 0
+    if isinstance(v, dict):
+        n = sys.getsizeof(v)
+        for x in dict.values(v):
+            n += _skel_val_bytes(x)
+        return n
+    if t is list:
+        n = sys.getsizeof(v)
+        for x in v:
+            n += _skel_val_bytes(x)
+        return n
+    return sys.getsizeof(v)
+
+
+def _skel_bytes(s):
+    """One skeleton's own weight once its decoded record is freed (_skel_val_bytes): the containers it built and the strings
+    it keeps (ids, parent links, the timestamp, the message and tool ids, a user record's text). A review measured the first
+    flat charge (600 bytes a record, taken while the decoded records were still alive) at 25 to 40 percent under what the
+    skeletons hold alone, and without bound for a long user text (2026-10-07)."""
+    return _skel_val_bytes(s)
+
+
+def _skel(r):
+    """The walk skeleton of one decoded record (see the block above); a record that is not a dict is kept as it is."""
+    if type(r) is not dict:
+        return r
+    if not r.get("uuid") and r.get("type") != "attachment":
+        return _skel_bare(r)                              # no graph node: the walks count it in read order and read nothing else
+    s = _SkelRec()
+    put = dict.__setitem__
+    for k in _SKEL_SCALARS:
+        if k in r:
+            v = r[k]
+            put(s, k, _skel_word(v) if k in ("type", "subtype") else v)
+    user = r.get("type") == "user"
+    if "message" in r:
+        m = r["message"]
+        if isinstance(m, dict):
+            sm = _SkelMsg()
+            if "id" in m:
+                put(sm, "id", m["id"])
+            if "content" in m:
+                c = m["content"]
+                if isinstance(c, str):
+                    put(sm, "content", c if user else _skel_text_mark(c))
+                elif isinstance(c, list):
+                    out = []
+                    for b in c:
+                        if isinstance(b, dict):
+                            sb = _SkelBlock()
+                            if "type" in b:
+                                put(sb, "type", _skel_word(b["type"]))
+                            if "id" in b:
+                                put(sb, "id", b["id"])
+                            if "name" in b:
+                                put(sb, "name", _skel_word(b["name"]))
+                            if "tool_use_id" in b:
+                                put(sb, "tool_use_id", b["tool_use_id"])
+                            if "text" in b:
+                                put(sb, "text", b["text"] if user else _skel_text_mark(b["text"]))
+                            if _GC_UNTRACK_ON:
+                                _PY_GC_UNTRACK(sb)
+                            out.append(sb)
+                        else:
+                            out.append(b)
+                    if _GC_UNTRACK_ON and _gc.is_tracked(out):
+                        _PY_GC_UNTRACK(out)
+                    put(sm, "content", out)
+                else:
+                    put(sm, "content", c)
+            if _GC_UNTRACK_ON:
+                _PY_GC_UNTRACK(sm)
+            m = sm
+        put(s, "message", m)
+    if "attachment" in r:
+        a = r["attachment"]
+        if isinstance(a, dict):
+            sa = _SkelAtt()
+            if "type" in a:
+                put(sa, "type", _skel_word(a["type"]))
+            if "prompt" in a and a.get("type") == "queued_command":
+                put(sa, "prompt", a["prompt"])
+            if _GC_UNTRACK_ON:
+                _PY_GC_UNTRACK(sa)
+            a = sa
+        put(s, "attachment", a)
+    if "compactMetadata" in r:
+        cm = r["compactMetadata"]
+        if isinstance(cm, dict):
+            scm = _SkelCM()
+            if "preservedSegment" in cm:
+                put(scm, "preservedSegment", cm["preservedSegment"])
+            if _GC_UNTRACK_ON:
+                _PY_GC_UNTRACK(scm)
+            cm = scm
+        put(s, "compactMetadata", cm)
+    if _GC_UNTRACK_ON:
+        _PY_GC_UNTRACK(s)                                 # acyclic, as the records it stands for: out of the collector's walk
+    return s
+
+
+def _skel_entry(old, ncold_combined, hot_combined, dropped_skel, dropped_n, scan_start, final):
+    """The skeleton list for `final`, the _TailRecords a read just built (index i < final.ncold is the skeleton of record i),
+    from what the read had in memory and never off disk: the earlier entry's skeletons (`old`, the entry the read appended
+    to, when it is a _TailRecords whose skeleton is complete; its list is EXTENDED in place when no later entry has grown it,
+    since every holder reads only below its own ncold), the earlier entry's window records that went cold, the scan's
+    skeletons of the records it dropped (`dropped_skel`, `dropped_n` of them, from record `scan_start` on), and the combined
+    window's records the final shape slid out (`hot_combined`, which starts at record `ncold_combined`). None when a source
+    is missing (skeletons off, an earlier entry without one): the walks then read before the window as before."""
+    if not _SKEL_ON or type(final) is not _TailRecords:
+        return None
+    want = final.ncold
+    if type(old) is _TailRecords:
+        oc, oh = old.ncold, old.hot
+        osk = old.skel
+        if osk is None or len(osk) < oc:
+            return None
+        out = osk if len(osk) == oc else osk[:oc]
+        nbytes = int(old.skel_bytes)                      # the earlier entry's skeletons 0..oc, summed when it was built
+    else:
+        oc, oh = 0, (old or [])
+        out = []
+        nbytes = 0
+    if len(out) > want:                                   # (never: a window only moves forward) a fresh prefix, the old list kept
+        out = out[:want]
+        final.skel_bytes = sum(_skel_bytes(x) for x in out)
+        return out
+    i = len(out)
+    while i < want:
+        if i < oc + len(oh):
+            sk = _skel(oh[i - oc])
+        elif i < scan_start + dropped_n:
+            k = i - scan_start
+            if dropped_skel is None or k >= len(dropped_skel):
+                return None
+            sk = dropped_skel[k]
+        else:
+            j = i - ncold_combined
+            if j < 0 or j >= len(hot_combined):
+                return None
+            sk = _skel(hot_combined[j])
+        nbytes += _skel_bytes(sk)
+        out.append(sk)
+        i += 1
+    final.skel_bytes = nbytes
+    return out
+
+
+def _walk_ready(recs):
+    """Whether a tail-only entry carries a skeleton for every record before its window."""
+    sk = recs.skel
+    return _SKEL_ON and sk is not None and len(sk) >= recs.ncold
+
+
+def _walk_list(recs):
+    """The records a chain walk ingests from a tail-only entry: the skeletons of the records before the window, then the
+    window's own records, one list of references (nothing decoded, nothing read); counted under coldReads.skeleton."""
+    out = recs.skel[:recs.ncold]
+    out.extend(recs.hot)
+    with _COLD_STATS_LOCK:
+        row = _COLD_STATS.setdefault("skeleton", {"walks": 0, "records": 0, "misses": 0})
+        row["walks"] += 1; row["records"] += recs.ncold
+    return out
+
+
+_SKEL_MISS_NOTED = set()
+
+
+def _walk_with_skeletons(build):
+    """build(walk_only) for a chain walk: over skeletons first; a walk that asked a skeleton for a field it does not keep
+    (_SkelMiss) is run again over the full records, counted under coldReads.skeleton.misses and named once on stderr, so a
+    new field read in a walk costs a disk pass and says so, never a wrong verdict."""
+    try:
+        return build(True)
+    except _SkelMiss as e:
+        with _COLD_STATS_LOCK:
+            row = _COLD_STATS.setdefault("skeleton", {"walks": 0, "records": 0, "misses": 0})
+            row["misses"] += 1
+        key = str(e)
+        if key not in _SKEL_MISS_NOTED and len(_SKEL_MISS_NOTED) < 64:
+            _SKEL_MISS_NOTED.add(key)
+            print("romp event-model: a chain walk read %s, which record skeletons do not keep; walked the full records "
+                  "(coldReads.skeleton.misses)" % key, file=sys.stderr)
+        return build(False)
+
+
+_WHOLE_HOLDERS = {}               # path -> weak references to whole adapters holding a materialized list of its tail-only entry
+_WHOLE_HOLDERS_LOCK = threading.Lock()
+_WHOLE_STATS = {"shared": 0, "extended": 0, "built": 0}   # /perf recordCache.coldReads.wholeLists: lists reused, reused and
+#                                   extended by an append's records, and built by a streaming pass
+
+
+def _whole_register(path, adapter):
+    """Record `adapter` as holding a whole list of `path`'s records (FileAdapter._src[path]), for _whole_list to share."""
+    with _WHOLE_HOLDERS_LOCK:
+        refs = [r for r in _WHOLE_HOLDERS.get(path, ()) if r() is not None and r() is not adapter]
+        refs.append(weakref.ref(adapter))
+        _WHOLE_HOLDERS[path] = refs[-4:]
+        if len(_WHOLE_HOLDERS) > 512:                    # paths whose adapters are all gone
+            for k in [k for k, v in _WHOLE_HOLDERS.items() if not any(r() is not None for r in v)]:
+                del _WHOLE_HOLDERS[k]
+
+
+def _whole_list(path, ent):
+    """The whole list a WHOLE adapter ingests from a tail-only entry `ent` of `path` (review find, 2026-10-07: each whole
+    adapter decoded a private full copy off disk, so two over one file held two copies and each paid a streaming pass).
+    A live whole adapter already holding the records of the same generation from base 0 lends its list: as it is when it
+    covers every record, or extended by the newer records (the window's, from memory) after an append. Lists an adapter
+    holds are never mutated (a fold builds a new one), so sharing one is safe. Else one streaming pass, as before."""
+    recs, gen, n = ent[4], ent[6], len(ent[4])
+    if ent[5] == 0:
+        with _WHOLE_HOLDERS_LOCK:
+            holders = [r() for r in _WHOLE_HOLDERS.get(path, ())]
+        best = None
+        for ad in reversed(holders):
+            if ad is None:
+                continue
+            held, key = ad._src.get(path), ad._src_keys.get(path)
+            if type(held) is list and key and len(key) == 3 and key[0] == gen and key[1] == 0 and key[2] == len(held) <= n:
+                if best is None or len(held) > len(best):
+                    best = held
+        if best is not None:
+            k = len(best)
+            with _COLD_STATS_LOCK:
+                _WHOLE_STATS["shared" if k == n else "extended"] += 1
+            if k == n:
+                return best
+            return best + list(recs[k:])                  # the records an append brought: inside the window, from memory
+    with _COLD_STATS_LOCK:
+        _WHOLE_STATS["built"] += 1
+    return list(recs)
+
+
+def _first_within(offs, lo, hi, end, nbytes):
+    """The smallest record index in lo..hi whose record starts within `nbytes` of `end` (hi when none does): offsets ascend."""
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if end - int(offs[2 * mid]) <= nbytes:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+def _window_start(offs, total, end, ncold):
+    """The first record index the window keeps for a file of `total` records ending (consumed) at byte `end`: the records
+    inside the last _TAIL_BYTES, or the last _TAIL_RECORDS, whichever is more, never before `ncold` (a window only moves
+    forward) and always at least the last record. The record floor reaches back at most _TAIL_MIN_FILE_BYTES (twice the
+    window) from the end, so a run of very large records (an image payload in every one) cannot make the floor hold more
+    than two windows' bytes."""
+    i_bytes = _first_within(offs, ncold, total, end, _TAIL_BYTES)
+    i_floor = max(0, total - max(1, _TAIL_RECORDS))
+    if i_floor < i_bytes:
+        i_floor = max(i_floor, _first_within(offs, ncold, total, end, _TAIL_MIN_FILE_BYTES))
+    i = min(i_bytes, i_floor)
+    return max(ncold, min(i, max(0, total - 1)))
+
+
+def _tail_shape(path, offs, ncold, hot, end, guard, force=False, keep_index=None, crcs=None, fh=None):
+    """The records field for an entry holding `ncold` records before the window and `hot` in memory, with every record's
+    offsets in `offs`, consumed to `end` with witness `guard`: the window slid when it has grown past _TAIL_SLIDE_FACTOR
+    times _TAIL_BYTES (or `force`, a list converting to a window), never past `keep_index` (the first record the read
+    that called this appended), a plain list when nothing lies before it, else a _TailRecords. A held span under
+    _TAIL_MIN_FILE_BYTES, or the rule off, is never windowed. `crcs` are the records' CRCs aligned with `offs` (complete for a
+    tail-only entry; for a whole list turning into a window, only its newest records', the rest filled from the open file
+    `fh` by _fill_crcs, which leaves the list whole when its bytes do not prove the records)."""
+    total = ncold + len(hot)
+    if _TAIL_BYTES > 0 and total and hot and (ncold > 0 or _tail_eligible(path)):
+        hot_bytes = end - int(offs[2 * ncold])
+        span = end - int(offs[0])
+        if span >= _TAIL_MIN_FILE_BYTES and (force or hot_bytes > _TAIL_SLIDE_FACTOR * _TAIL_BYTES):
+            w = _window_start(offs, total, end, ncold)
+            if keep_index is not None:
+                w = max(ncold, min(w, int(keep_index)))
+            pin = _tail_pin(path)
+            if pin is not None and w > ncold:             # never past a restored assembly entry's cut (_tail_pin)
+                w = max(ncold, min(w, _first_within(offs, ncold, total, end, max(0, end - pin))))
+            if w > ncold:
+                have = len(crcs) if crcs is not None else 0
+                if have < total:                          # a first conversion: the records held whole have no CRCs yet
+                    if ncold > 0 or fh is None:
+                        w = ncold                         # (never: a tail-only entry's scan always keeps CRCs) stay as is
+                    else:
+                        crcs = _fill_crcs(fh, offs, hot, total - have, crcs)
+                        if crcs is None:
+                            w = ncold                     # the bytes do not prove the records: whole, as before
+            if w > ncold:
+                hot = hot[w - ncold:]
+                ncold = w
+    if ncold <= 0:
+        return hot
+    try:
+        st = os.fstat(fh.fileno()) if fh is not None else os.stat(path)
+        ident = (st.st_dev, st.st_ino)
+    except OSError:
+        ident = None
+    return _TailRecords(path, offs, ncold, hot, end, guard, crcs, ident)
+
+
+def _tail_scan_info(path, size, span_start, append_from=None, held_tail=False):
+    """The scan's tail mode for a read that will leave an entry holding records from byte `span_start` of `path`, a file of
+    `size` bytes: None when the rule is off, the file is no transcript (_tail_eligible) or the held span stays under
+    _TAIL_MIN_FILE_BYTES (held whole), else the window's start byte and the record floor (_scan_jsonl_stream's `tail`).
+    `append_from`, the byte an APPEND to a held entry starts at: an append of up to _TAIL_MIN_FILE_BYTES is kept whole in the
+    window, so a fold that was current before it steps the new records from memory however large one of them is (a
+    40 KB tool result appended to a 32 KiB window would otherwise slide the window past the fold's cursor). `held_tail`: the
+    entry being appended to is tail-only, so the scan runs in tail mode whatever the rule says now (its new records need
+    their CRCs beside the old ones), dropping nothing when the rule would not window it."""
+    if _TAIL_BYTES <= 0 or size - int(span_start) < _TAIL_MIN_FILE_BYTES or not _tail_eligible(path):
+        return {"keep_from": 0, "keep_last": 0} if held_tail else None
+    keep_from = max(0, int(size) - _TAIL_BYTES)
+    if append_from is not None and int(size) - int(append_from) <= _TAIL_MIN_FILE_BYTES:
+        keep_from = min(keep_from, int(append_from))
+    pin = _tail_pin(path)
+    if pin is not None and pin >= int(span_start):
+        keep_from = min(keep_from, pin)               # a restored assembly entry's cut: kept from there on (_tail_pin)
+    return {"keep_from": keep_from, "keep_last": _TAIL_RECORDS,
+            "ring_from": max(0, int(size) - _TAIL_MIN_FILE_BYTES)}   # the floor's reach (see _window_start): the ring's too
+
+
+def _crcs_after(old, tinfo, pre=None):
+    """The CRCs of the entry an append to `old` leaves: a tail-only entry's own, extended by the scan's (a NEW array, the
+    served one untouched); a plain list's `pre` (filled from disk before a scan that drops records) extended the same way;
+    the scan's alone otherwise (the plain list's records have none until a first conversion fills them, _tail_shape);
+    None when the scan kept none."""
+    new = tinfo.get("crcs") if tinfo else None
+    base = old.crcs if type(old) is _TailRecords else pre
+    if base is not None:
+        out = array.array("I", base)
+        if new:
+            out.extend(new)
+        return out
+    return new
+
+
+def _fill_crcs(fh, offs, hot, m, crcs):
+    """The CRCs of records 0..m of a whole list turning into a window, from their bytes on disk, each proved by decoding to
+    the record held in memory (hot[j]) first; the scan's `crcs` for the rest appended. None on any mismatch or read error:
+    the entry then stays whole (the file is not what the list holds; the reader's next read decides)."""
+    out = array.array("I")
+    try:
+        j = 0
+        while j < m:
+            k = j + 1
+            a0 = int(offs[2 * j])
+            while k < m and int(offs[2 * k]) + int(offs[2 * k + 1]) - a0 <= _COLD_CHUNK_BYTES:
+                k += 1
+            a1 = int(offs[2 * k - 2]) + int(offs[2 * k - 1])
+            fh.seek(a0)
+            blob = fh.read(a1 - a0)
+            if len(blob) != a1 - a0:
+                return None
+            for i in range(j, k):
+                at = int(offs[2 * i]) - a0
+                piece = blob[at:at + int(offs[2 * i + 1])]
+                if json.loads(piece.strip().decode("utf-8", "replace")) != hot[i]:
+                    return None
+                out.append(zlib.crc32(piece))
+            j = k
+    except (OSError, ValueError):
+        return None
+    if crcs:
+        out.extend(crcs)                                  # the scan's: records m..total, the newest
+    return out if len(out) == len(hot) else None
+
+
+def _tail_combine(old, new, tinfo):
+    """(ncold, hot) for an entry whose earlier records were `old` (a list, a _TailRecords or []) and whose read just scanned
+    `new` under tail mode `tinfo`: what the scan dropped before the window makes every earlier record cold too, less the
+    newest dropped ones the ring gives back to keep _TAIL_RECORDS in memory. A NEW hot list; neither input is touched."""
+    if type(old) is _TailRecords:
+        oc, oh = old.ncold, old.hot
+    else:
+        oc, oh = 0, (old or [])
+    dropped = int(tinfo.get("dropped") or 0) if tinfo else 0
+    if not dropped:
+        return oc, ((oh + new) if oh else new)
+    ring = list(tinfo.get("ring") or ())
+    need = max(0, max(1, _TAIL_RECORDS) - len(new))
+    fill = ring[len(ring) - min(need, len(ring)):] if need else []
+    nd = dropped - len(fill)
+    if nd <= 0:                                           # the ring held every dropped record: nothing left the window
+        return oc, oh + fill + new
+    return oc + len(oh) + nd, fill + new
 
 
 def _entry_offsets_gen(path):
@@ -1807,9 +3114,10 @@ def _read_jsonl_incremental(path, on_fail=None):
     failure the caller may count and log (fold_records passes it through as on("fail")). The answer is []
     either way. This is the WHOLE-file read: a tail entry a checkpoint restored is upgraded to the whole file
     first (T323 stage 3); fold_records reads the entry itself through _read_jsonl_entry with tail_ok."""
-    ent = _read_jsonl_entry(path, on_fail=on_fail, tail_ok=bool(getattr(_TAIL_OK, "flag", False)))
-    _LAST_ENTRY.ent = ent
-    return ent[4] if ent is not None else []
+    fold = bool(getattr(_TAIL_OK, "flag", False))
+    ent = _read_jsonl_entry(path, on_fail=on_fail, tail_ok=fold)
+    _LAST_ENTRY.ent = ent if fold else None       # only a fold's read parks its entry, for the pin it makes next, which
+    return ent[4] if ent is not None else []      #  releases it (_pinned_entry); a plain read leaves nothing held
 
 
 _TAIL_OK = threading.local()      # .flag: the calling fold accepts a tail entry (set by fold_records around its read)
@@ -1875,7 +3183,9 @@ def register_whole_read_passthrough(*fns):
     """Register functions the whole-read attribution walks past (the parse family a walker reaches the reader through)."""
     for fn in fns:
         _WHOLE_READ_PASSTHROUGH.add(fn.__code__)
-_LAST_ENTRY = threading.local()   # .ent: the entry the last _read_jsonl_incremental on this thread served
+_LAST_ENTRY = threading.local()   # .ent: the entry a fold's read (_tail_read) on this thread was served, until its pin takes it.
+#                                   It was set by every read and kept until the thread's next one, so each long-lived thread
+#                                   held its last entry alive outside the budget, evicted or not, whatever its size (2026-09-28)
 
 
 _READ_STRIPES = [threading.RLock() for _ in range(64)]   # per-path serialization of the reads that pull bytes: two threads
@@ -1957,6 +3267,10 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
                                                                     and (st.st_mtime == hit[0] or tail_from is not None)))
             unchanged_tail = (hit is not None and not tail_ok and hit[5] > 0 and st.st_size == hit[1]
                               and st.st_mtime == hit[0])            # a whole reader meets an unchanged tail entry
+            sk_old, sk_start = None, 0                    # the entry a read appends to and the record its scan starts at (_skel_entry)
+            ncold, tinfo, keep_index, crcs = 0, None, None, None   # records before the tail-only window, the scan's tail mode, the
+            #                                               first record an append brought (the window keeps it: see _tail_shape),
+            #                                               and the records' CRCs (None for an entry that is not tail-only)
             if grown or unchanged_tail:
                 _, _, offset, tail, records, base0, gen0 = hit[:7]
                 fh.seek(max(0, offset - len(tail)))
@@ -1964,19 +3278,38 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
                 if fh.read(len(tail)) == tail:            # the file really is our cached prefix + more
                     if tail_ok or base0 == 0:
                         offs = array.array("q", hit[7]) if len(hit) > 7 else array.array("q")
-                        new, offset, nread = _scan_jsonl_stream(fh, offset, offs, limit=max(0, st.st_size - fh.tell()))   # the appended lines, one at a time
+                        tinfo = _tail_scan_info(path, st.st_size, int(offs[0]) if offs else offset,
+                                                append_from=offset if records else None,
+                                                held_tail=type(records) is _TailRecords)
+                        pre = None
+                        if (tinfo is not None and records and type(records) is not _TailRecords
+                                and int(tinfo.get("keep_from") or 0) > offset):
+                            # an append so large the scan drops records before the window, to a list held whole: its records
+                            # would go to disk with no CRC, so theirs are taken first, each proved against the record held
+                            pre = _fill_crcs(fh, offs, records, len(records), None)
+                            fh.seek(offset)
+                            if pre is None:
+                                tinfo = None                  # the bytes do not prove the list: this read keeps it whole
+                        keep_index = len(records) if (records and st.st_size - offset <= _TAIL_MIN_FILE_BYTES) else None
+                        new, offset, nread = _scan_jsonl_stream(fh, offset, offs, limit=max(0, st.st_size - fh.tell()),
+                                                                tail=tinfo)   # the appended lines, one at a time
                         _count_read(path, nread)
-                        records = (records + new) if records else new   # a NEW list — never extend the served one in place
+                        crcs = _crcs_after(records, tinfo, pre)   # the old entry's CRCs and the scan's (before `records` is replaced)
+                        sk_old, sk_start = records, len(records)
+                        ncold, records = _tail_combine(records, new, tinfo)   # a NEW list — never extend the served one in place
                         base, gen, done = base0, gen0, True
                         kind = "restore" if restored is not None else "grown"
                         if restored is not None and tail_from is None:
                             with _CKPT_LOCK:
                                 _CKPT_STATS["restored"] += 1
-                    else:                                 # a whole reader over a tail entry: the whole file, same gen
-                        fh.seek(0)
+                    else:                                 # a whole reader over a tail entry: the whole file, same gen (a large
+                        fh.seek(0)                        #  file tail-only: every record indexed, the window kept)
                         offs = array.array("q")
-                        records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size)
+                        tinfo = _tail_scan_info(path, st.st_size, 0)
+                        records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size, tail=tinfo)
                         _count_read(path, nread)
+                        ncold, records = _tail_combine([], records, tinfo)
+                        crcs = tinfo.get("crcs") if tinfo else None
                         base, gen, done, kind = 0, gen0, True, "upgrade"
                 else:
                     kind = "guard"                        # prefix changed → a rewrite → full re-read, a fresh generation
@@ -1989,13 +3322,25 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
             if not done:
                 fh.seek(0)
                 offs = array.array("q")
-                records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size)   # line by line, to the size the stat saw
+                tinfo = _tail_scan_info(path, st.st_size, 0)    # a large file: decoded line by line, only the window kept
+                records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size, tail=tinfo)   # line by line, to the size the stat saw
                 _count_read(path, nread)
+                ncold, records = _tail_combine([], records, tinfo)
+                crcs = tinfo.get("crcs") if tinfo else None
                 base, gen = 0, _next_gen()                # a from-zero read: a generation no cursor of this path can hold
             tail_from = max(0, offset - _JSONL_TAIL_GUARD)
             fh.seek(tail_from)
             tail = fh.read(offset - tail_from)
             _count_read(path, len(tail))                  # the guard capture is a read too (/perf's count is what was pulled)
+            sk_ncold, sk_hot = ncold, records
+            records = _tail_shape(path, offs, ncold, records, offset, tail, keep_index=keep_index, crcs=crcs,
+                                  fh=fh)          # a plain list, or the window over the indexed file
+            if type(records) is _TailRecords:     # the walk skeletons of the records before the window, from memory (see _skel)
+                records.gen = gen
+                records.skel = _skel_entry(sk_old, sk_ncold, sk_hot, tinfo.get("skel") if tinfo else None,
+                                           int(tinfo.get("dropped") or 0) if tinfo else 0, sk_start, records)
+                if _GC_UNTRACK_ON and records.skel is not None and _gc.is_tracked(records.skel):
+                    _PY_GC_UNTRACK(records.skel)  # the list of acyclic skeletons, as the window's own list below
             if kind in _WHOLE_READ_KINDS:                 # a whole read: counted by kind and caller on /perf (T384), always on; the
                 try:                                      #  frame walk runs only here, on the rare whole read, never on a tail or an
                     fr = sys._getframe(1)                 #  append
@@ -2030,13 +3375,18 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
+    held = records.hot if type(records) is _TailRecords else records
+    if _GC_UNTRACK_ON and type(held) is list and _gc.is_tracked(held):
+        _PY_GC_UNTRACK(held)                      # the entry's outer list (a fresh list per read; its records were untracked at decode)
+    if _GC_UNTRACK_ON and held is not records and _gc.is_tracked(records):
+        _PY_GC_UNTRACK(records)                   # the window's holder: an array, the list above, a str and bytes, acyclic
     ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen, offs)
     with _JSONL_CACHE_LOCK:
         _cache_insert_locked(path, ent)      # the count cap and the byte budget, LRU order (hot entries survive any cold flood)
     return ent
 
 
-def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
+def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None, step_reads=True):
     """Fold a JSONL file's records into a carried state, APPEND-INCREMENTALLY (issue 903, 2026-09-03):
     the states/transcript readers re-read their whole file behind an (mtime,size) key that every append
     invalidates — O(file) per push for every working session. The reader serves the parsed records of a
@@ -2073,7 +3423,12 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     `drop_after` (the kernel memory work, 2026-09-11): "quiescent" drops the file's records from the shared reader's
     cache once this fold has stepped them, when the file has not changed for _DROP_AFTER_QUIESCENT_S (a subagent
     that returned; the user's rule: nothing stays resident that nobody looks at). The cursor and its checkpoint stand;
-    a later fold of an unchanged file re-reads it once, a growing file keeps its records (see _drop_quiescent_entry).
+    a later fold of an unchanged file re-reads it once, a growing file keeps its records, and a live session's main
+    transcript keeps them while a fold over it cannot restore from its document (see _drop_quiescent_entry).
+
+    `step_reads` False (2026-10-07) says `step` reads nothing of the record it is handed (rewound_uuids' step retires the
+    memo whatever arrived): any record past the cursor applies it ONCE with None, and a refold is init() plus that one
+    step, so neither walks the records (off disk, for a tail-only entry) nor reads a tail entry whole to find out.
 
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
@@ -2136,6 +3491,10 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
             kind = kind or "append"
         else:
             kind = None
+    if kind is None and not step_reads:                   # a step that reads no record (rewound_uuids' retiring step): a refold
+        state, start, kind = init(), len(recs), "refold"  #  is the step applied once if any record exists, never a walk of every
+        if total > 0:                                     #  record off a tail-only entry's disk, nor a whole read of a tail entry
+            state = step(state, None)                     #  (2026-10-07: the memo's first call after a restart read the file)
     if kind is None:
         if base > 0:                                      # a refold needs every record: the entry is a tail, so read whole
             del failed[:]
@@ -2159,9 +3518,16 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
                     rf = _CKPT_STATS["refolds"].setdefault(ckpt, {"count": 0, "bytes": 0})   #  and weighed per fold on /perf (T377).
                     rf["count"] += 1; rf["bytes"] += got   #  Diagnostic: the delta is over the path's process-wide counter, so another
         #                                                    thread's read of the same file inside this call lands in it
-    for r in recs[start:]:
-        if isinstance(r, dict):
-            state = step(state, r)
+                rw = _CKPT_STATS["refoldWalks"].setdefault(ckpt, {"count": 0, "records": 0})   # the walk from record 0, whether
+                rw["count"] += 1; rw["records"] += len(recs)   #  or not it read (2026-10-10): a refold over an entry already indexed
+                #                                                from 0 reads nothing, so `refolds` missed it, and still walks all
+    if not step_reads:
+        if start < len(recs):
+            state = step(state, None)                     # appended records: the step once, whatever they hold
+    else:
+        for r in recs[start:]:
+            if isinstance(r, dict):
+                state = step(state, r)
     if len(cache) > 256:
         # Past 256 cursors the dict is swept of the ones that cannot serve a hit (2026-09-17). It was CLEARED here, "bounded by
         # the session count", but a fold dict is keyed per FILE, and the chat build's agent-gist dict holds one cursor per agent
@@ -2205,8 +3571,10 @@ def _drop_quiescent_entry(key, ent, pop=True):
     once a fold has stepped them: the fold's cursor (and its checkpoint) stands, the file's bytes leave memory. Only the
     very entry this fold read is dropped (another thread's newer entry is left alone); a file still changing keeps its
     records, since its next append would otherwise re-read it whole. Without `pop` (a fold that stepped nothing: a hit or
-    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. Returns
-    True when the document was written here."""
+    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. A live
+    session's main transcript (keep_whole_paths) that a fold cannot restore from its document is not popped either: its drop
+    stays owed until the session leaves the live map or every fold restores (2026-10-03, at the pop below). Returns True when
+    the document was written here."""
     try:
         if time.time() - float(ent[0]) < _DROP_AFTER_QUIESCENT_S:
             return False
@@ -2219,6 +3587,11 @@ def _drop_quiescent_entry(key, ent, pop=True):
     with _CKPT_LOCK:
         if key in _DROP_OWED:                             # a drop deferred for the budget is taken at the next fold over the file
             _DROP_OWED.pop(key, None); pop = True         #  (whichever path that fold takes) or at the next cycle's start
+        rekeep = pop and key in _DROP_KEPT
+    if rekeep and key in _KEEP_WHOLE[0] and _drop_rereads(key):
+        with _CKPT_LOCK:                                  # a drop held for its live session (below), retried and still held: owed
+            _DROP_OWED[key] = time.time()                 #  again, and no write here (its session's settle and periodic writes keep
+        return False                                      #  the document current), so a held leaf never costs a write per cycle
     # T362: the entry a quiescent-drop fold ends over is a read that already happened (the boot's, by whichever fold read the
     # file whole); if the file's document lacks something this process holds (the one rule), it is written NOW, before any
     # pop, from that read: the idle sessions' documents converge here, where no settle reaches them and the converge pass must
@@ -2246,8 +3619,9 @@ def _drop_quiescent_entry(key, ent, pop=True):
                 if pop:
                     _DROP_OWED[key] = time.time()
                     if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
-                        oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
-                        _DROP_OWED.pop(oldest, None)
+                        oldest = next((k for k in _DROP_OWED if k not in _DROP_KEPT), None)   #  two, low 1: a cleared mark left
+                        if oldest is not None:            #  its entry neither paid nor popped), never one held for its live
+                            _DROP_OWED.pop(oldest, None)  #  session (2026-10-03: that pop is a whole read on the next pass)
             if oldest is not None:
                 _pop_owed_entry(oldest)                   # outside _CKPT_LOCK: the reader's lock alone
             return False
@@ -2262,6 +3636,23 @@ def _drop_quiescent_entry(key, ent, pop=True):
                 _CKPT_STATS["converge"]["dropWrites"] += 1
     if not pop:
         return wrote
+    if key in _KEEP_WHOLE[0] and _drop_rereads(key):
+        # 2026-10-03: a live session's main transcript, which the jobs pass folds on every pass, with a fold the document cannot
+        # restore (the background view of a long transcript is over the cap): the pop would come back as a whole read within a
+        # pass, not as memory (on a devbox, 101 such reads of 89 GB in 16 hours, and the auto-nudge and interrupt parses that
+        # upgraded the same tail entries, 48 GB more). The entry stays whole and its drop stays OWED, so every cycle's start and
+        # the next fold over the file retry it; it is paid once the session leaves the live map or every fold restores. The
+        # write above ran as before. Subagent files, idle sessions' leaves and leaves whose folds all restore drop as before.
+        with _CKPT_LOCK:
+            _DROP_OWED.pop(key, None); _DROP_OWED[key] = time.time()   # the newest mark: the bound pays older ones first
+            first = key not in _DROP_KEPT
+            _DROP_KEPT.add(key)
+        if first:
+            with _JSONL_CACHE_LOCK:
+                _RECORD_CACHE_STATS["dropKept"] += 1
+        return wrote
+    with _CKPT_LOCK:
+        _DROP_KEPT.discard(key)
     with _JSONL_CACHE_LOCK:
         if _JSONL_CACHE.get(key) is ent:
             w = _cache_pop_locked(key)
@@ -2288,8 +3679,10 @@ def _pinned_entry(key, recs):
     """The shared reader's cache entry for `key` if it still describes the read that returned `recs` (its
     records list IS `recs`), None when the reader holds nothing for the path, _UNPINNED when another thread
     has advanced the entry past that read. The entry the reader served on this thread is checked first
-    (T323 stage 3: an entry evicted from the cache between the read and the pin still describes the read)."""
+    (T323 stage 3: an entry evicted from the cache between the read and the pin still describes the read). The handle
+    is taken, not read: once pinned, the entry lives as long as the fold holds it and no longer (2026-09-28)."""
     last = getattr(_LAST_ENTRY, "ent", None)
+    _LAST_ENTRY.ent = None
     if last is not None and last[4] is recs:
         return last
     with _JSONL_CACHE_LOCK:
@@ -2696,7 +4089,9 @@ class FileAdapter:
     ancestors and drop out for free; `/clear` leaves no parent link so the walk
     stops there and pre-clear history drops out naturally."""
 
-    def __init__(self, candidate_files, leaf_path, leaf_override=None, resume_links=None, seed=None):
+    def __init__(self, candidate_files, leaf_path, leaf_override=None, resume_links=None, seed=None, walk_only=False):
+        self.walk_only = bool(walk_only)   # a chain walk's adapter (2026-10-07): only the graph is read, so a tail-only entry's
+        #                                    records before its window are its walk skeletons (see _skel), never a disk read
         self.seed = seed         # the assembly checkpoint's pre-cut graph (T323 stage 4): uuids, verdicts, types, the kept
         #                          chain, the gate facts and the read-counter floor of every record before the cut, so the
         #                          walks and gates over the tail answer as the whole graph would; None for a whole read
@@ -2761,11 +4156,26 @@ class FileAdapter:
                     self._src_stat[str(fp)] = tuple(st_skip)
                 continue
             if cut is not None:
-                ent = _read_jsonl_entry(fp, tail_ok=True, tail_from=tuple(cut))
+                ent = _read_jsonl_entry(fp, tail_ok=True, tail_from=_entry_start(fp, tuple(cut)))   # from the earlier of the
+            #                                              assembly cut and the fold document's, so the folds resume over the entry;
+            #                                              the slice below still ingests from the assembly cut (2026-10-10)
             else:
                 ent = _read_jsonl_entry(fp, tail_ok=False)
             recs = ent[4] if ent is not None else []
+            whole_from_tail = False
+            if walk_only and type(recs) is _TailRecords and _walk_ready(recs):
+                recs = _walk_list(recs)                  # the skeletons before the window and the window's records, from memory
+            elif seed is None and type(recs) is _TailRecords:
+                recs = _whole_list(str(fp), ent)         # a WHOLE adapter over a tail-only entry (2026-10-07): a list this adapter
+                whole_from_tail = True                   #  holds as it held the cache's whole list before (by_uuid keeps nearly
+            #                                              every record anyway), so the assembly writer's walks over _src stay in
+            #                                              memory; released with the entry (re-seat). One streaming pass off disk,
+            #                                              or the list a live whole adapter over the same entry already holds
+            #                                              (_whole_list: one copy per transcript, not one per adapter)
             self._src[str(fp)] = recs
+            if whole_from_tail:
+                _whole_register(str(fp), self)
+                whole_from_tail = False
             self._src_keys[str(fp)] = (ent[6], ent[5], ent[5] + len(recs)) if ent is not None else (None, 0, 0)
             if ent is not None:
                 self._src_stat[str(fp)] = (ent[1], ent[0])    # the reader's (size, mtime) for this very read
@@ -3676,10 +5086,11 @@ class FileAdapter:
                 # dedup, and this summary's text landed on the manual card). The fallback serves a
                 # summary whose boundary is not on record here: a restored assembly entry holds only
                 # the tail's records and carries last_boundary from its checkpoint.
-                bp = self.parent_of.get(u)
-                br = self.by_uuid.get(bp) if bp else None
-                own = bp if (br is not None and br.get("type") == "system"
-                             and br.get("subtype") == "compact_boundary") else last_boundary
+                # Since 2026-10-09 the link is followed up through attachment records (_summary_boundary):
+                # the CLI now writes boundary, attachments, then the summary parented on the last
+                # attachment, and the direct-parent test filed every such summary on the previous card.
+                br = _summary_boundary(r, self.by_uuid.get, self.parent_of.get)
+                own = br.get("uuid") if br is not None else last_boundary
                 stext = _text_of(_content(r.get("message")))
                 if own and stext:                      # attach to its own boundary; cap for transport
                     summaries[own] = stext[:SUMMARY_CAP] + (
@@ -4613,22 +6024,24 @@ def chain_membership(leaf_path, candidate_files=None, states=None, leaf_override
             doc = None if _standing else _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links)
             if _standing:
                 _asm_stat("seeded:refusedStanding")       # the cold walk, no proof, while the mark stands (round two)
-            if doc is not None and not _tail_chains_onto_the_document(leaf_path, doc):
+            if doc is not None and not _tail_chains_onto_the_document(leaf_path, doc, walk_only=True):
                 _asm_stat("seeded:chainRefused"); doc = None   # the tail re-parents into the pre-cut part: the cold walk, as
             if doc is not None:                              #  before T391 (T402 round four)
                 try:                                         # no current entry: the document's pre-cut facts plus the tail
                     seed, _landed = _seed_from_doc(doc)      #  read now, the whole graph's verdicts without the whole read
-                    adapter = FileAdapter(candidate_files, leaf_path, resume_links=links, seed=seed)
-                    how = "seeded"
+                    adapter = _walk_with_skeletons(lambda w: _membership_of(FileAdapter(
+                        candidate_files, leaf_path, resume_links=links, seed=seed, walk_only=w)))   # skeletons: no disk read
+                    how = "seeded"                           #  between the cut and the window per call (review find, 2026-10-07)
                 except Exception as e:                       # noqa: BLE001
                     _asm_ckpt_note(leaf_path, "restore", repr(e)[:120]); adapter = None
             elif _READER_TRACE:
                 sys.stderr.write("chain: no document for %s (rompuuid %s sdk_human %r cands %r)\n" % (leaf_path, rompuuid, sdk_human, [str(f) for f in candidate_files]))
-    if adapter is None:
-        adapter = FileAdapter(candidate_files, leaf_path, leaf_override=leaf_override, resume_links=links)
-    if _READER_TRACE:
+    if adapter is None:                                  # the whole walk over skeletons: the rewind hold asks it with the pending
+        adapter = _walk_with_skeletons(lambda w: _membership_of(FileAdapter(   #  cut on every feed build of an armed hold, on the
+            candidate_files, leaf_path, leaf_override=leaf_override, resume_links=links, walk_only=w)))   # pusher, partly under
+    if _READER_TRACE:                                    #  _goals_snap_lock: no read before the window (review find, 2026-10-07)
         sys.stderr.write("chain: %s %s\n" % (how, leaf_path))
-    return _membership_of(adapter)
+    return adapter if isinstance(adapter, dict) else _membership_of(adapter)   # the walks above answer the membership itself
 
 
 def file_rewound(path, rompuuid=None, sdk_human=None, own=True):
@@ -4640,6 +6053,13 @@ def file_rewound(path, rompuuid=None, sdk_human=None, own=True):
     session's leaf (2026-09-15): its document is loaded without the note, so a document that does not verify for this
     walk (written under the other owner bit, moved, rewritten) is refused quietly and stands for its owner, and the walk
     reads the file whole here as before the seeded road."""
+    return _walk_with_skeletons(lambda walk_only: _file_rewound(path, rompuuid, sdk_human, own, walk_only))
+
+
+def _file_rewound(path, rompuuid, sdk_human, own, walk_only):
+    """file_rewound's walk; `walk_only`, over a tail-only entry's skeletons (see _walk_with_skeletons): the judges call it on
+    every pass a leaf grew, and over the document's road the records between the cut and the window were read off disk twice
+    per call before skeletons (review find, 2026-10-07)."""
     path = Path(path)
     ad = None
     if rompuuid is not None and _CKPT_DIR_FN is not None:
@@ -4648,12 +6068,14 @@ def file_rewound(path, rompuuid=None, sdk_human=None, own=True):
                                                     memo="seeded")   # the decode once per process per document (2026-09-15)
         if _standing:                                     # the cold walk, no proof, while the mark stands (round two); a reader
             _asm_stat("seeded:refusedStanding" if own else "foreign:refusedStanding")   # that does not own the leaf counts its own
-        if doc is not None and not _tail_chains_onto_the_document(path, doc):
+        if doc is not None and not _tail_chains_onto_the_document(path, doc, walk_only=walk_only):
             _asm_stat("seeded:chainRefused"); doc = None      # the cold walk over a tail that re-parents into the pre-cut
         if doc is not None:                                   #  part (T402 round four)
             try:
                 seed, _landed = _seed_from_doc(doc)
-                ad = FileAdapter([str(path)], str(path), seed=seed)
+                ad = FileAdapter([str(path)], str(path), seed=seed, walk_only=walk_only)
+            except _SkelMiss:
+                raise                                         # a skeleton miss is the walk's to rerun whole, never a refusal
             except Exception as e:                            # noqa: BLE001
                 if own:
                     _asm_ckpt_note(path, "restore", repr(e)[:120])
@@ -4661,7 +6083,7 @@ def file_rewound(path, rompuuid=None, sdk_human=None, own=True):
                     _asm_stat("foreign:restore")              # another session's document: never unlinked from here
                 ad = None
     if ad is None:
-        ad = FileAdapter([str(path)], str(path))
+        ad = FileAdapter([str(path)], str(path), walk_only=walk_only)
     if not ad.by_uuid and (ad.seed is None or not ad.seed["verdicts"]) and path.stat().st_size > 0:
         raise OSError("transcript read yielded no records")
     verdicts = dict(ad.chain_verdicts())
@@ -4683,11 +6105,14 @@ def _rewound_walk(path):
     Its own, never re-fetched from the cache after the walk: an append and a refresh between the two would memoize pre-append
     verdicts at the post-append witness (T391 round one, low 1)."""
     key = str(path)
-    ad = FileAdapter([key], key)
-    if not ad.by_uuid and Path(path).stat().st_size > 0:
-        raise OSError("transcript read yielded no records")
-    verdicts = dict(ad.chain_verdicts())
-    return {u for u, v in verdicts.items() if v == "rewind"}, ad._src_keys.get(key, (None, 0, 0))
+
+    def build(walk_only):                                 # over a tail-only entry, the walk skeletons: no disk read per pass,
+        ad = FileAdapter([key], key, walk_only=walk_only)  #  however often the leaf grows (review find, 2026-10-07)
+        if not ad.by_uuid and Path(path).stat().st_size > 0:
+            raise OSError("transcript read yielded no records")
+        verdicts = dict(ad.chain_verdicts())
+        return {u for u, v in verdicts.items() if v == "rewind"}, ad._src_keys.get(key, (None, 0, 0))
+    return _walk_with_skeletons(build)
 
 
 def rewound_uuids(path, drop=True):
@@ -4715,7 +6140,9 @@ def rewound_uuids(path, drop=True):
     key = str(path)
     had = _REWOUND_CACHE.get(key)
     kinds = []
-    state = fold_records(_REWOUND_CACHE, key, lambda: None, lambda st, o: None, on=kinds.append, ckpt="rewoundUuids")
+    state = fold_records(_REWOUND_CACHE, key, lambda: None, lambda st, o: None, on=kinds.append, ckpt="rewoundUuids",
+                         step_reads=False)                # the step retires the memo whatever a record holds: never a walk
+    #                                                       of the records to find that out (2026-10-07)
     if isinstance(state, dict) and isinstance(state.get("uuids"), list):
         with _CKPT_LOCK:
             _REWOUND_STATS["served"] += 1
@@ -4814,6 +6241,29 @@ _ASM_KEYLOCKS = {}                 # key -> Lock; never pruned (a Lock is tiny, 
 #                                    key's lock mid-flight would let two folds interleave)
 _ASM_STATS = {"full": 0, "fold": 0, "serve": 0, "restore": 0, "bypass": 0, "fallback": 0}   # observability + tests (restore
 #                                                                                             seeded: a row without it means zero)
+_ASM_RESEAT_DUE = {}               # key -> True: a whole entry asm_checkpoint_write released after writing its document (a
+#                                    tail-only leaf, _asm_release_at_write): the next parse of the key restores it with the
+#                                    re-seat's churn bound, and a refusal keeps the whole parse that follows whole (as a re-seat
+#                                    the restore did not serve). Popped by that parse, or by asm_reseat_due's caller
+
+
+def _asm_release_at_write(leaf_path):
+    """Whether asm_checkpoint_write releases the whole entry it wrote a document from at once (see there): a leaf the tail-only
+    rule windows. Other leaves keep the re-seat at their next parse, as before (their entries hold what their record entries
+    hold, which the record cache counts)."""
+    return tail_rule_on() and _tail_eligible(leaf_path) and _ASM_RELEASE_AT_WRITE
+
+
+_ASM_RELEASE_AT_WRITE = os.environ.get("ROMP_ASM_RELEASE_AT_WRITE", "1") != "0"
+
+
+def asm_reseat_due(leaf_path, rompuuid, sdk_human=False):
+    """Whether asm_checkpoint_write released this session's whole entry over `leaf_path` after its last write (and no parse
+    has restored it yet): the caller then drops the parse store's trees over the leaf, which hold the released entry's
+    bodies, and re-parses (a restore from the document just written)."""
+    key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+    with _ASM_LOCK:
+        return bool(_ASM_RESEAT_DUE.get(key))
 
 
 def _asm_stat(key, n=1):
@@ -4829,12 +6279,34 @@ _TS_REPAIRED_SEEN = set()    # record uuids already counted in ts-repair — dis
 
 
 _ASM_DEMOTE_TL = threading.local()   # the calling thread's last demotion reason: what _assemble reads to pick the road after it
+_ASM_RESTORE_AFTER_DEMOTE_TAIL = ("kept", "uuid-known", "recs-gone", "boundary", "summary", "no-leaf-slot")
+#                                   (2026-10-08) further demotions a RESTORED entry of a tail-only leaf takes to the restore road rather than
+#                                   the whole parse: for such a leaf the whole parse streams every record off disk (the deploy of 2026-10-07:
+#                                   7.9 GB in 47 minutes through four routine callers' parses) and leaves a whole entry holding them. Each
+#                                   reason here is a property of the FOLD's carry (the delta cannot be absorbed into the entry in hand: a
+#                                   kept-set change under an old tail record, a uuid the graph knows, a compaction or its summary in the
+#                                   tail), and the restore does not fold: it re-parses the tail from the document's cut through a fresh
+#                                   seeded adapter, exactly the boot's restore over the same document and tail, behind the same chain
+#                                   proof (_tail_chains_onto_the_document: a compaction anchored into the pre-cut interior, a summary or a
+#                                   reused uuid parented before the cut, a re-rooted tail all refuse to the whole parse). The reasons that
+#                                   can re-classify a PRE-CUT atom (a prompt id of the twins family or an adopted boundary's, a skill link
+#                                   to an old payload, a stamp sorting before the cut) are not here: the document holds those atoms fixed,
+#                                   so only a whole parse answers them.
 _ASM_RESTORE_AFTER_DEMOTE = ("descent", "rewrite", "nonleaf", "reseat")   # the demotions the document still stands for (T402): the
 #                                   tail moved (a spur, a rewind, a fork), the leaf's record entry was replaced, a lineage file moved; the
 #                                   load's own checks refuse a document that no longer fits. `reseat` (2026-09-24) is a whole entry whose
 #                                   own document now stands (asm_checkpoint_write): re-seated on it, the folds after walk the tail alone.
 #                                   Every other reason (a new boundary or summary in the tail, a prompt id, a skill link, a stamp out of
 #                                   order, ...) keeps the whole parse.
+
+
+def _restore_bounded(leaf_path):
+    """Whether every restore of `leaf_path`'s entry carries the churn bound (the `reseated` flag, _asm_gates' tailShare), not
+    only a re-seat's (2026-10-08): a leaf the tail-only rule windows. Its restored entry's adapter holds every record past the
+    document's cut, and so does the record window pinned to that cut (_tail_pin), so a cut frozen for the life of the process
+    held a tail that only grew; under the bound the tail past the cut stays under the share of the pre-cut bytes and the
+    whole parse that follows the share writes the next cut."""
+    return tail_rule_on() and _tail_eligible(leaf_path)
 
 
 def _asm_demote(reason):
@@ -4864,6 +6336,8 @@ def _asm_release(entry):
     ix = entry.get("index") if entry else None
     if ix is not None:
         ix.release()
+    if entry:
+        _tail_pin_clear(entry.get("pin"))            # the window pinned to its cut slides again (_tail_pin)
 
 
 def _asm_serve(entry):
@@ -4923,6 +6397,9 @@ def evict_document(leaf_path):
             if e is not None:
                 popped.append(e)
                 files.update(e.get("cands") or ())
+        real = os.path.realpath(leaf)
+        for k in [k for k in _ASM_RESEAT_DUE if k[0] == real]:
+            _ASM_RESEAT_DUE.pop(k, None)                 # a released entry's pending re-seat goes with the document's entries
     for e in popped:
         _asm_release(e)                              # OUTSIDE _ASM_LOCK: release takes _MAT_LOCK, never nested with it
     dropped = 0
@@ -4988,6 +6465,8 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             delta = []
         elif count > ocount:
             delta = recs[ocount - base:]        # the records past what the entry folded (the reader's generation proves the prefix)
+            if type(delta) is not list:
+                delta = list(delta)             # a lag past a tail-only window: read once, then walked by the gates and the fold
         else:
             return _asm_demote("rewrite")
     if delta is None:
@@ -4999,45 +6478,36 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
     if old_leaf is None:
         return _asm_demote("empty-graph")
     parent_d, new_leaf = {}, old_leaf
-    for r in delta:
+    rest_ppt = entry.get("docMaxPpt", max_ppt)    # what a record after a restorable demotion is held to: the document's watermark for a
+    #                                               restored entry, the stamp its restore checks against (2026-10-08, review N6d: the
+    #                                               entry's own watermark counts the tail, so a summary written a second before its own
+    #                                               boundary in the next append took a whole parse the restore would have answered)
+    for i, r in enumerate(delta):
         t, u = r.get("type"), r.get("uuid")
         if u:
-            if u in ad.by_uuid or u in ad.dangling or u in ((ad.seed or {}).get("verdicts") or {}):
-                return _asm_demote("uuid-known")   # a re-write rebinds last-write-wins index state; a resurrected dangling target
-                #                                    rebinds repaired stitches; a RESTORED entry's adapter holds only the tail's
-                #                                    records, its pre-cut uuids live in the seed (round seven: a reuse of a pre-cut
-                #                                    uuid folded and served u1 a1 u2 a2 where a cold parse clears them)
+            if u in ad.dangling:
+                return _asm_demote("dangling")     # a resurrected dangling target rebinds repaired stitches: a stitch the document
+                #                                    froze before the cut, so only the whole parse answers it (2026-10-08: it was
+                #                                    counted uuid-known, which a restored tail-only entry now restores)
+            if u in ad.by_uuid or u in ((ad.seed or {}).get("verdicts") or {}):
+                return _asm_demote_whole(_asm_rest_whole(delta, i, ad, rest_ppt) or "uuid-known")
+                #                                    a re-write rebinds last-write-wins index state; a RESTORED entry's adapter holds
+                #                                    only the tail's records, its pre-cut uuids live in the seed (round seven: a reuse
+                #                                    of a pre-cut uuid folded and served u1 a1 u2 a2 where a cold parse clears them)
             p = r.get("parentUuid") or r.get("logicalParentUuid")
             parent_d[u] = None if p == u else p
             new_leaf = u
         if t == "system" and r.get("subtype") == "compact_boundary":
-            return _asm_demote("boundary")   # sets the pre-pass's compaction gate and can re-seat adoptions
+            return _asm_demote_whole(_asm_rest_whole(delta, i, ad, rest_ppt) or "boundary")   # sets the pre-pass's compaction gate and
+            #                                                                             can re-seat adoptions
         if r.get("isCompactSummary") is True:
-            return _asm_demote("summary")    # attaches to its boundary and arms the restore dedup in the
-            #                                  chronological pre-pass (the summary, not the boundary, 2026-09-19)
-        if t == "user" and r.get("promptId") and r["promptId"] in ad.prompt_ids:
-            # A repeated promptId is ROUTINE — every record of a turn wears its prompt's id, so
-            # tool results repeat it on nearly every append (measured: this gate, unshaped,
-            # demoted 1863 of 1869 bursts on a live 46MB replay). Only two shapes can
-            # re-classify OLD atoms: a command-wrapper-family record (it grows the twins map
-            # retroactively) and any record wearing an adoptable boundary's episode pid (it can
-            # re-seat the adopted card's splice without changing kept — invisible to the
-            # invariance check). Everything else folds: the carried twins map serves the DELTA
-            # record's own classification record-locally.
-            _wtxt = _text_of(_content(r.get("message"))) or ""
-            if r["promptId"] in ad.boundary_pids or \
-                    (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
-                return _asm_demote("promptid")                                        #   re-classifies nothing (T333)
-        if t == "assistant":
-            for b in _content(r.get("message")) or []:
-                if isinstance(b, dict) and b.get("type") == "tool_use" and \
-                        b.get("name") == "Skill" and b.get("id") in ad.src_tool_links:
-                    return _asm_demote("skill-link")   # an already-ingested payload references it
-        if t in ("user", "assistant"):
-            ts = parse_z(r.get("timestamp"))
-            if ts is None or ts < max_ppt:
-                return _asm_demote("ts")   # the carry is valid only for a delta sorting at-or-
-                #                            after everything folded (the pre-pass sorts None first)
+            if _asm_summary_orphan(r, {x.get("uuid"): x for x in delta[:i] if x.get("uuid")}, ad):
+                return _asm_demote_whole("summary-orphan")
+            return _asm_demote_whole(_asm_rest_whole(delta, i, ad, rest_ppt) or "summary")   # attaches to its boundary and arms the
+            #                                  restore dedup in the chronological pre-pass (the summary, not the boundary, 2026-09-19)
+        why = _asm_record_whole(r, ad, max_ppt)
+        if why is not None:
+            return _asm_demote_whole(why)
     # Leaf descent: the new file-leaf must chain back to the old one THROUGH the delta — an
     # api_error spur re-parent, a rewind, and a /clear fork all fail here. parent_d.pop doubles
     # as the cycle guard; a delta with no uuid-bearing record passes trivially (leaf unmoved).
@@ -5048,6 +6518,106 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
         cur = parent_d.pop(cur)
         hops += 1
     return delta, leaf_recs
+
+
+def _asm_record_whole(r, ad, max_ppt, prior=None):
+    """The demotion a delta record `r` forces to the WHOLE parse, by the gates' rules, or None: a resurrected dangling target
+    ("dangling"), a repeated prompt id of the kinds that re-classify old atoms ("promptid"), a Skill tool_use an ingested
+    payload already references ("skill-link"), a conversational stamp unparseable or before the carry's watermark ("ts").
+    The reasons a restore cannot answer either: each moves an atom the document holds fixed before the cut."""
+    t, u = r.get("type"), r.get("uuid")
+    if u and u in ad.dangling:
+        return "dangling"
+    if r.get("isCompactSummary") is True and _asm_summary_orphan(r, prior or {}, ad):
+        return "summary-orphan"               # off any boundary: a cold parse attaches it to the last boundary's card, which may sit
+        #                                       before the cut (review p5; N1, N2: the rule ran only on an append's first hit)
+    if t == "user" and r.get("promptId") and r["promptId"] in ad.prompt_ids:
+        # A repeated promptId is ROUTINE — every record of a turn wears its prompt's id, so tool results repeat it on nearly
+        # every append (measured: this gate, unshaped, demoted 1863 of 1869 bursts on a live 46MB replay). Only two shapes can
+        # re-classify OLD atoms: a command-wrapper-family record (it grows the twins map retroactively) and any record wearing an
+        # adoptable boundary's episode pid (it can re-seat the adopted card's splice without changing kept — invisible to the
+        # invariance check). Everything else folds: the carried twins map serves the DELTA record's own classification
+        # record-locally.
+        _wtxt = _text_of(_content(r.get("message"))) or ""
+        if r["promptId"] in ad.boundary_pids or \
+                (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
+            return "promptid"                                                     #   re-classifies nothing (T333)
+    if t == "assistant":
+        for b in _content(r.get("message")) or []:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and \
+                    b.get("name") == "Skill" and b.get("id") in ad.src_tool_links:
+                return "skill-link"           # an already-ingested payload references it
+    if t in ("user", "assistant") or (t == "system" and r.get("subtype") == "compact_boundary"):
+        ts = parse_z(r.get("timestamp"))      # the watermark counts compactions too (the carry's max_ppt, the writer's cut order)
+        if ts is None or ts < max_ppt:
+            return "ts"                       # the carry is valid only for a delta sorting at-or-after everything folded (the
+            #                                   pre-pass sorts None first)
+    return None
+
+
+_SUMMARY_ATTACH_HOPS = 8   # how many attachment records may sit between a compaction boundary and its summary (_summary_boundary)
+
+
+def _summary_boundary(rec, lookup, parent_of=None):
+    """The compact_boundary record the compaction summary `rec` belongs to, or None (2026-10-09). The Claude CLI writes a
+    compaction as the boundary, then attachment records (three on every live transcript read that day), then the summary,
+    parented on the LAST attachment and stamped about a second before the boundary; older writes parent the summary on the
+    boundary itself. So the walk follows parent links up through attachment records only, at most _SUMMARY_ATTACH_HOPS of
+    them: a chain that meets any other record (a prompt, a reply) before a boundary is an orphan summary, as before.
+    `lookup` maps a uuid to its record (or None); `parent_of`, when given, maps a uuid to its parent uuid (the whole parse's
+    repaired links), else each record's own parentUuid is followed. Read by the whole parse's own-boundary pick
+    (_prepass), the fold's orphan gate (_asm_summary_orphan) and the restore's (_restore_tail_refusal): with the summary's
+    direct parent required to be the boundary, every live compaction read as an orphan, so the restore refused and the fold
+    demoted to a whole parse of the transcript, and the whole parse filed the summary on the previous compaction's card."""
+    def up(r):
+        return parent_of(r.get("uuid")) if parent_of is not None else r.get("parentUuid")
+    p, seen = up(rec), set()
+    for _ in range(_SUMMARY_ATTACH_HOPS + 1):             # the direct parent, then one step past each attachment
+        if not p or p in seen:
+            return None
+        seen.add(p)
+        pr = lookup(p)
+        if not pr:
+            return None
+        t = pr.get("type")
+        if t == "system" and pr.get("subtype") == "compact_boundary":
+            return pr
+        if t != "attachment":
+            return None
+        p = up(pr)
+    return None
+
+
+def _asm_summary_orphan(r, prior, ad):
+    """Whether the compaction summary `r` belongs to no compaction boundary (_summary_boundary): its chain read among the
+    append's earlier records (`prior`, uuid -> record) and the adapter's."""
+    return _summary_boundary(r, lambda u: prior.get(u) or ad.by_uuid.get(u)) is None
+
+
+def _asm_demote_whole(why):
+    """_asm_demote, with an orphan summary counted as the summary it is (g:summary, read by the road counters) and routed by its
+    own reason (summary-orphan, which no restore road takes), g:summary:orphan beside it."""
+    if why == "summary-orphan":
+        _asm_demote("summary")
+        _asm_stat("g:summary:orphan")
+        _ASM_DEMOTE_TL.reason = "summary-orphan"
+        return None
+    return _asm_demote(why)
+
+
+def _asm_rest_whole(delta, i, ad, max_ppt):
+    """The first whole-parse demotion (_asm_record_whole) among delta[i:], or None (2026-10-08, review R1-1). The gates stop at a
+    record's first demotion, and a restored tail-only entry now restores for some (_ASM_RESTORE_AFTER_DEMOTE_TAIL); an append
+    whose first hit was one of those carried a later record the restore cannot answer (a prompt stamped before the cut landed in
+    a tail turn, where a cold parse opens the old turn with it), so the rest of the append is read before the road is picked."""
+    prior = {x.get("uuid"): x for x in delta[:i] if x.get("uuid")}
+    for r in delta[i:]:
+        why = _asm_record_whole(r, ad, max_ppt, prior)
+        if why is not None:
+            return why
+        if r.get("uuid"):
+            prior[r["uuid"]] = r
+    return None
 
 
 def _asm_heal(entry, rompuuid, postal_index):
@@ -5131,7 +6701,10 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
     entry["n_qatts"] = len(ad.qatts)
     ogen, obase, ocount = entry["recs"][leaf_key]
     entry["recs"][leaf_key] = (ogen, obase, ocount + len(delta))   # commit LAST: a bail above re-slices the same
-    ad._src[leaf_key] = leaf_recs                 #  delta next visit and the uuid gate demotes it
+    held = ad._src.get(leaf_key)                  #  delta next visit and the uuid gate demotes it
+    if type(leaf_recs) is _TailRecords and type(held) is list and ad.seed is None:
+        leaf_recs = held + list(delta)            # a whole adapter keeps its own list (see FileAdapter: a NEW list, served ones stay)
+    ad._src[leaf_key] = leaf_recs
     ad._src_keys[leaf_key] = entry["recs"][leaf_key]
     _asm_stat("fold")
     return _asm_serve(entry)
@@ -5687,6 +7260,25 @@ def asm_index_stats():
 #   resident is len(_MAT_LRU) with the entries of collected lists included until they expire at the cap (_mat_trim) or are released;
 #   released and expired are the counters those two roads bump (the LRU's weak ownership, measured 2026-09-15)
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
+_ASM_CKPT_CAP_SHARE = 16           # a TAIL-ONLY leaf's cap (2026-10-08): a document up to 1/16 of its pre-cut bytes, never under
+#                                    _ASM_CKPT_CAP. A document costs about 1.3 percent of the transcript compressed (a synthetic
+#                                    403 MB leaf: 5.3 MB), so the flat cap refused every leaf past about 1.2 GB: on the devbox that
+#                                    motivated tail-only, every settle of the 0.7 to 1.9 GiB leaves skipped `oversize` (8 of 8 in
+#                                    the deploy's first hour, 162 in 11 hours on the build before), their assembly entries stayed
+#                                    WHOLE for the life of the process (every decoded record and body held, whatever the record
+#                                    cache counted) and every demotion re-read the whole leaf off disk. For such a leaf the
+#                                    alternative to a document is that whole entry and that read. 1/16 (6.25 percent) is about twice
+#                                    the largest ratio measured on the devbox's documents (26 leaves past 50 MB, 2026-10-08: 0.7 to
+#                                    3.3 percent of the leaf compressed, median 2.1), so every such leaf's document fits.
+
+
+def _asm_ckpt_cap_for(leaf_path, pre_bytes):
+    """The largest compressed document asm_checkpoint_write writes for `leaf_path` whose pre-cut lineage holds `pre_bytes`:
+    _ASM_CKPT_CAP, or for a leaf the tail-only rule windows (tail_rule_on, _tail_eligible) the larger of it and
+    pre_bytes / _ASM_CKPT_CAP_SHARE (see the constant)."""
+    if not tail_rule_on() or not _tail_eligible(leaf_path):
+        return _ASM_CKPT_CAP
+    return max(_ASM_CKPT_CAP, int(pre_bytes) // _ASM_CKPT_CAP_SHARE)
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
                    "restoreMs": {"load": 0.0, "verify": 0.0, "index": 0.0, "seed": 0.0, "total": 0.0},   # the restore's parts since boot, ms
                    #                     (`total` is the whole of _asm_restore, entry to return, so the unnamed remainder, the tail's
@@ -6197,7 +7789,8 @@ def _pre_tree_identity(atoms, rompuuid):
     return h.hexdigest()
 
 
-_ASM_SKIP_STRUCTURAL = ("unsplittable", "reconstruction", "unencodable", "oversize", "noCut", "reuse", "closure", "young")   # true of a cut until it moves
+_ASM_SKIP_STRUCTURAL = ("unsplittable", "reconstruction", "unencodable", "oversize", "noCut", "reuse", "closure", "young",
+                        "sameCut", "refusalTail")   # true of a cut until it moves
 _ASM_FIRST_DOC_MIN = _env_or("ROMP_CKPT_FIRST_DOC_KB", _CKPT_FOLD_CAP // 8, 1024)   # the young-session floor (the 1695 read, low 1): no FIRST
 #                                       document until the pre-cut part holds this many bytes (an eighth of the fold cap: 1 MB by default, moving with
 #                                       ROMP_CKPT_FOLD_CAP_KB; ROMP_CKPT_FIRST_DOC_KB sets it outright, 0 turns the floor off, as the test suite does
@@ -6220,14 +7813,18 @@ def _tree_key(tree):
     return (id(tree), len(turns), turns[-1].get("id") if turns else None)
 
 
-def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle"):
+def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle", refused_cut=None):
     """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
     entry, an entry restored from a document (its cut stands until a compaction moves it), no compaction boundary in
     the tree (the whole file would be the tail), a cut that would not split the chronological order the fold's gate
     needs (garbled stamps), or a document past the cap; each counted under asmCheckpoint.skipped, and appended to
     `reason_out` when a list is given (the converge pass reads its refusal there; T376 review). `who` names the caller
     in the blip line (the settle, the converge pass), said once per leaf and reason. An entry it wrote from is marked for
-    re-seat: the next parse restores the entry from this document (2026-09-24)."""
+    re-seat: the next parse restores the entry from this document (2026-09-24). `refused_cut`: the leaf cut offset of the
+    document a restore just refused for its tail's content (parse_session's refusal road); the write declines when its cut
+    would be that same cut (sameCut: the same tail, the same refusal at every boot) or would leave the tail past it over the
+    churn bound's share (refusalTail: the restore would read a near-whole tail and demote at its first fold), so the road
+    marks the leaf at its stat instead (2026-10-09, third review)."""
     cp = _asm_ckpt_file(leaf_path)
     if cp is None:
         return False
@@ -6320,27 +7917,80 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
         for _sq, _r in all_recs:
             first_at.setdefault(_r["uuid"], _sq); last_at[_r["uuid"]] = _sq
         spans = sorted((a, b) for a, b in ((first_at[u], last_at[u]) for u in first_at) if a < b)   # a reused uuid: (first, last)
-        def _reused_across(cand):
-            return any(a < cand <= b for a, b in spans)
-        def _parent_past(cand):
-            for _sq, _r in all_recs:
-                if _sq >= cand:
-                    break
-                u = _r["uuid"]
-                p = ad.parent_of.get(u) if ad.by_uuid.get(u) is _r else (_r.get("parentUuid") or None)   # the last-wins copy: as the
-                if p and ad.seq_of.get(p, 0) >= cand:                                                     #  parse resolves it; a shadowed
-                    return True                                                                           #  copy: its raw parent, last-wins
-            return False
+        # The guards below read facts precomputed once, so each candidate costs a bisect, not a pass over every record
+        # (2026-10-09, third review: a stale stamp in the last turn steps the cut back a turn per candidate, and each
+        # candidate rescanned the kept records, every record and every later turn: 69.8 s at 4,000 turns on the parse
+        # thread). Each fact answers exactly what its old per-candidate scan answered.
+        span_a = [a for a, _b in spans]
+        span_bmax, _m = [], 0                             # the largest `last` over the spans whose `first` sorts before
+        for _a, _b in spans:
+            _m = max(_m, _b); span_bmax.append(_m)
+        def _reused_across(cand):                         # a span with first < cand <= last
+            k = bisect.bisect_left(span_a, cand)
+            return k > 0 and span_bmax[k - 1] >= cand
+        rec_runmax, rec_pmax, _rm, _pm = [], [], 0, 0     # in all_recs order: the running max seq (the old scan broke at the first
+        for _sq, _r in all_recs:                          #  record at or past the candidate) and the running max of each record's
+            u = _r["uuid"]                                #  resolved parent's seq (its raw parent for a shadowed copy, last-wins)
+            p = ad.parent_of.get(u) if ad.by_uuid.get(u) is _r else (_r.get("parentUuid") or None)
+            _rm = max(_rm, _sq); _pm = max(_pm, ad.seq_of.get(p, 0) if p else 0)
+            rec_runmax.append(_rm); rec_pmax.append(_pm)
+        def _parent_past(cand):                           # a record before the candidate whose resolved parent is at or past it
+            k = bisect.bisect_left(rec_runmax, cand)      # the records the old scan read before its break
+            return k > 0 and rec_pmax[k - 1] >= cand
+        _ts_kind = [(ad.seq_of.get(u, 0), ad.ts_of.get(u, 0)) for u in entry["kept"] if u in ad.by_uuid
+                    and (ad.by_uuid[u].get("type") in ("user", "assistant") or ad.by_uuid[u].get("subtype") == "compact_boundary")]
+        _ts_kind.sort(key=lambda x: x[0])
+        ts_seqs = [x[0] for x in _ts_kind]
+        ts_premax, _m = [], None                          # ts_premax[i]: the latest stamp of the first i such kept records
+        for _x in _ts_kind:
+            _m = _x[1] if _m is None else max(_m, _x[1]); ts_premax.append(_m)
+        ts_sufmin, _m = [None] * len(_ts_kind), None      # ts_sufmin[i]: the earliest stamp from the i-th on
+        for _i in range(len(_ts_kind) - 1, -1, -1):
+            _m = _ts_kind[_i][1] if _m is None else min(_m, _ts_kind[_i][1]); ts_sufmin[_i] = _m
+        def _stamps_cross(cand):                          # a stamp out of order across the cut: the carry would not hold
+            i = bisect.bisect_left(ts_seqs, cand)
+            return 0 < i < len(ts_seqs) and ts_premax[i - 1] > ts_sufmin[i]
+        turn_seqs = [[_rec_seq(a) for a in t["atoms"] if a.get("uuid") in ad.seq_of] for t in turns]
+        suf_min, _m = [None] * (len(turns) + 1), None     # suf_min[ti]: the first record seq over turns[ti:]'s atoms
+        for _i in range(len(turns) - 1, -1, -1):
+            if turn_seqs[_i]:
+                _m = min(turn_seqs[_i]) if _m is None else min(_m, min(turn_seqs[_i]))
+            suf_min[_i] = _m
+        pre_max, _m = [0] * (len(turns) + 1), 0           # pre_max[ti]: the last record seq over turns[:ti]'s atoms
+        for _i, _sqs in enumerate(turn_seqs):
+            pre_max[_i] = _m
+            if _sqs:
+                _m = max(_m, max(_sqs))
+        pre_max[len(turns)] = _m
+        atom_uuids = {a.get("uuid") for t in turns for a in t["atoms"] if a.get("uuid")}
         blocked = set()                                   # why candidates fell: the named skip when none survives
         qseqs = {q["seq"] for q in ad.qatts}              # the absorbed attachments' seqs: a turn's bytes begin at the attachments the
         #                                                   CLI spliced before its prompt, so a cut at the prompt's record leaves them
         #                                                   pre-cut (absorbed through the carry) and a cut before them is the same turn
         #                                                   boundary; both are tried, the attachment-first one when the prompt's fails
+        def _twin_before(c):
+            """The seq of a typed slash command's raw twin just before the cut record at `c`, or None (2026-10-09, third review,
+            must-fix 4): the twin makes no atom, so the turn's first atom is its command wrapper, and a cut there left the twin
+            before the cut wearing the wrapper's prompt id, which every restore then refused (promptId): two whole parses at
+            every restart. The twin is the wrapper's turn: the cut takes it with its wrapper."""
+            w = ad.by_uuid.get(uuid_at.get(c))
+            if not (w and w.get("type") == "user" and w.get("promptId")):
+                return None
+            wtxt = _text_of(_content(w.get("message"))) or ""
+            if not (CMD_WRAP_RE.match(wtxt) and not is_skill_load_wrapper(wtxt)):
+                return None
+            tw = ad.by_uuid.get(uuid_at.get(c - 1))
+            if tw and tw.get("type") == "user" and tw.get("promptId") == w["promptId"] and tw.get("uuid") not in atom_uuids:
+                return c - 1
+            return None
         def _cands(ti):
-            seqs = [_rec_seq(a) for t in turns[ti:] for a in t["atoms"] if a.get("uuid") in ad.seq_of]
-            if not seqs:
+            if suf_min[ti] is None:
                 return []
-            out, c = [min(seqs)], min(seqs)
+            c = suf_min[ti]
+            tw = _twin_before(c)
+            if tw is not None:
+                c = tw                                    # the twin-first cut alone: the wrapper-first one would refuse at every restore
+            out = [c]
             for _k in range(len(qseqs)):                  # bounded: at most every attachment
                 if (c - 1) not in qseqs:
                     break
@@ -6356,6 +8006,12 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                 #                                           parent the parse re-points from the /compact stdout to the summary): the
                 #                                           restore's proof walks raw parents, so this cut could never be proven; the
                 #                                           turn before it is the cut (stage one b, correction 1)
+            if pre_max[ti] >= cand:
+                continue                                  # an atom of a pre-cut turn comes from a record at or past the cut (a reply
+                #                                           stamped between the last pre-cut stamp and the cut's first record, a record
+                #                                           parented on the settled tip): the restore would give it a turn of its own
+                #                                           (_restore_first_atom_refusal refuses it), so the turn holding it goes past
+                #                                           the cut (2026-10-09, third review, must-fix 1 and 2)
             if _reused_across(cand):
                 blocked.add("reuse"); continue            # a tail record reuses a uuid the pre-cut bytes carry (a row's, an absorbed
                 #                                           attachment's, a shadowed copy's): the restore cannot rebuild what the parse
@@ -6365,11 +8021,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                 #                                           cut, which the restore cannot rebuild (the pre-cut rows are frozen, their parent
                 #                                           bound to a record the tail holds). The pre-cut part is closed under parents,
                 #                                           or the cut steps back (stage one b; found by the moving-cut oracle)
-            pre_ts = [ad.ts_of.get(u, 0) for u in entry["kept"] if ad.seq_of.get(u, 0) < cand and u in ad.by_uuid
-                      and (ad.by_uuid[u].get("type") in ("user", "assistant") or ad.by_uuid[u].get("subtype") == "compact_boundary")]
-            tail_ts = [ad.ts_of.get(u, 0) for u in entry["kept"] if ad.seq_of.get(u, 0) >= cand and u in ad.by_uuid
-                       and (ad.by_uuid[u].get("type") in ("user", "assistant") or ad.by_uuid[u].get("subtype") == "compact_boundary")]
-            if pre_ts and tail_ts and max(pre_ts) > min(tail_ts):
+            if _stamps_cross(cand):
                 continue                                  # a stamp out of order across the cut: the carry would not hold
             cut_seq = cand
             break
@@ -6440,6 +8092,14 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             files[fsid] = f
         # the pre-cut records: identity, verdict, type, order, time, file, landed
         type_code = {"user": "u", "assistant": "a", "system": "s", "attachment": "t"}
+        if refused_cut is not None:
+            _lf = files.get(Path(leaf_path).stem) or {}
+            _new_cut = int((_lf.get("cut") or [0])[0])
+            if _new_cut == int(refused_cut):
+                return skip("sameCut")                    # the refused document's own cut: rewriting it changes nothing the restore reads
+            if (int(_lf.get("size") or 0) - _new_cut) * _ASM_TAIL_SHARE >= max(1, int(cut_off_total)):
+                return skip("refusalTail")                # the cut stepped back so far (a stale stamp near the start) that the tail is
+                #                                           over the share: a document no restore would hold, so none is written
         if standing is None and not cp.exists() and cut_off_total < _ASM_FIRST_DOC_MIN:
             return skip("young")                          # the young-session floor: no first document under the floor's bytes; the memo
             #                                               re-arms as the cut moves with the settled turns, so the first write lands once
@@ -6647,6 +8307,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                #                                             (absorbed attachments, shadowed copies): the restore's reuse check reads
                #                                             rows and these, so a tail record reusing any of them refuses (round two)
                "turns": turns_doc, "treeIdentity": _tree_identity_of_doc(turns_doc, identity) if turns_doc else None,
+               "preGates": _pre_cut_gates(all_recs, cut_seq),   # the gate sets of the pre-cut records alone (_restore_tail_refusal)
                "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(ad.boundary_pids),
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
@@ -6657,7 +8318,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
         except TypeError:
             return skip("unencodable")
         data = gzip.compress(text.encode("utf-8"), compresslevel=6)   # identities and hashes compress about five to one; the
-        if len(data) > _ASM_CKPT_CAP:                                  #  bytes a boot reads are the compressed ones
+        if len(data) > _asm_ckpt_cap_for(leaf_path, cut_off_total):   #  bytes a boot reads are the compressed ones
             return skip("oversize")
         try:
             cp.parent.mkdir(parents=True, exist_ok=True)
@@ -6704,7 +8365,41 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
         #                                                   re-seat would freeze it (review low 1); the rewrite after the heal marks it
         with _ASM_CKPT_LOCK:
             _ASM_CKPT_STATS["written"] += 1
+        if entry["reseat"] and _asm_release_at_write(leaf_path):
+            # a TAIL-ONLY leaf's whole entry is released NOW (2026-10-08), not at the next parse: an idle leaf is never parsed
+            # again (the parse store serves its tree while the file stands), so its entry kept every decoded record and body
+            # for the life of the process, outside the record cache's count (the deploy of 2026-10-07: 355 million allocations
+            # at half an hour, the whole build's count, with the cache counting a quarter). The next parse restores from this
+            # document as the re-seat would have (_assemble reads _ASM_RESEAT_DUE: the churn bound rides it); the caller drops
+            # the parse store's trees over the leaf (asm_reseat_due tells it), since those hold the same bodies
+            with _ASM_LOCK:
+                if _ASM_CACHE.get(key) is entry:
+                    _ASM_CACHE.pop(key, None)
+                    _ASM_RESEAT_DUE[key] = True
+                    released = entry
+                else:
+                    released = None
+            if released is not None:
+                _asm_release(released)
+                _asm_stat("reseat:atWrite")
         return True
+
+
+def _pre_cut_gates(all_recs, cut_seq):
+    """The gate sets FileAdapter._ingest builds (prompt ids, compaction summaries' prompt ids, payload records' tool links), over
+    the records before the cut alone (2026-10-08): the document's `gates` come from the whole adapter, tail included, so a
+    restore checking a tail record against them would refuse every tail holding its own slash command."""
+    pids, bpids, links = set(), set(), set()
+    for sq, r in all_recs:
+        if sq >= cut_seq or r.get("type") != "user":
+            continue
+        if r.get("promptId"):
+            pids.add(r["promptId"])
+            if r.get("isCompactSummary") is True:
+                bpids.add(r["promptId"])
+        if r.get("sourceToolUseID"):
+            links.add(r["sourceToolUseID"])
+    return {"prompt_ids": sorted(pids), "boundary_pids": sorted(bpids), "src_tool_links": sorted(links)}
 
 
 def _carry_encode(st):
@@ -7072,7 +8767,7 @@ def _boundary_effective_parent(r, known):
     return None
 
 
-def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False):
+def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False, walk_only=False):
     """Whether the leaf's tail (its records past the document's cut) CHAINS onto the document: every tail record that bears a
     uuid or a parentUuid key, whatever its type (user, assistant, a system spur, a summary, a sidechain record, an attachment),
     parents a record IN THE TAIL, or the pre-cut SPINE TIP when the document says the writer proved the tip had no pre-cut
@@ -7095,8 +8790,23 @@ def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False):
     cut = f.get("cut")
     if not cut or f.get("skip"):
         return True
-    ent = _read_jsonl_entry(leaf_path, tail_ok=True, tail_from=(int(cut[0]), int(cut[1]), bytes.fromhex(cut[2])))
+    ent = _read_jsonl_entry(leaf_path, tail_ok=True,
+                            tail_from=_entry_start(leaf_path, (int(cut[0]), int(cut[1]), bytes.fromhex(cut[2]))))
+    #                                                     the earlier of the assembly cut and the fold document's (2026-10-10):
+    #                                                     whichever of the two reads comes first starts the entry where the folds
+    #                                                     resume; _tail_chains_over slices the tail from the assembly cut
     recs = ent[4] if ent is not None else []
+    if walk_only and type(recs) is _TailRecords and _walk_ready(recs):
+        try:                                              # the graph fields of the records between the cut and the window from
+            return _tail_chains_over(_walk_list(recs), ent, cut, doc, assume_childless)   # their skeletons: no disk read per
+        except _SkelMiss:                                 #  call (review find, 2026-10-07: every judge pass read that span twice)
+            with _COLD_STATS_LOCK:
+                _COLD_STATS.setdefault("skeleton", {"walks": 0, "records": 0, "misses": 0})["misses"] += 1
+    return _tail_chains_over(recs, ent, cut, doc, assume_childless)
+
+
+def _tail_chains_over(recs, ent, cut, doc, assume_childless):
+    """_tail_chains_onto_the_document's rule over the leaf entry `ent`'s records `recs` (its own, or its walk list)."""
     if ent is not None and ent[5] < int(cut[1]):          # a whole entry: the tail is the records past the cut
         recs = recs[int(cut[1]) - ent[5]:]
     nodes = [r for r in recs if isinstance(r, dict) and r.get("uuid")]   # the graph nodes: records the parse indexes by uuid; a
@@ -7108,6 +8818,9 @@ def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False):
     tip = rows[spine[-1]][0] if spine and spine[-1] < len(rows) else None
     tip_ok = tip if tip is not None and (doc.get("tipChildless") is True or assume_childless) else None
     known = pre_uuids | set(by_uuid)
+    dangling = set(((doc.get("gates") or {}).get("dangling")) or ())   # the pre-cut stitch targets no record carried (2026-10-08):
+    if any(u in dangling for u in by_uuid):               #  a tail record carrying one rebinds a repaired stitch before the cut,
+        return False                                      #  which the document holds fixed (review R1-2): the whole parse answers it
     if any(u in pre_uuids for u in by_uuid):
         return False                                      # a tail uuid reusing a pre-cut record's: a cycle across the spine, and the parse
     #                                                       would re-bind a frozen record (round seven). A uuid REPEATED within the tail is
@@ -7165,6 +8878,7 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
     The pre-cut turns come from the document as lazy atoms; the tail is read from the cut and parsed through an
     adapter seeded with the pre-cut graph facts and the carried emit state; the prefix's identity is proven. `reseated`:
     the restore re-seats a whole entry on the document written from it (the entry carries the churn bound, _asm_gates)."""
+    _ASM_DEMOTE_TL.restore_refused = None                 # set by a content refusal (_restore_tail_refusal), read by _assemble
     if _asm_refusal_stands(leaf_path):
         _asm_stat("restore:refusedStanding")             # refused for the tail's shape at this very stat: no proof, no rewrite (round two)
         return None
@@ -7179,13 +8893,101 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
     if doc is None:
         return None
     asm_sidecar_refresh(leaf_path, doc)                   # an older sidecar gains the inputs list here (round one, low 2)
+    pin = None
+    f_ = (doc.get("files") or {}).get(Path(leaf_path).stem) or {}
+    if f_.get("cut") and not f_.get("skip") and tail_rule_on() and _tail_eligible(leaf_path):
+        pin = _tail_pin_set(str(Path(leaf_path)), int(f_["cut"][0]))   # before the tail's first read: kept from the cut on
+        _widen_entry_to(str(Path(leaf_path)), pin.off)    # a window that slid past the cut already comes back to it, once
+    served = None
+    try:
+        served = _asm_restore_from_doc(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, reseated,
+                                       doc, pin)
+        return served
+    finally:
+        if served is None:
+            _tail_pin_clear(pin)                          # refused: nothing stands on the document, the window slides again
+
+
+def _restore_tail_refusal(ad, max_ppt, pre_gates, pre_boundary=None):
+    """Why a restore must refuse the tail the seeded adapter `ad` ingested, or None (2026-10-08). The checks a cold parse makes
+    of the tail against the pre-cut part, which the document holds fixed:
+      - stamp: a prompt, reply or compaction stamped before the carry's watermark (`max_ppt`) (a record with no stamp is read
+        at its repaired stamp): the cold parse sorts it among the pre-cut turns (a prompt opens an old turn; a card moves);
+      - summary: a compaction summary parented on no compaction boundary of the tail while the carry names a pre-cut boundary
+        (`pre_boundary`): the cold parse attaches it to that boundary's card, which the document holds fixed (with no pre-cut
+        compaction there is no such card, and the restore builds what the cold parse does);
+      - promptId: a record wearing a pre-cut prompt id that re-classifies the pre-cut record carrying it (a command wrapper of a
+        typed slash command's raw twin, or any record wearing a pre-cut compaction summary's id);
+      - skill: a Skill tool_use whose id a pre-cut payload record references.
+    The last two read the document's PRE-CUT gate sets (`pre_gates`, written since 2026-10-08); for a document written before
+    them the caller passes its whole-adapter gates, a superset (2026-10-09)."""
+    if pre_gates:
+        pre_gates = {k: set(v or ()) for k, v in pre_gates.items()}
+    for r in ad.by_uuid.values():                         # the seeded adapter holds the tail's records alone
+        t = r.get("type")
+        if max_ppt is not None and (t in ("user", "assistant") or (t == "system" and r.get("subtype") == "compact_boundary")):
+            ts = parse_z(r.get("timestamp"))
+            if ts is None:                                # no stamp: the stamp both parses repair it to (the last parseable stamp
+                ts = ad.ts_of.get(r.get("uuid"))          #  before it in file order; the seeded adapter starts from the document's
+                #                                           lastTs, the whole parse's value at the cut), so the record sorts alike in
+                #                                           both (2026-10-09, third review: a missing stamp refused at every boot,
+                #                                           and the rewrite could not move past it)
+            if ts is None or ts < max_ppt:
+                return "stamp"
+        if r.get("isCompactSummary") is True and pre_boundary is not None:
+            if _summary_boundary(r, ad.by_uuid.get) is None:   # through the attachments the CLI writes between them (2026-10-09)
+                return "summary"
+        if pre_gates:
+            pid = r.get("promptId")
+            if t == "user" and pid and pid in pre_gates.get("prompt_ids", ()):
+                txt = _text_of(_content(r.get("message"))) or ""
+                if pid in pre_gates.get("boundary_pids", ()) or (CMD_WRAP_RE.match(txt) and not is_skill_load_wrapper(txt)):
+                    return "promptId"
+            if t == "assistant" and pre_gates.get("src_tool_links"):
+                for b in _content(r.get("message")) or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Skill" \
+                            and b.get("id") in pre_gates["src_tool_links"]:
+                        return "skill"
+    return None
+
+
+def _restore_first_atom_refusal(last_pre, atoms):
+    """Why a restore over a turns section must refuse the tail atoms `atoms`, or None (2026-10-09, third review, must-fix 1
+    and 2). The restore segments the tail alone and appends its turns after the frozen pre-cut turns; the cold parse segments
+    everything in one sorted walk (segment_turns). The two agree exactly when the tail's first atom in that sort order
+    (t, _seq) opens a fresh turn there: it sorts at or after every pre-cut atom (the last pre-cut turn's maxT, the largest
+    pre-cut stamp, since turns are contiguous runs of the sorted atoms), and it is a compaction boundary (always a fresh
+    turn) or an opener after a last pre-cut turn that ended. After that first atom both walks carry the same state, so the
+    rest of the tail segments alike. `ended` is the turn's flag, which implies the walk's own (a turn the flag calls ended
+    always leaves the walk ended; the converse can fail on a command absorbed mid-turn), so the check can over-refuse there
+    and never under-refuse. `last_pre` None (an atoms-only document, segmented whole with its tail) or no tail atom: None.
+      - order: the first atom sorts before a pre-cut atom (a stamp the carry's watermark does not count, an idle span's);
+      - opener: it opens no fresh turn: a reply or tool_result stamped in the gap between the watermark and the cut's first
+        record, a record parented on the settled pre-cut tip, a prompt after an open pre-cut turn."""
+    if last_pre is None or not atoms:
+        return None
+    first = min(atoms, key=lambda a: (a.get("t") or 0, a.get("_seq", 0)))
+    mt = last_pre.get("maxT")
+    if mt is not None and (first.get("t") or 0) < mt:
+        return "order"
+    if first.get("type") == "system" and first.get("subtype") == "compact_boundary":
+        return None
+    if _is_opener(first) and last_pre.get("ended"):
+        return None
+    return "opener"
+
+
+def _asm_restore_from_doc(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, reseated, doc, pin):
+    """_asm_restore_inner past the document's load: the restored entry served, or None (see there). `pin` is the window pin
+    the entry takes ownership of (_tail_pin), or None."""
     try:
         _t0 = time.perf_counter()
         seed, landed = _seed_from_doc(doc)
         _restore_ms("seed", _t0)
-        if not _tail_chains_onto_the_document(leaf_path, doc):
+        if not _tail_chains_onto_the_document(leaf_path, doc, walk_only=True):   # graph fields only: skeletons (2026-10-07)
             _asm_stat("restore:chainRefused")             # the tail does not chain onto the document: the whole parse (T402); the
-            _why = ("unproven" if doc.get("tipChildless") is None and _tail_chains_onto_the_document(leaf_path, doc, assume_childless=True)
+            _why = ("unproven" if doc.get("tipChildless") is None and _tail_chains_onto_the_document(leaf_path, doc, assume_childless=True,
+                                                                                                      walk_only=True)
                     else "shape")                         # the missing bit alone, or the tail's own shape
             with _ASM_CKPT_LOCK:
                 _ASM_CHAIN_REFUSED_PATHS[os.path.realpath(str(leaf_path))] = (_why, int((((doc.get("files") or {}).get(Path(leaf_path).stem)
@@ -7228,18 +9030,55 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
         ad.sdk_human = sdk_human
         st = _emit_state()
         st.update(_carry_decode(doc["carry"]))
+        pre_gates = doc.get("preGates")
+        legacy = pre_gates is None                        # a document written before preGates (every document at the deploy of
+        if legacy:                                        #  this change): its whole-adapter gates, a superset of the pre-cut sets
+            g_ = doc.get("gates") or {}                   #  (tail at write time included), so it refuses at least what preGates
+            pre_gates = {k: list(g_.get(k) or ()) for k in ("prompt_ids", "boundary_pids", "src_tool_links")}   # would (2026-10-09,
+            #                                               third review, must-fix 3: skipped, a wrapper or Skill link written after the
+            #                                               document restored a wrong tree, and the restore after a compaction kept it).
+            #                                               An over-refusal costs one whole parse; its rewrite carries preGates
+        why_ = _restore_tail_refusal(ad, st.get("max_ppt"), pre_gates, st.get("last_boundary"))
+        if why_ is not None:
+            # a tail the restore cannot answer (2026-10-08, reviews R1-1, N3, N4, N10d): a record a cold parse sorts or binds into
+            # the pre-cut part, which the document holds fixed. Refused to the whole parse, at a boot as after a demotion, and
+            # recorded like a chain refusal, so parse_session rewrites the document from that whole parse at once (the tail then
+            # lies inside its pre-cut part) and the whole entry it builds is not kept whole (_assemble), so the rewrite releases it
+            _asm_stat("restore:%sRefused" % why_)
+            _ASM_DEMOTE_TL.restore_refused = why_
+            with _ASM_CKPT_LOCK:
+                _ASM_CHAIN_REFUSED_PATHS[os.path.realpath(str(leaf_path))] = (
+                    "legacy" if legacy and why_ in ("promptId", "skill") else "content",
+                    int((((doc.get("files") or {}).get(Path(leaf_path).stem) or {}).get("cut") or [0])[0]))
+                #                                           legacy: refused from the superset, so the rewrite is wanted even at the
+                #                                           same cut (it writes preGates); content: the rewrite declines the same cut
+            return None
+        mp = st.get("max_ppt")
         kept = ad.kept_uuids(ad.active_path())
         order = _chrono(ad, kept)
         ad._prepass(order, st)
         atoms = list(ad._emit_fold(order, st, rompuuid, postal_index))
         atoms += ad._absorbed(ad.qatts, kept, st, rompuuid, postal_index)
+        why_ = _restore_first_atom_refusal(pre_turns[-1] if pre_turns else None, atoms)
+        if why_ is not None:
+            # the tail's first atom would not open a fresh turn after the frozen last pre-cut turn (2026-10-09, third review,
+            # must-fix 1 and 2): a reply stamped between the watermark and the cut's first record, a record parented on the
+            # settled pre-cut tip. The cold parse files it into that turn; refused like a content refusal (the rewrite's cut
+            # guard then puts the record's turn past the new cut)
+            _asm_stat("restore:%sRefused" % why_)
+            _ASM_DEMOTE_TL.restore_refused = why_
+            with _ASM_CKPT_LOCK:
+                _ASM_CHAIN_REFUSED_PATHS[os.path.realpath(str(leaf_path))] = (
+                    "content", int((((doc.get("files") or {}).get(Path(leaf_path).stem) or {}).get("cut") or [0])[0]))
+            return None
         entry = {"ad": ad, "st": st, "atoms": atoms, "kept": kept, "landed": landed | ad.landed_text_uuids(),
                  "cands": tuple(str(f) for f in candidate_files), "links": dict(links or {}),
                  "recs": dict(ad._src_keys), "n_qatts": len(ad.qatts), "prefix": prefix, "preTurns": pre_turns, "index": index,
                  "skipped": {f["path"]: (f["size"], f["mtime"]) for f in doc["files"].values() if f.get("skip")},
                  "docPre": sum((int(f["size"]) if f.get("skip") else int((f.get("cut") or [0])[0])) for f in doc["files"].values()),
                  "docCutOff": int(((doc["files"].get(Path(leaf_path).stem) or {}).get("cut") or [0])[0]),
-                 "path": str(leaf_path)}                   # as handed: the reader's key for the same leaf
+                 "docMaxPpt": mp if mp is not None else 0,   # the carry's watermark: what the restore held the tail to (_asm_gates)
+                 "path": str(leaf_path), "pin": pin}       # as handed: the reader's key for the same leaf; the window pin
         #        docPre: the pre-cut bytes over the lineage; docCutOff: the leaf's cut offset. The fold's gate demotes this entry
         #        to a whole parse when the tail past the cut reaches the share (tailShare), so the settle rewrites the cut
         if reseated:
@@ -7257,6 +9096,40 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
     with _ASM_CKPT_LOCK:
         _ASM_CKPT_STATS["restored"] += 1
     return _asm_serve(entry)
+
+
+def _hydrated_keep(rec, lz):
+    """What the hydration memo keeps of a record read for the lazy atom whose marker is `lz` (2026-10-08): the fields
+    _hydrate_one reads for that atom's kind, never the whole record. A tool result's record carries its output twice (the
+    message's tool_result block and toolUseResult), and the atom keeps toolUseResult only when its marker says so (`tur`), so
+    the memo held a second copy of every output no atom referenced, beside every record's metadata; the message's blocks are
+    shared with the hydrated atom. A field dropped for this atom's kind is marked, so an atom of the same uuid that needs it
+    (_hydrated_hit) reads the record again rather than being served a body without it."""
+    keep = {"uuid": rec.get("uuid"), "message": rec.get("message")}
+    if "toolUseResult" in rec:
+        if lz.get("tur"):
+            keep["toolUseResult"] = rec["toolUseResult"]
+        else:
+            keep["_noTur"] = True
+    if "attachment" in rec:
+        if lz.get("k") == "b":
+            keep["attachment"] = rec["attachment"]
+        else:
+            keep["_noAtt"] = True
+    return keep
+
+
+def _hydrated_hit(u, a):
+    """The hydration memo's entry for uuid `u` when it serves atom `a` (under _ASM_CKPT_LOCK): None when absent, or when it
+    was kept for an atom that needed less than `a` does (_hydrated_keep's markers)."""
+    hit = _HYDRATED.get(u) if u else None
+    if hit is None:
+        return None
+    lz = a.get("lazy") or {}
+    rec = hit[0]
+    if (lz.get("tur") and rec.get("_noTur")) or (lz.get("k") == "b" and rec.get("_noAtt")):
+        return None
+    return hit
 
 
 def _hydrate_one(a, rec):
@@ -7345,7 +9218,7 @@ def hydrate(atoms, rompuuid=None, by=None):
     for a in lazy:
         u = a.get("uuid")
         with _ASM_CKPT_LOCK:
-            hit = _HYDRATED.get(u) if u else None
+            hit = _hydrated_hit(u, a)
             if hit is not None:
                 _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
         if hit is not None:
@@ -7356,7 +9229,7 @@ def hydrate(atoms, rompuuid=None, by=None):
         msg = a.get("message")
         if not hasattr(msg, "source_path"):                 # another thread finished this atom between the memo miss above and
             with _ASM_CKPT_LOCK:                            #  here (2026-09-20): its body is a plain dict with no source, and the
-                hit = _HYDRATED.get(u) if u else None       #  per-session map below could name a newer document and refuse an atom
+                hit = _hydrated_hit(u, a)                   #  per-session map below could name a newer document and refuse an atom
             if hit is not None:                             #  whose body is in place, the whole call with it. Its bookkeeping (the
                 _hydrate_one(a, hit[0])                     #  popped marker) may still be in flight: finish it from the memo as the
             filled += 1                                     #  hit branch does, or count it filled when the entry is gone already.
@@ -7396,7 +9269,7 @@ def hydrate(atoms, rompuuid=None, by=None):
                     filled += 1; continue                 # another thread hydrated it between the filter and here (the feed's
                 u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
-                    hit = _HYDRATED.get(u) if u else None
+                    hit = _hydrated_hit(u, a)
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
@@ -7418,7 +9291,10 @@ def hydrate(atoms, rompuuid=None, by=None):
                     hk = "%s:%s" % (_read_stage() or "none", by)
                     hbs[hk] = hbs.get(hk, 0) + ln
                     if a.get("uuid"):
-                        _HYDRATED[a["uuid"]] = (rec, ln); _HYDRATED_BYTES[0] += ln
+                        _old = _HYDRATED.pop(a["uuid"], None)   # an entry kept for an atom needing less (a re-read): its bytes go
+                        if _old is not None:                    #  before the new ones count, and the new one takes the LRU tail
+                            _HYDRATED_BYTES[0] -= _old[1]
+                        _HYDRATED[a["uuid"]] = (_hydrated_keep(rec, lz), ln); _HYDRATED_BYTES[0] += ln
                         while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
                             _old = _HYDRATED.pop(next(iter(_HYDRATED)))    # the least recently used body goes first
                             _HYDRATED_BYTES[0] -= _old[1]
@@ -7492,7 +9368,9 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                 # not fit; the tail read from the cut covers the moved leaf. The first instrumented boot (T398) paid two whole
                 # parses under g:descent inside the auto-nudge tick where a restore would have read the tail.
                 _why = getattr(_ASM_DEMOTE_TL, "reason", None)
-                if _CKPT_DIR_FN is not None and _why in _ASM_RESTORE_AFTER_DEMOTE:
+                if _CKPT_DIR_FN is not None and (_why in _ASM_RESTORE_AFTER_DEMOTE
+                                                 or (_why in _ASM_RESTORE_AFTER_DEMOTE_TAIL and entry.get("docPre") is not None
+                                                     and _tail_eligible(leaf_path) and tail_rule_on())):
                     # every restore over a document, this one and the boot's, first asks whether the tail CHAINS onto it
                     # (_tail_chains_onto_the_document); a rewind into the pre-cut interior, a /clear fork, a system spur
                     # anchored before the cut or an orphan parent refuses to the whole parse, as before (rounds one and two)
@@ -7503,7 +9381,8 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                     # share, a refused document, a postal author waiting) carries no flag and restores without the bound, as
                     # every entry did before: held to the share there, an open turn's entry would parse whole at every descent
                     served = _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human,
-                                          reseated=_why == "reseat" or bool(entry.get("reseat") or entry.get("reseated")))
+                                          reseated=_why == "reseat" or bool(entry.get("reseat") or entry.get("reseated"))
+                                          or _restore_bounded(leaf_path))
                     if served is not None:
                         _asm_stat("restore"); _asm_stat("restore:afterDemote")
                         _mode("restore")
@@ -7512,14 +9391,29 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                     # refusal (else every settle would write a document and every miss after it refuse it and parse whole); nor is
                     # any entry whose parse follows a refusal that left the document standing (the chain proof, a standing mark:
                     # the same tail refuses the next document too). Either way the entry stays whole and folds, as before the re-seat
-                    keep_whole = _why == "reseat" or asm_document_stands(leaf_path)
+                    keep_whole = _why == "reseat" or (asm_document_stands(leaf_path)
+                                                       and not getattr(_ASM_DEMOTE_TL, "restore_refused", None))
+                    #                                   a content refusal (a tail record the restore cannot answer) is healed by the
+                    #                                   rewrite parse_session makes from this whole parse: not kept whole, so the
+                    #                                   rewrite releases the entry (2026-10-08, review: three boots stayed whole)
             elif _CKPT_DIR_FN is not None:
-                served = _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human)
+                with _ASM_LOCK:
+                    due = _ASM_RESEAT_DUE.pop(key, None)  # the writer released this key's whole entry (asm_checkpoint_write)
+                served = _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human,
+                                      reseated=bool(due) or _restore_bounded(leaf_path))
                 if served is not None:
                     _asm_stat("restore")
+                    if due:
+                        _asm_stat("g:reseat"); _asm_stat("restore:afterDemote")   # the re-seat's own counts, as at the next parse
                     _mode("restore")
                     return served
-                keep_whole = asm_document_stands(leaf_path)   # a boot's refusal that left the document standing: as above
+                _content_ref = getattr(_ASM_DEMOTE_TL, "restore_refused", None)
+                keep_whole = (bool(due) and not _content_ref) or (asm_document_stands(leaf_path)   # a boot's refusal that left the
+                                                                  and not _content_ref)   # document standing, or a released re-seat
+                #                                   the restore refused: as above; a content refusal is healed by the rewrite (as above),
+                #                                   a released re-seat's included (2026-10-09, third review: `due` overrode it, so the
+                #                                   second ask of every boot parsed whole again and held the entry whole); a rewrite
+                #                                   that would repeat the refused cut declines and marks the leaf (parse_session)
             # A full parse names its road (T398): an entry the gates DEMOTED (the g:<reason> beside it: the leaf's record
             # entry replaced by a from-zero read, a lineage file moved), a leaf with NO document file, a document that
             # stood but was REFUSED at the restore (its fallback reason counted beside), or no checkpoint directory at all.
@@ -7659,7 +9553,8 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     _why, _refused_off = _refused if _refused is not None else (None, None)
     if _why is not None and _CKPT_DIR_FN is not None:
         try:                                        # the chain proof refused the standing document and this whole parse produced a
-            if asm_checkpoint_write(leaf_path, rompuuid, sdk_human, tree=out, who="refusal"):   # sound tree: write its document now,
+            if asm_checkpoint_write(leaf_path, rompuuid, sdk_human, tree=out, who="refusal",   # sound tree: write its document now,
+                                    refused_cut=_refused_off if _why == "content" else None):
                 _asm_stat("write:afterRefusal")     #  carrying the childless bit, so the next restore takes it (T402 follow-up)
                 with _ASM_CKPT_LOCK:
                     _new_off = _ASM_LAST_WRITE_CUT.get(_rk)

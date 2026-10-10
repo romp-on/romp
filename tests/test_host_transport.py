@@ -1161,7 +1161,7 @@ class Pins(unittest.TestCase):
         self.assertIn("                    connected = True\n                    self._host_attach_retries = 0", src,
                       "the retry counter resets inside the connected block: consecutive incomplete attaches only (the commit-10 review's first item)")
         ksrc = open(os.path.join(ROOT, "kernel", "kernel.py")).read()
-        self.assertIn("if _send_with_id(be, sid, text, qid, user=user, paths=paths) is False:", ksrc, "the park-or-send route hands on who speaks and what rode along; the caller that knows classifies (T315; the attachment list, T373)")
+        self.assertIn("if _send_with_id(be, sid, text, qid, user=user, paths=paths, from_user=from_user) is False:", ksrc, "the park-or-send route hands on who speaks and what rode along; the caller that knows classifies (T315; the attachment list, T373; the person's-own-words marker, 2026-10-06)")
         self.assertIn('user="<!-- romp-tag: " not in text', ksrc, "POST /send: an untagged send is the user's, a tagged one a machine's")   # the one delivery door since T370
         self.assertIn('return "user" in inspect.signature(fn).parameters', ksrc, "read from the signature, so a stand-in send without the keyword is called as before")
 

@@ -7,10 +7,10 @@ answering on the old model (PR #923). A pick is not a slash injection on the SDK
 the CLI's control channel — so the reason _send_or_park parks a typed slash command mid-turn does not apply
 to it, and an open turn alone need not defer it. The rule is keyed on the backend's OWN capability, NOT on
 forwards_sends: forwarding a plain send says nothing about how a model change applies (Codex forwards sends
-but applies set_model at the next turn_start). And the real SDK backend declares False for now: on CLI
-2.1.257 a mid-turn switch mis-parents its transcript breadcrumbs and the rest of the turn is lost as a
-rewound branch — see SdkBackend.model_switches_live. So today every shipped backend still parks; the fakes
-below pin the rule each way for the day one of them can flip. Every other park reason stands.
+but applies set_model at the next turn_start). The real SDK backend declares True on this install and
+False upstream, where on CLI 2.1.257 a mid-turn switch mis-parented its transcript breadcrumbs and the rest
+of the turn was lost as a rewound branch — see SdkBackend.model_switches_live. The fakes below pin the rule
+each way. Every other park reason stands.
 Synthetic only — no real session data."""
 import os
 import tempfile
@@ -47,8 +47,8 @@ class _Typed:
 
 class _Sdk(_Typed):
     """A backend that takes a send mid-turn (forwards_sends) AND can apply a model change mid-turn
-    (model_switches_live) — the shape the open-turn exception is for. The real SdkBackend has the channel
-    for it but declares False until the CLI persists a mid-turn switch correctly (see its docstring)."""
+    (model_switches_live) — the shape the open-turn exception is for, and the real SdkBackend's shape on
+    this install (see its docstring)."""
     def forwards_sends(self): return True
     def model_switches_live(self): return True
     def unqueue(self, sid, idx, expect=None): return expect
@@ -182,33 +182,34 @@ class ModelLiveMidTurn(unittest.TestCase):
         self.assertEqual(state, {"queued": True})
         self.assertEqual(km._pending_ops.get(SID), [("model", "opus")])
 
-    def test_no_shipped_backend_declares_the_capability_yet(self):
-        # Codex applies a pick at the next turn_start; the base shape types it at the CLI; and the SDK,
-        # which HAS the control channel, says no for now: on CLI 2.1.257 a switch applied inside a turn
-        # mis-parents its transcript breadcrumbs and the rest of that turn is read as a rewound branch by
-        # romp and dropped by --resume (review of #923, 2026-09-04). Flipping the SDK is a one-line change
-        # here once the CLI persists a mid-turn switch at the turn's tail — this pin is where that shows.
+    def test_only_the_sdk_backend_declares_the_capability(self):
+        # Codex applies a pick at the next turn_start and the base shape types it at the CLI, so both park.
+        # The SDK, which HAS the control channel, declares True on this install (the user 2026-09-16, who
+        # wanted picks applied mid-turn again: parked picks on busy sessions held every later send behind
+        # them). Upstream it declares False because on CLI 2.1.257 a switch applied inside a turn mis-parented
+        # its transcript breadcrumbs (review of #923, 2026-09-04); that caveat is watched, and the revert is
+        # the one line in SdkBackend.model_switches_live plus this pin and the next.
         root = os.path.dirname(HERE)
         base = load_source("romp_session_backend_cap", os.path.join(root, "kernel", "session_backend.py"))
         sdk = load_source("romp_sdk_backend_cap", os.path.join(root, "kernel", "sdk_backend.py"))
         codex = load_source("romp_codex_backend_cap", os.path.join(root, "kernel", "codex_backend.py"))
         self.assertFalse(base.SessionBackend.model_switches_live(None))
-        self.assertFalse(sdk.SdkBackend.model_switches_live(None),
-                         "the SDK parks a mid-turn pick until the CLI persists the switch correctly")
+        self.assertTrue(sdk.SdkBackend.model_switches_live(None),
+                        "the SDK applies a mid-turn pick over its control channel on this install")
         self.assertFalse(codex.CodexBackend.model_switches_live(None))
 
-    def test_the_real_sdk_backend_still_parks_a_pick_while_a_turn_is_open(self):
-        # the rule read through the REAL backend's word: a fake wearing SdkBackend.model_switches_live parks
-        # exactly as the pre-#923 kernel did, and the send typed after it chains behind in press order
+    def test_the_real_sdk_backend_fires_a_pick_into_an_open_turn(self):
+        # the rule read through the REAL backend's word: a fake wearing SdkBackend.model_switches_live takes
+        # the pick now, creates no queue, and the send typed after it follows in press order, both immediate
         sdk = load_source("romp_sdk_backend_cap2", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
         class _RealWord(_Sdk):
             def model_switches_live(self): return sdk.SdkBackend.model_switches_live(None)
         be = _RealWord()
         km._set_model_or_park(be, SID, "claude-fable-5-1")
         km._send_or_park(be, SID, "after the pick", echo="human")
-        self.assertEqual(be.calls, [], "parked, and the send chained behind it")
-        self.assertEqual(km._pending_ops.get(SID),
-                         [("model", "claude-fable-5-1"), ("send", "after the pick", "human")])
+        self.assertEqual(be.calls, [("model", "claude-fable-5-1"), ("send", "after the pick")],
+                         "the pick fires live and the send follows it, in press order")
+        self.assertNotIn(SID, km._pending_ops, "nothing parked")
 
     def test_the_real_codex_backend_parked_on_a_rejected_model_lets_the_pick_that_fixes_it_through(self):
         # The wedge this rule met on the REAL backend (review, 2026-09-11): a Codex send the worker parked on a

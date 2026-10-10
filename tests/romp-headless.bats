@@ -139,6 +139,38 @@ assert json.loads(body) == {"name": "helper", "text": 'fix the "thing" \\ and th
 PY
 }
 
+@test "romp send --from-user marks the person's own line in the body; without the flag the body names nothing" {
+    # the chat page relays the person's words with --from-user, so the session queues them ahead of peer and machine
+    # sends (2026-10-06); the flag works ahead of the session name and right after it, as --tag does. The test above
+    # pins the unflagged body: no field at all.
+    start_fake_kernel '{"ok": true}'
+    run "$ROMP_SCRIPT" send --from-user helper 'hold the deploy until the web tests pass'
+    [ "$status" -eq 0 ]
+    python3 - "$TEST_DIR/req" <<'PY'
+import json, sys
+body = open(sys.argv[1]).read().split("\n", 1)[1]
+assert json.loads(body) == {"name": "helper", "text": "hold the deploy until the web tests pass", "fromUser": True}, body
+PY
+    run "$ROMP_SCRIPT" send helper --from-user 'and tell me when the api pod is back'
+    [ "$status" -eq 0 ]
+    python3 - "$TEST_DIR/req" <<'PY'
+import json, sys
+body = open(sys.argv[1]).read().split("\n", 1)[1]
+assert json.loads(body) == {"name": "helper", "text": "and tell me when the api pod is back", "fromUser": True}, body
+PY
+}
+
+@test "romp send refuses --from-user together with --tag: a tagged text is machine-sent" {
+    start_fake_kernel '{"ok": true}'
+    run "$ROMP_SCRIPT" send --from-user --tag kickoff helper 'boot brief'
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--from-user"* ]]
+    run "$ROMP_SCRIPT" send helper --tag kickoff --from-user 'boot brief'
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--from-user"* ]]
+    [ ! -e "$TEST_DIR/req" ]
+}
+
 @test "romp send --tag appends the render-hint marker; bad labels and missing text exit 2" {
     start_fake_kernel '{"ok": true}'
     run "$ROMP_SCRIPT" send helper --tag kickoff 'boot brief for the run'

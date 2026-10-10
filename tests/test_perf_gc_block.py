@@ -55,8 +55,12 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 km = load_source("romp_kernel_perf_gc", os.path.join(BIN, "romp-kernel"))
 
-GC_KEYS = {"gen", "thresholds", "counts", "frozen", "errors", "hooked", "freeze"}
-FREEZE_KEYS = {"enabled", "active", "loadTrees", "backstopFoldins", "freezes", "reclaims", "collections", "survivors", "lastReleaseSurvivors", "lastReleaseSids", "endedPending", "lastReconcileMs", "lastReconcileKind", "totalReconcileMs", "errors"}
+GC_KEYS = {"gen", "thresholds", "counts", "frozenAsOfCleanup", "frozenAsOfCleanupAt", "errors", "hooked", "freeze"}
+FREEZE_KEYS = {"enabled", "active", "loadTrees", "backstopFoldins", "freezes", "reclaims", "collections", "survivors", "lastReleaseSurvivors", "lastReleaseSids", "endedPending", "lastReconcileMs", "lastReconcileKind", "totalReconcileMs", "errors",
+               # the full-collection freeze (2026-10-07)
+               "fullFreezeMs", "fullFreezes", "fullT2", "fullSinceReclaim", "fullBackstopRatio", "fullMsSinceReclaim",
+               "fullRefMs", "lastFullMs", "callbackErrors", "fullFreezeSkips", "fullForceS", "forced", "owedForS",
+               "reclaimSkips", "frozenAsOfCleanup", "frozenAsOfCleanupAt", "cleanupMaxS"}
 GEN_KEYS = {"collections", "msSum", "msMax", "msLast", "collectedLast"}
 ROW_GC_KEYS = {"n0", "n1", "n2", "ms2"}
 
@@ -91,11 +95,28 @@ class Shape(unittest.TestCase):
             self.assertEqual(row, {"collections": 0, "msSum": 0.0, "msMax": 0.0, "msLast": 0.0, "collectedLast": 0})
         self.assertEqual(g["thresholds"], list(gc.get_threshold()))
         self.assertEqual(len(g["counts"]), 3)
-        self.assertEqual(g["frozen"], gc.get_freeze_count())
+        self.assertEqual((g["frozenAsOfCleanup"], g["frozenAsOfCleanupAt"]),
+                         (km._GC_FREEZE.frozen_as_of_cleanup, km._GC_FREEZE.frozen_as_of_cleanup_at),
+                         "the count re-read at the last cleanup and its time, never a walk on read")
         self.assertEqual(g["errors"], 0)
         self.assertEqual(set(g["freeze"]), FREEZE_KEYS, "the #1735 freeze sub-block carries its state and reconcile counters")
         self.assertFalse(g["hooked"], "a collector's hook is installed only when asked")
         json.dumps(g)
+
+    def test_the_frozen_count_is_served_without_walking_the_frozen_list(self):
+        """2026-10-07 review: gc.get_freeze_count() walks the frozen list (seconds once the long-lived heap is frozen), so
+        /perf serves the freeze controller's stored count and never calls it on the read path."""
+        from unittest import mock
+        saved = (km._GC_FREEZE.frozen_as_of_cleanup, km._GC_FREEZE.frozen_as_of_cleanup_at)
+        km._GC_FREEZE.frozen_as_of_cleanup, km._GC_FREEZE.frozen_as_of_cleanup_at = 123456, 1791000000.0
+        try:
+            with mock.patch.object(km.gc, "get_freeze_count", side_effect=AssertionError("walked on read")) as walk, \
+                    mock.patch.object(km.gc, "get_objects", side_effect=AssertionError("listed on read")) as listing:
+                g = km._PerfStats().snapshot()["gc"]
+            self.assertFalse(walk.called or listing.called, "the read path never walks or lists the heap")
+            self.assertEqual((g["frozenAsOfCleanup"], g["frozenAsOfCleanupAt"]), (123456, 1791000000.0))
+        finally:
+            km._GC_FREEZE.frozen_as_of_cleanup, km._GC_FREEZE.frozen_as_of_cleanup_at = saved
 
     def test_a_snapshot_reads_the_tallies_and_does_not_collect(self):
         st = km._PerfStats()
@@ -289,18 +310,19 @@ class Robustness(_Hooked):
             json.dumps(snap)
             g = snap["gc"]
             self.assertEqual(set(g), GC_KEYS)
-            self.assertIsNone(g["frozen"]); self.assertIsNone(g["hooked"])
+            self.assertEqual(g["frozenAsOfCleanup"], km._GC_FREEZE.frozen_as_of_cleanup, "the stored count needs no accessor")
+            self.assertIsNone(g["hooked"])
             self.assertIsInstance(g["thresholds"], list, "the accessors the stub has still answer")
             self.assertEqual(set(g["gen"]), {"0", "1", "2"}, "the hook's own tallies need no accessor")
         lines = [l for l in err.getvalue().splitlines() if l.startswith("perf: ")]
         mine = sorted(l.split()[1] for l in lines if l.startswith("perf: gc."))
-        self.assertEqual(mine, ["gc.frozen", "gc.hooked"], "one line per key over three snapshots: %r" % lines)
+        self.assertEqual(mine, ["gc.hooked"], "one line per key over three snapshots: %r" % lines)
         # the same stub lacks isenabled and get_stats too, which the HEAP block reads: it says so under ITS name, from its own
         # said-set, so the two blocks' `gc.*` keys never share a line or silence each other
         theirs = sorted(l.split()[1] for l in lines if l.startswith("perf: heap."))
         self.assertEqual(theirs, ["heap.gc.enabled", "heap.gc.stats"], lines)
-        self.assertEqual(len(lines), 4, "nothing under any other name: %r" % lines)
-        self.assertEqual(km._GC_SAID, {"frozen", "hooked"})
+        self.assertEqual(len(lines), 3, "nothing under any other name: %r" % lines)
+        self.assertEqual(km._GC_SAID, {"hooked"})
         self.assertFalse({"frozen", "hooked"} & km._HEAP_SAID, "the heap block's said-set holds its own keys alone")
 
 

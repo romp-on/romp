@@ -477,6 +477,9 @@ class DeleteWhileBusy(unittest.TestCase):
                          "degrades to the loud spent restore, never a wrong-branch cut")
 
     def test_stop_hook_and_settle_both_observe_the_turn_end(self):
-        self.assertIn('if getattr(self, "_rewind_wait", False):\n            try:\n'
+        # the Stop hook reads the wait as it stood when the hook FIRED (captured; review 2 of the hook move): a delete
+        # armed after this turn ended waits for its own turn end
+        self.assertIn('rewind_wait=bool(getattr(self, "_rewind_wait", False))', BACKEND_SRC)
+        self.assertIn('if cap["rewind_wait"]:\n            try:\n'
                       '                self.backend._complete_rewind_wait(self)', BACKEND_SRC)
         self.assertIn('if self._rewind_to and getattr(self, "_rewind_wait", False):', BACKEND_SRC)

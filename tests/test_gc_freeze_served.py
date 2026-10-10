@@ -137,7 +137,13 @@ class ServedGcFreeze(unittest.TestCase):
         self.assertTrue(fr["enabled"] and fr["active"], "the freeze is on and holds a freeze: %r" % fr)
         self.assertGreaterEqual(fr["freezes"], 1, "the freeze fired on the judges' boot parse: %r" % fr)
         self.assertIn(fr["lastReconcileKind"], ("initial", "load"), "no reclaim yet, only loads: %r" % fr)
-        self.assertGreater(pf["gc"]["frozen"], 0, "objects left the collector's walk (gc.get_freeze_count): %r" % pf["gc"]["frozen"])
+        # the frozen count is served only as of a cleanup (a reclaim re-reads it; no freeze lists the heap, 2026-10-07), and
+        # this lab runs none yet, so it reads null with its time; `active` above is the live signal that a freeze holds
+        self.assertIsNone(pf["gc"]["frozenAsOfCleanup"], "no cleanup yet, so no count served: %r" % pf["gc"])
+        self.assertIsNone(pf["gc"]["frozenAsOfCleanupAt"], "and no cleanup time: %r" % pf["gc"])
+        # and the retired walk of the frozen list is not served at all, while the freeze sub-block serves the same pair
+        self.assertNotIn("frozen", pf["gc"], "the walk of the frozen list is not served: %r" % sorted(pf["gc"]))
+        self.assertEqual((fr["frozenAsOfCleanup"], fr["frozenAsOfCleanupAt"]), (None, None), "the freeze block agrees: %r" % fr)
         reclaims_before = fr["reclaims"]
         inserts_before = int(pf["recordCache"]["inserts"])
         # steady re-reads: append to a transcript repeatedly (each re-read replaces its acyclic cache entry). Under the

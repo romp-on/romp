@@ -752,8 +752,10 @@ def preflight_auth(jd, model):
     hand-placed-helper remedy, never a rebuild (the 2026-09-22 PR 2022 review, low 4). The probe's timeout tracks the judge module's own alarm at
     `jd.CALL_ALARM_S`, backstopped by five seconds, so raising the alarm does not kill a slow, healthy probe (the 2026-09-22 PR 2022 review, low f)."""
     auth = jd._judge_auth(None)
-    cmd = jd._judge_cmd(model, "Reply with the word ok.", auth=auth)
     env = jd._judge_env("triage", auth=auth)
+    # a key-billed probe carries the judges' held key (2026-10-05) and, like every judge call, turns its own helper off
+    held = env.get(jd._KEY_SOURCE.env_name, "") if auth == "key" else ""
+    cmd = jd._judge_cmd(model, "Reply with the word ok.", auth=auth, key_held=bool(held))
     scratch = jd._ensure_judge_scratch()                        # the same romp-owned scratch cwd every judge call runs in, so the
     #                                                             CLI's per-invocation files do not land in the checkout (the 2026-09-22 PR 2022 review, low 1)
     try:

@@ -72,7 +72,7 @@ class RouteGates(unittest.TestCase):
     def test_send_refuses_postal_shaped_mail_to_isolated_targets(self):
         # the gate sits in the one delivery door (_deliver_text, T370) that POST /send and a notice card's /send action both take
         self.assertIn('if _postal_shaped(text) and _postal_isolated(sid):', self.src)
-        self.assertIn('ok, err, queued = _deliver_text(sid, body["text"])', self.src.split('u.path == "/send"')[1][:3000], "the route takes the door")
+        self.assertIn('ok, err, queued = _deliver_text(sid, body["text"], from_user=bool(body.get("fromUser")))', self.src.split('u.path == "/send"')[1][:3000], "the route takes the door")
 
     def test_deliver_refuses_isolated_targets_outright_and_parks(self):
         self.assertIn('if _postal_isolated(sid):', self.src)

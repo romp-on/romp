@@ -382,7 +382,7 @@ class _PerfStats:
                                    main installs once): per generation, collections, msSum / msMax / msLast
                                    (wall on the collecting thread) and collectedLast; thresholds and counts
                                    (gc.get_threshold / gc.get_count, repeated from heap.gc so the block reads
-                                   on its own), frozen (gc.get_freeze_count), errors (callback failures,
+                                   on its own), frozenAsOfCleanup/At (the frozen count at the last cleanup), errors (callback failures,
                                    counted, never raised) and hooked (whether this collector's hook is in
                                    gc.callbacks). Each split row on the rings carries the cycle's own delta
                                    as `gc` (n0, n1, n2 collections per generation and ms2), so a slow cycle
@@ -1188,7 +1188,10 @@ class _PerfStats:
         memos["convergeDeclined"] = _CONVERGE_DECLINED[0]   # converges that asked no restart because this kernel was leaving
         memos["sessionsListing"] = {"built": _SESSIONS_LISTING["built"], "served": _SESSIONS_LISTING["served"],
                                     "requestBuilt": _SESSIONS_LISTING["requestBuilt"], "faultBuilt": _SESSIONS_LISTING["faultBuilt"],
-                                    "missBy": dict(_SESSIONS_LISTING["missBy"])}
+                                    "missBy": dict(_SESSIONS_LISTING["missBy"]),
+                                    # the shared request build (2026-09-28): builds, callers joined to one in flight, served
+                                    # its kept rows, refused at the waiter cap, given up at their deadline, and the waiters now
+                                    "requestShared": dict(_SESSIONS_REQUEST_BUILD.stats, waiting=_SESSIONS_REQUEST_BUILD.waiting)}
         memos["nudgeWalk"] = dict(_NUDGE_WALK_STATS)   # the walk's parse gate: looks, skipped and paid parses, cold ones, the
         #                                                yield's deferrals, memos refused as unbounded or clock-due (T401 (2))
         memos["cleared"] = dict(_CLEARED_STATS)       # the clear set: parsed once per file state, served while it stands (2026-09-09)
@@ -1203,7 +1206,11 @@ class _PerfStats:
                     # and the block still serves (the heap block's review find, 2026-09-15, applied here)
                     "thresholds": _gc_read("thresholds", lambda: list(gc.get_threshold())),
                     "counts": _gc_read("counts", lambda: list(gc.get_count())),
-                    "frozen": _gc_read("frozen", lambda: gc.get_freeze_count()),
+                    # the frozen count AS OF THE LAST CLEANUP and that cleanup's time, never gc.get_freeze_count() here (a walk
+                    # of the frozen list: seconds once the long-lived heap is frozen, every /perf read would stall the kernel for
+                    # it); the controller re-reads it inside each reclaim's pause; 2026-10-07
+                    "frozenAsOfCleanup": _gc_read("frozenAsOfCleanup", lambda: _GC_FREEZE.frozen_as_of_cleanup),
+                    "frozenAsOfCleanupAt": _gc_read("frozenAsOfCleanupAt", lambda: _GC_FREEZE.frozen_as_of_cleanup_at),
                     "errors": gc_errors,
                     "hooked": _gc_read("hooked", lambda: self.gc_event in gc.callbacks),
                     # #1735: the freeze controller's state and the reconcile trade, so a reconcile collection is told
@@ -1251,14 +1258,28 @@ _PERF_STATS = _PerfStats()
 _GC_FREEZE_ERRORS = [0]
 _GC_FREEZE_SAID = [False]
 _GC_FREEZE_LOAD_TREES, _gc_freeze_bad_knob = gcf.load_trees_from_env()   # parsed with a fallback, never a bare int() at import (#1735 high)
-_GC_FREEZE = gcf.GcFreeze(enabled=gcf.enabled_from_env(), load_trees=_GC_FREEZE_LOAD_TREES)   # the ended note (note_ended) is wired when the SDK backend loads (below)
-if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell back to the default: said once, counted, never fatal
-    _GC_FREEZE_ERRORS[0] += 1
-    try:
-        sys.stderr.write("gc-freeze: ROMP_GC_FREEZE_LOAD_TREES=%r is not a positive integer; using the default %d\n"
-                         % (_gc_freeze_bad_knob[:80], gcf.DEFAULT_LOAD_TREES))
-    except Exception:
-        pass
+# 2026-10-07: the FULL-COLLECTION freeze (gc_freeze.py's docstring): an organic full collection that paused at least
+# ROMP_GC_FREEZE_FULL_MS freezes its survivors from the collector's own stop callback, and the third collection threshold is
+# raised to ROMP_GC_FREEZE_FULL_T2 so the full collections left (now cheap) run less often. ROMP_GC_FREEZE_FULL_MS=off restores
+# the collector as it was before (no callback, thresholds untouched); ROMP_GC_FREEZE=off turns the whole controller off.
+_GC_FREEZE_FULL_MS, _gc_freeze_bad_full = gcf.full_freeze_ms_from_env()
+_GC_FREEZE_FULL_T2, _gc_freeze_bad_t2 = gcf.full_t2_from_env()
+_GC_FREEZE_FULL_FORCE_S, _gc_freeze_bad_force = gcf.full_force_s_from_env()   # an owed backstop runs on a busy cycle after this long
+_GC_FREEZE_CLEANUP_MAX_S, _gc_freeze_bad_cap = gcf.full_cleanup_max_s_from_env()   # the longest a frozen heap goes between cleanups
+_GC_FREEZE = gcf.GcFreeze(enabled=gcf.enabled_from_env(), load_trees=_GC_FREEZE_LOAD_TREES,   # the ended note (note_ended) is wired
+                          full_freeze_ms=_GC_FREEZE_FULL_MS, full_t2=_GC_FREEZE_FULL_T2,    #  when the SDK backend loads (below)
+                          full_force_s=_GC_FREEZE_FULL_FORCE_S, full_cleanup_max_s=_GC_FREEZE_CLEANUP_MAX_S)
+for _knob, _bad, _default in (("ROMP_GC_FREEZE_LOAD_TREES", _gc_freeze_bad_knob, gcf.DEFAULT_LOAD_TREES),
+                              ("ROMP_GC_FREEZE_FULL_MS", _gc_freeze_bad_full, gcf.DEFAULT_FULL_FREEZE_MS),
+                              ("ROMP_GC_FREEZE_FULL_T2", _gc_freeze_bad_t2, gcf.DEFAULT_FULL_T2),
+                              ("ROMP_GC_FREEZE_FULL_FORCE_S", _gc_freeze_bad_force, gcf.DEFAULT_FULL_FORCE_S),
+                              ("ROMP_GC_FREEZE_CLEANUP_MAX_S", _gc_freeze_bad_cap, gcf.DEFAULT_FULL_CLEANUP_MAX_S)):
+    if _bad is not None:     # a bad knob fell back to its default: said once, counted, never fatal
+        _GC_FREEZE_ERRORS[0] += 1
+        try:
+            sys.stderr.write("gc-freeze: %s=%r is not a positive number; using the default %s\n" % (_knob, _bad[:80], _default))
+        except Exception:
+            pass
 
 
 def _gc_freeze_tick(idle, first):
@@ -1275,6 +1296,12 @@ def _gc_freeze_tick(idle, first):
             except Exception:
                 pass
     kind = gcf.pusher_tick(_GC_FREEZE, idle, first, em.record_cache_stats, on_error)
+    if kind == "forced":     # no idle cycle came while a backstop was owed: it ran on this busy cycle (one line per run)
+        try:
+            sys.stderr.write("gc-freeze: a backstop owed past %.0f s ran on a busy cycle in %.1f ms\n"
+                             % (_GC_FREEZE.full_force_s or 0, _GC_FREEZE.last_ms))
+        except Exception:
+            pass
     if kind == "release":    # #1735: a release means a session ended and the collector took (or was owed) a full-heap pause; name it (one per release, none per load)
         try:
             survivors = getattr(_GC_FREEZE, "last_release_survivors", 0)
@@ -4734,6 +4761,23 @@ def _bus_restore_mail(sid, mids):
     return out
 
 
+def _bus_report_take(sid, mids):
+    """POST /seen to the local bus: `sid`'s CLI has TAKEN a banner carrying `mids` (SdkBackend._report_postal_take,
+    2026-10-03), so the bus writes the read stamp the sender's receipt reads. RAISES when the bus could not be told or
+    refused; the caller logs it, and the bus settles the stamp at the session's next take."""
+    conn = http.client.HTTPConnection("127.0.0.1", _bus_port(), timeout=5)
+    try:
+        conn.request("POST", "/seen", json.dumps({"id": sid, "mids": list(mids)}),
+                     {"Content-Type": "application/json", "X-Romp-Token": TOKEN})
+        resp = conn.getresponse()
+        data = resp.read()
+    finally:
+        conn.close()
+    body = json.loads(data.decode("utf-8", "replace") or "{}") if resp.status == 200 else None
+    if not isinstance(body, dict) or not body.get("ok"):
+        raise RuntimeError("bus /seen answered %d: %s" % (resp.status, data[:200].decode("utf-8", "replace")))
+
+
 class _BusHeld(set):
     """The set _bus_restore_mail answers: the ids the bus holds (put back, or held under an unreadable cur/ for its retry), with
     the held ones named in `.held` so SdkSession._return_stranded_mail can say the pending fault in its own line."""
@@ -5040,6 +5084,8 @@ def _codex_receipts_text(recs):
                 st = "parked for %s · id %s" % (r["parked"], rid)
         elif r.get("relayed"):
             st = "delivered %s (not read yet) · id %s" % (_codex_hhmm(r["relayed"]), rid)
+        elif r.get("queued"):
+            st = "waiting in the session's queue (not read yet) · id %s" % rid
         else:
             st = "pending (not read yet) · id %s" % rid
         out.append("  → %-18s sent %s · %s%s" % (r.get("to", "?"), _codex_hhmm(r.get("sent")), st,
@@ -12998,10 +13044,10 @@ def _GENERIC_LEAF_FOLDS():
 
 
 def _LEAF_FOLDS():
-    """The leaf's checkpointed folds with their cursor dicts: the kernel's two background-task views, the judges' pairing, the
-    session meta and the agent launch state."""
-    return ((_bg_scan_cached, _bgtasks_cache), (_bg_scan_all_cached, _bgall_cache), (jd._bg_scan, jd._BG_SCAN_CACHE),
-            (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE))
+    """The leaf's checkpointed folds with their cursor dicts: the kernel's three background-task views (running, every task,
+    and every task narrowed for the awaiting-stamp lift), the judges' pairing, the session meta and the agent launch state."""
+    return ((_bg_scan_cached, _bgtasks_cache), (_bg_scan_all_cached, _bgall_cache), (_bg_scan_lift_cached, _bglift_cache),
+            (jd._bg_scan, jd._BG_SCAN_CACHE), (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE))
 
 
 def _heal_cold_folds(leaf):
@@ -13035,6 +13081,26 @@ def _stored_tree_under(path, sid, human):
     except Exception:
         return None
     return hit[1] if hit else None
+
+
+def _asm_reseat_after_write(leaf, sid, human):
+    """After an assembly document was written for `leaf`: when the event model released the session's whole entry at the
+    write (a tail-only leaf, em.asm_reseat_due), the parse store's trees over the leaf go too (2026-10-08). Those trees were
+    built from the whole entry, so each held every body of the transcript; an idle leaf's tree was served for the life of the
+    process (the store keys on the file's stat), keeping the released entry's records alive whatever the record cache counted.
+    No parse here: the next one to ask restores from the document just written. For a session the feed shows warm that is the
+    next build_feed (its warm fall-through re-parses on a miss), so the restore lands in the next push, as the converge step's
+    own parse landed in the same pusher cycle before (the second review of 2026-10-08). A restore costs 1.4 to 1.6 s for a
+    5.3 MB document (a 403 MB synthetic leaf), seconds more for the largest live leaves."""
+    try:
+        if not em.asm_reseat_due(leaf, sid, human):
+            return False
+        jd.parse_cache_drop_leaf(str(leaf))
+        _BG_TOPS_CACHE.pop(str(sid), None)                 # its pinned parse is the dropped tree (identity is its version)
+        return True
+    except Exception:
+        sys.stderr.write("assembly re-seat: %s\n" % traceback.format_exc())
+        return False
 
 
 def _stored_tree(path, sid):
@@ -13157,6 +13223,7 @@ _ASM_CONVERGE_DONE = {}             # leaf -> the file's (mtime_ns, size) once i
 #                                     writer refused it for a property of its cut (T376): looked at once per file state, never per cycle
 _ASM_CONVERGE_BLIP = {}             # leaf -> the file state under which the writer's one blip retry was spent
 _ASM_CONVERGE_NOENTRY = {}          # leaf -> the file state under which "no entry" was counted (once, not per cycle)
+_ASM_CONVERGE_OWED = {}             # leaf -> True: the budget deferred its write (insertion order = oldest owed first); tried first next pass
 _ASM_STRUCTURAL = set(em._ASM_SKIP_STRUCTURAL) | {"written", "restored"}   # the writer's reasons that hold until the cut moves (noCut
 #                                                                              rides in the writer's own structural set, stage one b)
 
@@ -13185,16 +13252,39 @@ def _converge_assembly(now, t0):
     for leaf, sid, human in em.asm_whole_entries():        #  whole entries for one leaf, the judges' flag and the display's, and the
         if leaf and sid:                                   #  document must carry the one the display's next boot reads with)
             by_leaf.setdefault((str(leaf), sid), set()).add(human)
-    for (leaf, sid), flags in by_leaf.items():             # the parses the boot actually did (T382: the discover window's rows, 48
+    owed_at = {leaf: i for i, leaf in enumerate(_ASM_CONVERGE_OWED)}
+    order = sorted(by_leaf.items(), key=lambda kv: (kv[0][0] not in owed_at, owed_at.get(kv[0][0], 0)))   # leaves the budget deferred
+    #                                                      go first, oldest owed first (2026-10-08)
+    tried = False                                          # a candidate reached the budget this pass: the floor is spent
+    fl = {"taken": False}                                  # the floor was taken this pass, whatever the writer then did (review: a refused
+    #                                                        write left `tried` unset and a second owed leaf took the floor in the cycle)
+    for (leaf, sid), flags in order:                       # the parses the boot actually did (T382: the discover window's rows, 48
         if time.monotonic() - t0 > CKPT_CONVERGE_MS / 1000.0:   #  hours, left every older idle leaf out: 19 of the 25 boundary leaves
             break                                          #  without a document on the devbox); the cycle's wall: the rest wait
         try:
-            r = _converge_assembly_leaf(leaf, sid, t0, flags=flags)
+            r = _converge_assembly_leaf(leaf, sid, t0, flags=flags, floor=not tried and not fl["taken"] and leaf in _ASM_CONVERGE_OWED,
+                                        floor_state=fl)
+            #                                                the floor (a cycle alone, over the budget) is an OWED leaf's: one the budget
+            #                                                deferred on an earlier pass, so a write over the budget still waits a cycle
         except Exception:                                  # one leaf's raise (a stat, a backend hook) leaves the rest their turn
             sys.stderr.write("assembly converge: %s\n" % traceback.format_exc()); continue
         if r is None:
-            break                                          # the budget: the rest wait for the next cycle
+            # the budget refused this leaf (2026-10-08): it is owed, and the pass goes on to the others, which may fit. A break here
+            # left every whole entry after a leaf too large for the cycle (an estimate over the cap: any leaf past 512 MiB under the
+            # 8 MiB default) waiting forever, and that leaf itself was never written, so the largest idle leaves, the ones holding
+            # the most, were never released. The owed leaf goes first next pass, where the floor lets it take a cycle alone
+            _ASM_CONVERGE_OWED[leaf] = True
+            tried = True
+            continue
+        if r:
+            tried = True
+            _ASM_CONVERGE_OWED.pop(leaf, None)             # written: owed no more. Only then: another session's row over the same leaf
+            #                                                that returns False first (a flag mismatch) no longer takes the owed mark from
+            #                                                the row that can write it (review, 2026-10-08)
         n += 1 if r else 0
+    for leaf in [l_ for l_ in _ASM_CONVERGE_OWED if not any(k[0] == l_ for k in by_leaf)]:
+        _ASM_CONVERGE_OWED.pop(leaf, None)                 # no whole entry left to write from: nothing is owed
+    _release_oldest(_ASM_CONVERGE_OWED)
     return n
 
 
@@ -13206,7 +13296,7 @@ def _release_oldest(table, cap=4096):
 _ASM_CONVERGE_FLAG = {}             # leaf -> the file state under which a flag mismatch was counted (once, not per cycle)
 
 
-def _converge_assembly_leaf(key, sid, t0, flags=None):
+def _converge_assembly_leaf(key, sid, t0, flags=None, floor=False, floor_state=None):
     """One leaf's assembly write for the pass (see _converge_assembly): True written, False not (done, refused, nothing to
     write from), None when the budget refused it (the caller defers the rest). `flags`, when the caller knows them, are the
     sdk_human flags the boot parsed the leaf under; the document is written under the DISPLAY parse's flag (the one the next
@@ -13233,15 +13323,19 @@ def _converge_assembly_leaf(key, sid, t0, flags=None):
         if _ASM_CONVERGE_FLAG.get(key) != st:               # parsed only under the other flag: no document the reader would unlink
             _ASM_CONVERGE_FLAG[key] = st; em.asm_converge_skip("flagMismatch")
         return False
-    if not em.asm_entry_whole(key, sid, human) or not em.entry_whole_resident(key):
+    if not em.asm_entry_whole(key, sid, human) or not em.entry_indexed_whole(key):   # offsets from record 0 (a tail-only entry has them)
         if _ASM_CONVERGE_NOENTRY.get(key) != st:           # no whole assembly entry, or the reader's record entry gone (the writer
             _ASM_CONVERGE_NOENTRY[key] = st; em.asm_converge_skip("noEntry")   #  needs both): nothing to write from, never a read
         return False
     em.asm_converge_stat("candidates")
     est = max(4096, st[1] // 64)
     if not em.checkpoint_cycle_take(est):
-        em.asm_converge_stat("deferred")
-        return None
+        if not (floor and em.checkpoint_cycle_take_floor(est)):
+            em.asm_converge_stat("deferred")           # `floor`: an owed leaf may take the cycle alone, over the budget, once a cycle
+            return None                                #  (2026-10-08: else a leaf whose estimate passes the cap never writes)
+        if floor_state is not None:
+            floor_state["taken"] = True                # spent, whether the write below lands or is refused
+        em.asm_converge_stat("floor")
     reasons = []
     try:
         wrote = em.asm_checkpoint_write(key, sid, human, tree=_stored_tree_under(key, sid, human), reason_out=reasons, who="converge pass")
@@ -13254,6 +13348,7 @@ def _converge_assembly_leaf(key, sid, t0, flags=None):
             size = 0
         em.asm_converge_stat("writes"); em.asm_converge_stat("bytes", size); em.checkpoint_cycle_charge(size - est)
         _ASM_CONVERGE_DONE[key] = st
+        _asm_reseat_after_write(key, sid, human)
         return True
     em.checkpoint_cycle_charge(-est)                       # nothing written: the take goes back
     reason = reasons[-1] if reasons else "failed"          # the writer's own reason (round one, low 6)
@@ -13369,6 +13464,7 @@ def _persist_checkpoints(now):
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
             if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_stored_tree(leaf, sid)):   # with a compaction
                 written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
+                _asm_reseat_after_write(leaf, sid, _display_sdk_human(sid))
         #                                          document its turns section (T323 stage 4c: a restore builds the turns without an
         #                                          atom); never a parse of its own (the settle reads no leaf whole)
         except Exception:
@@ -14513,7 +14609,7 @@ def _lift_spent_awaiting(now, live_map):
             # for every dispatch the transcript pairs, WHETHER its recorded deadline has passed (a
             # watcher past deadline+grace counts as returned — a clock fact, keyed as the boolean it
             # resolves to, so the crossing itself re-examines the session; review 2026-09-03).
-            every = _bg_scan_all_cached(s["path"]) if s.get("path") else []
+            every = _bg_scan_lift_cached(s["path"]) if s.get("path") else []   # the lift's narrow view: it fits the checkpoint
             gate = _sid_inputs_fp(sid, s.get("path"),
                                   extra=(tuple(sorted(str(t.get("toolUseId") or "") for t in (snap.get("bgTasks") or ())
                                                       if isinstance(t, dict))),
@@ -14666,7 +14762,7 @@ def _lift_decisions(sid, s, store, now, live_map):
             stamped.remove((nid, nd))
     if not stamped:
         return out
-    every = _bg_scan_all_cached(s["path"])
+    every = _bg_scan_lift_cached(s["path"])
     # the backend's lifecycle set (present-but-empty is AUTHORITATIVE — _bg_live_norm's own
     # rule) and the CLI epoch it (re)started at: the restart-orphan reconciliation evidence
     snap = live_map.get(sid) or {}
@@ -18810,7 +18906,7 @@ def _comments_frame(sid, live_map=None):
                 # LOST — a reconnect with it in flight; the popover shows "never delivered") owes nothing.
                 user_atoms = _echo_landing_atoms(turns, live)          # (stamp, its texts) from the oldest echo's send up, built once
                 def _landed(e):
-                    keys = set(sb.echo_keys(e.get("_echo_text")))     # the plain key and, for a slash send, its words
+                    keys = set(sb.echo_lookup_keys(e))     # the plain key, for a slash send its words, for a joined part the joined text's
                     since = float(e.get("t") or 0)                     # the send's own stamp: the record the CLI writes for
                     return any(t >= since and not keys.isdisjoint(texts) for t, texts in user_atoms)   # it is at or after it
                 floor = _human_turn_floor({"turns": turns}) if turns else 0
@@ -19830,6 +19926,9 @@ def _sdk_locked():
             # a postal banner the backend fed and a connection rebuild stranded goes BACK to the bus by message id
             # (SdkSession._return_stranded_mail → the bus's POST /restore), never dropped (2026-09-12)
             _sdk_backend.postal_restore = _bus_restore_mail
+            # ...and a banner the CLI has TAKEN is reported to the bus, which writes the sender's read stamp then, never at
+            # the delivery (SdkSession's take → the bus's POST /seen, 2026-10-03)
+            _sdk_backend.postal_taken = _bus_report_take
             # NO thread-wake model remap. The T223 rider installed _family_newest_model as the
             # backend's wake hook, so a dormant comment thread registered on a superseded full id came
             # up on its family's newest at its next explicit wake — built for the artefact where a
@@ -26651,17 +26750,19 @@ def _restore_notice_archive(item_ids):
     return faults
 
 
-def _deliver_text(sid, text, plain=False):
+def _deliver_text(sid, text, plain=False, from_user=False):
     """Deliver `text` to session `sid` the way POST /send does, for every caller of that door (the route, a notice card's /send
     action): (ok, error, queued). The postal-isolation gate, the remote forward over the session's tunnel, a typed /model,
     /effort or /fast through the setters, else the composer's own park-or-send. `plain` skips the typed-command routing: the
-    text is a MESSAGE whatever its first character (a notice card's stored action, which must never reach a setter)."""
+    text is a MESSAGE whatever its first character (a notice card's stored action, which must never reach a setter).
+    `from_user`: the body's "fromUser" (`romp send --from-user`, the chat page's relay of the person's own words,
+    _parse_send_body) rides to the queued copy, which then queues ahead of peer and machine sends (2026-10-06)."""
     if _postal_shaped(text) and _postal_isolated(sid):
         return False, ("isolation: the target session's mailbox is OFF — agent mail is refused on every route; the refusal is "
                        "final (the user can toggle its mailbox back on)"), False
     r = _host_for_sid(sid)
     if r is not None:
-        res = _remote_forward(r, "/send", {"id": sid, "text": text})
+        res = _remote_forward(r, "/send", {"id": sid, "text": text, **({"fromUser": True} if from_user else {})})
         if res is None:
             return False, ("the remote kernel for this session (%s) isn't answering — message not delivered" % r.get("host", "?")), False
         if isinstance(res, dict) and res.get("ok") is False:
@@ -26681,7 +26782,7 @@ def _deliver_text(sid, text, plain=False):
                 return False, "no running backend owns %s — the command was not delivered" % sid, False
             return False, str(meta["refused"]), False   # the route's words: a Codex refusal (2026-09-19)
         return True, "", bool(meta.get("queued"))
-    res = _send_or_park(be, sid, text, user="<!-- romp-tag: " not in text)
+    res = _send_or_park(be, sid, text, user="<!-- romp-tag: " not in text or bool(from_user), from_user=bool(from_user))
     if res is None:
         return False, "no running backend owns %s — the message was not delivered" % sid, False
     return True, "", bool(res)
@@ -29296,6 +29397,110 @@ _SESSIONS_LISTING = {"key": None, "rows": None, "json": None, "threads": None, "
 #                      (plans/sessions-route-from-the-cycle.md): the rows built once per change by the pusher's cycle under an
 #                      exact key, served from memory to every request; `missBy` names the key input that moved
 
+# The REQUEST's own build of the listing (no cycle has built it yet, or the cycle's last build failed) is shared: one build at
+# a time for every caller, its result reused briefly, a bounded number of callers waiting on it (_SharedBuild). Before this each
+# request built for itself, and on a restart's reload window, when one build took about 16 s, the postal bus's abandoned 6 s
+# fetches piled up about 1,360 connections on about 1,500 threads, each still building, and the bus's liveness checks failed
+# (2026-09-28). The numbers:
+_SESSIONS_REQUEST_REUSE_S = 1.5      # a request build's rows serve later requests this long after it lands. A clock only here:
+#                                      the request path holds no key (the key reads every row's compacting pair and the transcript
+#                                      sweep, about the build's own cost), and the event that supersedes it, the cycle's keyed
+#                                      build landing, drops it at once (_sessions_listing_refresh)
+_SESSIONS_REQUEST_WAITERS_MAX = 32   # callers allowed to wait on a build in flight; the next is answered 503 at once
+_SESSIONS_REQUEST_WAIT_S = 9.0       # how long one caller waits before a 503: under the longest caller's own cap (bin/romp's
+#                                      10 s curl; the postal bus gives up at 6 s, reading a 503 and its timeout alike as "the
+#                                      kernel did not answer"), so the route's threads number at most 1 + 32, each back within 9 s
+_sessions_request_clock = time.monotonic   # the reuse window's clock (a module name, so a test moves it)
+
+
+class _ListingUnavailable(Exception):
+    """The shared request build could not answer this caller: `reason` "busy" (the waiter cap was full) or "timeout" (the
+    build ran past the caller's wait). The route answers 503 with Retry-After; the build itself carries on and its rows serve
+    the retry."""
+
+    def __init__(self, reason, text):
+        super().__init__(text)
+        self.reason = reason
+
+
+class _SharedBuild:
+    """One build at a time for any number of callers (a single flight), its result reused for a short window, and a cap on
+    how many callers may wait for it. get(build, …) returns (value, built_here): a kept result younger than `reuse_s` is
+    served; else a caller finding no build in flight runs `build` on its own thread (the leader) and keeps what it returns;
+    a caller finding one in flight waits for it, up to `wait_s`, unless `waiters_max` callers already are, and is served the
+    same value (or re-raises the same exception). A caller that joins a build started before it arrived is served that
+    build's rows: that is the sharing. Only the leader's thread computes, and it always finishes: an abandoned request leaves
+    a waiter that gives up at its deadline, never a second build."""
+
+    def __init__(self):
+        self._cv = threading.Condition(threading.Lock())
+        self._flight = None          # the build in progress: {"done", "value", "error"}
+        self._kept = None            # (value, landed_at on the caller's clock): the last build's result
+        self.waiting = 0
+        self.stats = {"built": 0, "joined": 0, "reused": 0, "busy": 0, "timedOut": 0, "failed": 0, "peakWaiting": 0}
+
+    def reset(self):
+        with self._cv:
+            self._kept = None
+            self.stats = dict.fromkeys(self.stats, 0)
+            self.stats["peakWaiting"] = self.waiting
+
+    def drop(self):
+        """Forget the kept result (the event that supersedes it has happened); a build in flight still serves its waiters."""
+        with self._cv:
+            self._kept = None
+
+    def get(self, build, reuse_s, waiters_max, wait_s, clock):
+        with self._cv:
+            kept = self._kept
+            if kept is not None and clock() - kept[1] < reuse_s:
+                self.stats["reused"] += 1
+                return kept[0], False
+            fl = self._flight
+            if fl is None:
+                fl = self._flight = {"done": False, "value": None, "error": None}
+            else:
+                if self.waiting >= waiters_max:
+                    self.stats["busy"] += 1
+                    raise _ListingUnavailable("busy", "the session list is being built and %d requests are already waiting "
+                                                      "for it; try again in a moment" % self.waiting)
+                self.waiting += 1
+                self.stats["peakWaiting"] = max(self.stats["peakWaiting"], self.waiting)
+                try:
+                    deadline = time.monotonic() + wait_s
+                    while not fl["done"]:
+                        left = deadline - time.monotonic()
+                        if left <= 0:
+                            self.stats["timedOut"] += 1
+                            raise _ListingUnavailable("timeout", "the session list took longer than %.0f s to build; it is "
+                                                                 "still building, try again in a moment" % wait_s)
+                        self._cv.wait(left)
+                finally:
+                    self.waiting -= 1
+                self.stats["joined"] += 1
+                if fl["error"] is not None:
+                    raise fl["error"]
+                return fl["value"], False
+        try:                                              # the leader: build outside the lock, then hand the result to every waiter
+            value = build()
+        except BaseException as e:
+            with self._cv:
+                fl["done"], fl["error"] = True, e
+                self._flight = None
+                self.stats["failed"] += 1
+                self._cv.notify_all()
+            raise
+        with self._cv:
+            fl["done"], fl["value"] = True, value
+            self._flight = None
+            self._kept = (value, clock())
+            self.stats["built"] += 1
+            self._cv.notify_all()
+        return value, True
+
+
+_SESSIONS_REQUEST_BUILD = _SharedBuild()
+
 
 def _reg_rev():
     """The SDK registry's ROWS revision (kernel/sdk_backend.py REG_ROWS_REV: moved by a write that changes one of the fields
@@ -29314,6 +29519,7 @@ def _sessions_listing_reset():
     per test must drop what an earlier build kept)."""
     _SESSIONS_LISTING.update({"key": None, "rows": None, "json": None, "threads": None, "threadsKey": None, "fault": None,
                               "built": 0, "served": 0, "requestBuilt": 0, "faultBuilt": 0, "missBy": {}})
+    _SESSIONS_REQUEST_BUILD.reset()
 
 
 def _sessions_listing_key(live_map, names):
@@ -29468,22 +29674,27 @@ def _sessions_listing_refresh(now, live_map):
         _live_scope.listing_pairs = None
     _SESSIONS_LISTING.update({"key": key, "rows": rows, "json": body, "fault": None, "built": _SESSIONS_LISTING["built"] + 1})
     _SESSIONS_LISTING["missBy"][why] = _SESSIONS_LISTING["missBy"].get(why, 0) + 1   # the thread rows keep their own key (below)
+    _SESSIONS_REQUEST_BUILD.drop()                        # the keyed listing supersedes any request build, whatever its age
 
 
 def _sessions_listing_serve(threads=False):
-    """The route's read: the kept JSON (a cycle old at most), or one build when no cycle has run yet (kept under no key, so
-    the first cycle rebuilds it under its own). `threads`: the comment-thread rows appended, kept apart under the registry
-    revision and the parents' comments stores (a thread's editable name lives there)."""
+    """The route's read: the kept JSON (a cycle old at most); or, when no cycle has built it yet or the cycle's last build
+    failed (the kept listing may then be stale), a request build shared by every caller (_SharedBuild: one build at a time,
+    reused for _SESSIONS_REQUEST_REUSE_S, dropped the moment the cycle's keyed build lands, at most _SESSIONS_REQUEST_WAITERS_MAX
+    callers waiting on it for at most _SESSIONS_REQUEST_WAIT_S). Raises _ListingUnavailable when this caller cannot be served
+    by it (the route's 503). `threads`: the comment-thread rows appended, kept apart under the registry revision and the
+    parents' comments stores (a thread's editable name lives there)."""
     L = _SESSIONS_LISTING
-    if L["json"] is None:
-        rows = _session_rows()
-        L.update({"rows": rows, "json": json.dumps(rows), "requestBuilt": L["requestBuilt"] + 1})
     L["served"] += 1
-    if L["fault"] is not None:                                     # the cycle's build failed since the kept listing: it may be
-        body = json.dumps(_session_rows())                         #  stale, so this request builds for itself, as the base did
-        L["faultBuilt"] += 1
+    if L["json"] is not None and L["fault"] is None:
+        body = L["json"]                                           # the cycle's keyed listing: never on a clock
     else:
-        body = L["json"]
+        fault = L["fault"] is not None                             # counted apart: before the first cycle, or while its build fails
+        body, built = _SESSIONS_REQUEST_BUILD.get(lambda: json.dumps(_session_rows()), _SESSIONS_REQUEST_REUSE_S,
+                                                  _SESSIONS_REQUEST_WAITERS_MAX, _SESSIONS_REQUEST_WAIT_S,
+                                                  _sessions_request_clock)
+        if built:
+            L["faultBuilt" if fault else "requestBuilt"] += 1
     if not threads:
         return body
     tkey = _thread_rows_key()
@@ -30206,7 +30417,12 @@ def _parse_send_body(raw):
     posing it as the user's typed words or dressing it as romp's own. A malformed tag
     fails the WHOLE parse (loud, per the fail-loudly rule): the caller asked for an
     identity the kernel can't honor, and delivering the text anyway would silently
-    misattribute it."""
+    misattribute it.
+
+    Optional "fromUser": true alone, which `romp send --from-user` sets (the chat page relays the
+    person's own words with it, 2026-10-06). The queued copy wears it and goes ahead of peer and
+    machine sends (SdkSession._q_insert_from_user_locked). Any other value fails the parse, as a
+    bad tag does, and so does a tag beside it: a tag says machine-sent, the marker says the person's."""
     try:
         body = json.loads(raw or b"{}")
     except Exception:
@@ -30222,6 +30438,10 @@ def _parse_send_body(raw):
         if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,23}", tag):
             return None
         text = text + "\n\n<!-- romp-tag: " + tag + " -->"
+    if "fromUser" in body:
+        if body["fromUser"] is not True or tag is not None:
+            return None
+        return {"who": who, "text": text, "fromUser": True}
     return {"who": who, "text": text}
 
 
@@ -32171,10 +32391,28 @@ _bgall_cache = {}             # path -> em.fold_records entry (every task, launc
 def _bg_scan_all_cached(path):
     """Every background task the transcript records (launch-ordered, each with its launch `t` and current
     status), mtime+size cached like _bg_scan_cached. Its own cache: the running-only view is read on every
-    push, this one only by the awaiting-stamp lift, and sharing one entry would make each invalidate the
-    other's shape.
+    push, this one by the chat build (an agent's closing report, `result`), the task-output view (`command`)
+    and the feed's top-goal heal (`launchDesc`, `summary`), and sharing one entry would make each invalidate
+    the other's shape. The awaiting-stamp lift reads _bg_scan_lift_cached instead (2026-10-03).
     Folds append-incrementally since 2026-09-03 (em.fold_records), like _bg_scan_cached."""
     return em.scan_bg_tasks_cached(path, _bgall_cache, want_all=True, ckpt="bgAll")
+
+
+_bglift_cache = {}            # path -> em.fold_records entry (every task, the lift's fields only)
+
+
+def _bg_scan_lift_cached(path):
+    """Every background task the transcript records, as _bg_scan_all_cached, each row narrowed to the fields the
+    awaiting-stamp lift rules on (id, status, t, endT, type, deadline, monitor: em._BG_SLIM_KEYS). The lift folds
+    this for every alive session on every cycle, before its skip check (whose fingerprint is built from it). It read
+    the every-task view until 2026-10-03, whose rows carry each agent's closing report and each brief or command: on
+    a long transcript that state is over the checkpoint's per-fold cap, so it was written as a cursor without its
+    state, and after every drop of the reader's entry (the quiescent drop, an eviction) the lift's next fold read
+    the whole transcript again (live: 97 reads, 85.5 GB in 15.7 hours, over half of the kernel's whole-read bytes).
+    This state is about 170 bytes a task (under 200 is pinned), so it is written whole and the fold after a drop
+    restores from it. A document written before this fold existed restores it from bgAll's entry (em._FOLD_SEEDS),
+    so the first boot of this kernel does not read every alive transcript whole for it."""
+    return em.scan_bg_tasks_cached(path, _bglift_cache, want_all=True, ckpt="bgLift", slim=True)
 
 
 def _session_started_face(nodes, nid, healed):
@@ -33135,6 +33373,8 @@ def _is_auth_error(text):
     low = (text or "").lower()
     return ("not logged in" in low
             or "api key is invalid" in low
+            or "invalid api key" in low                # the CLI's own words for a 401 on a key (2.1.284)
+            or "invalid auth token" in low             # …and on a bearer token in ANTHROPIC_AUTH_TOKEN
             or "invalid x-api-key" in low
             or "failed to authenticate" in low
             or ("oauth token" in low and ("expired" in low or "revoked" in low))
@@ -33892,6 +34132,46 @@ def _POSTAL_UNRESOLVED_RESET():
     _POSTAL_UNRESOLVED["suppressed"] = 0
 
 
+# One bus banner as the bus pushes it (postal_service.format_push): a rule line of 44 '#', the '## 📬 from …' head, a rule
+# line, then the message(s), through the reply hint that closes every banner.
+_PUSH_BANNER_RE = re.compile(r"(?ms)^#{44}\n## \U0001F4EC from [^\n]*\n#{44}\n.*?^\(to reply, only if substantive: [^\n]*\)[ \t]*$")
+
+
+def _mail_cards_keeping_tagged_lines(ev, cards):
+    """The events a fully resolved user record `ev` hydrates to, given its `cards` (one per id, in text order): the cards
+    alone, as ever, unless the record is a JOINED feed of peer mail and tagged machine lines (the SDK backend's
+    _join_queued_locked feeds them as one text, so the CLI writes one record). Replacing that record with its cards hid
+    every tagged line in it (2026-10-06). So when the text outside its complete banners (_PUSH_BANNER_RE) carries a
+    `romp-tag` marker and no message id, that remaining text stays as one entry, a copy of the record (its uuid, its
+    sends' ids, its tag) whose md is the remaining pieces joined by a blank line, placed where its first piece sat among
+    the cards. Anything else (mail alone, mail beside untagged text, an id outside a banner) keeps the cards alone, so
+    every record that rendered before renders the same. Per event, with no state across events, so a hydration of A + B
+    still equals hydrate(A) + hydrate(B) (the chat fold's commit relies on it)."""
+    text = ev.get("md") or ""
+    spans = [m.span() for m in _PUSH_BANNER_RE.finditer(text)]
+    if not spans:
+        return cards
+    seq, pos = [], 0
+    for a, b in spans:
+        seq.append(("text", text[pos:a]))
+        seq.append(("mail", len(em.POSTAL_RE.findall(text[a:b]))))
+        pos = b
+    seq.append(("text", text[pos:]))
+    residue = "\n\n".join(c.strip() for k, c in seq if k == "text" and c.strip())
+    if not residue or not em.MSG_TAG_RE.search(residue) or em.POSTAL_RE.search(residue):
+        return cards
+    out, placed, ci = [], False, 0
+    for k, c in seq:
+        if k == "mail":
+            out.extend(cards[ci:ci + c])
+            ci += c
+        elif c.strip() and not placed:
+            out.append(dict(ev, md=residue))
+            placed = True
+    out.extend(cards[ci:])                       # belt: every id sits inside a banner, so nothing is left here
+    return out
+
+
 def _hydrate_postal(events, index, sid=None, captions=None):
     """Replace postal traffic with clean cards: a send_message tool (or `romp mail send` Bash) → an
     OUTGOING card; a user event (or a MAIL READER's output — see _reads_mail) carrying romp-msg-id
@@ -33991,7 +34271,9 @@ def _hydrate_postal(events, index, sid=None, captions=None):
                         card["peerHost"] = rec["fromHost"]
                     cards.append(card)
             if len(cards) == len(ids):                   # all-or-nothing: a partial log never half-renders
-                out.extend(cards); continue
+                # a user record holding mail AND tagged machine lines (a joined feed) keeps its lines visible
+                out.extend(_mail_cards_keeping_tagged_lines(ev, cards) if ev.get("kind") == "user" else cards)
+                continue
             # NOT every id resolved. The turn still passes through unhydrated — a half-rendered card run
             # would be worse — but it must not also lose the ids, which is what made a timeline message
             # arc click land nowhere: the arc draws from the message log, the click carries the message
@@ -37333,6 +37615,53 @@ def _park_behind_queue(sid, op):
     return True
 
 
+# SENDS DRAIN MID-TURN PAST A PARKED SETTING (the user 2026-10-08, who ruled that parked messages always drain mid-turn,
+# after sessions went hours without receiving anything): the queue drained only once a session was QUIET, and while
+# anything was parked every new send parked behind it, so a busy session (almost never quiet) stopped hearing its peers
+# at the first parked /effort or /env. On a backend that forwards its own sends (_forwards_sends: it takes a send
+# mid-turn and hands it to the model at the next tool boundary), a parked op of one of these kinds changes only a
+# session SETTING (a reconnect at most), never the conversation, so a send parked behind it is passed over: the send
+# drains mid-turn (_drain_sends_midturn) and the setting stays parked until the session is quiet, where the drain
+# applies it as before. Every other kind keeps strict order, because it changes the conversation the send would land
+# in: a /compact or /clear (the send belongs after it), a typed slash command (it must fire as its own top-level
+# prompt), a move (the CLI rejects a move while a send is in flight), and any kind this list does not name.
+_SEND_PASSABLE_KINDS = frozenset(("model", "effort", "fast", "env", "auth"))
+
+
+def _send_may_pass(op, model_live):
+    """Can a parked SEND drain past this parked op (see _SEND_PASSABLE_KINDS)? A model pick is passable only on a
+    backend that switches models live (_model_switches_live, read by the caller OUTSIDE the queue lock and handed in
+    as `model_live`): on one that does not (Codex), the pick lands at the NEXT turn start while a send steers the
+    LIVE turn, so a send passing the parked pick would reach the old model first, the inversion that pick parks to
+    prevent (codex_backend.model_switches_live); there it stays a barrier, as it was."""
+    k = op[0] if op else None
+    if k not in _SEND_PASSABLE_KINDS:
+        return False
+    return model_live or k != "model"
+
+
+def _park_behind_blocking_queue(sid, op, model_live):
+    """_park_behind_queue for a plain send to a backend that forwards sends: park only behind a queue the send may
+    NOT pass. False (the caller hands over now) when nothing is parked, or when every parked op is a setting the send
+    may pass (_send_may_pass) and none is in flight: the setting keeps its slot and applies once the session is
+    quiet. True when parked: behind an earlier parked SEND (press order among sends: that one drains first, on the
+    next pusher cycle, and this one lines up behind it rather than overtaking it), behind a barrier kind, or behind
+    an op the drain is handing to the backend this instant (_inflight_ops: a reconnect in progress). None when the
+    park was refused because the session is ending, as _park_behind_queue answers. Same lock discipline: the check
+    and the park are one step under _pending_ops_lock, and `model_live` was read before taking it."""
+    sid = str(sid)
+    with _pending_ops_lock:
+        ops = _pending_ops.get(sid)
+        if not ops:
+            return False
+        if sid not in _inflight_ops and all(_send_may_pass(o, model_live) for o in ops):
+            return False
+        if not _park_op_locked(sid, op):
+            return None
+    _mark_views_dirty()
+    return True
+
+
 def _park_op(sid, op):
     """Park one mid-compaction drive op in the sid's FIFO queue and push at once (the queued bubble
     appears immediately, never waiting out the backstop poll). A repeat model/effort pick REPLACES the
@@ -38256,8 +38585,8 @@ def _forwards_sends(be):
 
 
 def _model_switches_live(be):
-    """True if this backend applies a model pick to a RUNNING session mid-turn (no shipped backend yet: the
-    SDK has the channel for it but declares False for now — see SdkBackend.model_switches_live), so
+    """True if this backend applies a model pick to a RUNNING session mid-turn (on this install the SDK
+    declares True; upstream it declares False — see SdkBackend.model_switches_live), so
     _set_model_or_park fires the pick into an open turn instead of parking it until the turn ends.
     getattr-guarded like _forwards_sends: a backend / test fake without the capability reads as False (park
     while a turn runs, fire at its end — the pre-#923 rule)."""
@@ -38336,6 +38665,13 @@ def _op_user(op) -> bool:
     return op[0] in ("send", "command") and len(op) > 4 and op[4] is True
 
 
+def _op_from_user(op) -> bool:
+    """Whether a parked send carries the person's-own-words marker (its seventh slot, _send_or_park; `romp send
+    --from-user`, 2026-10-06), so the drained copy still queues ahead of peer and machine sends. Length-guarded like
+    every reader of an optional slot; a parked command carries none (a slash command never jumps the queue)."""
+    return op[0] == "send" and len(op) > 6 and op[6] is True
+
+
 def _op_qid(op):
     """The press-time id a parked send or command carries (its fourth slot, _send_or_park), or None: a kernel-
     parked op (a re-delivery, a nudge, a three-slot record from a mirror written before the slot existed) has
@@ -38386,7 +38722,7 @@ def _user_send(be, sid, text):
     return be.send(sid, text)
 
 
-def _send_with_id(be, sid, text, qid=None, user=False, paths=None):
+def _send_with_id(be, sid, text, qid=None, user=False, paths=None, from_user=False):
     """be.send, with the copy's press-time id when one rode and the backend's send takes it (_takes_qid:
     SdkBackend, whose queued copy and echo then wear the id the chat's bubble already has). A send that takes
     no id (Codex; a stand-in) gets the text alone, as before. `user`: a message the user typed (the composer, the phone, a user's `romp send`, a parked
@@ -38398,6 +38734,8 @@ def _send_with_id(be, sid, text, qid=None, user=False, paths=None):
         kw["user"] = True
     if paths and _takes_kw(be.send, "paths"):
         kw["paths"] = list(paths)                          # the attachment list, beside the copy's id (T373 fold)
+    if from_user and _takes_kw(be.send, "from_user"):
+        kw["from_user"] = True                             # the person's own words: queued ahead of peer and machine sends (2026-10-06)
     return be.send(sid, text, **kw)
 
 
@@ -38419,11 +38757,13 @@ def _op_paths(op):
     return list(op[5]) if op[0] == "send" and len(op) > 5 and isinstance(op[5], (list, tuple)) else []
 
 
-def _send_or_park(be, sid, text, echo=None, qid=None, user=False, paths=None):
+def _send_or_park(be, sid, text, echo=None, qid=None, user=False, paths=None, from_user=False):
     """`user` (T315): the text is the USER's (the composer, the phone, an untagged `romp send`, a typed command),
     handed to the backend as its word to retry a stood-down attach and remembered on a parked op's fifth slot for the
     replay; a machine caller (a watch notice, a nudge, a tagged `romp send`) passes nothing and is queued behind a
-    stand-down instead. Classified by the caller that knows who speaks, never by the route.
+    stand-down instead. Classified by the caller that knows who speaks, never by the route. `from_user`: `romp send
+    --from-user`, the person's own words relayed by the chat page (2026-10-06), kept on a parked send's seventh slot
+    (_op_from_user) and handed to a send that takes it, whose queued copy then goes ahead of peer and machine sends.
 
     Deliver `text` now — or PARK it in the sid's FIFO. Park when: (a) the session is COMPACTING (the user
     2026-07-02: a mid-compaction send's live-tail echo opened a turn that KILLED the 'compacting' cue — a
@@ -38434,7 +38774,10 @@ def _send_or_park(be, sid, text, echo=None, qid=None, user=False, paths=None):
     forwards_sends backend would hand it straight over, so this arm has to sit ahead of that check); or
     (c) the backend can't forward its own sends AND a turn is open (the tmux backend's regime, until
     2026-09-11: hold while working, and _apply_pending_ops MERGES the held run into one message at turn
-    end). Otherwise hand
+    end). Arm (b) has one exception (the user 2026-10-08, who ruled that parked messages always drain mid-turn): on a
+    forwards_sends backend a plain send passes a queue that holds only parked SETTINGS (_SEND_PASSABLE_KINDS: model
+    where it switches live, effort, fast, env, auth) with none in flight and no move running
+    (_park_behind_blocking_queue); the settings stay parked until the session is quiet. Otherwise hand
     it over NOW — a forwards_sends backend (SDK) takes a send even mid-turn and forwards it at the next tool
     boundary (the user 2026-07-17, who wanted messages in as soon as possible, without an interrupt), hands
     a drained pile of queued sends to the CLI one message each, in order, the next held until the CLI has
@@ -38492,16 +38835,23 @@ def _send_or_park(be, sid, text, echo=None, qid=None, user=False, paths=None):
         op = op + (None,) * (4 - len(op)) + (True,)     # the fifth slot: the user's words (_op_user); the fourth stays the id or None
     if paths and not cmd:
         op = op + (None,) * (5 - len(op)) + (list(paths),)   # the sixth slot: the attachments the trailing line named (_op_paths, T373 fold)
-    if _compacting_now(sid) or _pending_ops.get(sid) or _limit_hold(sid):
+    if from_user and not cmd:
+        op = op + (None,) * (6 - len(op)) + (True,)          # the seventh slot: the person's own words (_op_from_user), kept across the park
+    # a plain send to a backend that forwards sends may pass parked SETTINGS (_SEND_PASSABLE_KINDS, the user 2026-10-08):
+    # the queue alone no longer parks it, unless a move is in flight (which holds everything); the locked check
+    # below decides against the queue as it stands
+    passes = not cmd and _forwards_sends(be) and str(sid) not in _moving
+    if _compacting_now(sid) or (_pending_ops.get(sid) and not passes) or _limit_hold(sid):
         return True if _park_op(sid, op) else None       # None: the park was refused, the session is ending (2026-09-21)
     if _working_now(sid) and (cmd or not _forwards_sends(be)):
         return True if _park_op(sid, op) else None
-    parked = _park_behind_queue(sid, op)
+    parked = (_park_behind_blocking_queue(sid, op, _model_switches_live(be)) if passes
+              else _park_behind_queue(sid, op))
     if parked:
         return True
     if parked is None:
         return None                                      # refused at the park: the session is ending; nothing is handed over
-    if _send_with_id(be, sid, text, qid, user=user, paths=paths) is False:
+    if _send_with_id(be, sid, text, qid, user=user, paths=paths, from_user=from_user) is False:
         return None                                      # refused by the backend: not parked, not delivered
     return False
 
@@ -38789,7 +39139,7 @@ def _route_setter_command(be, sid, text, client=None, floating=False, state=None
         return True
     if model_pick:
         # the model setter has its OWN rule (an open turn fires it live only on a backend that declares
-        # model_switches_live — none shipped does yet, so the SDK still parks; #923), so its verdict is
+        # model_switches_live — on this install the SDK does, so its pick fires live; #923), so its verdict is
         # read, not inferred from _ops_gate, which would say `queued` for a pick that had already applied
         parked = _set_model_or_park(be, sid, value, floating=floating)
         if parked is None:
@@ -39151,7 +39501,8 @@ def _deliver_send_batch(be, sid, run):
         return
     if _forwards_sends(be):
         for op in run:
-            if _send_with_id(be, sid, op[1], _op_qid(op), user=_op_user(op), paths=_op_paths(op) or None) is False:   # under the id the press minted, with its attachment list
+            if _send_with_id(be, sid, op[1], _op_qid(op), user=_op_user(op), paths=_op_paths(op) or None,
+                             from_user=_op_from_user(op)) is False:   # under the id the press minted, with its attachment list and marker
                 _hand_back_refused_send(be, sid, op)
         return
     merged = "\n\n".join(op[1] for op in run)          # one message, blank-line separated between turns
@@ -39164,9 +39515,65 @@ def _deliver_send_batch(be, sid, run):
             _hand_back_refused_send(be, sid, op)
 
 
+def _drain_sends_midturn(sid):
+    """The drain's arm for a session whose turn is OPEN (the user 2026-10-08, who ruled that parked messages always
+    drain mid-turn): on a backend that forwards its own sends (_forwards_sends: SDK, Codex), hand it the parked SENDS
+    it can take now instead of holding them for a quiet moment that a busy session almost never has. The backend
+    forwards each at its next tool boundary, one message each, in order (_deliver_send_batch), exactly as it does a
+    send that arrived with no queue ahead of it.
+
+    WHICH sends: walking from the head, every send up to the first op a send may not pass (_send_may_pass). A parked
+    SETTING (model where it switches live, effort, fast, env, auth) is passed over and stays where it is, to apply
+    once the session is quiet; a barrier (compact, clear, a typed slash command, a move, any unknown kind) ends the
+    walk, and the sends behind it wait for it as they always did. Sends keep their press order among themselves.
+
+    WHEN: the caller has already passed every hold the quiet drain honours ahead of the working gate (a move in
+    flight, a drain hold, an account limit, a compaction); this arm adds one more: nothing in flight (_inflight_ops).
+    The backend's busy() stays True across the handover (its send enqueues under the session lock), so the working
+    gate keeps the ops left behind for the quiet pass, and nothing here opens a turn of its own: no prompt hold is
+    armed. A non-forwarding backend gets nothing here (its regime is hold-then-merge at turn end).
+
+    Same lock discipline as the quiet walk: the head read and the pops run under _pending_ops_lock, the backend call
+    with it released; the run is popped before delivery (a ✕ after the pop is the same honest 'too late' as for a
+    quiet batch), and a refused send is handed back by the delivery itself. Unlike the quiet walk, a raise here
+    drops nothing still queued: it is logged and the rest waits for the next cycle. True when something drained."""
+    sid = str(sid)
+    try:
+        be = Sessions.backend_for(sid)
+        if be is None or be is _UNOWNED or not _forwards_sends(be):
+            return False
+        model_live = _model_switches_live(be)        # a backend capability, read before the lock (never under it)
+        with _pending_ops_lock:
+            ops = _pending_ops.get(sid) or []
+            if not ops or sid in _inflight_ops:
+                return False
+            take = []
+            for j, o in enumerate(ops):
+                if o[0] == "send":
+                    take.append(j)
+                elif not _send_may_pass(o, model_live):
+                    break                             # a barrier: the sends behind it wait for it
+            if not take:
+                return False
+            run = [ops[j] for j in take]
+            for j in reversed(take):
+                ops.pop(j)                            # an emptied list stays: the next cycle's walk drops it with its holds
+    except Exception:
+        sys.stderr.write("pending ops apply (mid-turn): %s\n" % traceback.format_exc())
+        return False
+    try:
+        _deliver_send_batch(be, sid, run)
+    except Exception:
+        sys.stderr.write("pending ops apply (mid-turn): %s\n" % traceback.format_exc())
+    _save_pending_ops()                               # the queue shrank: the disk mirror follows
+    _mark_views_dirty()                               # and the chips retire on this cycle's push
+    return True
+
+
 def _apply_pending_ops(now=None):
     """Pusher cycle: FIFO-deliver parked ops once the session is QUIET (neither compacting nor an open
-    turn) — in exactly the order they were parked, which is exactly the order the chat rendered their
+    turn) — except parked SENDS on a backend that forwards its own sends, which drain mid-turn past any parked
+    setting (_drain_sends_midturn, the user 2026-10-08) — in exactly the order they were parked, which is exactly the order the chat rendered their
     queued bubbles (the user 2026-07-02: what you see is what runs). SEQUENTIAL by construction (the user
     2026-07-02, compact-mid-turn): settings ops (model/effort) apply instantly and delivery continues,
     but a SEND or /COMPACT ends the pass — its turn/compaction must finish before the next op fires, so
@@ -39314,7 +39721,9 @@ def _apply_pending_ops(now=None):
                 _held_working.pop(sid, None)          # the compacting gate's hold, not the working gate's
                 continue
             if _working_now(sid):
-                _mark_held_working(sid, now)          # the belt records the hold; the jobs thread reads the transcript (_held_working_pass)
+                _drain_sends_midturn(sid)             # a forwarding backend takes parked SENDS mid-turn (the user 2026-10-08)
+                if _pending_ops.get(sid):
+                    _mark_held_working(sid, now)      # the belt records the hold; the jobs thread reads the transcript (_held_working_pass)
                 continue
             _held_working.pop(sid, None)              # the hold ended: the next one says again
             changed = False                               # a real mutation below → save the mirror + wake the pusher
@@ -40171,6 +40580,13 @@ def _echo_landed_in(text, tx_texts):
     return any(k in tx_texts for k in sb.echo_keys(text))
 
 
+def _echo_atom_landed_in(a, tx_texts):
+    """_echo_landed_in for a live echo ATOM: under its own text's keys and, for a send fed inside a joined text (the
+    SDK backend's `_joined_text` stamp, SdkSession._join_queued_locked), that text's keys too (sb.echo_lookup_keys),
+    since the CLI writes one record for the joined text and none of the part's own."""
+    return any(k in tx_texts for k in sb.echo_lookup_keys(a))
+
+
 def _human_turn_floor(session):
     """The newest GENUINE-HUMAN user atom's timestamp in the parsed session, or 0. The one event that says
     "the transcript has moved past anything typed before this": read by sdk_backend.prune_live (to retire
@@ -40402,7 +40818,7 @@ def _merge_live_atoms(session, sid, shown_texts=(), live=None):
     # scan read the record off the transcript — the prune just retired it, and painting it once more would
     # show a delivered message as a pending bubble for one build)
     fresh = [a for a in live if a.get("uuid") not in tx_uuids
-             and not (a.get("_echo_text") and (a.get("_landed") or _echo_landed_in(a["_echo_text"], hide)))]
+             and not (a.get("_echo_text") and (a.get("_landed") or _echo_atom_landed_in(a, hide)))]
     if not fresh:
         return session
     # Reopen the turn ONLY for genuine live ASSISTANT work (a streaming reply), never for a lone input echo.
@@ -40439,7 +40855,7 @@ def _merge_live_atoms(session, sid, shown_texts=(), live=None):
         # (_pending_ledger, the settle's "still owed" read); read only when a candidate exists.
         p = _path_of(sid)
         owed = {sb.echo_text_key(t) for t in shown_texts if t} | {sb.echo_text_key(t) for t in (_pending_ledger(p) if p else ())}
-        stale = [a for a in stale if not _echo_landed_in(a["_echo_text"], owed)]
+        stale = [a for a in stale if not _echo_atom_landed_in(a, owed)]   # a joined part is owed with its joined text
     placed = ()
     if stale:
         # `placed` is what the chat fold keys its sealed prefix on (build_session, the "echo" refold): a placed
@@ -41607,6 +42023,17 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                                     _qs = be.qids_for_landing(sid, a.get("uuid"), _tblocks, a.get("t"))
                                 except Exception:
                                     _qs = []
+                                _qs = list(_qs or [])   # a backend without the ledger pairing answers None (as before: no qid)
+                                # a block that landed a JOINED text (several queued sends fed as one, the backend's
+                                # _join_queued_locked) answers with the list of their ids: a one-block record ships
+                                # them all as qids, so the chat retires each copy by its id; in a record of several
+                                # blocks such a block keeps its first id in its place, so qids still align with blocks
+                                if len(_tblocks) == 1 and _qs and isinstance(_qs[0], list):
+                                    _ids = [q for q in _qs[0] if q]
+                                    if len(_ids) > 1:
+                                        ev["qids"] = _ids
+                                    _qs = [_ids[0] if len(_ids) == 1 else None]   # one id rides as the plain qid below
+                                _qs = [(q[0] if q else None) if isinstance(q, list) else q for q in _qs]
                                 if len(_tblocks) > 1 and any(_qs):
                                     ev["qids"] = list(_qs)
                                 elif len(_tblocks) == 1 and _qs and _qs[0]:
@@ -63124,7 +63551,8 @@ def _pusher_cycle():
             _boot_health_first_cycle(time.monotonic() - _t_cycle)   # the boot's first cycle, on the record (a no-op after)
         elif not _BOOT_HEALTH_DONE[0]:
             _boot_health_row_backstop(time.monotonic())         # the jobs pass still open long after: the row without it
-        _gc_freeze_tick(_cycle_idle, first)                     # #1735: reconcile the freeze at the idle boundary (the guard is inside pusher_tick)
+        _gc_freeze_tick(_cycle_idle, first)                     # #1735: reconcile the freeze at the idle boundary, or run an owed full backstop
+        #                                                         past its bound on a busy one (2026-10-07); the guards are inside pusher_tick
 
 
 @contextlib.contextmanager
@@ -63223,6 +63651,18 @@ def _pusher_cycle_jobs(now, live_map, any_client):
 
 
 
+def _publish_live_leaves(now, live_map):
+    """Hand the event model the main transcripts of the sessions in the live map (the lift's own rule: a sid mapped to nothing
+    is dormant), once per jobs pass, before the lift. The lift folds every one of them on every pass (_bg_scan_all_cached,
+    before its skip gate), so a quiescence drop of one whose background view is over the document cap was undone by a whole
+    read within a pass: on a devbox, 101 such reads of 89 GB in 16 hours, plus 48 GB of auto-nudge and interrupt parses
+    upgrading the same tail entries, minutes of jobs-thread time per large file and no memory saved. With the paths published,
+    the drop keeps such a leaf whole and pays it once the session leaves this set (em.set_keep_whole_paths). The rows come from
+    the pass's sessions memo, so this costs no listing of its own."""
+    em.set_keep_whole_paths(str(s["path"]) for s in _alive_sessions(now, live_map)
+                            if s.get("path") and live_map.get(s.get("sid")) is not None)
+
+
 def _jobs_pass(now, live_map):
     """One pass of the housekeeping jobs, in the order they always ran (the lift before the walk, the walk before the interrupt
     tick, the deferral sweep before the walk: each comment below names its reason), on the jobs thread, with the pass's own
@@ -63236,6 +63676,10 @@ def _jobs_pass(now, live_map):
         _PERF_STATS.cycle_begin("jobs")   # a caller that did not open the pass (a test driving the jobs alone) opens it here
     _own_stat = _files_stat_pass_open(live_map)   # the dirty set taken, the prelude's observers read, the pass's shared ten-file
     #                                               snapshot opened when the caller did not (closed below; the cycle's finally too)
+    try:                                  # the live sessions' main transcripts, which the lift below folds every pass: the
+        _publish_live_leaves(now, live_map)   # quiescence drop keeps them whole while a fold cannot restore (2026-10-03)
+    except Exception:
+        sys.stderr.write("live-leaves: %s\n" % traceback.format_exc())
     try:                                  # EXACT retraction first: dispatches returned → the stamp is spent,
         _job_stage('liftSpentAwaiting', lambda: _lift_spent_awaiting(now, live_map))   # so the nudge tick below never wakes a wait that already ended
     except Exception:
@@ -71149,8 +71593,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(_token_analytics(int(time.time()), w)),
                                   "application/json", cache="no-cache")
             if p == "/sessions":                              # unified romp session list (every backend) for external tools (the Obsidian plugin, the postal bus)
-                body = _sessions_listing_serve(threads=(q.get("threads") or [""])[0] == "1")   # the cycle's kept rows (a cycle old at
-                return self._send(200, body, "application/json", cache="no-cache")           #  most); ?threads=1 appends the thread rows
+                try:
+                    body = _sessions_listing_serve(threads=(q.get("threads") or [""])[0] == "1")   # the cycle's kept rows (a cycle old
+                except _ListingUnavailable as e:                                                  #  at most); ?threads=1 appends the thread rows
+                    # the shared request build (no cycle yet, or its build failing) could not take this caller: said at once, and
+                    # the build carries on for the retry (2026-09-28: callers each building piled up ~1,500 threads)
+                    return self._send(503, json.dumps({"ok": False, "retryable": True, "error": str(e)}), "application/json",
+                                      cache="no-cache", headers={"Retry-After": "1"})
+                return self._send(200, body, "application/json", cache="no-cache")
             if p == "/sessions/by-fsid":
                 # ONE live session's (or comment thread's) row by any transcript id it has owned — the postal
                 # bus's self-identity join for a session whose environment still carries a pre-/clear id
@@ -72226,7 +72676,7 @@ class Handler(BaseHTTPRequestHandler):
                 # user 2026-07-10), the remote forward over the session's tunnel, a typed setter command, else the
                 # composer's own park-or-send. `queued` says which arm it took (the /compact route's shape): a sender that
                 # IS the target's open turn read 'ok' otherwise and could not know the command waits (2026-09-03).
-                ok, err, queued = _deliver_text(sid, body["text"])
+                ok, err, queued = _deliver_text(sid, body["text"], from_user=bool(body.get("fromUser")))
                 if not ok:
                     if err.startswith("no running backend owns "):
                         err = err.replace(sid, body.get("who") or sid, 1)
@@ -73012,7 +73462,13 @@ class Handler(BaseHTTPRequestHandler):
                     res = _remote_forward(r, "/deliver", {"id": sid, "text": text})
                     return self._send(200, json.dumps({"ok": True, "injected": bool(res and res.get("injected"))}), "application/json")
                 injected = bool(Sessions.backend_for(sid).deliver(sid, text))
-                return self._send(200, json.dumps({"ok": True, "injected": injected}), "application/json")
+                # reportsTake (2026-10-03): this backend tells the bus when the agent TAKES the banner, so the bus holds the
+                # sender's read stamp until then (a queued banner can wait minutes to hours behind a long tool call or a
+                # queue of earlier texts). Absent or false, the bus stamps at this answer, as it always has.
+                rt = getattr(Sessions.backend_for(sid), "reports_postal_takes", None)   # duck-typed: Codex has none, never reports
+                takes = bool(injected and callable(rt) and rt(sid))
+                return self._send(200, json.dumps({"ok": True, "injected": injected, "reportsTake": takes}),
+                                  "application/json")
             # /picker-check, /mail-badge, /deliver-chrome and /reconcile-peers painted the tmux status bar and
             # watched a revived pane; they left with the tmux backend (2026-09-11) and fall to the 404 below. The
             # postal bus is a long-lived singleton that restarts only when its own source changes, so a bus from
@@ -75630,6 +76086,8 @@ def main():
     signal.signal(signal.SIGTERM, _graceful_term)             # drain, don't die mid-flight (see _graceful_term)
     _PERF_STATS.install_gc_hook()                             # the collector's pauses on /perf (2026-09-16): before the boot warm and
     #                                                           the loops, so the boot's own full collections count (see gc_event)
+    _GC_FREEZE.install_full_freeze()                          # the full-collection freeze and its threshold (2026-10-07), after the perf hook
+    #                                                           so that hook's stop timing never includes the freeze; a no-op when off
     # romp holds no API key (credentials.py, 2026-09-08). A retired provider line in service.env, the marker
     # beside it, or a key in this process's environment stops the kernel HERE, before the bundler, the
     # postal bus or the SDK backend spawn anything that could inherit it. RuntimeError: the

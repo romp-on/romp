@@ -224,7 +224,9 @@ class Rebill(unittest.TestCase):
         self.assertEqual(self._cost_state()["cli"], "", "a kernel child's watermark names no CLI")
         import inspect
         src = inspect.getsource(sb)
-        i = src.index("self._host = None" + chr(10) + "                    self._host_intent = False" + chr(10))
+        # the finally leaves the host through _leave_host (review 3), which drops the transport itself
+        i = src.index("self._leave_host()" + chr(10) + "                    self._host_intent = False" + chr(10))
+        self.assertIn("self._host = None", inspect.getsource(sb.SdkSession._leave_host))
         self.assertIn("self._host_is_attach = False", src[i:i + 900], "the connect's finally drops the flag with the transport")
         self.assertLess(src.index("self._host_is_attach = False", i), src.index("if self.ended or not self._reconnect:", i))
         self.assertIn('if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:',

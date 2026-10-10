@@ -59,7 +59,8 @@ test("chat: a long template folds to its OWN first non-quote line — nudge fold
 });
 
 test("cli: romp send --tag is sugar for the marker, validated to one word", () => {
-  assert.match(CLI, /if \[\[ "\$\{1:-\}" == "--tag" \]\]; then/);
+  // the trailing form loops since --from-user joined it (2026-10-06): either flag, in either order, after the session name
+  assert.match(CLI, /while \[\[ "\$\{1:-\}" == "--tag" \|\| "\$\{1:-\}" == "--from-user" \]\]; do/);
   assert.match(CLI, /\[A-Za-z0-9\]\[A-Za-z0-9-\]\{0,23\}/, "the CLI enforces the same label shape the kernel lifts");
   assert.match(CLI, /<!-- romp-tag: \$_tag -->/);
 });

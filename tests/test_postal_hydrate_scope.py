@@ -33,6 +33,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 km = load_source("romp_kernel_hscope", os.path.join(BIN, "romp-kernel"))
+pm = load_source("romp_postal_hscope", os.path.join(BIN, "romp-postal-service"))   # the bus's own banner formatter
 
 ME = "11111111-2222-3333-4444-555555555555"       # the session whose chat is being built ('web')
 PEER = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"     # the sender ('api')
@@ -67,6 +68,16 @@ def user(text):
 
 
 INBOX_TOOL = "mcp__romp-postal-service__check_inbox"
+
+
+def banner(mid, frm="api", body="the deploy is handed over"):
+    """A bus banner exactly as the bus pushes it (format_push), one message."""
+    return pm.format_push([{"from": frm, "from_id": PEER, "body": body, "id": mid, "date": ""}])
+
+
+def tagged(body, label="watch"):
+    """A tagged machine line as `romp send --tag` builds it."""
+    return body + "\n\n<!-- romp-tag: " + label + " -->"
 
 
 class HydrateScope(unittest.TestCase):
@@ -244,11 +255,75 @@ class HydrateRecipient(unittest.TestCase):
         self.assertEqual(set(seen), {ME}, "every hydration carried the session's own sid")
 
 
+class HydrateMixedJoinedRecord(unittest.TestCase):
+    """A busy session is fed queued peer mail and tagged machine lines as ONE text (the SDK backend's
+    _join_queued_locked), so the CLI writes one user record holding both. Its mail becomes cards as before, and its
+    tagged lines must stay visible beside them: replacing the whole record with the cards, as a mail-only record is,
+    hid every tagged line in it from the chat."""
+
+    def setUp(self):
+        km._POSTAL_UNRESOLVED_RESET()
+
+    def _run(self, events, index, sid=ME):
+        err = io.StringIO()
+        saved_sum, saved_err = km._msg_summaries, km.sys.stderr
+        km._msg_summaries, km.sys.stderr = (lambda: {}), err
+        try:
+            return km._hydrate_postal(events, index, sid), err.getvalue()
+        finally:
+            km._msg_summaries, km.sys.stderr = saved_sum, saved_err
+
+    def test_a_mixed_joined_record_keeps_its_tagged_lines_and_turns_its_mail_into_cards(self):
+        t1, t2 = tagged("lint passed on TESTHOST"), tagged("tests passed on TESTHOST", label="ci")
+        ev = dict(user("\n\n".join([t1, banner(M1), t2, banner(M2, body="the changelog is next")])),
+                  qids=["echo:11111111-2222-3333-4444-000000000001", "echo:11111111-2222-3333-4444-000000000002"],
+                  tag="watch")
+        out, warned = self._run([ev], {M1: row(M1, ME, "the deploy is handed over"), M2: row(M2, ME, "the changelog is next")})
+        self.assertEqual([e["kind"] for e in out], ["user", "postal-service", "postal-service"],
+                         "the tagged lines first, where they sat, then a card per message; before, the cards alone")
+        self.assertEqual(out[0]["md"], t1 + "\n\n" + t2, "every tagged line stays visible, in order, and no mail text")
+        self.assertEqual((out[0]["uuid"], out[0]["qids"], out[0]["tag"]), (ev["uuid"], ev["qids"], "watch"),
+                         "the remaining entry is the record's own: its uuid and its sends' ids ride with it")
+        self.assertNotIn("mids", out[0])
+        self.assertEqual([e["mid"] for e in out[1:]], [M1, M2])
+        self.assertEqual([e["body"] for e in out[1:]], ["the deploy is handed over", "the changelog is next"])
+        self.assertEqual(warned, "")
+
+    def test_a_record_that_opens_with_mail_shows_its_card_before_the_tagged_line(self):
+        t1 = tagged("coverage 91 percent")
+        out, _ = self._run([user(banner(M1) + "\n\n" + t1)], {M1: row(M1, ME)})
+        self.assertEqual([e["kind"] for e in out], ["postal-service", "user"])
+        self.assertEqual(out[1]["md"], t1)
+
+    def test_a_mail_only_joined_record_renders_exactly_as_today(self):
+        ev = user(banner(M1) + "\n\n" + banner(M2))
+        out, _ = self._run([ev], {M1: row(M1, ME), M2: row(M2, ME)})
+        self.assertEqual([(e["kind"], e["mid"]) for e in out], [("postal-service", M1), ("postal-service", M2)])
+
+    def test_a_tagged_only_record_is_untouched(self):
+        ev = user(tagged("build 7 green") + "\n\n" + tagged("build 8 green"))
+        out, _ = self._run([ev], {M1: row(M1, ME)})
+        self.assertEqual(out, [ev])
+
+    def test_mail_beside_untagged_text_renders_exactly_as_today(self):
+        # only tagged lines are kept: any other text around a banner keeps today's cards-only rendering
+        out, _ = self._run([user("mail for you:\n\n" + banner(M1))], {M1: row(M1, ME)})
+        self.assertEqual([e["kind"] for e in out], ["postal-service"])
+
+    def test_a_mixed_record_with_unresolved_mail_passes_through_whole(self):
+        ev = user(tagged("deploy queued") + "\n\n" + banner(M2))
+        out, warned = self._run([ev], {M2: row(M2, OTHER)})
+        self.assertEqual([e["kind"] for e in out], ["user"], "all-or-nothing, as before")
+        self.assertEqual(out[0]["md"], ev["md"])
+        self.assertIn("unresolved", warned)
+
+
 class HydrateIndependence(unittest.TestCase):
     """hydrate(A + B) == hydrate(A) + hydrate(B). The chat fold's commit hydrates only the raw postal events
     new since its seal and prepends the sealed cards (2026-09-09); that equals a hydration of the whole list
     only while hydration carries no state from one event to the next. Pinned over the four event shapes: an
-    outgoing send, a resolved incoming id, an unresolved id, a plain Bash row, split at every position."""
+    outgoing send, a resolved incoming id, an unresolved id, a plain Bash row, and a mixed joined record (a tagged line beside a banner), split at every
+    position."""
 
     M_OUT = "1700000009.77777_88888.TESTHOST"
 
@@ -260,7 +335,8 @@ class HydrateIndependence(unittest.TestCase):
                      input=json.dumps({"to": "api", "body": "taking the deploy"}), ts="2026-09-07T10:00:00.000Z"),
                 user("mail: " + MARKER % M1),
                 user("look at this: " + MARKER % M3),        # no row: passes through, ids kept
-                bash("uv run pytest -q", "ok")]
+                bash("uv run pytest -q", "ok"),
+                user(tagged("lint passed") + "\n\n" + banner(M1))]   # a mixed joined record: its line, then its card
 
     def _index(self):
         out_row = dict(row(self.M_OUT, PEER, body="taking the deploy"), fromId=ME)   # the send's own log row
@@ -280,7 +356,9 @@ class HydrateIndependence(unittest.TestCase):
         finally:
             km.sys.stderr = saved
         self.assertEqual([(e["kind"], e.get("direction")) for e in whole],
-                         [("postal-service", "out"), ("postal-service", "in"), ("user", None), ("tool", None)])
+                         [("postal-service", "out"), ("postal-service", "in"), ("user", None), ("tool", None),
+                          ("user", None), ("postal-service", "in")])
+        self.assertEqual(whole[4]["md"], tagged("lint passed"))
         self.assertEqual(whole[0].get("summary"), "web: taking the deploy", "the send joined its row and caption")
         self.assertEqual(whole[1]["summary"], "api: the deploy is handed over")
         self.assertEqual(whole[2]["mids"], [M3])
