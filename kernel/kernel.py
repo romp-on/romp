@@ -241,10 +241,12 @@ def _heap_stats():
     stats), so there is no lock order with the perf lock to get wrong. materializedLruSlots counts the LRU's SLOTS: a kernel
     whose LRU holds its atom lists weakly keeps a collected list's slots until they expire, so the number is an upper bound on
     the live materialized atoms; where the LRU holds the lists strongly the two are equal; it is the same read
-    asmIndex.resident publishes, repeated here so the holders sit together. hydrated.bytes is the records' length on disk,
-    what capBytes bounds: a proxy for the memo's share that locates the holder without sizing it (decoded bodies usually
-    weigh more, but escaped text can make disk bytes exceed the decoded storage: a record of 10,000 escaped non-ASCII
-    characters is 60 KB on disk and 21 KB decoded, measured). builtChat.events counts
+    asmIndex.resident publishes, repeated here so the holders sit together. hydrated.bytes is the entries' estimated resident
+    size (em._hydrated_weight, 2026-10-19), what capBytes bounds; until then it was the records' length on disk, a proxy that
+    under-weighed the memo by a factor of 1.5 to 1.8. hydrated.hits, evictions and evictedBytes count since boot (counters,
+    an exception to the gauge rule beside gc.stats), so a cap that makes bodies be read again shows. unownedIndexes is the
+    lazy indexes no assembly entry owns (em.asm_unowned_index_report: count, rowBytes, records): a tree that outlived its
+    entry holds them, and no cache's cap bounds that. builtChat.events counts
     the cached payloads' events, a count and not bytes, the occupancy measure of that cache; serializedBytes sums the cached
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
@@ -256,7 +258,9 @@ def _heap_stats():
     100 KB in the lab). A gauge the process cannot read is None, said once (_heap_read)."""
     def hydrated():
         with em._ASM_CKPT_LOCK:
-            return {"entries": len(em._HYDRATED), "bytes": int(em._HYDRATED_BYTES[0]), "capBytes": int(em._HYDRATED_CAP)}
+            st = dict(em._HYDRATED_STATS)
+            return {"entries": len(em._HYDRATED), "bytes": int(em._HYDRATED_BYTES[0]), "capBytes": int(em._HYDRATED_CAP),
+                    "hits": int(st["hits"]), "evictions": int(st["evictions"]), "evictedBytes": int(st["evictedBytes"])}
 
     def assembly_entries():
         with em._ASM_LOCK:
@@ -311,6 +315,7 @@ def _heap_stats():
             "assemblyEntries": _heap_read("assemblyEntries", assembly_entries),
             "parseSlots": _heap_read("parseSlots", parse_slots),
             "lazyIndexes": _heap_read("lazyIndexes", lambda: len(em._LIVE_INDEXES)),
+            "unownedIndexes": _heap_read("unownedIndexes", lambda: em.asm_unowned_index_report()),
             "materializedLruSlots": _heap_read("materializedLruSlots", materialized_slots),
             "judgeUsageRows": _heap_read("judgeUsageRows", lambda: len(_JUDGE_USAGE_CACHE["rows"])),
             "builtChat": _heap_read("builtChat", built_chat),
