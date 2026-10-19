@@ -5277,6 +5277,7 @@ class LazyIndex:
         #                                                   under _MAT_LOCK; release() walks and prunes them): plain refs, no WeakSet, since
         #                                                   a LazyAtoms is unhashable and a ref callback may fire under the lock
         self.rowb = [r.encode("utf-8") for r in doc["atoms"]]   # v6: the document's rows are JSON strings already (T401 (4))
+        self.row_bytes = sum(map(len, self.rowb))         # what /perf heap.unownedIndexes sums for an index no entry owns
         self.records = doc["records"]
         self.fsids = list(doc.get("fsids") or [])
         files = doc.get("files")
@@ -5686,6 +5687,31 @@ def asm_index_stats():
 #                                                                                       live indexes (a dropped index takes its cache with it)
 #   resident is len(_MAT_LRU) with the entries of collected lists included until they expire at the cap (_mat_trim) or are released;
 #   released and expired are the counters those two roads bump (the LRU's weak ownership, measured 2026-09-15)
+
+
+def asm_unowned_index_report():
+    """/perf heap.unownedIndexes (2026-10-19): the lazy indexes alive that no assembly entry owns, with the bytes of their
+    rows and the count of their decoded record rows: {"count", "rowBytes", "records"}. An index outlives its entry when a tree
+    built from that entry is still held somewhere (the judges' parse store keeps a tree per session, a memo can pin one, a
+    build can be in flight), and nothing caps that: an entry that leaves the assembly store by a cap eviction, a demotion,
+    the fold's fallback or a row refusal does not take the parse store's tree with it. A kernel 23 hours up held 51 live
+    indexes against 23 restored entries. This gauge only measures; it frees nothing. The owners are read under _ASM_LOCK and
+    the live set under _MAT_LOCK, one after the other, never nested, so an index restored between the two reads counts as
+    unowned for that one read. O(live indexes): each index's row bytes were summed when it was built."""
+    with _ASM_LOCK:
+        owned = {id(e.get("index")) for e in _ASM_CACHE.values() if e.get("index") is not None}
+    with _MAT_LOCK:
+        live = list(_LIVE_INDEXES)
+    out = {"count": 0, "rowBytes": 0, "records": 0}
+    for ix in live:
+        if id(ix) in owned:
+            continue
+        out["count"] += 1
+        out["rowBytes"] += int(getattr(ix, "row_bytes", 0) or 0)
+        out["records"] += len(getattr(ix, "records", None) or ())
+    return out
+
+
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
                    "restoreMs": {"load": 0.0, "verify": 0.0, "index": 0.0, "seed": 0.0, "total": 0.0},   # the restore's parts since boot, ms
@@ -5738,12 +5764,24 @@ def _asm_doc_memo_put(key, mkey, doc):
                 break
             _asm_doc_memo_drop(k_)
 _LAZY_FILES = {}                   # rompuuid -> {fsid: path}: fallback for legacy unbound descriptors; restored bodies own their source (2026-09-17)
-_HYDRATED = {}                     # uuid -> the body fields read; dict order = LRU
-_HYDRATED_BYTES = [0]
-_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(1024 ** 3, _machine_memory_bytes() // 32), 1024 * 1024)
-#                                    the hydrated-body memo's byte cap: MemTotal / 32, never under 1 GiB (3.7 GiB on a 118 GiB
-#                                    machine; 64 MB hydrated 3.1 GB of bodies in 150 s on 2026-09-11) (a judge pass re-reading one large body every cycle
-#                                    shows in hydratedBytes; the memo keeps the common case at one read)
+_HYDRATED = collections.OrderedDict()   # uuid -> (the record read, its resident weight); order = LRU, oldest first.
+#                                    An OrderedDict, not a plain dict (2026-10-19): the cap evicts from the front, and a plain
+#                                    dict leaves an empty slot for every key deleted there, which next(iter()) then steps over
+#                                    until the dict next resizes, so each eviction cost time in proportion to the evictions
+#                                    before it (65 us an insert at 200K entries against 1.5 us for an OrderedDict, measured)
+_HYDRATED_BYTES = [0]              # the entries' summed weight: their estimated RESIDENT bytes (_hydrated_weight), what the cap bounds
+_HYDRATED_STATS = {"hits": 0, "evictions": 0, "evictedBytes": 0}   # under _ASM_CKPT_LOCK; counters since boot, /perf heap.hydrated
+_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(1024 ** 3, _machine_memory_bytes() // 64), 1024 * 1024)
+#                                    the hydrated-body memo's cap in RESIDENT bytes: MemTotal / 64, never under 1 GiB (4.2 GB on a
+#                                    270 GB machine; 64 MB hydrated 3.1 GB of bodies in 150 s on 2026-09-11) (a judge pass re-reading
+#                                    one large body every cycle shows in hydratedBytes; the memo keeps the common case at one read).
+#                                    Until 2026-10-19 each entry was weighed at its record's length ON DISK against MemTotal / 32,
+#                                    and a decoded record holds 1.5 to 1.8 times that (measured on sampled records), so a kernel
+#                                    23 hours up on a 50-session machine held 2.2 million bodies counted at 7.75 GB and weighing
+#                                    12 to 14 GB, and never evicted one. Entries are weighed by their decoded size now
+#                                    (_hydrated_weight) and the fraction is halved. ROMP_HYDRATED_CAP_MB sets the cap outright, in
+#                                    resident megabytes; hits, evictions and evictedBytes on /perf heap.hydrated show whether a
+#                                    smaller cap makes bodies be read again
 _LAZY_KINDS = ("a", "u", "c", "o", "k", "b")   # atom kinds whose message is lazy; boundary and refusal atoms carry no message
 
 
@@ -7296,6 +7334,64 @@ def _hydrate_one(a, rec):
     a.pop("lazy", None)
 
 
+_HYDRATED_W_SLOT = 320             # an entry's own overhead beside its record: the (record, weight) tuple and the weight (56 + 28
+#                                    bytes), the uuid key string (about 80) and the OrderedDict's slot and link node (about 90 to
+#                                    150, with the table's fill) on CPython 3.12
+
+
+def _hydrated_weight(rec):
+    """The resident bytes one memo entry holds (2026-10-19): sys.getsizeof summed over every dict, list and value of the
+    decoded record, iteratively, each distinct key string once (one json decode shares a key object across the record's
+    dicts), plus the entry's own slot. An estimate that never walks anything outside the record: parts of it the hydrated
+    atom also holds are counted here whole, which is what the memo keeps alive once the atom goes. It feeds the memo's cap,
+    so the cap bounds what the process holds rather than the record's length on disk (ordinary records decode to 1.5 to 1.8
+    times their disk bytes; escaped text can go the other way). Called on the reading thread before the memo's lock is taken:
+    the record is that thread's own until the entry is published. Tens of microseconds for a typical record, the same order
+    as its json decode."""
+    size = sys.getsizeof
+    n = _HYDRATED_W_SLOT
+    keys = set()
+    stack = [rec]
+    pop, push = stack.pop, stack.append
+    while stack:
+        o = pop()
+        n += size(o)
+        if type(o) is dict:
+            for k, v in o.items():
+                if id(k) not in keys:
+                    keys.add(id(k))
+                    n += size(k)
+                tv = type(v)
+                if tv is dict or tv is list:
+                    push(v)
+                elif v is not None and tv is not bool:
+                    n += size(v)
+        else:
+            for v in o:
+                tv = type(v)
+                if tv is dict or tv is list:
+                    push(v)
+                elif v is not None and tv is not bool:
+                    n += size(v)
+    return n
+
+
+def _hydrated_put(u, ent):
+    """Under _ASM_CKPT_LOCK: publish memo entry `ent` = (record, weight) under uuid `u` at the LRU tail, then evict from the
+    front until the summed weight fits the cap. An entry already under `u` (two readers of one record) leaves first and its
+    weight with it, so the sum never counts a body twice; before 2026-10-19 the second put overwrote the first in place and
+    the first one's bytes stayed counted for good. Each eviction is O(1) on the OrderedDict (see _HYDRATED)."""
+    old = _HYDRATED.pop(u, None)
+    if old is not None:
+        _HYDRATED_BYTES[0] -= old[1]
+    _HYDRATED[u] = ent; _HYDRATED_BYTES[0] += ent[1]
+    while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
+        old = _HYDRATED.pop(next(iter(_HYDRATED)))       # the least recently used body goes first
+        _HYDRATED_BYTES[0] -= old[1]
+        _HYDRATED_STATS["evictions"] += 1
+        _HYDRATED_STATS["evictedBytes"] += old[1]
+
+
 _HYDRATE_TEXT_READERS = set()     # the CODE objects of the shared text readers (the judges' _unit_text, _prompt_text and _atom_text,
 #                                   the kernel's _atom_user_texts), each registered where it is defined: a hydration through one is
 #                                   attributed with the reader's caller. Matched by code object, never by name (T384 round three: a
@@ -7348,6 +7444,7 @@ def hydrate(atoms, rompuuid=None, by=None):
             hit = _HYDRATED.get(u) if u else None
             if hit is not None:
                 _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
+                _HYDRATED_STATS["hits"] += 1                    # a body served instead of a disk read (/perf heap.hydrated)
         if hit is not None:
             if a.get("lazy") is not None:                       # another thread may have finished it since the filter (C)
                 _hydrate_one(a, hit[0])
@@ -7397,6 +7494,8 @@ def hydrate(atoms, rompuuid=None, by=None):
                 u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
                     hit = _HYDRATED.get(u) if u else None
+                    if hit is not None:
+                        _HYDRATED_STATS["hits"] += 1        # a peer's read landed while this one waited for the stripe
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
@@ -7410,6 +7509,7 @@ def hydrate(atoms, rompuuid=None, by=None):
                 rec = json.loads(raw.decode("utf-8", "replace"))
                 if rec.get("uuid") != a.get("uuid"):
                     raise LazyBodyRead("atom %s: the record at its offset is %s" % (a.get("uuid"), rec.get("uuid")))
+                ent = (rec, _hydrated_weight(rec)) if a.get("uuid") else None   # weighed before the memo's lock is taken
                 with _ASM_CKPT_LOCK:
                     _ASM_CKPT_STATS["hydratedBytes"] += ln; _ASM_CKPT_STATS["hydratedAtoms"] += 1
                     _THREAD_BYTES.hydrated = getattr(_THREAD_BYTES, "hydrated", 0) + ln   # this thread's share (T397)
@@ -7417,11 +7517,8 @@ def hydrate(atoms, rompuuid=None, by=None):
                     hbs = _ASM_CKPT_STATS.setdefault("hydratedByStage", {})   # T401: the same bytes under the calling thread's stage
                     hk = "%s:%s" % (_read_stage() or "none", by)
                     hbs[hk] = hbs.get(hk, 0) + ln
-                    if a.get("uuid"):
-                        _HYDRATED[a["uuid"]] = (rec, ln); _HYDRATED_BYTES[0] += ln
-                        while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
-                            _old = _HYDRATED.pop(next(iter(_HYDRATED)))    # the least recently used body goes first
-                            _HYDRATED_BYTES[0] -= _old[1]
+                    if ent is not None:
+                        _hydrated_put(a["uuid"], ent)
                 _hydrate_one(a, rec); filled += 1
     return filled
 

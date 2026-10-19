@@ -2149,8 +2149,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   large `process.rss_kb` can be attributed live, without a restart or a
   debugger (the lag investigation, 2026-09-15, had to attribute a 5-6 GiB
   resident size from cumulative byte counters and lab runs). Every value is
-  a GAUGE, the occupancy at the read and not a count since boot, with one
-  exception named below. `allocatedBlocks` is the number of memory blocks
+  a GAUGE, the occupancy at the read and not a count since boot, with two
+  exceptions named below (`gc.stats` and the `hydrated` counters).
+  `allocatedBlocks` is the number of memory blocks
   the interpreter's object allocator holds at the read, of any size
   (`sys.getallocatedblocks`; 0 on a build that cannot count them); `gc` is
   the collector's `enabled`, its `counts` (the young generation's
@@ -2159,13 +2160,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   lists, and `stats` (per generation: `collections`, `collected`,
   `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
-  lazy bodies read on demand: `entries`, and `bytes`, the records' length on
-  disk, which `capBytes` bounds, a proxy that locates the holder without
-  sizing it: decoded bodies usually weigh more, but escaped text can make the
-  disk bytes exceed the decoded storage),
+  lazy bodies read on demand: `entries`, and `bytes`, the entries' estimated
+  resident size, which `capBytes` bounds, `ROMP_HYDRATED_CAP_MB`, default a
+  sixty-fourth of physical memory and never under 1 GiB; until 2026-10-19 the
+  bytes were the records' length on disk against a thirty-second, and decoded
+  bodies weigh 1.5 to 1.8 times that; then `hits`, `evictions` and
+  `evictedBytes`, counters since boot, so a cap that makes bodies be read
+  again shows),
   `assemblyEntries` (the assembly cache's entries), `parseSlots` (the one
   parse store's slots, one per session, cut and leaf), `lazyIndexes` (the
-  lazy indexes alive, a weak count), `materializedLruSlots` (the
+  lazy indexes alive, a weak count), `unownedIndexes` (of those, the ones no
+  assembly entry owns, held by a tree that outlived its entry: `count`,
+  `rowBytes`, the bytes of their rows, and `records`, their decoded record
+  rows; nothing frees them when their entry leaves the store, so a number
+  that keeps growing locates that holder), `materializedLruSlots` (the
   materialized-atom LRU's slots, not the atoms: on a kernel whose LRU holds
   its atom lists weakly a collected list's slots stay until they expire, so
   this is an upper bound on the live materialized atoms; where the LRU holds

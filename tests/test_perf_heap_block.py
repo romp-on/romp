@@ -49,6 +49,7 @@ km = load_source("romp_kernel_perf_heap", os.path.join(BIN, "romp-kernel"))
 em, jd = km.em, km.jd
 
 HEAP_KEYS = {"allocatedBlocks", "gc", "tracing", "hydrated", "assemblyEntries", "parseSlots", "lazyIndexes",
+             "unownedIndexes",                                                    # the indexes no entry owns (2026-10-19)
              "materializedLruSlots", "judgeUsageRows", "builtChat", "imgCache"}
 SID = "11111111-2222-3333-4444-%012d"       # placeholder uuids, one per synthetic tab
 IMG_URL = "data:image/png;base64,"           # the image cache holds data URLs; the payload here is invented
@@ -161,7 +162,7 @@ class Gauges(_Caches):
         h = self.st.snapshot()["heap"]
         self.assertEqual(set(h), HEAP_KEYS)
         self.assertEqual(set(h["gc"]), {"enabled", "counts", "thresholds", "stats"})
-        self.assertEqual(set(h["hydrated"]), {"entries", "bytes", "capBytes"})
+        self.assertEqual(set(h["hydrated"]), {"entries", "bytes", "capBytes", "hits", "evictions", "evictedBytes"})
         self.assertEqual(set(h["builtChat"]), {"tabs", "events", "serializedBytes"})
         self.assertEqual(set(h["imgCache"]), {"entries", "bytes"})
         self.assertIsInstance(h["tracing"], bool)
