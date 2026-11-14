@@ -2273,6 +2273,8 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
         # and starved key-billed judging for nothing. `resets_at` keeps the gate self-expiring, skips
         # ride the paused flag, unreadable usage.json never gates — all unchanged.
         u = json.loads((STATE / "usage.json").read_text()) if auth == "login" else {}
+        if not _cred.usage_is_current_login(u):
+            u = {}       # another login's windows (another organization's): they say nothing about this call
         # The gated buckets FOLLOW THE CALL'S MODEL (2026-08-18, user-approved via the optimizer's
         # audit): the account-wide windows gate every model, and a model-scoped window gates exactly
         # the calls that would bill it. The old tuple hardcoded the account buckets and deliberately
@@ -7423,6 +7425,8 @@ def _giveup_cause():
     names = []
     try:
         u = json.loads((STATE / "usage.json").read_text())
+        if not _cred.usage_is_current_login(u):
+            u = {}       # another login's maxed window is not this login's cause
         now = time.time()
         # the windows wear their ONE display name here too (the user 2026-08-09: '5 hours' on the rail
         # but 'Session (5h)' in this modal was two vocabularies for the same window) — prose-shaped

@@ -45,12 +45,15 @@ class AccountIdentity(unittest.TestCase):
         # the read mechanics live in _acct_read now: ONE cached parse feeds the digest AND the
         # display label (the user 2026-08-09 added the label; the digest's own rules stand)
         src = inspect.getsource(km._acct_read)
-        self.assertIn("accountUuid", src, "the account identity the CLI itself uses")
-        self.assertIn("sha256", src)
+        self.assertIn("val = jd._cred.login_digest(oa)", src, "the account identity the CLI itself uses")
         # the digest is short and opaque: enough to answer "same or not", carrying nothing back —
-        # and it hashes the uuid ALONE, never the email, so cross-host equality carries no identity
-        self.assertIn("hexdigest()[:12]", src)
-        self.assertIn('hashlib.sha256(str(uuid).encode("utf-8"))', src)
+        # it hashes the account uuid (and, since 2026-11, its organization's uuid: one account in two
+        # organizations is two logins), never the email, so cross-host equality carries no identity
+        dsrc = inspect.getsource(km.jd._cred.login_digest)
+        self.assertIn("accountUuid", dsrc)
+        self.assertIn("organizationUuid", dsrc)
+        self.assertIn("hexdigest()[:12]", dsrc)
+        self.assertNotIn("emailAddress", dsrc)
         # the label is the deliberate, narrower exception: display-only (picker Billing row, tab
         # hover), read through _claude_account_label — the digest path itself never returns it
         self.assertIn('return _ACCT_CACHE["val"]', inspect.getsource(km._claude_account))

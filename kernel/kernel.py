@@ -20133,6 +20133,8 @@ def _usage_cap_open(now=None):
         u = json.loads((jd.STATE / "usage.json").read_text())
     except Exception:
         return None
+    if not jd._cred.usage_is_current_login(u):
+        return None                      # another login's windows (another organization's): not this login's cap
     now = time.time() if now is None else now
     for k in ("five_hour", "seven_day"):
         w = u.get(k) or {}
@@ -47187,9 +47189,9 @@ def _acct_read():
         _ACCT_CACHE["org"] = _ACCT_CACHE["orgDigest"] = ""
         return                                                     # uncached: retried on the next read
     oa = ((d if isinstance(d, dict) else {}).get("oauthAccount")) or {}
-    uuid = oa.get("accountUuid") if isinstance(oa, dict) else None
-    if uuid:
-        val = hashlib.sha256(str(uuid).encode("utf-8")).hexdigest()[:12]
+    # the account AND its organization (credentials.login_digest): one account in two organizations is two
+    # logins, with two sets of usage windows and two bills
+    val = jd._cred.login_digest(oa)
     org = org_dig = ""
     if isinstance(oa, dict):
         label = str(oa.get("emailAddress") or oa.get("displayName") or "")

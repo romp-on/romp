@@ -1974,15 +1974,14 @@ def _reg_path(state_dir: Path, sid: str) -> Path:
 
 
 def acct_digest() -> str:
-    """The signed-in Claude account as an opaque 12-hex digest, "" when logged out — duplicated tiny
-    from the kernel's _claude_account (same file, same field, same hash) so usage-window WRITES can
-    stamp whose reading they hold without a kernel import. The stamp is what lets the kernel drop bars
+    """The signed-in Claude login (account + organization, credentials.login_digest) as an opaque 12-hex
+    digest, "" when logged out — the same value as the kernel's _claude_account (same file, same digest)
+    so usage-window WRITES can stamp whose reading they hold without a kernel import. The stamp is what lets the kernel drop bars
     the INSTANT that login goes away (the user 2026-08-04), instead of waiting for a next reading that
     never comes after a logout."""
     try:
-        acct = ((json.loads(open(os.path.expanduser("~/.claude.json"), encoding="utf-8").read()) or {})
-                .get("oauthAccount") or {}).get("accountUuid")
-        return hashlib.sha256(str(acct).encode("utf-8")).hexdigest()[:12] if acct else ""
+        return _cred.login_digest((json.loads(open(os.path.expanduser("~/.claude.json"), encoding="utf-8").read())
+                                   or {}).get("oauthAccount"))
     except Exception:
         return ""
 

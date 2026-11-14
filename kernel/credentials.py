@@ -19,6 +19,7 @@ whatever let a less secure key path exist, and keep only the most secure one):
   a session can print.
 
 stdlib only, loaded by path as `romp_credentials` from the kernel, the SDK backend and the judges."""
+import hashlib
 import json
 import os
 import subprocess
@@ -402,3 +403,71 @@ def forget_helper_key() -> None:
         if t is not None:
             t.cancel()
             _HELPER_TIMER[0] = None
+
+
+# ---------------------------------------------------------------------------
+# Which login: the account AND its organization
+# ---------------------------------------------------------------------------
+# One Claude account can belong to several organizations (a personal plan and a work organization, say),
+# and `claude /login` picks one. Each organization has its own usage windows and its own bill, so "the same
+# login" means the same account IN the same organization. The digest used to cover the account alone: a
+# re-login that landed in the other organization kept the digest, the other organization's usage windows
+# stayed attributed to the new login, and its full weekly window parked every login session's input and
+# skipped every login-billed judge call until that window's reset (2026-11, a box whose re-login went to
+# the account's personal organization and then came back to the work one).
+
+def login_digest(oauth_account) -> str:
+    """The login's identity as an opaque 12-hex digest: sha256 of the accountUuid, joined with the
+    organizationUuid when the login names one; "" with no account. Equality is the whole question, and
+    no identifier travels. A login with no organization keeps the account-only digest it always had."""
+    oa = oauth_account if isinstance(oauth_account, dict) else {}
+    acct = oa.get("accountUuid")
+    if not acct:
+        return ""
+    org = oa.get("organizationUuid")
+    material = "%s/%s" % (acct, org) if org else str(acct)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+
+
+_LOGIN_CACHE = {"mtime": -1.0, "digest": ""}
+_ASK = object()   # usage_is_current_login's default: read the login now
+_LOGIN_LOCK = threading.Lock()
+
+
+def current_login_digest():
+    """The signed-in login's digest from ~/.claude.json (Claude Code's own record of who is signed in),
+    mtime-cached; "" when no file or no account, None when the file cannot be read just now (Claude Code
+    rewrites it in place). A failed read is never cached."""
+    p = os.path.expanduser("~/.claude.json")
+    try:
+        m = os.stat(p).st_mtime
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return None
+    with _LOGIN_LOCK:
+        if _LOGIN_CACHE["mtime"] == m:
+            return _LOGIN_CACHE["digest"]
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.loads(f.read())
+    except Exception:
+        return None
+    dig = login_digest((d if isinstance(d, dict) else {}).get("oauthAccount"))
+    with _LOGIN_LOCK:
+        _LOGIN_CACHE["mtime"], _LOGIN_CACHE["digest"] = m, dig
+    return dig
+
+
+def usage_is_current_login(usage, current=_ASK) -> bool:
+    """Whether a usage.json reading belongs to the login signed in now. Its `acct` stamp names whose
+    reading it is; a different login's windows are not this login's (a full window of another
+    organization must neither hold input nor gate judges). An unstamped legacy file, or a login file that
+    cannot be read just now, cannot tell, and counts as current (the long-standing rule for both)."""
+    stamped = (usage or {}).get("acct") if isinstance(usage, dict) else ""
+    if not stamped:
+        return True
+    cur = current_login_digest() if current is _ASK else current
+    if cur is None:
+        return True
+    return stamped == cur
