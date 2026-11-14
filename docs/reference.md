@@ -649,6 +649,16 @@ assumes nothing about where it is kept; it only runs the recorded command
 (a secret manager's read command, a private file's `cat`: the choice, and the
 setup that puts the token there, are the user's own, outside romp).
 
+The machine's own login is identified by its account AND its organisation. One
+account in two organisations, a personal plan and a work organisation say, is
+two logins, each with its own usage windows: `/login` into the other
+organisation counts as a login change. The usage bars, the input hold on a full
+window, the billing-switch offer and the judges' rate gate all read only the
+windows stamped with the login signed in now, so one organisation's full week
+never holds the other's sessions (2026-11, after a re-login that landed in the
+account's other organisation left its full weekly window holding every login
+session until its reset).
+
 A session billed to a stored login gets the token the way the machine's own
 login tokens already reach a launch: at launch, the kernel runs the record's
 token command itself and puts the output into that ONE session's process
